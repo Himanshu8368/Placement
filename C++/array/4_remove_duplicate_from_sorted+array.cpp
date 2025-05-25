@@ -23,5 +23,23 @@ public:
     }
 };
 
+    // vector<int> removeDuplicates(vector<int>& nums) {
+    //     vector<int> answer;
+    //     if(nums.size()==0){
+    //         return answer;
+    //     }
+    //     int prev = nums[0];
+    //     answer.push_back(nums[0]);
+    //     for(int i=1;i<nums.size();i++){
+    //         if(nums[i]!=prev){
+    //             answer.push_back(nums[i]);
+    //         }
+    //         prev = nums[i];
+    //     }
+    //     return answer;
+    // }
+
+
+
 
 
