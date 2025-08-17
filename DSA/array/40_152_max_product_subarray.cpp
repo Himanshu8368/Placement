@@ -31,7 +31,7 @@ public:
                 swap(min_p,max_p);
             }
             min_p = min(nums[i],min_p*nums[i]);
-            max_p = max(nums[i],max_p *nums[i]);
+            max_p = max(nums[i],max_p*nums[i]);
             ans = max(ans,max_p);
         }
         return ans ;
