@@ -1,0 +1,681 @@
+%============================================================
+% APPENDIX — TESTING GRAPH CODE
+%   Pitfall examples: code/examples/pitfalls/p1..p8, stress example: code/examples/stress_bfs/,
+%   generators: code/gen/, brute forces: code/tests/check.hpp, driver: tools/stress.py.
+%   Every input, output and number in this appendix comes from a real run (g++ 6.3, Windows).
+%============================================================
+\chapter{Testing Graph Code}
+\label{ch:testing}
+
+% ---- local helpers (prefixed ts / cl to avoid clashes with chapter macros) ----
+\providecommand{\clfile}[1]{\texttt{\detokenize{#1}}}
+\providecommand{\clneed}{\par\vspace{0pt plus 8\baselineskip}\penalty-200\vspace{0pt plus -8\baselineskip}}
+\tikzset{
+    tsin/.style={draw=darkgray, fill=lightgray!60, rounded corners=2pt, font=\ttfamily\scriptsize,
+                 align=left, inner sep=4pt},
+    tscap/.style={font=\scriptsize\bfseries, align=center},
+    tscmd/.style={font=\scriptsize\ttfamily\color{deepblue}, align=center},
+    tsbad/.style={draw=recursionred, line width=1.8pt},
+    tsq/.style={rectangle, draw=darkgray!70, fill=hitfill, minimum width=5.5mm, minimum height=5.5mm,
+                inner sep=0pt, font=\scriptsize\bfseries}
+}
+
+\begin{tcolorbox}[enhanced, colback=white, colframe=secondaryblue, boxrule=1pt, arc=2mm, left=10pt, right=10pt]
+\textbf{\large\textcolor{primaryblue}{A graph solution that passes the samples is a hypothesis, not a proof. This appendix shows the eight ways graph code most often breaks, each caught on a tiny input, and the one habit that catches the rest: a random generator, a slow but obviously correct reference, and a loop that compares them until they disagree.}}
+\end{tcolorbox}
+
+\chaptercontents
+
+%============================================================
+\clneed
+\section{Why Graph Code Fails}
+\label{sec:ts-why}
+
+Samples in graph problems are small, connected, simple and friendly. Real tests are not: they contain a path of $10^5$ vertices, five components, an edge from a vertex to itself, the same edge three times, many test cases in one file, weights near $10^9$. Each of these breaks a different line of code, and the samples exercise none of them. The good news is that the list of failure modes is short. The eight pitfalls below cover the large majority of wrong answers on graph problems; for each one, the book's folder \clfile{code/examples/pitfalls/} holds a program of 20--40 lines that fails on a tiny input. Every output below is a real run.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm,
+    pf/.style={rectangle, rounded corners=3pt, draw=#1, fill=#1!8, line width=0.9pt, font=\scriptsize,
+               align=center, text width=3.1cm, minimum height=1.05cm}]
+    \node[pf=recursionred]  at (0,0)     {\textbf{1. Recursion depth}\\a path of $10^5$ vertices};
+    \node[pf=accentorange]  at (3.6,0)   {\textbf{2. Disconnected}\\only vertex 1 was searched};
+    \node[pf=softpurple]    at (7.2,0)   {\textbf{3. Loops / multi-edges}\\``skip the parent''};
+    \node[pf=primaryblue]   at (10.8,0)  {\textbf{4. 0/1-indexing}\\array of size $n$, vertex $n$};
+    \node[pf=successgreen]  at (0,-1.4)  {\textbf{5. Multi-test reset}\\globals keep old data};
+    \node[pf=deepblue]      at (3.6,-1.4){\textbf{6. Overflow}\\distances in \texttt{int}};
+    \node[pf=memoorange]    at (7.2,-1.4){\textbf{7. Mark on pop}\\vs.\ mark on push};
+    \node[pf=darkgray]      at (10.8,-1.4){\textbf{8. Direction}\\undirected edge stored once};
+\end{tikzpicture}
+\figcap{The eight pitfalls of this section. The top row breaks on the \emph{shape} of the input, the bottom row on the \emph{bookkeeping} of the code.}
+\end{diagrambox}
+
+%------------------------------------------------------------
+\subsection{Pitfall 1: Recursion Depth}
+\label{ssec:ts-p1}
+
+A recursive DFS uses one stack frame per vertex on the current path. On a random graph the path is short; on a \emph{path graph} $0-1-2-\cdots-(n-1)$ it is $n$ frames deep. \clfile{p1_depth.cpp} runs a plain recursive DFS on a path of $N$ vertices.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \node[gvsrc] (a) at (0,0) {0};
+    \node[gvcur] (b) at (1.2,0) {1};
+    \node[gvcur] (c) at (2.4,0) {2};
+    \node (d) at (3.6,0) {$\cdots$};
+    \node[gvdst, minimum size=10mm, font=\scriptsize\bfseries] (e) at (5.0,0) {$N{-}1$};
+    \draw[gtree] (a) -- (b); \draw[gtree] (b) -- (c); \draw[gtree] (c) -- (d); \draw[gtree] (d) -- (e);
+    \foreach \i/\t in {0/dfs(0), 1/dfs(1), 2/dfs(2), 4/dfs(N-1)} {
+        \node[draw=recursionred, fill=recursionbg, minimum width=2.4cm, minimum height=4.5mm,
+              font=\scriptsize\ttfamily] at (8.6,-1.0+0.5*\i) {\t};
+    }
+    \node[font=\scriptsize] at (8.6,0.5) {$\vdots$};
+    \draw[gcut] (7.2,1.55) -- (10.0,1.55);
+    \node[font=\scriptsize\color{warningred}, anchor=west] at (10.1,1.55) {stack limit};
+    \node[font=\scriptsize\bfseries] at (8.6,-1.6) {call stack};
+\end{tikzpicture}
+\figcap{On a path, every call is still active when the next one starts: the stack holds all $N$ frames at the deepest point.}
+\end{diagrambox}
+
+\begin{lstlisting}[style=trace]
+$ p1_depth 50000
+n = 50000: recursion depth 49999, finished
+$ p1_depth 100000
+                                   (no output, exit code 0xC00000FD = stack overflow)
+$ g++ -std=c++14 -O2 -Wl,--stack=268435456 p1_depth.cpp -o p1big
+$ p1big 1000000
+n = 1000000: recursion depth 999999, finished
+\end{lstlisting}
+
+With the default stack of a Windows executable, $5\cdot 10^4$ levels pass and $10^5$ crash. The program prints nothing: a stack overflow is a silent \emph{runtime error}, not a wrong answer. Two fixes: write the DFS iteratively with an explicit stack (\clfile{dfs_iterative.hpp} in Appendix~\ref{ch:code-library}), or give the program a larger stack --- most judges (Codeforces, AtCoder) already run with a large one, but you cannot rely on it everywhere, and your local tests must use the same limit as the judge.
+
+%------------------------------------------------------------
+\subsection{Pitfall 2: Disconnected Inputs}
+\label{ssec:ts-p2}
+
+``Run a BFS from vertex 1'' silently assumes the graph is connected. \clfile{p2_disconnected.cpp} checks bipartiteness twice: once with a BFS from vertex 1 only, once with a BFS from every uncoloured vertex.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \node[gvA] (1) at (0,0.5) {1};
+    \node[gvB] (2) at (0,-0.9) {2};
+    \draw[ge] (1) -- (2);
+    \node[gv] (3) at (2.0,0.5) {3};
+    \node[gv] (4) at (3.6,0.5) {4};
+    \node[gv] (5) at (2.8,-0.9) {5};
+    \draw[tsbad] (3) -- (4); \draw[tsbad] (4) -- (5); \draw[tsbad] (5) -- (3);
+    \node[tscap, text width=3cm] at (2.8,-1.75) {odd cycle --- never visited from 1};
+    \node[tsin, anchor=west] at (5.0,-0.2) {5 4\\1 2\\3 4\\4 5\\5 3};
+    \node[font=\scriptsize\color{darkgray}, anchor=west] at (5.0,1.0) {input};
+\end{tikzpicture}
+\figcap{Component $\{1,2\}$ is bipartite, component $\{3,4,5\}$ is a triangle. A search from vertex 1 sees only the first one.}
+\end{diagrambox}
+
+\begin{lstlisting}[style=trace]
+$ p2_disconnected < in2.txt
+buggy (start at 1 only): YES
+correct (every start)  : NO
+\end{lstlisting}
+
+The fix is the outer loop \texttt{for (s = 1; s <= n; s++) if (!seen[s]) search(s);}. Every ``for each vertex'' property --- bipartite, acyclic, number of components, topological order --- needs it.
+
+%------------------------------------------------------------
+\subsection{Pitfall 3: Self-Loops and Multi-Edges}
+\label{ssec:ts-p3}
+
+Many problems allow two edges between the same pair of vertices, or an edge from a vertex to itself, and say so in one easily missed line. Code that identifies an edge by its endpoints then breaks. The classic victim is bridge finding: in the low-link DFS, the edge back to the parent must be skipped, and \clfile{p3_multiedge.cpp} compares skipping the parent \emph{vertex} with skipping the parent \emph{edge} (by its id).
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \node[gv] (1) at (0,0) {1};
+    \node[gv] (2) at (2.2,0) {2};
+    \node[gv] (3) at (4.4,0) {3};
+    \draw[tsbad] (1) to[bend left=28] node[gw, above=1pt] {e1} (2);
+    \draw[ge] (1) to[bend right=28] node[gw, below=1pt] {e2} (2);
+    \draw[gpath] (2) -- node[gw, above=1pt] {e3} (3);
+    \node[tsin, anchor=west] at (5.4,0) {3 3\\1 2\\1 2\\2 3};
+    \node[note, anchor=west, text width=4.5cm] at (7.2,0) {red: reported as a bridge by the buggy version; it is not one (e2 is a second road between 1 and 2). Orange: the only real bridge.};
+\end{tikzpicture}
+\figcap{Two parallel edges between 1 and 2 form a cycle of length 2, so neither is a bridge. Skipping ``the parent vertex'' skips \emph{both} of them and loses that cycle.}
+\end{diagrambox}
+
+\begin{lstlisting}[style=trace]
+$ p3_multiedge < in3.txt
+skip parent vertex: bridges 1 3
+skip parent edge  : bridges 3
+\end{lstlisting}
+
+Self-loops cause the twin failures: a loop $u{-}u$ appears twice in \texttt{adj[u]} if you push both directions, inflates degrees, and makes ``every vertex has a parent different from itself'' false. Read the statement for the words \emph{simple}, \emph{distinct} and $u_i \ne v_i$; if they are missing, your generator must produce loops and multi-edges (all of \clfile{code/gen} can).
+
+%------------------------------------------------------------
+\subsection{Pitfall 4: 0- and 1-Indexing}
+\label{ssec:ts-p4}
+
+Almost every judge numbers vertices $1..n$; almost every C++ container is indexed from 0. \clfile{p4_indexing.cpp} reads 1-indexed edges into \texttt{vector<vector<int>> adj(n)}.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \node[gv] (1) at (0,0) {1};
+    \node[gv] (2) at (1.3,0) {2};
+    \node[gvdst] (3) at (2.6,0) {3};
+    \draw[ge] (1) -- (2); \draw[ge] (2) -- (3);
+    \node[tsin, anchor=west] at (3.5,0) {3 2\\1 2\\2 3};
+    \foreach \i in {0,1,2} \node[cell] (c\i) at (6.8+0.9*\i,0) {};
+    \node[cell, fill=dupfill, draw=recursionred, line width=1pt] (c3) at (9.5,0) {?};
+    \foreach \i in {0,1,2,3} \node[idx] at (6.8+0.9*\i,-0.6) {\i};
+    \node[font=\scriptsize\bfseries, anchor=east] at (6.3,0) {adj};
+    \draw[dep] (3) to[bend left=35] node[lbl, above] {adj[3]} (c3.north);
+    \node[font=\scriptsize\color{warningred}] at (9.5,-1.0) {out of bounds};
+\end{tikzpicture}
+\figcap{\texttt{adj} has slots $0,1,2$; edge $2{-}3$ writes to \texttt{adj[3]}, one past the end.}
+\end{diagrambox}
+
+\begin{lstlisting}[style=trace]
+$ p4_indexing < in4.txt
+                 (no output, exit code 0xC0000005 = access violation; "Segmentation fault" in bash)
+$ p4_indexing_fixed < in4.txt          (the same program with adj(n + 1))
+deg(1) = 1
+deg(2) = 2
+deg(3) = 1
+\end{lstlisting}
+
+Here the bug crashed; that was lucky. Writing one element past the end of a \texttt{vector} is undefined behaviour and may just as well corrupt a neighbouring variable and print a plausible wrong answer. The book's convention is the safest one: convert on input (\texttt{u--, v--}) and work 0-indexed everywhere, \emph{or} allocate $n+1$ slots and never touch slot 0. Never mix the two in one program. Compiling tests with \texttt{-D\_GLIBCXX\_DEBUG} turns every out-of-range \texttt{vector} access into an immediate, explained abort.
+
+%------------------------------------------------------------
+\subsection{Pitfall 5: Multi-Test Resets}
+\label{ssec:ts-p5}
+
+``The first line contains $t$, the number of test cases'' --- and the sum of $n$ over all tests is bounded. Global arrays declared once must be cleared before every test, but only up to the current $n$ (clearing all of \texttt{MAXN} per test is a classic TLE when $t=10^5$). \clfile{p5_reset.cpp} forgets the reset.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \begin{scope}
+        \node[gvdone] (a1) at (0,0) {1}; \node[gvdone] (a2) at (1.3,0) {2}; \node[gvdone] (a3) at (2.6,0) {3};
+        \draw[gtree] (a1) -- (a2);
+        \node[tscap] at (1.3,-0.9) {test 1: $n=3$, edge $1{-}2$};
+        \node[font=\scriptsize] at (1.3,-1.35) {answer 2 (both versions)};
+    \end{scope}
+    \draw[fcarrow] (3.3,0) -- node[lbl, above] {next test} (4.6,0);
+    \begin{scope}[xshift=5.3cm]
+        \node[gvdone] (b1) at (0,0) {1}; \node[gvdone] (b2) at (1.3,0) {2}; \node[gvdone] (b3) at (2.6,0) {3};
+        \draw[tsbad, dashed] (b1) -- (b2);
+        \node[tscap] at (1.3,-0.9) {test 2: $n=3$, no edges};
+        \node[font=\scriptsize\color{warningred}] at (1.3,-1.35) {stale: all \texttt{seen}, old edge kept};
+    \end{scope}
+    \node[tsin, anchor=west] at (9.4,-0.3) {2\\3 1\\1 2\\3 0};
+\end{tikzpicture}
+\figcap{Without a reset, test 2 starts with every vertex already marked (blue) and the edge of test 1 still in \texttt{adj}: zero components are counted.}
+\end{diagrambox}
+
+\begin{lstlisting}[style=trace]
+$ p5_reset < in5.txt            $ p5_reset_fixed < in5.txt   (reset adj[v], seen[v] for v = 1..n)
+2                               2
+0                               3
+\end{lstlisting}
+
+The safest habit is to avoid globals altogether: build the graph inside a \texttt{solve()} function with local \texttt{vector}s sized to the current $n$. All headers of the code library re-\texttt{assign} their arrays in \texttt{run} for this reason. A stress test catches this pitfall only if the generator prints \emph{several} tests per file --- if your problem is multi-test, so must be your generator.
+
+%------------------------------------------------------------
+\subsection{Pitfall 6: Overflow in Distances}
+\label{ssec:ts-p6}
+
+Weights up to $10^9$ and paths of up to $10^5$ edges give distances up to $10^{14}$; even two edges overflow a 32-bit \texttt{int}. \clfile{p6_overflow.cpp} runs the same Dijkstra template with \texttt{int} and with \texttt{long long}.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \node[gvsrc] (1) at (0,0) {1};
+    \node[gv] (2) at (2.6,0) {2};
+    \node[gvdst] (3) at (5.2,0) {3};
+    \draw[gpath] (1) -- node[gw, above=2pt] {1500000000} (2);
+    \draw[gpath] (2) -- node[gw, above=2pt] {1500000000} (3);
+    \node[gdist, below=2pt] at (1.south) {0};
+    \node[gdist, below=2pt] at (2.south) {$1.5\cdot10^9$};
+    \node[gdist, below=2pt, text=warningred] at (3.south) {$3\cdot10^9 > 2^{31}-1$};
+    \node[tsin, anchor=west] at (7.0,0) {3 2\\1 2 1500000000\\2 3 1500000000};
+\end{tikzpicture}
+\figcap{Two edges are enough: $\dist{3} = 3\,000\,000\,000$ does not fit in an \texttt{int} (maximum $2\,147\,483\,647$).}
+\end{diagrambox}
+
+\begin{lstlisting}[style=trace]
+$ p6_overflow < in6.txt
+int       : -1294967296
+long long : 3000000000
+\end{lstlisting}
+
+The wrong value is exactly $3\cdot10^9 - 2^{32}$: the sum wrapped around. Worse cases do not even print a negative number --- a wrapped sum can compare as \emph{smaller} than a correct distance and steer the whole search. Rules: distances in \texttt{long long}; ``infinity'' small enough that $\INF + w$ does not overflow either (\texttt{LLONG\_MAX / 4}, or test \texttt{d[u] == INF} before adding); and a generator that can produce maximal weights, not only weights in $[1,9]$.
+
+%------------------------------------------------------------
+\subsection{Pitfall 7: Marking Visited When Popped}
+\label{ssec:ts-p7}
+
+In BFS a vertex must be marked when it is \emph{pushed}. Marking it when it is popped lets it enter the queue once for every neighbour that sees it first. On the complete graph $K_n$ the queue receives every edge: \clfile{p7_pop_mark.cpp} counts the pushes.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \foreach \i/\a in {0/90, 1/162, 2/234, 3/306, 4/18} \node[gv] (k\i) at (\a:1.2) {\i};
+    \node[gvsrc] at (k0) {0};
+    \foreach \i in {0,...,4} \foreach \j in {0,...,4} { \ifnum\i<\j \draw[ge] (k\i) -- (k\j); \fi }
+    \node[tscap] at (0,-1.75) {$K_5$: every pair adjacent};
+    \node[anchor=west] at (2.4,0) {%
+      \renewcommand{\arraystretch}{1.15}\small
+      \begin{tabular}{rrr}
+        \toprule
+        $n$ & pushes, mark on pop & pushes, mark on push \\
+        \midrule
+        10 & 46 & 10 \\
+        100 & 4\,951 & 100 \\
+        1\,000 & 499\,501 & 1\,000 \\
+        3\,000 & 4\,498\,501 & 3\,000 \\
+        \bottomrule
+      \end{tabular}};
+\end{tikzpicture}
+\figcap{Real counts from \clfile{p7_pop_mark}: marking on pop pushes $\binom{n}{2}+1$ times, marking on push exactly $n$ times.}
+\end{diagrambox}
+
+The quadratic queue is the \emph{mild} symptom; on dense inputs it turns $\bigO{n+m}$ memory into $\bigO{m}$ queue entries and may MLE. The serious symptom is a wrong distance: if the code also writes \texttt{dist[v]} each time it pushes $v$, a later, deeper vertex overwrites the correct value. That bug survives every sample we tried and is the worked example of Section~\ref{sec:ts-example}, where a stress test finds it on a triangle.
+
+%------------------------------------------------------------
+\subsection{Pitfall 8: Directed vs.\ Undirected}
+\label{ssec:ts-p8}
+
+``There is a road between $u$ and $v$'' is an undirected edge and needs two pushes; ``a one-way road from $u$ to $v$'' needs one. \clfile{p8_direction.cpp} stores the undirected input in one direction only.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \begin{scope}
+        \node[gvsrc] (1) at (0,0) {1}; \node[gvdone] (2) at (1.4,0) {2};
+        \node[gvdead] (3) at (0,-1.3) {3}; \node[gvdead] (4) at (1.4,-1.3) {4};
+        \draw[gde] (1) -- (2); \draw[gde] (3) -- (1); \draw[gde] (3) -- (4);
+        \node[tscap] at (0.7,-2.15) {stored one way: reach $\{1,2\}$};
+    \end{scope}
+    \begin{scope}[xshift=4.2cm]
+        \node[gvsrc] (1) at (0,0) {1}; \node[gvdone] (2) at (1.4,0) {2};
+        \node[gvdone] (3) at (0,-1.3) {3}; \node[gvdone] (4) at (1.4,-1.3) {4};
+        \draw[ge] (1) -- (2); \draw[ge] (3) -- (1); \draw[ge] (3) -- (4);
+        \node[tscap] at (0.7,-2.15) {stored both ways: reach $\{1,2,3,4\}$};
+    \end{scope}
+    \node[tsin, anchor=west] at (8.0,-0.65) {4 3\\1 2\\3 1\\3 4};
+\end{tikzpicture}
+\figcap{The edge ``3 1'' is listed with the endpoints in the ``wrong'' order. Stored as $3\to1$ only, it cannot be used from 1.}
+\end{diagrambox}
+
+\begin{lstlisting}[style=trace]
+$ p8_direction < in8.txt
+one direction : 1 2
+both         : 1 2 3 4
+\end{lstlisting}
+
+The bug hides whenever the input happens to list edges as ``smaller endpoint first'' --- which is exactly how hand-written samples look. That is why every generator in \clfile{code/gen} gives each undirected edge a random orientation. The opposite mistake (adding the reverse of a directed arc) is just as common in topological sort and SCC problems.
+
+%============================================================
+\clneed
+\section{Random Generators}
+\label{sec:ts-gen}
+
+A stress test is only as strong as its inputs. A good generator for graph problems has four properties: it is \textbf{seeded} (the same seed gives the same input, so a failure can be replayed), it produces \textbf{every shape the statement allows} (disconnected, loops, multi-edges, $n=1$, $m=0$), it \textbf{shuffles labels and orientations} (so no hidden ``sorted'' assumption survives), and it starts \textbf{small} (so the first failure is a readable one). The library's generators (\clfile{code/gen/gen.hpp} for C++, \clfile{code/gen/gen.py} for Python, the same algorithms) do all four. From the command line \clfile{gen.py} prints a contest-style input:
+
+\begin{lstlisting}[style=trace]
+python code/gen/gen.py tree       N            SEED
+python code/gen/gen.py connected  N M          SEED
+python code/gen/gen.py graph      N M          SEED [--loops] [--multi]
+python code/gen/gen.py digraph    N M          SEED [--loops] [--multi]
+python code/gen/gen.py dag        N M          SEED
+python code/gen/gen.py functional N            SEED
+python code/gen/gen.py grid       R C PCT      SEED          (add --weights LO HI for weights)
+\end{lstlisting}
+
+The pictures below are drawn from the \emph{actual} output of these commands. For example \texttt{gen.py tree 8 1} prints the eight lines below (shown side by side, one column per output line):
+
+\begin{lstlisting}[style=trace]
+8 7    4 5    2 7    6 4    4 7    1 6    3 5    8 4
+\end{lstlisting}
+
+Note that the edges are neither sorted nor oriented ``parent first'', and the vertex with the largest degree is 4, not 1: a solution that assumes ``vertex 1 is the root and edges point down'' fails at once.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=0.85cm, y=0.85cm]
+    \begin{scope}
+        \node[gvsel] (4) at (0,0) {4};
+        \node[gv] (5) at (-1.1,0.9) {5}; \node[gv] (3) at (-2.2,0.9) {3};
+        \node[gv] (6) at (-1.1,-0.9) {6}; \node[gv] (1) at (-2.2,-0.9) {1};
+        \node[gv] (7) at (1.1,0.9) {7}; \node[gv] (2) at (2.2,0.9) {2};
+        \node[gv] (8) at (1.1,-0.9) {8};
+        \foreach \a/\b in {4/5, 2/7, 6/4, 4/7, 1/6, 3/5, 8/4} \draw[ge] (\a) -- (\b);
+        \node[tscap] at (0,-1.9) {random tree};
+        \node[tscmd] at (0,-2.4) {gen.py tree 8 1};
+    \end{scope}
+    \begin{scope}[xshift=5.0cm]
+        \node[gv] (2) at (0,0) {2}; \node[gv] (3) at (1.5,0) {3}; \node[gv] (7) at (3.0,0) {7};
+        \node[gv] (4) at (0.75,1.2) {4}; \node[gv] (5) at (0.75,-1.2) {5};
+        \node[gv] (1) at (-1.3,-0.6) {1}; \node[gv] (6) at (-1.3,0.8) {6};
+        \foreach \a/\b in {4/3, 7/3, 6/1, 2/3, 4/2, 1/2, 4/6, 5/2, 3/5} \draw[ge] (\a) -- (\b);
+        \node[tscap] at (0.85,-1.9) {connected, $m=9$};
+        \node[tscmd] at (0.85,-2.4) {gen.py connected 7 9 2};
+    \end{scope}
+    \begin{scope}[xshift=10.2cm]
+        \node[gv] (3) at (-1.2,0) {3}; \node[gv] (1) at (0,0) {1}; \node[gvsel] (4) at (1.6,0) {4};
+        \node[gv] (2) at (2.6,0.9) {2}; \node[gv] (5) at (2.6,-0.9) {5};
+        \draw[ge] (1) -- (3);
+        \draw[ge] (1) -- (4); \draw[ge] (1) to[bend left=35] (4); \draw[ge] (1) to[bend right=35] (4);
+        \draw[ge] (4) to[out=240, in=300, looseness=7] (4);
+        \draw[ge] (4) -- (2); \draw[ge] (2) -- (5);
+        \node[tscap] at (0.7,-1.9) {loops and multi-edges};
+        \node[tscmd] at (0.7,-2.6) {gen.py graph 5 7 1\\--loops --multi};
+    \end{scope}
+\end{tikzpicture}
+\figcap{Undirected generators. Right: the seven edges are $2{-}5$, $1{-}3$, $1{-}4$, $4{-}4$, $4{-}2$, $1{-}4$, $1{-}4$ --- one self-loop and three copies of $1{-}4$ (purple: vertex 4 carries the trouble).}
+\end{diagrambox}
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=0.85cm, y=0.85cm]
+    \begin{scope}
+        \node[gv] (1) at (0,0) {1}; \node[gv] (2) at (1.6,0) {2}; \node[gv] (4) at (0.8,-1.3) {4};
+        \node[gv] (3) at (3.2,0) {3}; \node[gv] (5) at (3.2,-1.3) {5};
+        \draw[gde] (2) -- (3); \draw[gde] (1) -- (4); \draw[gde] (4) -- (2); \draw[gde] (5) -- (3);
+        \draw[gde] (1) to[bend left=30] (2); \draw[gde] (2) to[bend left=30] (1);
+        \node[tscap] at (1.6,-2.2) {directed (2-cycle $1\rightleftarrows2$)};
+        \node[tscmd] at (1.6,-2.7) {gen.py digraph 5 6 4};
+    \end{scope}
+    \begin{scope}[xshift=5.4cm]
+        \node[gv] (2) at (0,0) {2}; \node[gv] (1) at (1.2,0.6) {1}; \node[gv] (5) at (1.2,-0.9) {5};
+        \node[gv] (3) at (2.4,1.2) {3}; \node[gv] (4) at (2.4,0) {4}; \node[gv] (6) at (3.6,0.4) {6};
+        \draw[gde] (1) -- (6); \draw[gde] (2) -- (5); \draw[gde] (2) -- (1); \draw[gde] (4) -- (6);
+        \draw[gde] (2) to[bend left=40] (3); \draw[gde] (1) -- (3); \draw[gde] (1) -- (4);
+        \node[tscap] at (1.8,-2.2) {DAG (drawn in topological order)};
+        \node[tscmd] at (1.8,-2.7) {gen.py dag 6 7 5};
+    \end{scope}
+    \begin{scope}[xshift=12.6cm, yshift=-0.2cm]
+        \foreach \v/\a in {1/150, 2/90, 8/30, 6/-30, 3/-90, 5/-150} \node[gvA] (f\v) at (\a:1.05) {\v};
+        \node[gv] (f4) at (150:2.1) {4}; \node[gv] (f7) at (30:2.1) {7};
+        \foreach \a/\b in {1/2, 2/8, 8/6, 6/3, 3/5, 5/1, 4/1, 7/8} \draw[gde] (f\a) -- (f\b);
+        \node[tscap] at (0,-2.0) {functional: $f = 2\,8\,5\,1\,1\,3\,8\,6$};
+        \node[tscmd] at (0,-2.5) {gen.py functional 8 6};
+    \end{scope}
+\end{tikzpicture}
+\figcap{Directed generators. The functional graph has one cycle of length 6 (blue) with two tails $4\to1$ and $7\to8$; every vertex has exactly one outgoing arc.}
+\end{diagrambox}
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=0.7cm, y=0.7cm]
+    \begin{scope}
+        \foreach \r/\c in {0/1, 0/4, 0/5, 1/0, 1/3, 1/6, 2/0, 2/3, 2/5, 3/1, 3/3}
+            \node[gwall] at (\c,-\r) {};
+        \foreach \r in {0,...,3} \foreach \c in {0,...,6} \node[gcell, fill=none] at (\c,-\r) {};
+        \node[tscap] at (3,-4.0) {grid $4\times7$, 25\% walls};
+        \node[tscmd] at (3,-4.6) {gen.py grid 4 7 25 7};
+    \end{scope}
+    \begin{scope}[xshift=7.6cm, yshift=-1.0cm]
+        \node[gv] (6) at (0,0) {6}; \node[gv] (3) at (1.8,0) {3}; \node[gv] (1) at (3.6,0) {1};
+        \node[gv] (4) at (5.4,0) {4}; \node[gv] (5) at (7.2,0) {5}; \node[gv] (2) at (9.0,0) {2};
+        \draw[ge] (6) -- node[gw, above=2pt] {1} (3); \draw[ge] (3) -- node[gw, above=2pt] {9} (1);
+        \draw[ge] (1) -- node[gw, above=2pt] {3} (4); \draw[ge] (4) -- node[gw, above=2pt] {7} (5);
+        \draw[ge] (5) -- node[gw, above=2pt] {2} (2);
+        \node[tscap] at (4.5,-1.8) {weighted tree (here a path)};
+        \node[tscmd] at (4.5,-2.4) {gen.py tree 6 3 --weights 1 9};
+    \end{scope}
+\end{tikzpicture}
+\figcap{Left: the grid rows are \texttt{.\#..\#\#.}, \texttt{\#..\#..\#}, \texttt{\#..\#.\#.}, \texttt{.\#.\#...} (grey = wall). Right: a random tree may well be a path --- the shape that breaks recursion (Pitfall 1) and quadratic ``walk up to the root'' code.}
+\end{diagrambox}
+
+In a stress test you do not call \clfile{gen.py} from the shell but write a tiny problem-specific generator that imports it, chooses the sizes, and prints the input in the problem's format. The one for the worked example is \clfile{code/examples/stress_bfs/gen_bfs.py}:
+
+\lstinputlisting[style=snippet, language=Python]{code/examples/stress_bfs/gen_bfs.py}
+
+Two choices in it matter more than they look. The size \textbf{grows with the seed}: seeds 1--49 give $n\le2$, seeds 50--99 give $n\le3$, and so on, so the stress loop tries the smallest inputs first and the first failure it reports is (close to) a minimal one. And $m$ is drawn from the full range $[0, \binom{n}{2}]$, so empty graphs, isolated vertices and complete graphs all appear.
+
+%============================================================
+\clneed
+\section{Brute-Force References}
+\label{sec:ts-brute}
+
+The second ingredient is a \textbf{reference}: a program that solves the same problem slowly but so simply that you believe it without a proof. What makes a reference trustworthy:
+\begin{itemize}[leftmargin=*]
+    \item \textbf{A different algorithm.} If the reference shares the idea of the solution, it shares its bugs. BFS is checked against Bellman--Ford or Floyd--Warshall, Kruskal against trying every subset of edges, DSU against relabelling an array.
+    \item \textbf{No cleverness.} No early exits, no ``visited'' subtleties, no data structures beyond arrays; triple loops are welcome. Its running time may be exponential --- inputs are tiny.
+    \item \textbf{No shared code.} Write it from the statement, not by editing the solution; a copied input-reading loop copies Pitfall 4 and Pitfall 8 too.
+    \item \textbf{Safe arithmetic.} The reference must not overflow where the solution might: use \texttt{long long} and an infinity that survives an addition.
+    \item \textbf{A certificate check where possible.} When the answer is an object (a path, an order, a colouring), check the object's properties instead of comparing with one specific answer --- there may be many correct ones.
+\end{itemize}
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm,
+    rb/.style={rectangle, rounded corners=3pt, draw=#1, fill=#1!8, line width=0.9pt, font=\scriptsize,
+               align=center, text width=3.0cm, minimum height=9mm}]
+    \node[rb=primaryblue] (s1) at (0,1.6) {BFS distances};
+    \node[rb=primaryblue] (s2) at (0,0.5) {Dijkstra};
+    \node[rb=primaryblue] (s3) at (0,-0.6) {Kruskal / Prim};
+    \node[rb=primaryblue] (s4) at (0,-1.7) {components / DSU};
+    \node[rb=successgreen, text width=4.6cm] (r1) at (7.2,1.6) {Floyd--Warshall $\bigO{n^3}$\\(\texttt{apsp\_unweighted})};
+    \node[rb=successgreen, text width=4.6cm] (r2) at (7.2,0.5) {all simple paths $\bigO{n!}$, $n\le7$};
+    \node[rb=successgreen, text width=4.6cm] (r3) at (7.2,-0.6) {every edge subset $\bigO{2^m}$\\(\texttt{brute\_msf})};
+    \node[rb=successgreen, text width=4.6cm] (r4) at (7.2,-1.7) {label = smallest reachable\\(\texttt{naive\_labels})};
+    \foreach \i in {1,2,3,4} \draw[fcarrow, <->] (s\i) -- node[lbl, above] {compare} (r\i);
+    \node[tscap] at (0,2.5) {fast solution};
+    \node[tscap] at (7.2,2.5) {reference (\clfile{code/tests/check.hpp})};
+\end{tikzpicture}
+\figcap{Each library component is tested against a reference built on a different, slower, simpler idea.}
+\end{diagrambox}
+
+The library's references live in \clfile{code/tests/check.hpp}. The BFS reference is three nested loops:
+
+\lstinputlisting[style=snippet, firstline=45, lastline=61]{code/tests/check.hpp}
+
+and the test of \clfile{bfs.hpp} shows the full pattern --- seeded generator, reference, value comparison, certificate checks on every reconstructed path, and an exact description of the input in every failure message:
+
+\lstinputlisting[style=cpp]{code/tests/test_bfs.cpp}
+
+For the worked example below the reference is a stand-alone program that reads the same input format: Bellman--Ford with weight 1, relaxing every edge $n$ times. It is $\bigO{nm}$ and has no queue, so it cannot make the queue mistake.
+
+\lstinputlisting[style=cpp]{code/examples/stress_bfs/bfs_brute.cpp}
+
+%============================================================
+\clneed
+\section{The Stress-Testing Loop}
+\label{sec:ts-loop}
+
+With a generator and a reference, stress testing is a loop: generate input number $s$, run both programs, compare, and stop at the first difference.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \node[fcstart] (st) at (0,0) {seed $s = 1$};
+    \node[fcproc=3.0cm] (g) at (0,-1.3) {\texttt{gen.py $s$}\\$\to$ input};
+    \node[fcproc=2.6cm] (a) at (-2.4,-2.9) {solution\\$\to$ out$_1$};
+    \node[fcproc=2.6cm] (b) at (2.4,-2.9) {brute force\\$\to$ out$_2$};
+    \node[fcdec=3.2cm] (d) at (0,-4.6) {out$_1$ = out$_2$ and\\both exit 0?};
+    \node[fcproc=2.2cm] (inc) at (5.0,-4.6) {$s \gets s+1$};
+    \node[fcout=4.4cm] (bad) at (0,-6.4) {MISMATCH: print input,\\both outputs, the seed;\\save stress\_fail.txt};
+    \node[fcout=2.6cm] (ok) at (5.0,-6.4) {OK: all runs passed};
+    \draw[fcarrow] (st) -- (g);
+    \draw[fcarrow] (g) -- (a); \draw[fcarrow] (g) -- (b);
+    \draw[fcarrow] (a) -- (d); \draw[fcarrow] (b) -- (d);
+    \draw[fcarrow] (d) -- node[lbl, above] {yes} (inc);
+    \draw[fcarrow] (d) -- node[lbl, right] {no} (bad);
+    \draw[fcarrow] (inc.north) -- node[lbl, right, pos=0.3] {$s \le$ runs} (5.0,-1.3) -- (g.east);
+    \draw[fcarrow, dashed] (inc.south) -- node[lbl, right] {$s >$ runs} (ok.north);
+\end{tikzpicture}
+\figcap{The stress loop of \clfile{tools/stress.py}. Because the generator is seeded, a mismatch is reproducible: \texttt{gen.py $s$} prints the same input forever.}
+\end{diagrambox}
+
+\clfile{tools/stress.py} implements exactly this loop for any problem:
+
+\begin{lstlisting}[style=trace]
+python tools/stress.py <solution.cpp> <brute.cpp> <generator.cpp|generator.py> [runs] [first_seed]
+\end{lstlisting}
+
+It compiles the C++ files with \texttt{g++ -std=c++14 -O2}, passes the seed to the generator as its only argument, compares the outputs token by token (so spacing does not matter), and treats a crash or a 10-second timeout of either program as a failure too --- so Pitfalls 1 and 4 are caught as well as wrong answers. The default is 1000 runs from seed 1. On a mismatch it prints the input, both outputs and the seed, writes the input to \clfile{stress_fail.txt} and exits with code 1; otherwise it prints \texttt{OK: <runs> tests passed}.
+
+\lstinputlisting[style=snippet, language=Python, firstline=37, lastline=78]{tools/stress.py}
+
+Two refinements are worth knowing. If the answer is not unique (any shortest path, any topological order), replace the comparison by a \emph{checker} that validates out$_1$ against the input and the reference's optimal value. If the problem is multi-test, let the generator print several tests per file, so Pitfall 5 is exercised.
+
+%============================================================
+\clneed
+\section{A Full Worked Example}
+\label{sec:ts-example}
+
+\textbf{Task.} Read an undirected graph ($n$ vertices, $m$ edges, 1-indexed) and print $\dist{1, v}$ for $v = 1..n$, or $-1$ if $v$ is unreachable. Here is a BFS that looks right, compiles cleanly, and returns correct answers on a path, a star and a tree:
+
+\lstinputlisting[style=cpp]{code/examples/stress_bfs/bfs_buggy.cpp}
+
+\subsection*{Step 1: run the stress test}
+
+We run it against the brute force and the generator of the previous sections; all three files are in the folder \clfile{code/examples/stress_bfs/}.
+
+\begin{lstlisting}[style=trace]
+$ python tools/stress.py code/examples/stress_bfs/bfs_buggy.cpp \
+                         code/examples/stress_bfs/bfs_brute.cpp \
+                         code/examples/stress_bfs/gen_bfs.py
+MISMATCH on test 68 (seed 68)
+---- input ----
+3 3
+3 1
+1 2
+3 2
+---- solution (exit 0) ----
+0 2 1
+---- brute force (exit 0) ----
+0 1 1
+\end{lstlisting}
+
+Sixty-seven inputs with $n \le 3$ passed (on one or two vertices, or on a path, the bug is invisible). The 68th is a triangle, and vertex 2, a neighbour of vertex 1, is reported at distance 2.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \node[gvsrc] (1) at (0,0) {1};
+    \node[gvdst] (2) at (2.2,0) {2};
+    \node[gv] (3) at (1.1,1.6) {3};
+    \draw[ge] (3) -- (1); \draw[ge] (1) -- (2); \draw[ge] (3) -- (2);
+    \node[gdist, below=3pt] at (1.south) {0};
+    \node[gdist, below=3pt, text=warningred] at (2.south) {buggy 2, correct 1};
+    \node[gdist, above=3pt] at (3.north) {1};
+    \node[tsin, anchor=west] at (4.0,0.6) {3 3\\3 1\\1 2\\3 2};
+    \node[note, anchor=west, text width=3.5cm] at (6.0,0.6) {adj[1] = 3 2\\adj[2] = 1 3\\adj[3] = 1 2};
+\end{tikzpicture}
+\figcap{The failing input found by \clfile{stress.py}: a triangle. Because the edge ``3 1'' comes first, vertex 3 precedes vertex 2 in \texttt{adj[1]}.}
+\end{diagrambox}
+
+\subsection*{Step 2: why a small input matters}
+
+The generator grows $n$ with the seed. Starting the same loop at seed 500 (\texttt{stress.py \ldots{} 1000 500}, where $n$ may reach 12) fails immediately --- on this:
+
+\begin{lstlisting}[style=trace]
+MISMATCH on test 1 (seed 500)
+---- input ----
+8 16
+8 5   7 4   2 6   2 1   4 6   5 1   6 3   8 2
+8 3   7 3   8 6   5 6   6 1   7 1   1 3   7 2
+---- solution (exit 0) ----
+0 1 3 3 1 2 2 3
+---- brute force (exit 0) ----
+0 1 1 2 1 1 1 2
+\end{lstlisting}
+
+(edges printed in two rows here to save space). Five of eight distances differ and the reason is buried in sixteen edges. The triangle, in contrast, can be traced by hand in four lines --- which is the whole point of growing sizes slowly.
+
+\subsection*{Step 3: trace the minimal input}
+
+The trace below is printed by an instrumented copy of the buggy program (one line per pop: the queue after the pop and its pushes, then \texttt{dist[1..3]}):
+
+\begin{lstlisting}[style=trace]
+start      queue=[1] dist=0 -1 -1
+pop 1      queue=[3 2] dist=0 1 1
+pop 3      queue=[2 2] dist=0 2 1        <- 2 is still waiting, not yet visited: overwritten
+pop 2      queue=[2] dist=0 2 1
+pop 2      queue=[] dist=0 2 1
+\end{lstlisting}
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \foreach \k/\t/\sa/\sb/\sc/\da/\db/\dc/\q in {
+        0/start/gvsrc/gv/gv/0/$-1$/$-1$/1,
+        1/pop 1/gvdone/gvseen/gvseen/0/1/1/{3,2},
+        2/pop 3/gvdone/gvseen/gvdone/0/2/1/{2,2},
+        3/pop 2 (twice)/gvdone/gvdone/gvdone/0/2/1/{}} {
+        \begin{scope}[xshift=3.6*\k cm]
+            \node[\sa] (a) at (0,0) {1}; \node[\sb] (b) at (1.6,0) {2}; \node[\sc] (c) at (0.8,1.2) {3};
+            \draw[ge] (a) -- (b); \draw[ge] (a) -- (c); \draw[ge] (b) -- (c);
+            \node[gdist, below=2pt] at (a.south) {\da};
+            \node[gdist, below=2pt] at (b.south) {\db};
+            \node[gdist, above=2pt] at (c.north) {\dc};
+            \node[tscap] at (0.8,-1.0) {\t};
+            \node[font=\scriptsize\ttfamily] at (0.8,-1.45) {queue [\q]};
+        \end{scope}
+    }
+    \draw[tsbad, shorten <=3.9mm, shorten >=3.9mm] (7.2+1.6,0) -- (7.2+0.8,1.2);
+    \node[font=\scriptsize\color{warningred}, anchor=west] at (9.0,0.8) {$2 \gets$ dist$(3)+1$};
+\end{tikzpicture}
+\figcap{Snapshots of the buggy BFS (blue = popped and marked, yellow = in the queue). When 3 is popped, vertex 2 is in the queue but not yet \emph{marked}, so the edge $3{-}2$ (red) overwrites $\dist{2}=1$ with 2.}
+\end{diagrambox}
+
+The diagnosis is now one sentence: a vertex waiting in the queue is not marked, so a later vertex of the same or a deeper layer can rewrite its distance --- Pitfall 7 in its harmful form.
+
+\subsection*{Step 4: fix and re-run}
+
+Mark on discovery: \texttt{dist[v] == -1} \emph{is} the visited test, and it is set the moment $v$ is pushed.
+
+\lstinputlisting[style=cpp]{code/examples/stress_bfs/bfs_fixed.cpp}
+
+The same instrumented trace on the triangle now pushes vertex 2 once:
+
+\begin{lstlisting}[style=trace]
+start      queue=[1] dist=0 -1 -1
+pop 1      queue=[3 2] dist=0 1 1
+pop 3      queue=[2] dist=0 1 1
+pop 2      queue=[] dist=0 1 1
+\end{lstlisting}
+
+and the full stress run passes (1000 inputs, $n$ up to 22, 2 minutes 24 seconds on the author's machine --- process start-up dominates, which is why the tests are small):
+
+\begin{lstlisting}[style=trace]
+$ python tools/stress.py code/examples/stress_bfs/bfs_fixed.cpp \
+                         code/examples/stress_bfs/bfs_brute.cpp \
+                         code/examples/stress_bfs/gen_bfs.py
+OK: 1000 tests passed
+\end{lstlisting}
+
+A passing stress test is not a proof either; it says that no input of this generator's shapes and sizes breaks the solution. That is why the generator's \emph{shapes} matter as much as the number of runs, and why the timing tests below are a separate step.
+
+%============================================================
+\clneed
+\section{Before You Submit}
+\label{sec:ts-checklist}
+
+Stress tests catch wrong answers on small inputs; the large-input pitfalls (depth, overflow, time) need a few hand-made inputs as well. A maximal path, a maximal star and a maximal complete-ish graph, with maximal weights, cover most of them.
+
+\begin{diagrambox}
+\begin{tikzpicture}[x=1cm, y=1cm]
+    \begin{scope}
+        \foreach \i in {0,...,4} \node[gv, minimum size=5.5mm, font=\scriptsize] (p\i) at (0.8*\i,0) {};
+        \foreach \i/\j in {0/1,1/2,2/3,3/4} \draw[ge] (p\i) -- (p\j);
+        \node[font=\scriptsize] at (4.0,0) {$\cdots$};
+        \node[tscap] at (1.8,-0.8) {path, $n = 2\cdot10^5$};
+        \node[font=\scriptsize] at (1.8,-1.2) {depth, quadratic walks};
+    \end{scope}
+    \begin{scope}[xshift=6.6cm]
+        \node[gv, minimum size=5.5mm] (c) at (0,0) {};
+        \foreach \a in {0,40,...,320} { \node[gv, minimum size=4mm] (l\a) at (\a:0.95) {}; \draw[ge] (c) -- (l\a); }
+        \node[tscap] at (0,-1.4) {star};
+        \node[font=\scriptsize] at (0,-1.8) {one huge adjacency list};
+    \end{scope}
+    \begin{scope}[xshift=11.2cm]
+        \foreach \i/\a in {0/90, 1/162, 2/234, 3/306, 4/18} \node[gv, minimum size=5mm] (k\i) at (\a:0.85) {};
+        \foreach \i in {0,...,4} \foreach \j in {0,...,4} { \ifnum\i<\j \draw[ge] (k\i) -- (k\j); \fi }
+        \node[tscap] at (0,-1.4) {dense, $w = 10^9$};
+        \node[font=\scriptsize] at (0,-1.8) {overflow, time, memory};
+    \end{scope}
+\end{tikzpicture}
+\figcap{Three hand-made maximal inputs to run (and time) before every submission of a graph problem.}
+\end{diagrambox}
+
+\begin{checklistbox}[Pre-submit checklist for graph code]
+\begin{itemize}[leftmargin=*]
+    \item \textbf{Indexing.} Vertices converted once (\texttt{u--}) or arrays of size $n+1$; never both. Compiled once with \texttt{-D\_GLIBCXX\_DEBUG} on the samples.
+    \item \textbf{Direction.} Undirected edge = two pushes; directed arc = one. Tested with edges listed ``larger endpoint first''.
+    \item \textbf{Disconnected.} Every ``for all vertices'' search has the outer loop over all start vertices; isolated vertices and $m=0$ work.
+    \item \textbf{Loops and multi-edges.} The statement checked for ``simple''; if not guaranteed, parents skipped by \emph{edge id}, degrees and counts correct with $u=v$.
+    \item \textbf{Multi-test.} Everything rebuilt per test (locals in \texttt{solve()} or reset up to the current $n$ only); a stress file with several tests.
+    \item \textbf{Overflow.} Distances and sums in \texttt{long long}; $\INF + w$ cannot overflow; maximal weights tried.
+    \item \textbf{Visited.} BFS marks on push; Dijkstra skips stale queue entries (\texttt{d != dist[u]}).
+    \item \textbf{Depth.} Recursion depth bounded, or iterative, or the judge's stack known; tested on a path of maximal length.
+    \item \textbf{Stress.} \texttt{python tools/stress.py sol.cpp brute.cpp gen.py} passes 1000 runs with sizes growing from $n=1$; the generator produces every shape the statement allows.
+    \item \textbf{Time.} Maximal path, star and dense inputs each run well under the limit with \texttt{-O2}.
+\end{itemize}
+\end{checklistbox}
