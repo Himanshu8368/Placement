@@ -1,0 +1,296 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  2.3  Bottom-Up Recursion: returning values up          sec:c02-bottomup
+%  Exports: def:c02-bottomup  prop:c02-aggregate  lst:c02-bottomup-tmpl
+%           prob:c02-tilt  prob:c02-prune  prob:c02-univalue
+% =====================================================================
+\section{Bottom-Up Recursion: Returning Values Up}\label{sec:c02-bottomup}
+
+\begin{topicintro}
+In a \term{bottom-up} recursion each node asks its children for an answer, combines the
+two, and \emph{returns} the result to its own parent -- the return value is a subtree
+aggregate. The height and size recurrences of \thmref{c01-height-recursion} were already
+bottom-up; here we generalise them and add the one idiom that unlocks the hardest tree
+mediums: a function that \emph{returns} one quantity (so the parent can use it) while
+\emph{silently updating a global best} (the real answer). That is exactly how diameter,
+tilt and longest-path problems collapse into a single DFS.
+
+\textbf{Prerequisites.} \secref{c02-model} (structural recursion) and
+\thmref{c01-height-recursion} (return-and-combine).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item tell a bottom-up problem instantly: the answer at a node is a function of its two
+        subtrees alone;
+  \item return a subtree aggregate (sum, height, pruned pointer, chain length) and combine
+        it correctly;
+  \item use the "return one value, update a second global answer" split for
+        diameter/tilt/longest-path;
+  \item solve binary tree tilt, prune tree, and longest univalue path in one pass each.
+\end{itemize}
+\end{topicintro}
+
+\usedin{Chapter 9 (diameter and centroid), Chapter 10 (tree DP) and Chapter 20 (advanced
+tree DP)}{tree DP \emph{is} bottom-up recursion with a richer returned state; mastering the
+return-plus-global split now is literally the first lesson of every DP-on-trees chapter.}
+
+\subsection{Intuition}
+
+\begin{analogybox}[An org chart reporting up]
+A VP does not decide the company total herself: she waits for both directors under her to
+report their numbers, adds them to her own, and passes one total up to the CEO. The value
+travels from the bottom (leaves) to the top (root) -- the opposite direction to
+\secref{c02-topdown}. Sometimes, though, a manager also shouts "biggest team so far!" to a
+whiteboard on the wall: that side note is the global-best update made during the upward pass.
+\end{analogybox}
+
+Take subtree sums. To know the sum at a node you must already know the sums of both
+children, so the information is forced to flow upward. We draw the returns on the tree.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram]
+  \node[troot] (r) at (0,0) {$1$};
+  \node[tnode] (l) at (-1.8,-1.4) {$2$};
+  \node[tnode] (c) at (1.8,-1.4) {$3$};
+  \node[tleaf] (a) at (-2.6,-2.8) {$4$};
+  \node[tleaf] (b) at (-1.0,-2.8) {$5$};
+  \node[tleaf] (d) at (1.8,-2.8) {$6$};
+  \draw[tedge] (r) -- (l); \draw[tedge] (r) -- (c);
+  \draw[tedge] (l) -- (a); \draw[tedge] (l) -- (b); \draw[tedge] (c) -- (d);
+  \node[annot, text=successgreen] at (-2.9,-3.3) {$4$};
+  \node[annot, text=successgreen] at (-1.0,-3.3) {$5$};
+  \node[annot, text=successgreen] at (-2.3,-1.9) {$11$};
+  \node[annot, text=successgreen] at (1.8,-3.3) {$6$};
+  \node[annot, text=successgreen] at (2.4,-1.9) {$9$};
+  \node[annot, text=successgreen] at (0.2,0.7) {$21$};
+\end{tikzpicture}
+\caption{Subtree sums returned upward (green): leaves return their own value, node $2$
+returns $2{+}4{+}5=11$, node $3$ returns $3{+}6=9$, the root returns $1{+}11{+}9=21$. The
+parent cannot be computed before the children -- the definition of bottom-up.}\label{fig:c02-bottomup}
+\end{figure}
+
+\subsection{Definition and the Aggregate Property}
+
+\begin{definition}{Bottom-up recursion}{c02-bottomup}
+A recursion whose \emph{return value} is a function of the return values of the children
+plus the node itself: $g(v)=\phi\big(v,\ g(v_{\text{left}}),\ g(v_{\text{right}})\big)$
+with a base value at \nil. The answer to the whole problem is either $g(\text{root})$ or a
+quantity recorded while computing the $g$'s.
+\end{definition}
+
+\begin{proposition}{Bottom-up well-definedness}{c02-aggregate}
+Because a tree has no cycles (\defref{c01-tree}) every recursion path ends at a \nil{}
+base case, so the combination $\phi$ is applied over a finite, acyclic call graph and $g(v)$
+depends only on the strict subtree $\subtree(v)$ -- the aggregate is always defined.
+\end{proposition}
+\begin{proofbox}
+$\subtree(v)$ is finite and, excluding $v$, consists of the strict subtrees of $v$'s
+children, which are strictly smaller. Induction on $\size(v)$ (\thmref{c01-height-recursion}
+is exactly this for $\height$): the children's $g$ are defined by the hypothesis (smaller
+subtrees), and $\phi$ combines finitely many of them with $v$. The \nil{} base terminates
+the recursion.
+\end{proofbox}
+
+\subsection{The Template and the Global-Best Split}
+
+\begin{lstlisting}[caption={Bottom-up skeleton: return the aggregate the parent needs, and separately update the answer that lives "through" the current node}, label={lst:c02-bottomup-tmpl}]
+// g(r) = the aggregate a parent can reuse (height, sum, chain length, pruned pointer).
+// best = the real answer, which may pass THROUGH r and so cannot be a single-child return.
+Aggregate dfs(TreeNode* r, Best& best) {
+    if (r == nullptr) return IDENTITY;        // 0 for sums, 0/-1 for heights, ...
+    Aggregate L = dfs(r->left,  best);
+    Aggregate R = dfs(r->right, best);
+    best = std::max(best, combine(L, R, r));  // answer using BOTH sides at r
+    return fold(L, R, r);                    // single aggregate sent UP
+}
+\end{lstlisting}
+
+\begin{notebox}[Why the split is necessary]
+A recursion returns \emph{one} value, but the best path/tilt/answer at $r$ may use both
+children at once (a path bending through $r$). If you tried to return that, the parent would
+double-count. So you return the extendable part (one side) and record the through-part in a
+global -- the exact move behind diameter (\chref{c09}) and \probref{c02-univalue} below.
+\end{notebox}
+
+\begin{complexitybox}
+One DFS, $\bigO{n}$ time, $\bigO{h}$ stack. The whole point of bottom-up is that each
+child's aggregate is computed once and reused by the parent, so an $\bigO{n}$-per-node
+naive recomputation (like the $O(n^2)$ balanced-check warned about in \probref{c01-balanced})
+drops to $\bigO{n}$.
+\end{complexitybox}
+
+\subsection{Worked Examples}
+
+\begin{example}{Reading returns off \figref{c02-bottomup}}{c02-bu-ex}
+The returned sums are $4,5$ at $2$'s children, so node $2$ returns $11$; $3$ returns $9$;
+the root returns $21$. If instead we wanted the max subtree sum, we would update a global
+with each return and read $\max(4,5,11,6,9,21)=21$.
+\end{example}
+
+\begin{tracebox}
+\code{dfs} for tilt visits $4,5$ then $2$: at $2$ the tilt is $|5-4|=1$, returns sum $11$;
+at $3$ tilt $|6-0|=6$, returns $9$; at the root tilt $|9-11|=2$. Total tilt $1+6+2=9$.
+\end{tracebox}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Returning the answer instead of the aggregate]
+For path-through-node problems, returning $\text{combine}(L,R,r)$ (the through value)
+poisoning the parent is the most common error. Return only what a parent can extend -- the
+better of the two children -- and keep the through value in the global.
+\end{warningbox}
+
+\begin{warningbox}[Wrong identity for the null base case]
+Sums return $0$, node-heights return $0$, edge-heights return $-1$, "contains a $1$" returns
+\code{nullptr}/\code{false}. Using $-1$ where $0$ is the identity makes every subtree off by
+one -- the same off-by-one flagged in \secref{c01-anatomy}.
+\end{warningbox}
+
+\subsection{Solved Problems}
+
+\solvedproblem{c02-tilt}{Binary Tree Tilt}{LeetCode 563}
+  {https://leetcode.com/problems/binary-tree-tilt/}{LC Easy}
+  {bottom-up subtree sum, global accumulator}
+
+\begin{problemstatement}[Binary Tree Tilt]
+The tilt of a node is $|\text{sum}(\text{left})-\text{sum}(\text{right})|$. Return the sum
+of the tilts of all nodes.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+Tilt needs each subtree's \emph{sum}, which is a clean bottom-up aggregate; the total tilt
+is a value living at each node, so we return the sum and add the tilt into a global --
+exactly the split in \coderef{c02-bottomup-tmpl}.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Binary Tree Tilt (LeetCode 563)}, label={lst:c02-tilt}]
+class Solution {
+    int total = 0;
+    int sum(TreeNode* r) {
+        if (!r) return 0;                       // null contributes sum 0
+        int L = sum(r->left), R = sum(r->right);
+        total += abs(L - R);                    // tilt recorded on the way up
+        return r->val + L + R;                  // return the subtree sum
+    }
+public:
+    int findTilt(TreeNode* root) { sum(root); return total; }
+};
+\end{lstlisting}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, memory $\bigO{h}$. Note the two distinct roles: \code{sum} returns the
+subtree total, \code{total} accumulates the answer -- folding them into one return would
+lose the per-node tilt.
+\end{complexitybox}
+
+\solvedproblem{c02-prune}{Binary Tree Pruning}{LeetCode 814}
+  {https://leetcode.com/problems/binary-tree-pruning/}{LC Medium}
+  {bottom-up decision, return subtree pointer}
+
+\begin{problemstatement}[Binary Tree Pruning]
+The tree holds only $0$ and $1$. Remove every subtree that does not contain a $1$, and
+return the root of the pruned tree.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+Whether to keep a node depends only on its subtree: keep $r$ iff $r$\texttt{->val}$=1$ or
+one of its (already-pruned) children survived. That is a bottom-up predicate, so we recurse
+first, then decide, returning \code{nullptr} to delete a whole branch.
+
+\solstep{Key Observations}
+\begin{observation}
+After pruning the children, $r$ must go iff $\text{val}=0$ \emph{and} both children are now
+\nil.
+\end{observation}
+\begin{observation}
+A $1$ always survives even if both children are pruned away.
+\end{observation}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Binary Tree Pruning (LeetCode 814)}, label={lst:c02-prune}]
+class Solution {
+public:
+    TreeNode* pruneTree(TreeNode* r) {
+        if (!r) return nullptr;
+        r->left  = pruneTree(r->left);    // prune below first
+        r->right = pruneTree(r->right);
+        if (r->val == 0 && !r->left && !r->right) return nullptr;  // dead branch
+        return r;
+    }
+};
+\end{lstlisting}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, memory $\bigO{h}$. The returned pointer doubles as the aggregate (survives
+or not) and the rebuilt child link -- a bottom-up recursion that mutates the tree in place.
+\end{complexitybox}
+
+\solvedproblem{c02-univalue}{Longest Univalue Path}{LeetCode 687}
+  {https://leetcode.com/problems/longest-univalue-path/}{LC Easy}
+  {bottom-up chain length, global best, path-through-node}
+
+\begin{problemstatement}[Longest Univalue Path]
+Return the number of \emph{edges} on the longest path whose nodes all share one value. The
+path need not pass the root and may bend at any node.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+Mirror the diameter idea (\probref{c01-balanced}'s cousin in \secref{c01-anatomy}): \code{dfs}
+returns the longest univalue \emph{chain} going straight down from $r$ (extendable by $r$'s
+parent), while the global answer takes the best path \emph{through} $r$, which can join the
+left and right chains when they match $r$\texttt{->val}. This is the through-vs-return split
+of \coderef{c02-bottomup-tmpl} verbatim.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Longest Univalue Path (LeetCode 687)}, label={lst:c02-univalue}]
+class Solution {
+    int best = 0;
+    int chain(TreeNode* r) {
+        if (!r) return 0;
+        int L = chain(r->left), R = chain(r->right);
+        int leftExt = 0, rightExt = 0;
+        if (r->left  && r->left->val  == r->val) leftExt  = L + 1;   // extendable chains
+        if (r->right && r->right->val == r->val) rightExt = R + 1;
+        best = std::max(best, leftExt + rightExt);                   // path through r
+        return std::max(leftExt, rightExt);                          // return one side up
+    }
+public:
+    int longestUnivaluePath(TreeNode* root) { chain(root); return best; }
+};
+\end{lstlisting}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, memory $\bigO{h}$. Returning $\max(\text{leftExt},\text{rightExt})$ but
+scoring $\text{leftExt}+\text{rightExt}$ in the global is the whole trick -- returning the
+sum would let the parent count a path that bends twice.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}[Counting edges, not nodes]
+The answer is edges; a chain of $k$ matching nodes scores $k-1$. Adding $1$ only when we
+\emph{extend} to a child (as above) keeps the count in edges automatically.
+\end{warningbox}
+Variant: \emph{Diameter of Binary Tree} is the same code with lengths in place of value
+matching; the general tree version is \chref{c09}.
+
+\subsection{Practice Problems}
+
+\begin{practiceset}
+  \practice{Distribute Coins in Binary Tree}{LeetCode 979}
+    {https://leetcode.com/problems/distribute-coins-in-binary-tree/}{LC Medium}
+    {bottom-up: return the net surplus/deficit a subtree must move through its parent edge; add its absolute value to the answer.}
+  \practice{House Robber III}{LeetCode 337}
+    {https://leetcode.com/problems/house-robber-iii/}{LC Medium}
+    {return a pair (rob this node, skip this node) per subtree; combine the two children's pairs.}
+  \practice{Delete Nodes And Return Forest}{LeetCode 1110}
+    {https://leetcode.com/problems/delete-nodes-and-return-forest/}{LC Medium}
+    {post-order; when a child is deleted, its subtree roots become new trees -- collect them.}
+  \practicehh{Path Sum III}{LeetCode 437}
+    {https://leetcode.com/problems/path-sum-iii/}{LC Medium}
+    {count downward paths (any start/end) summing to target; brute force is two DFSs.}
+    {prefix sums on the root-to-node path: carry a hash map of running-sum counts down, and for each node add how many earlier prefixes equal current$-$target. A top-down map plus a bottom-up count.}
+\end{practiceset}

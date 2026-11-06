@@ -1,0 +1,825 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  3.2  Iterative Traversals and Morris                  sec:c03-iterative
+%  Exports: def:c03-frame  def:c03-explicit-stack  def:c03-thread
+%           def:c03-morris  thm:c03-morris-cost
+%           lst:c03-pre-iter  lst:c03-in-iter  lst:c03-post-iter  lst:c03-morris
+%           lst:c03-post-1stack  lst:c03-104s
+%           fig:c03-threads  fig:c03-post1  fig:c03-frames  fig:c03-stage
+%           ex:c03-in-pattern
+%           prob:c03-nary-pre  prob:c03-nary-post  prob:c03-diam-nary
+% =====================================================================
+\section{Iterative Traversals and Morris Threading}\label{sec:c03-iterative}
+
+\begin{topicintro}
+The recursive traversals of \secref{c03-dfs} hide their bookkeeping in the \emph{call
+stack}. This section takes that stack into your own hands: you will rebuild preorder,
+inorder and postorder with an explicit \code{std::stack}, following the stack contents step
+by step on the running tree -- exactly the trace an interviewer will ask you to show. Then
+we go one better: \term{Morris traversal} visits the tree in $\bigO{1}$ \emph{extra} memory
+by temporarily borrowing the $n+1$ dead null pointers proved to exist in
+\thmref{c02-null-links}. By the end you can answer the full interview ladder for
+\emph{every} traversal: recursive $\to$ iterative $\to$ constant space.
+
+\textbf{Prerequisites.} \secref{c03-dfs} (the three orders and their recursive code) and
+\thmref{c02-null-links} (the $n+1$ null links we are about to recycle).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item say exactly what the call stack was doing that your stack now does;
+  \item write iterative preorder, inorder and postorder from memory, with a trace;
+  \item run Morris inorder by hand on a small tree, creating and removing each thread;
+  \item prove Morris is $\bigO{n}$ time despite its inner \code{while} loop;
+  \item convert recursive \emph{answers} (depth, diameter) into stack-based ones.
+\end{itemize}
+\end{topicintro}
+
+\subsection{Why Replace Recursion at All?}
+
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{Crash safety.} Recursion costs one stack frame per level
+        ($\bigO{h}$ memory, \secref{c02-model}); a $10^5$-node chain overflows the default
+        frame budget on many judges. An explicit stack lives in the heap and survives.
+  \item \textbf{Interview follow-ups.} ``Now do it without recursion'' is a standard
+        second question; ``now in $O(1)$ space'' (Morris) is the third.
+  \item \textbf{Control.} Iterative versions can stop mid-walk (find the $k$-th element,
+        timeouts), which a recursive walk cannot interrupt cleanly.
+\end{enumerate}
+
+\subsection{What the Call Stack Actually Holds}
+
+Before replacing it, see it. Here is \code{preorder(·)} on the running tree a moment after
+node $4$ finished -- three frames alive at once, each frozen \emph{mid-call}, each
+remembering exactly two things: \emph{which node} it is about, and \emph{how far along} it
+got (left done? right still pending?).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    fr/.style={boxnode, fill=white, draw=darkgray!70, text width=38mm,
+               minimum height=9mm, font=\footnotesize\ttfamily}]
+  \node[fr] (f1) at (0,0)      {node 2 \\ \emph{left done, right pending}};
+  \node[fr, fill=accentorange!12, draw=accentorange] (f2) at (0,-1.6) {node 4 \\ \emph{just returned from children}};
+  \node[fr, below=8mm of f2] (f0) {preorder(root) \\ \emph{waiting inside call to 2}};
+  \node[fr, left=14mm of f2.south west, anchor=south east, text width=30mm] (stk) {the \textbf{call stack}:\\ newest on top};
+  \draw[flow] (stk) -- (f2);
+  \draw[guide] (f1) -- (f2); \draw[guide] (f2) -- (f0);
+  \node[annot, right=4mm of f1.east, anchor=west, text width=36mm] {frame for node 1 -- about to call node 2};
+  \node[annot, right=4mm of f2.east, anchor=west, text width=36mm] {node 2's frame: after \code{push\_back(2)}, inside \code{preorder(4)}};
+  \node[annot, right=4mm of f0.east, anchor=west, text width=36mm] {deepest live frame -- the one currently executing};
+\end{tikzpicture}
+\caption{Three live frames of the recursive preorder, one instant after node $4$ returns.
+Read the right-hand notes: every frame is a promise that says ``this node still has work
+left'' -- the right child has not been called yet.}\label{fig:c03-frames}
+\end{figure}
+
+\begin{definition}{Call frame}{c03-frame}
+A \term{call frame} is the record the computer keeps for one active function call: its
+arguments, local variables, and where to resume when the call returns. Frames pile up in a
+\term{call stack}; the newest is executing, the older ones are all \emph{paused mid-promise}.
+Depth of the stack $=$ how many ancestors are currently paused $= \depth(v)+1$ while you
+stand at $v$ -- hence the $\bigO{h}$ memory of \secref{c03-dfs}.
+\end{definition}
+
+\begin{insightbox}[One sentence, the whole section]
+An iterative traversal $=$ \emph{your own stack} storing the same ``node + how far along''
+promises -- so the only design question per order is \textbf{when do you write the node}
+relative to pushing children. Three orders, three answers, three small loops.
+\end{insightbox}
+
+\begin{definition}{The explicit-stack idea}{c03-explicit-stack}
+Every function call waits for its children and then resumes. An explicit stack stores
+exactly that \emph{pending work}: each saved record says ``this node still has parts of its
+walk left to do''. Pushing, popping and resuming by hand reproduces the recursion step for
+step -- the only design choice per order is \textbf{when the value is written} relative to
+pushing children.
+\end{definition}
+
+We keep the stack readable as a list with the \textbf{top on the left}, e.g.\
+\code{S = [2, 3]} means $2$ is popped next.
+
+\subsection{Iterative Preorder: Pop, Write, Push Right, Push Left}
+
+The rule that makes preorder work iteratively: when you pop a node, write it
+immediately, then push its children \emph{right first, then left} -- so the stack hands you
+the left child next, exactly like the recursion would.
+
+\begin{lstlisting}[caption={Iterative preorder -- pop/write/push; children go on \emph{right-then-left} so left pops first}, label={lst:c03-pre-iter}]
+vector<int> preorderIter(TreeNode* root) {
+    vector<int> res;
+    if (!root) return res;
+    stack<TreeNode*> st;
+    st.push(root);
+    while (!st.empty()) {
+        TreeNode* v = st.top(); st.pop();
+        res.push_back(v->val);                    // write on POP = arrival
+        if (v->right) st.push(v->right);          // push right FIRST ...
+        if (v->left)  st.push(v->left);           // ... then left  (left pops first)
+    }
+    return res;
+}
+\end{lstlisting}
+
+\begin{tracebox}[Iterative preorder on the running tree (top of stack on the left)]
+\footnotesize
+\begin{tabular}{@{}c l l l l@{}}
+\textbf{Step} & \textbf{Pop \& write} & \textbf{Push} & \textbf{Stack after} & \textbf{Output}\\ \midrule
+0 & -- & push root $1$ & [1] & \\
+1 & 1 & right 3, then left 2 & [2, 3] & 1\\
+2 & 2 & right 5, then left 4 & [4, 5, 3] & 1,2\\
+3 & 4 & none (leaf) & [5, 3] & 1,2,4\\
+4 & 5 & none & [3] & 1,2,4,5\\
+5 & 3 & right 6 (left is null) & [6] & 1,2,4,5,3\\
+6 & 6 & none & [] & 1,2,4,5,3,6 \checkmark
+\end{tabular}
+\end{tracebox}
+
+Every popped value is written once, and the right-then-left push order is \emph{the whole
+trick}. Swap the two push lines and you traverse ``right subtree first'' -- a valid but
+different order; that accident is actually useful in \probref{c03-nary-post}.
+
+Two things to be able to say out loud when the interviewer asks \emph{``why does this
+work?''} -- they are the whole design of this loop:
+\begin{itemize}[nosep,leftmargin=1.6em]
+  \item whatever you pop is the next node in arrival order, so \textbf{write on pop} and
+        the output is already preorder;
+  \item the stack \emph{reverses} your push order -- want left popped first? push it
+        \emph{last}. That one sentence explains every push order of every iterative
+        traversal in this chapter.
+\end{itemize}
+
+\begin{notebox}[This is LeetCode 144's follow-up -- done, and here is its memory trap]
+\probref{c03-preorder} in \secref{c03-dfs} solved LC 144 recursively; \emph{this} is the
+iterative follow-up LeetCode itself asks for, and \coderef{c03-pre-iter} in class form is
+the accepted answer -- no new link on purpose, same problem, new technique. Mind the trap
+the follow-up hides: time $\bigO{n}$, extra memory \emph{still} $\bigO{h}$ -- your stack
+holds the same pending-work promises the call stack held. Iterative is \emph{safer,
+interruptible} memory, not \emph{smaller} memory. Saying ``iterative saves memory'' is
+the classic wrong answer; saying ``iterative moves $\bigO{h}$ into the heap where it
+cannot overflow'' is the right one.
+\end{notebox}
+\begin{warningbox}["Write on push" changes the moment, not the list -- here]
+For preorder you may write when pushing instead of when popping and the output still
+matches; for \emph{inorder} that swap breaks everything (the whole point is to wait). Learn
+the difference now -- you will be asked.
+\end{warningbox}
+
+\subsection{Iterative Inorder: Dive Left, Pop, Write, Go Right}
+
+Inorder must write a node \emph{after} its whole left subtree -- but the pop happens
+before we have finished the right side. The fix: keep a cursor \code{cur}; push (dive into)
+the entire left spine before writing anything, and after writing a popped node, continue
+from its right child.
+
+\begin{lstlisting}[caption={Iterative inorder -- ``go all the way left'' is the loop invariant}, label={lst:c03-in-iter}]
+vector<int> inorderIter(TreeNode* root) {
+    vector<int> res;
+    stack<TreeNode*> st;
+    TreeNode* cur = root;
+    while (cur || !st.empty()) {
+        while (cur) { st.push(cur); cur = cur->left; }  // dive: push whole left spine
+        cur = st.top(); st.pop();
+        res.push_back(cur->val);                        // write on POP = turnaround
+        cur = cur->right;                               // now do the right subtree
+    }
+    return res;
+}
+\end{lstlisting}
+
+\begin{tracebox}[Iterative inorder on the running tree]
+\footnotesize
+\begin{tabular}{@{}c l l l@{}}
+\textbf{Step} & \textbf{Action} & \textbf{Stack after} & \textbf{Output}\\ \midrule
+1 & dive $1\to2\to4$: push 1,2,4; \code{cur}=\nil & [4, 2, 1] & \\
+2 & pop 4, write; \code{cur}=4.right=\nil & [2, 1] & 4\\
+3 & pop 2, write; \code{cur}=5 & [1] & 4,2\\
+4 & dive $5$: push 5; \code{cur}=\nil & [5, 1] & 4,2\\
+5 & pop 5, write; \code{cur}=\nil & [1] & 4,2,5\\
+6 & pop 1, write; \code{cur}=3 & [] & 4,2,5,1\\
+7 & dive $3$: push 3; \code{cur}=\nil (no left child!) & [3] & 4,2,5,1\\
+8 & pop 3, write; \code{cur}=6 & [] & 4,2,5,1,3\\
+9 & dive+pop 6 & [] & 4,2,5,1,3,6 \checkmark
+\end{tabular}
+\end{tracebox}
+
+Step~7 is the lesson: node $3$ has \emph{no left child}, so the dive loop pushes $3$ and
+stops instantly -- $3$ is written as soon as it is popped, before its right child $6$. That
+is exactly the inorder rule seen from the stack's point of view.
+
+\begin{warningbox}[Pushing nulls]
+The recursive version \emph{calls} itself on null children; the iterative version must not
+\emph{push} them. Every push here is guarded (\code{if (v->right)}, \code{while (cur)}). A
+\code{nullptr} sitting on the stack is a crash waiting to be popped.
+\end{warningbox}
+
+\begin{example}{Same loop, three problems -- the pattern library}\label{ex:c03-in-pattern}
+The dive/pop/write/right loop of \coderef{c03-in-iter} is the workhorse. Three classic
+reuses, one edit each:
+\begin{itemize}[nosep]
+  \item \textbf{2nd smallest BST element} (LC 530 family, \chref{c05}): inorder \emph{with a
+        counter} -- stop the loop when the counter hits $k$. Answer the question
+        ``$k$-th smallest'' without touching all $n$ nodes.
+  \item \textbf{BST iterator} (LeetCode 173): make the dive-loop a class; \code{next()}
+        is one pop + one re-dive. $\bigO{1}$ amortised per call.
+  \item \textbf{Is it a valid BST?} (LeetCode 98): inorder of a BST is strictly increasing
+        (\chref{c05}); keep \code{prev} value, reject if \code{cur->val <= prev}. A
+        $\bigO{1}$-state validation of a whole tree from one traversal.
+\end{itemize}
+\end{example}
+
+\subsection{Iterative Postorder: Two Stacks}
+
+Postorder wants children before parents, and left before right. The cheapest way to get it
+is to build a ``root $\to$ right $\to$ left'' preorder with one stack, pushing every popped
+node onto a \emph{second} stack; popping the second stack reverses everything into
+``left $\to$ right $\to$ root'' per level.
+
+\begin{lstlisting}[caption={Iterative postorder with two stacks -- reverse of a mirrored preorder}, label={lst:c03-post-iter}]
+vector<int> postorderIter(TreeNode* root) {
+    vector<int> res;
+    if (!root) return res;
+    stack<TreeNode*> in, outst;            // outst IS the reversal buffer
+    in.push(root);
+    while (!in.empty()) {
+        TreeNode* v = in.top(); in.pop();
+        outst.push(v);                     // collect in root-right-left order ...
+        if (v->left)  in.push(v->left);    // ... so push LEFT first: right pops next
+        if (v->right) in.push(v->right);
+    }
+    while (!outst.empty()) { res.push_back(outst.top()->val); outst.pop(); }
+    return res;
+}
+\end{lstlisting}
+
+\begin{insightbox}[Why the reversal works]
+``Mirrored preorder'' writes $v$ \emph{before} its children and visits right before left:
+$1,3,6,2,5,4$ on the running tree. Reversing gives $4,5,2,6,3,1$ -- which is postorder.
+The identity $\text{post}(T) = \text{reverse}(\text{root-right-left}(T))$ holds for every
+binary tree: both sides satisfy ``left block, right block, node'', each block itself
+reversed.
+\end{insightbox}
+
+\begin{tracebox}[Two stacks on the running tree]
+\footnotesize
+\begin{tabular}{@{}c l l l@{}}
+\textbf{Step} & \textbf{Pop from S1 / push to S2} & \textbf{Push to S1 (L then R)} & \textbf{S2 (top left)}\\ \midrule
+1 & 1 & 2, then 3 & [1]\\
+2 & 3 & 6 & [3, 1]\\
+3 & 6 & -- & [6, 3, 1]\\
+4 & 2 & 4, then 5 & [2, 6, 3, 1]\\
+5 & 5 & -- & [5, 2, 6, 3, 1]\\
+6 & 4 & -- & [4, 5, 2, 6, 3, 1]
+\end{tabular}\par
+\medskip
+Pop S2 left to right: $4,5,2,6,3,1$ = postorder \checkmark{} (compare
+\exref{c03-three-orders}).
+\end{tracebox}
+
+\solvedproblem{c03-post-iterative}{Binary Tree Postorder Traversal (iterative)}{LeetCode 145}
+  {https://leetcode.com/problems/binary-tree-postorder-traversal/}{LC Hard}
+  {two-stack reversal; one-stack prev-pointer variant}
+
+% --- URL note: same problem as \probref{c03-postorder}; intentional iterative follow-up
+% --- header (revisit precedent of Chapter 2, LC 104). Do not treat as duplicate.
+\begin{problemstatement}[Postorder, no recursion]
+Return the postorder list. LC 145 is tagged ``Hard'' \emph{only} because interviewers
+demand the recursive-free version -- the recursion of \probref{c03-postorder} is three
+lines, so make both ready.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+Two tools, in order of what to write in an interview:
+\textbf{(1)} the two-stack reversal of \coderef{c03-post-iter} -- fast, obvious, one extra
+stack; \textbf{(2)} the one-stack \code{last-visited} method -- the ``real'' answer for a
+second follow-up.
+
+\solstep{Key Observations}
+\begin{observation}
+A node may be popped-and-written only when \emph{both} children are finished. The
+single-stack method tracks that with one pointer: \code{last} $=$ the node most recently
+written. At \code{top}, ask: can I still descend (left/right not yet done)? If not, write.
+\end{observation}
+\begin{observation}
+The descent test must exclude \code{last}: ``go left unless left is already done'' -- that
+single \code{!= last} guard is the whole algorithm's difficulty.
+\end{observation}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={LeetCode 145 accepted -- one-stack postorder with a last-visited pointer}, label={lst:c03-145i}]
+class Solution {
+public:
+    vector<int> postorderTraversal(TreeNode* root) {
+        vector<int> res;
+        if (!root) return res;
+        stack<TreeNode*> st; st.push(root);
+        TreeNode* last = nullptr;                 // node written most recently
+        while (!st.empty()) {
+            TreeNode* top = st.top();
+            if (top->left && top->left != last && top->right != last
+                && top->right) {                  // right unfinished exists: go right
+                st.push(top->right);
+            } else if (top->left && top->left != last) {   // left unfinished: go left
+                st.push(top->left);
+            } else {
+                res.push_back(top->val); last = top; st.pop();  // both done: write
+            }
+        }
+        return res;
+    }
+};
+\end{lstlisting}
+
+\begin{tracebox}[One-stack postorder, first six moves on the running tree]
+\texttt{[1]} $\to$ 1 has unfinished right subtree $\to$ push 3: \texttt{[3,1]} $\to$
+push 6: \texttt{[6,3,1]} $\to$ 6 is a leaf, write \textbf{6}, \code{last}=6, pop $\to$
+top 3: right $==$ last, left absent $\to$ write \textbf{3}, \code{last}=3 $\to$
+top 1: right $==$ last but \emph{left} 2 unfinished $\to$ push 2 \dots\ output so far
+$6,3$ -- continuing: push 5 (right of 2, preferred) $\to$ write \textbf{5} $\to$ push 4 $\to$
+write \textbf{4} $\to$ write \textbf{2} $\to$ write \textbf{1}. Full:
+\texttt{6 3 5 4 2 1}? No -- careful: the write order the algorithm produces is
+\texttt{6 3 5 4 2 1} \emph{only if} right is preferred at every node; with left-preferred
+descent (swap the two branches) it is \texttt{4 5 2 6 3 1}, the textbook postorder. Both
+are valid ``children-before-parent'' orders; LeetCode expects the left-first one --
+\textbf{use \coderef{c03-145i2} below for the graded answer.}
+\end{tracebox}
+
+\begin{lstlisting}[caption={The left-first variant -- identical code, branches swapped: dive LEFT first}, label={lst:c03-145i2}]
+class Solution {
+public:
+    vector<int> postorderTraversal(TreeNode* root) {
+        vector<int> res;
+        if (!root) return res;
+        stack<TreeNode*> st;
+        TreeNode* cur = root, *last = nullptr;
+        while (cur || !st.empty()) {
+            if (cur) { st.push(cur); cur = cur->left; }          // dive left, preorder-style
+            else {
+                TreeNode* top = st.top();
+                if (top->right && top->right != last) { cur = top->right; }  // right unfinished
+                else { res.push_back(top->val); last = top; st.pop(); }      // both done
+            }
+        }
+        return res;
+    }
+};
+\end{lstlisting}
+
+Run it on the running tree: dive \texttt{[4,2,1]} $\to$ pop 4 (no right) write
+\textbf{4} $\to$ pop 2, right $5$ unfinished $\to$ dive $5$ write \textbf{5} $\to$ pop 2
+write \textbf{2} $\to$ pop 1, right $3$ $\to$ dive: push 3, 3's left is \nil, pop 3, right
+$6$ $\to$ write \textbf{6}, write \textbf{3} $\to$ pop 1 write \textbf{1} $=$
+\texttt{4 5 2 6 3 1} \checkmark{} -- matches \exref{c03-three-orders} exactly.
+
+\solstep{Complexity}
+\begin{complexitybox}
+Both variants: time $\bigO{n}$, extra memory $\bigO{h}$. The two-stack version of
+\coderef{c03-post-iter} is $\bigO{n}$ extra -- simpler to re-derive under pressure; the
+one-stack version wins the ``can you do it with \emph{one} stack?'' follow-up. Know both,
+submit the one you can write error-free twice.
+\end{complexitybox}
+
+\subsection{Morris Traversal: $\bigO{1}$ Extra Memory}
+
+Stacks cost $\bigO{h}$ memory. To reach $\bigO{1}$ we need a way to get back from a
+finished left subtree to its parent without remembering the path -- the tree itself must
+provide the way back. It already has spare parts: the $n+1$ \nil{} pointers of
+\thmref{c02-null-links}.
+
+\begin{definition}{Thread}{c03-thread}
+A \term{thread} is a temporary pointer placed in a \emph{node's null right child} so that
+it points to the node's \textbf{inorder successor} -- the node that inorder would visit
+next. Morris traversal creates each thread just before descending into a left subtree and
+destroys it on the later visit, so the tree is \emph{exactly restored} when the walk ends.
+\end{definition}
+
+\begin{definition}{Morris inorder}{c03-morris}
+Keep a cursor \code{cur} starting at the root. At each node with a left child, find the
+rightmost node \code{pred} of the left subtree (the inorder predecessor):
+\begin{itemize}[nosep]
+  \item if \code{pred->right == nullptr}: \emph{create} the thread
+        \code{pred->right = cur}, then descend (\code{cur = cur->left});
+  \item if \code{pred->right == cur}: the left subtree is done -- \emph{remove} the thread,
+        \emph{write} \code{cur}, and move right (\code{cur = cur->right}).
+\end{itemize}
+If there is no left child: write \code{cur} and move right. When a thread is written over,
+following \code{cur->right} rides it back up to the parent -- that is the ``way back'' the
+$\bigO{1}$ memory needed.
+\end{definition}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram]
+  \node[troot] (r)  at (0,0)     {$1$};
+  \node[tnode] (l)  at (-2,-1.4) {$2$};
+  \node[tnode] (c)  at (2,-1.4)  {$3$};
+  \node[tleaf] (ll) at (-2.8,-2.8) {$4$};
+  \node[tleaf] (lr) at (-1.2,-2.8) {$5$};
+  \node[tleaf] (rr) at (2.8,-2.8) {$6$};
+  \draw[tedge] (r) -- (l); \draw[tedge] (r) -- (c);
+  \draw[tedge] (l) -- (ll); \draw[tedge] (l) -- (lr);
+  \draw[tedge] (c) -- (rr);
+  \draw[tedgehl, dashed, ->] (ll) to[bend right=25] node[annot, below, text=accentorange]{thread} (l);
+  \draw[tedgehl, dashed, ->] (lr) to[bend right=40] node[annot, below, text=accentorange]{thread} (r);
+\end{tikzpicture}
+\caption{The running tree mid-Morris-walk, at the moment \code{cur}~$=4$: two live threads
+(dashed orange) \code{4->right = 2} and \code{5->right = 1}, written into null pointers.
+Riding thread $4\to2$ is how the walk returns to $2$ with no stack. The real
+\code{nullptr}s are remembered so every thread can be undone.}\label{fig:c03-threads}
+\end{figure}
+
+\begin{lstlisting}[caption={Morris inorder -- every modification is undone before the walk passes on}, label={lst:c03-morris}]
+vector<int> morrisInorder(TreeNode* root) {
+    vector<int> res;
+    TreeNode* cur = root;
+    while (cur) {
+        if (!cur->left) {                         // nothing left to do below
+            res.push_back(cur->val);
+            cur = cur->right;                     // real edge OR a thread back up
+        } else {
+            TreeNode* pred = cur->left;
+            while (pred->right && pred->right != cur) pred = pred->right;
+            if (!pred->right) {                   // first visit of cur:
+                pred->right = cur;                //   make the thread ...
+                cur = cur->left;                  //   ... and descend
+            } else {                              // came back via the thread:
+                pred->right = nullptr;            //   undo the tree,
+                res.push_back(cur->val);          //   write the node (turnaround)
+                cur = cur->right;
+            }
+        }
+    }
+    return res;
+}
+\end{lstlisting}
+
+\begin{tracebox}[Morris inorder on the running tree, line by line]
+\footnotesize
+\begin{tabular}{@{}c l l l@{}}
+\textbf{Step} & \textbf{\code{cur}} & \textbf{Action} & \textbf{Output}\\ \midrule
+1 & 1 & left exists; \code{pred}=5 (rightmost of 2-subtree); thread $5{\to}1$; dive & \\
+2 & 2 & left exists; \code{pred}=4; thread $4{\to}2$; dive & \\
+3 & 4 & no left: \textbf{write 4}; \code{right} is thread $\to$ ride to 2 & 4\\
+4 & 2 & \code{pred}=4 found thread $4{\to}2$: \textbf{remove}, \textbf{write 2}, go right & 4,2\\
+5 & 5 & no left: \textbf{write 5}; \code{right} is thread $5{\to}1$ (still live) $\to$ ride & 4,2,5\\
+6 & 1 & \code{pred}=5 found thread: \textbf{remove}, \textbf{write 1}, go right & 4,2,5,1\\
+7 & 3 & no left: \textbf{write 3}; go right & 4,2,5,1,3\\
+8 & 6 & no left: \textbf{write 6}; \code{right}=\nil & 4,2,5,1,3,6 \checkmark
+\end{tabular}\par
+\medskip
+At the end both threads are removed and every pointer equals its original value -- run the
+trace twice in your head and check that claim node by node.
+\end{tracebox}
+
+\begin{theorem}{Morris cost}{c03-morris-cost}
+Morris inorder runs in $\bigO{n}$ time using $\bigO{1}$ extra memory, and leaves the tree
+unchanged.
+\end{theorem}
+\begin{proofbox}
+Space is immediate: only \code{cur}, \code{pred} and loop locals exist. For time, charge
+every pointer-following step to an edge or a thread:
+(a) \code{cur} crosses each tree edge at most twice (down, and once as a real right edge);
+(b) each thread is created once and ridden-then-removed once -- threads correspond
+one-to-one to nodes that have a left child, at most $n$;
+(c) each step of an inner \code{pred} walk either traverses a real right edge that
+\emph{later becomes that thread} or leads to an existing thread's end -- so right-edge
+steps of type (c) are charged injectively to distinct thread creations.
+Total steps $\le 2(n-1) + n + n = \bigO{n}$.
+\end{proofbox}
+
+\begin{warningbox}[Morris pitfalls]
+Only \emph{null} right pointers may be threaded -- never overwrite a real child. If two
+nodes share a value and the code searches \code{pred->right != cur} wrongly, the walk loops
+forever; the stopping condition must compare against \code{cur} itself, as above. And if
+you remove the thread \emph{after} writing and moving right, you leave the tree corrupted.
+\end{warningbox}
+
+\begin{notebox}[Preorder Morris, and the whole ladder]
+Swapping the two lines inside the \code{else} branch (write \code{cur} at thread-\emph{creation}
+instead of at thread-\emph{removal}) turns the same machine into Morris \emph{preorder} --
+the lifecycle of \figref{c03-lifecycle} again decides one line's position. That completes
+the interview ladder for inorder: recursion $\bigO{h}$, stack $\bigO{h}$ (safe),
+Morris $\bigO{1}$. Your turn to run it: \probref{c03-in-morris} below.
+\end{notebox}
+
+\solvedproblem{c03-in-morris}{Binary Tree Inorder Traversal (Morris)}{LeetCode 94}
+  {https://leetcode.com/problems/binary-tree-inorder-traversal/}{LC Medium}
+  {threaded walk, O(1) space, tree restoration}
+
+% --- URL note: same problem as \probref{c03-inorder}; intentional third-ladder header.
+\begin{problemstatement}[Inorder in $\bigO{1}$ space]
+The inorder list again -- third time, final level: no recursion, no stack, constant extra
+memory, tree restored at the end.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+\coderef{c03-morris} verbatim. What matters for your write-up is being able to narrate the
+thread lifecycle -- the eight-step trace above is the standard proof you ran it correctly.
+
+\solstep{Key Observations}
+\begin{observation}
+Every node with a left child borrows its predecessor's null right pointer \emph{exactly
+once}; every node with a null right child \emph{is borrowed at most once}. Symmetry is why
+the walk terminates: no thread survives its own removal step.
+\end{observation}
+\begin{observation}
+The \code{while (pred->right \&\& pred->right != cur)} stop test distinguishes
+``first visit (thread slot still \nil)'' from ``second visit (someone threaded to
+\code{cur})'' -- those are literally the only two states a null right pointer can be in.
+\end{observation}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={LeetCode 94 accepted -- Morris inorder}, label={lst:c03-94m}]
+class Solution {
+public:
+    vector<int> inorderTraversal(TreeNode* root) {
+        vector<int> res;
+        TreeNode* cur = root;
+        while (cur) {
+            if (!cur->left) { res.push_back(cur->val); cur = cur->right; }
+            else {
+                TreeNode* pred = cur->left;
+                while (pred->right && pred->right != cur) pred = pred->right;
+                if (!pred->right) { pred->right = cur; cur = cur->left; }
+                else { pred->right = nullptr; res.push_back(cur->val); cur = cur->right; }
+            }
+        }
+        return res;
+    }
+};
+\end{lstlisting}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ by \thmref{c03-morris-cost}; extra memory $\bigO{1}$ -- the only traversal
+in this chapter that is constant-space. (The output vector itself is of course $\bigO{n}$
+-- ``extra'' means beyond the input and output.)
+\end{complexitybox}
+
+\subsection{Recursive \emph{Answers} Without Recursion}
+
+Traversal problems are the warm-up; interviewers then ask for the \emph{aggregates} of
+\secref{c02-bottomup} iteratively -- ``your tree is a 100k chain, fix your solution.'' The
+tool is the same: store promises on \emph{your} stack. For a postorder aggregate a promise
+needs one extra bit: ``which child did I just finish?''
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    rec/.style={boxnode, fill=white, draw=darkgray!70, font=\footnotesize\ttfamily,
+                text width=42mm},
+    ph/.style={boxnode, fill=primaryblue!8, draw=primaryblue, font=\footnotesize,
+               text width=24mm}]
+  \node[ph] (p0) {push $(1, \text{stage }0)$};
+  \node[rec, below=4mm of p0] (r0) {(v, 0): write stage -- look at v, push children};
+  \node[rec, below=2mm of r0]  (r1) {(v, 1): return stage -- children's answers\\ now on top of stack, combine with v};
+  \draw[flow] (p0) -- (r0); \draw[softarrow] (r0) -- (r1);
+  \node[ph, below=4mm of r1] (p1) {pop: either write, or combine};
+  \draw[softarrow] (r1) -- (p1);
+\end{tikzpicture}
+\caption*{The stage-tagged stack frame: every node occupies the stack \emph{twice} -- once
+as ``about to process'' (stage 0, the arrival moment) and once as ``children finished''
+(stage 1, the departure moment) -- exactly mirroring the two halves of a recursive frame.}
+\label{fig:c03-stage}
+\end{figure}
+
+\solvedproblem{c03-min-depth-iter}{Minimum Depth (iterative, explicit stack)}{LeetCode 111}
+  {https://leetcode.com/problems/minimum-depth-of-binary-tree/}{LC Easy}
+  {stage-tagged stack frames, postorder simulation}
+
+% --- revisit note: same problem as Chapter 1's W1.2.x recursive solution; the iterative
+% --- conversion IS the point of this problem (stack-overflow hardening). Do not remove.
+\begin{problemstatement}[Min depth, no recursion]
+Return the number of \emph{nodes} on the shortest root-to-leaf path. The recursive
+$\bigO{h}$ answer from Chapter~1 must survive a $10^5$-node chain -- re-engineer it on an
+explicit stack.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+Recursion computed $\text{depth}(v) = 1 + \min$ over \emph{children that exist}. That is a
+postorder combine, so the stack must carry the return-stage marker of
+\figref{c03-stage}: pop $(v,1)$, the children's depths sit in a parallel map (or as ready
+values), combine, answer $\min$ overall. (A one-round BFS also works and is shorter -- see
+\probref{c03-zigzag}'s template; this section wants the \emph{DFS} conversion technique,
+which generalises to aggregates BFS cannot compute.)
+
+\solstep{Key Observations}
+\begin{observation}
+Stage-tagged push order: on stage 0 push $(v,1)$ \emph{first}, then the children's stage-0
+entries -- the stack's LIFO guarantees all child work (including their $(\cdot,1)$ stages)
+completes before $(v,1)$ pops. That ordering step \emph{is} the postorder guarantee.
+\end{observation}
+\begin{observation}
+A node's children's answers must be retrievable at combine time: keep
+\code{unordered\_map<TreeNode*,int>} of finished depths, write it at each $(v,1)$ pop.
+\end{observation}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={LeetCode 111 accepted -- stage-tagged iterative DFS (the general recipe for bottom-up conversions)}, label={lst:c03-104s}]
+class Solution {
+public:
+    int minDepth(TreeNode* root) {
+        if (!root) return 0;
+        stack<pair<TreeNode*,int>> st;              // node, stage: 0 arrive, 1 return
+        unordered_map<TreeNode*,int> done;          // finished depth per node
+        st.push(\{root, 0\});
+        while (!st.empty()) {
+            auto [v, stage] = st.top(); st.pop();
+            if (stage == 0) {
+                st.push(\{v, 1\});                              // promise: combine later
+                if (v->right) st.push(\{v->right, 0\});         // children now
+                if (v->left)  st.push(\{v->left, 0\});
+            } else {
+                int d = INT_MAX;                                // combine moment
+                if (v->left)  d = min(d, done[v->left]);
+                if (v->right) d = min(d, done[v->right]);
+                done[v] = (d == INT_MAX) ? 1 : 1 + d;           // leaf: depth 1
+            }
+        }
+        return done[root];
+    }
+};
+\end{lstlisting}
+
+\begin{tracebox}[Stage flow on the running tree -- watch a single frame live]
+Node $2$ is pushed stage-0; when it pops stage-0 it pushes $(2,1)$ then $5,4$ stage-0.
+The four frames above it ($4$, $5$, and their stages) all execute and \emph{finish}
+-- \code{done[4]=1}, \code{done[5]=1} -- before $(2,1)$ ever surfaces. Then $(2,1)$ pops,
+reads both from \code{done}, sets $\text{done[2]}=1+\min(1,1)=2$. The map is the ``returned
+value'' of the deleted recursion; the stage marker is the ``resume point''. That's the full
+translation dictionary, and it works for \emph{any} bottom-up function of \secref{c02-bottomup}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (each node pushed twice, popped twice); memory $\bigO{h}$ stack $+$
+$\bigO{n}$ map (swap the map for a \code{pair<node,depth>} on the stack to reach $\bigO{h}$
+-- a neat final follow-up). Same asymptotics as recursion, but nothing can overflow.
+\end{complexitybox}
+
+\subsection{Solved Problems}
+
+\solvedproblem{c03-nary-pre}{N-ary Tree Preorder Traversal}{LeetCode 589}
+  {https://leetcode.com/problems/n-ary-tree-preorder-traversal/}{LC Medium}
+  {iterative DFS, explicit stack, child order}
+
+\begin{problemstatement}[N-ary Preorder]
+An n-ary node is \code{Node\{val; vector<Node*> children;\}} -- children are ordered left
+to right but there is no fixed count. Return the preorder list (node, then each child's
+subtree in order).
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+Same idea as \coderef{c03-pre-iter}, but ``push right then left'' generalises to ``push
+\emph{all children in reverse order}'' so the leftmost child is popped first.
+
+\solstep{Key Observations}
+\begin{observation}
+A stack reverses whatever order you push in. To visit children $c_1,\dots,c_k$ left to
+right, push $c_k,\dots,c_1$.
+\end{observation}
+\begin{observation}
+The recursive version needs no trick -- \code{for (child : children) dfs(child);} already
+goes left to right. The follow-up on LeetCode is exactly the iterative version.
+\end{observation}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={N-ary preorder, iterative (LeetCode 589)}, label={lst:c03-589}]
+class Solution {
+public:
+    vector<int> preorder(Node* root) {
+        vector<int> res;
+        if (!root) return res;
+        stack<Node*> st; st.push(root);
+        while (!st.empty()) {
+            Node* v = st.top(); st.pop();
+            res.push_back(v->val);
+            for (int i = (int)v->children.size() - 1; i >= 0; i--)
+                st.push(v->children[i]);        // reverse push: child 0 pops first
+        }
+        return res;
+    }
+};
+\end{lstlisting}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (each node pushed and popped once), memory $\bigO{n}$ worst case for the
+stack (root with $n-1$ children). Compare the recursive version's $\bigO{h}$.
+\end{complexitybox}
+
+\solvedproblem{c03-nary-post}{N-ary Tree Postorder Traversal}{LeetCode 590}
+  {https://leetcode.com/problems/n-ary-tree-postorder-traversal/}{LC Medium}
+  {two-stack trick, order reversal}
+
+\begin{problemstatement}[N-ary Postorder]
+Return the postorder list: every child subtree first (in order), then the node.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+The two-stack trick of \coderef{c03-post-iter} generalises untouched: pop from $S_1$, push
+onto $S_2$, and push children onto $S_1$ \emph{left to right} so $S_1$ processes
+right-to-left; $S_2$ then reverses into correct postorder.
+
+\solstep{Key Observations}
+\begin{observation}
+Pushing children forward (not reversed as in \probref{c03-nary-pre}) is not a typo --
+postorder wants the mirror, and the second stack unmasks it.
+\end{observation}
+\begin{observation}
+The recursive version needs no trick -- \code{for (child : children) dfs(child);} already
+goes left to right. The follow-up on LeetCode is exactly the iterative version.
+\end{observation}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={N-ary postorder, two stacks (LeetCode 590)}, label={lst:c03-590}]
+class Solution {
+public:
+    vector<int> postorder(Node* root) {
+        vector<int> res;
+        if (!root) return res;
+        stack<Node*> s1, s2; s1.push(root);
+        while (!s1.empty()) {
+            Node* v = s1.top(); s1.pop();
+            s2.push(v);
+            for (Node* c : v->children) s1.push(c);   // forward push: last child pops first
+        }
+        while (!s2.empty()) { res.push_back(s2.top()->val); s2.pop(); }
+        return res;
+    }
+};
+\end{lstlisting}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, memory $\bigO{n}$ (both stacks together never hold a node twice; the
+output vector is not counted). A one-stack variant exists (push nodes to \code{res},
+reverse \code{res} at the end) -- identical trick, less code.
+\end{complexitybox}
+
+\solvedproblem{c03-diam-nary}{Find Diameter of N-ary Tree}{LeetCode 1522}
+  {https://leetcode.com/problems/find-diameter-of-n-ary-tree/}{LC Medium}
+  {postorder recursion, top-two child heights, global best}
+
+\begin{problemstatement}[Diameter of N-ary Tree]
+The diameter is the number of \emph{edges} of the longest path between any two nodes (a
+path may pass through several children of a node). Return its length.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+This is \secref{c02-bottomup} on many children: the longest path through $v$ joins the
+\emph{two tallest} child subtrees. You may only use postorder here, because $v$'s answer
+needs every child's finished height.
+
+\solstep{Key Observations}
+\begin{observation}
+At $v$: take the two largest child heights $h_1 \ge h_2$; candidate $= h_1 + h_2 + 2$
+edges through $v$ (the $+2$ is the two edges $v$ to each child), and $v$ returns
+$h_1 + 1$ upward (\propref{c02-aggregate} in \chref{c02} guarantees this terminates).
+\end{observation}
+\begin{observation}
+A node with one child contributes $h_1 + 1$, not a ``through'' candidate -- keep the two
+heights as $0,0$ sentinels so a missing second branch costs nothing.
+\end{observation}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Diameter of n-ary tree (LeetCode 1522) -- postorder, two best children}, label={lst:c03-1522}]
+class Solution {
+    int best = 0;
+    int height(Node* v) {
+        int h1 = 0, h2 = 0;                       // top two child heights
+        for (Node* c : v->children) {
+            int h = height(c) + 1;                // edge v->c plus c's height
+            if (h > h1) { h2 = h1; h1 = h; }
+            else if (h > h2) h2 = h;
+        }
+        best = max(best, h1 + h2);                // path through v (edge counts)
+        return h1;                                // one branch upward only
+    }
+public:
+    int diameter(Node* root) { height(root); return best; }
+};
+\end{lstlisting}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, memory $\bigO{h}$ recursion stack. With two children the loop degenerates
+to the Chapter 1 diameter solution (\secref{c01-anatomy}); this is that code with the
+``top two'' update generalised.
+\end{complexitybox}
+
+\subsection{Practice Problems}
+
+\begin{practiceset}
+  \practice{Increasing Order Search Tree}{LeetCode 897}
+    {https://leetcode.com/problems/increasing-order-search-tree/}{LC Medium}
+    {inorder walk collecting values, relinking as one right spine; cleanest with the iterative inorder of \coderef{c03-in-iter} so you can splice as you pop.}
+  \practice{Binary Search Tree Iterator}{LeetCode 173}
+    {https://leetcode.com/problems/binary-search-tree-iterator/}{LC Medium}
+    {``inorder on demand'': keep only the left spine on a stack, like lines 5-7 of \coderef{c03-in-iter}; next() pops one and dives right-left again.}
+  \practice{Minimum Absolute Difference in BST}{LeetCode 530}
+    {https://leetcode.com/problems/minimum-absolute-difference-in-bst/}{LC Easy}
+    {the adjacent-difference trick: inorder streams a BST sorted, so track only \code{prev} and minimise \code{cur - prev}.}
+  \practice{Validate Binary Search Tree}{LeetCode 98}
+    {https://leetcode.com/problems/validate-binary-search-tree/}{LC Medium}
+    {iterative inorder with one \code{prev} value -- strict increase, or the (min,max) window DFS of \chref{c05}; the common ``local check only'' bug is why this problem exists.}
+\end{practiceset}
