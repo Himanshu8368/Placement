@@ -1,0 +1,1250 @@
+# Designing Array-Based Data Structures {#sec-ds}
+
+<!--
+Author-facing provenance (not rendered): Chapter 18 of the arrays volume, per outline.yml
+("Designing Array-Based Data Structures"): Swap-with-last deletion; Snapshots and versions;
+Counters of counters; Array-backed hashing; Lazy resets with timestamps. Source: array_book
+ch. 12 (planned contents only: dynamic array, swap-with-last, lazy init / sparse set, versioned
+arrays, open addressing and bit arrays). Part A holds lessons A1-A5, Part B patterns P1-P5 with
+fourteen registry write-ups homed here (lc-0380, lc-0381, lc-1146, lc-1472, lc-2671, lc-0895,
+lc-0432, cf-1200a, lc-0706, lc-0705, ac-abc278_d, lc-2166, cf-1799a, lc-1396) and one card
+(lc-0981, homed in chapter 3). Step boards come from books/traces/arr018_traces.py.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 10 (arrays, stacks and lists built from arrays), ch. 11 (direct-address tables, chaining, open addressing), ch. 16 (amortised analysis, dynamic tables) · **CPH** ch. 4 (data structures) · **Erickson** *Algorithms*, hash-table notes · **Briggs and Torczon** (1993), sparse sets · **LeetCode** 380, 381, 1146, 1472, 2671, 895, 432, 706, 705, 2166, 1396 · **Codeforces** 1200A, 1799A · **AtCoder** ABC 278 D.
+
+**Coverage:** packed arrays with swap-with-last deletion and index maps · growth and shrinking of a dynamic array · snapshots by per-cell version histories and binary search · undo logs and rollback · counters of counters (count of counts, frequency levels, ordered count buckets) · direct addressing and bit arrays · chaining, load factor and rehashing · open addressing with tombstones · lazy resets with timestamps, dirty lists and lazy flags · the sparse-set trick.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Delete any element of an unordered collection in $O(1)$ by **swap-with-last**, keep a `value -> slot` map correct through the move, and say which invariant makes it legal (@sec-ds-a1).
+- Give an array $O(1)$ **snapshots** by tagging writes with a version, answer "value at version $s$" by a floor search, and undo changes with a rollback log (@sec-ds-a2).
+- Build a **counter of counters** (a container indexed by a count) to answer "is some value at frequency $f$?", "pop the most frequent", or "name a min/max key" in $O(1)$ (@sec-ds-a3).
+- Implement a hash table on a plain array three ways (direct addressing, chaining with rehashing, open addressing with tombstones) and price each (@sec-ds-a4).
+- Replace an $O(n)$ clear or "update all" with a **timestamp**, a dirty list, a lazy flag or a sparse set, so it costs $O(1)$ (@sec-ds-a5).
+- For each design, write the class, state its invariant and the amortised cost of every operation, and stress-test it against a naive model class.
+:::
+
+```{python}
+#| include: false
+import bisect
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import arr018_traces as Traces
+
+random.seed(0)
+```
+
+## Why this matters {#sec-ds-why}
+
+::: {.callout-note title="In plain words"}
+Until now the array was the *input*: we read it to answer one question. In this chapter the array is the *product*. A caller keeps sending operations (insert, delete, take a snapshot, ask for a random element, clear everything) and each one must stay cheap, usually $O(1)$. Every structure here is an ordinary array plus one extra index or one counter, and the design work is choosing that index and keeping it correct.
+:::
+
+The chapter builds directly on earlier ones. From @sec-arr it takes the packed array and the amortised doubling of @sec-arr-vec, which every structure here relies on when it appends. From @sec-hash it takes the hash map, with its expected $O(1)$ cost and its weakness against adversarial keys (@sec-hash-sets, @sec-hash-anti); here we open the box and build the table ourselves. From @sec-bst it takes the floor search (`bisect_right(a, x) - 1`) that answers a snapshot query. @sec-idx taught that an array can be indexed by its own values, which is exactly direct addressing, and @sec-mat used the same "one more index" thinking for two dimensions.
+
+These designs come up constantly in interviews ("design a set with random access", "design a snapshot array", "design an LFU cache") and in contests as the hidden step that turns $O(nq)$ into $O(n + q)$: an "assign all" query, a "reset between test cases", a "flip every bit". They share three habits:
+
+- **Keep the array packed.** If no caller reads the order, a deletion can move the last element into the hole instead of shifting everything.
+- **Index by what the query asks for.** A query about frequencies is answered by a container indexed by frequency; a query about versions by records tagged with versions.
+- **Never do work you can defer.** A snapshot is a counter bump, a reset is a clock tick, a global flip is a flag; the cost reappears later as one comparison per touched cell.
+
+The lessons A1–A5 teach one tool each, and the patterns P1–P5 put each tool to work on solved problems. The next chapter, @sec-cnt, turns from designing structures to counting over all subarrays, pairs and triples.
+
+## Part A — Lessons
+
+## A1. Swap-with-last deletion {#sec-ds-a1}
+
+::: {.callout-note title="In plain words"}
+Removing an element from the middle of a list normally shifts every later element one step left: $O(n)$ work (`list.pop(i)` or `vector::erase`, the cost @sec-arr-vec warns about). But if the container has *no order to preserve*, as in a set, a multiset or a pool of live objects, you can delete with one move: copy the **last** element into the doomed slot, then shrink the array by one. The array stays packed into $[0, n)$, so `len(a)` is still the size and `a[randrange(n)]` is still a uniformly random element. The only catch is bookkeeping: the element that moved now sits at a different index, so anything that records positions must be updated for it too.
+:::
+
+The invariant, in one line: **after every operation the live elements occupy exactly `a[0..n-1]`, and `pos[v]` is the slot of every live `v`.** Swap-with-last preserves it because it changes only slot `i` (now holding the old tail) and slot `n-1` (dropped), and it repairs `pos` for the one element that moved.
+
+```{python}
+def swap_remove(a, pos, v):
+    """Delete value v from a packed list in O(1), keeping pos (value -> index) correct.
+    The order of `a` is irrelevant (it is a set), so v's slot is overwritten with the tail."""
+    i = pos[v]                             # slot holding v
+    last = a[-1]
+    a[i] = last                            # the tail fills the hole
+    pos[last] = i                          # ... and its recorded index follows it
+    del pos[v]                             # drop v AFTER, so that v == last still works
+    a.pop()                                # shrink the (now duplicated) tail
+    return i
+
+
+a = [10, 20, 30, 40]
+pos = {10: 0, 20: 1, 30: 2, 40: 3}
+swap_remove(a, pos, 20)
+assert a == [10, 40, 30] and pos == {10: 0, 30: 2, 40: 1}
+swap_remove(a, pos, 30)                    # removing the tail itself: i == n-1
+assert a == [10, 40] and pos == {10: 0, 40: 1}
+for _ in range(300):
+    b = random.sample(range(1000), random.randint(1, 8))
+    q = {x: k for k, x in enumerate(b)}
+    v = random.choice(b)
+    swap_remove(b, q, v)
+    assert set(b) == set(q) and v not in q and all(q[x] == k for k, x in enumerate(b))
+```
+
+@fig-ds-anim-swap plays four deletions. Watch the two coloured cells: the hole (amber) and the tail (cyan) that fills it. The last deletion removes the tail itself, the one case where nothing moves.
+
+::: {#fig-ds-anim-swap}
+
+```{python}
+#| echo: false
+sw_a = [10, 20, 30, 40, 50, 60]
+sw_pos = {v: i for i, v in enumerate(sw_a)}
+sw_frames = [(list(sw_a), dict(sw_pos), {}, [], "start: a is packed, pos[v] is the slot of v")]
+for v in [20, 60, 10, 30]:
+    i, n = sw_pos[v], len(sw_a)
+    sw_frames.append((list(sw_a), dict(sw_pos), {i: "amber", n - 1: "cyan"},
+                      [(i, "hole", "amber"), (n - 1, "tail", "cyan")] if i != n - 1 else
+                      [(i, "hole = tail", "amber")],
+                      f"remove({v}): its slot {i} is the hole; the tail {sw_a[-1]} sits at slot {n - 1}"))
+    swap_remove(sw_a, sw_pos, v)
+    moved = {i: "green"} if i < len(sw_a) else {}
+    sw_frames.append((list(sw_a), dict(sw_pos), moved, [],
+                      f"tail copied into slot {i}, pos fixed, last slot popped" if moved else
+                      f"{v} was the tail: just pop it, nothing moves"))
+assert sw_a == [40, 50] and sw_pos == {40: 0, 50: 1}
+assert len(sw_frames) == 9
+
+
+def sw_frame(ax, p, k):
+    cells, posd, cols, ptrs, _ = sw_frames[k]
+    V.array(ax, p, cells, colors=cols, pointers=ptrs, label="a")
+    V.array(ax, p, [f"{x}:{s}" for x, s in sorted(posd.items())], y=-3.2, index=False,
+            label="pos", cell_w=1.4)
+
+
+V.animate(sw_frame, len(sw_frames), captions=[f[4] for f in sw_frames], interval=1100)
+```
+
+Swap-with-last on `a = [10, 20, 30, 40, 50, 60]`, removing `20, 60, 10, 30`. Each removal is one copy, one `pos` repair and one pop; nothing after the hole shifts. The final state is `a = [40, 50]` with `pos = {40: 0, 50: 1}`.
+
+:::
+
+**What swap-with-last costs you.** The order of the array is destroyed. That is free for a set, but it rules the trick out whenever someone reads the order: a queue, a sorted array, a history. Two honest alternatives exist when order matters. A **tombstone** marks the slot dead instead of removing it ($O(1)$ delete, but the array now has holes, so sampling and `len` need extra counters), and a periodic **compaction** removes all tombstones in one $O(n)$ pass once, say, half the slots are dead, which keeps the amortised cost $O(1)$.
+
+### The array underneath: growth and shrinking {#sec-ds-a1-grow}
+
+Every structure in this chapter appends to a dynamic array, and @sec-arr-vec proved that doubling the capacity when it is full makes `append` $O(1)$ amortised. Structures that also delete a lot may want to give memory back by **shrinking**. The tempting rule "halve the capacity when the array is half full" is a trap: at the boundary, one `append` doubles (copying $n$ elements) and the next `pop` halves (copying $n$ again), so alternating the two costs $\Theta(n)$ per operation. The standard fix is hysteresis: **halve only when the array is a quarter full.** After any resize the array is exactly half full, so at least $n/4$ operations must happen before the next resize, and they pay for its $O(n)$ copy.
+
+```{python}
+def resize_copies(ops, shrink_at):
+    """Elements copied by a dynamic array that doubles when full and halves its capacity
+    when size <= cap * shrink_at. ops is a string of '+' (append) and '-' (pop)."""
+    cap, size, copies = 1, 0, 0
+    for op in ops:
+        if op == "+":
+            if size == cap:
+                copies += size
+                cap *= 2
+            size += 1
+        else:
+            size -= 1
+            if cap > 1 and size <= cap * shrink_at:
+                copies += size
+                cap //= 2
+    return copies
+
+
+fill = "+" * 1024                           # size 1024 = capacity: right at the boundary
+thrash = fill + "+-" * 500
+assert resize_copies(thrash, 1 / 2) > 500 * 1000      # every pair copies ~1024 elements twice
+assert resize_copies(thrash, 1 / 4) < 3 * len(thrash) # quarter rule: O(1) amortised
+for _ in range(200):                                  # and in general, on random sequences
+    ops, size = [], 0
+    for _ in range(random.randint(1, 400)):
+        op = "+" if size == 0 or random.random() < 0.55 else "-"
+        size += 1 if op == "+" else -1
+        ops.append(op)
+    assert resize_copies(ops, 1 / 4) <= 3 * len(ops)
+```
+
+## A2. Snapshots and versions {#sec-ds-a2}
+
+::: {.callout-note title="In plain words"}
+A snapshot "looks like" a full copy of the array, so the reflex is to store a copy on every `snap()`. But between two snapshots only the cells that were written change; a cell that is never written needs no history at all. So turn the representation inside out. Instead of *snapshot $\to$ whole array*, keep *cell $\to$ list of `(version, value)` records*. `snap()` is then just `version += 1`, `set(i, v)` records `(version, v)` on cell $i$ only, and `get(i, s)` asks cell $i$ for its newest record with version $\le s$. Versions on one cell only increase, so that lookup is the floor search of @sec-bst-a2: `bisect_right(versions, s) - 1`.
+:::
+
+**Two invariants.** (1) `snap()` copies nothing; it advances one integer, `version`, and returns the old value as the snapshot id. (2) Each cell's record list is sorted by version with no repeated version, and its last record is the cell's current value. A second write under the same version *overwrites* the last record, because a snapshot sees only the state at the moment it is taken, not the writes in between.
+
+```{python}
+class VersionedArray:
+    """Snapshots in O(1): each cell keeps (version, value) records, written only on set."""
+
+    def __init__(self, n):
+        self.vers = [[] for _ in range(n)]
+        self.vals = [[] for _ in range(n)]
+        self.version = 0
+
+    def set(self, i, v):
+        if self.vers[i] and self.vers[i][-1] == self.version:
+            self.vals[i][-1] = v               # same version: overwrite, don't append
+        else:
+            self.vers[i].append(self.version)
+            self.vals[i].append(v)
+
+    def snap(self):
+        self.version += 1
+        return self.version - 1                # the id the writes so far were tagged with
+
+    def get(self, i, sid):
+        p = bisect.bisect_right(self.vers[i], sid) - 1   # newest record with version <= sid
+        return self.vals[i][p] if p >= 0 else 0          # never written by then: default 0
+
+
+va = VersionedArray(3)
+va.set(0, 5); va.set(2, 1)
+assert va.snap() == 0
+va.set(0, 6); va.set(0, 7)
+assert va.snap() == 1
+va.set(1, 4)
+assert va.snap() == 2
+va.set(0, 9)
+assert va.vers[0] == [0, 1, 3] and va.vals[0] == [5, 7, 9]   # 6 was overwritten by 7
+assert [va.get(0, s) for s in range(3)] == [5, 7, 7]
+assert [va.get(1, s) for s in range(3)] == [0, 0, 4]
+# stress against copying the whole array at every snapshot
+for _ in range(200):
+    n = random.randint(1, 4)
+    fast, cur, copies = VersionedArray(n), [0] * n, []
+    for _ in range(30):
+        if random.random() < 0.6:
+            i, v = random.randrange(n), random.randint(1, 9)
+            fast.set(i, v); cur[i] = v
+        else:
+            assert fast.snap() == len(copies)
+            copies.append(cur[:])
+    assert all(fast.get(i, s) == copies[s][i] for s in range(len(copies)) for i in range(n))
+```
+
+```cpp
+// One snap is a counter bump; a set tags the CURRENT version.
+struct VersionedArray {
+    vector<vector<pair<int,int>>> col;   // per cell: (version, value), versions increasing
+    int version = 0;
+    VersionedArray(int n) : col(n) {}
+    void set(int i, int v) {
+        if (!col[i].empty() && col[i].back().first == version) col[i].back().second = v;
+        else col[i].push_back(make_pair(version, v));
+    }
+    int snap() { return version++; }
+    int get(int i, int sid) {            // newest record with version <= sid
+        const vector<pair<int,int>>& c = col[i];
+        int lo = 0, hi = (int)c.size();
+        while (lo < hi) { int m = (lo + hi) / 2; if (c[m].first <= sid) lo = m + 1; else hi = m; }
+        return lo ? c[lo - 1].second : 0;
+    }
+};
+```
+
+@fig-ds-a2-versions shows the records after the demo above, and which record answers each read of snapshot $1$.
+
+::: {#fig-ds-a2-versions}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+va_rows = [[f"v{s}: {x}" for s, x in zip(va.vers[i], va.vals[i])] or ["(none)"] for i in range(3)]
+va_hit = {}
+for i in range(3):
+    p = bisect.bisect_right(va.vers[i], 1) - 1
+    if p >= 0:
+        va_hit[(i, p)] = "amber"
+assert va_rows[0] == ["v0: 5", "v1: 7", "v3: 9"] and va_hit == {(0, 1): "amber", (2, 0): "amber"}
+
+
+def draw(ax, p):
+    V.grid(ax, p, va_rows, row_labels=["cell 0", "cell 1", "cell 2"], colors=va_hit, cell_w=1.3)
+V.show(draw)
+```
+
+Per-cell version histories after `set(0,5) set(2,1) snap set(0,6) set(0,7) snap set(1,4) snap set(0,9)`. Three snapshots cost three counter bumps; only the five effective writes are stored (the write of $6$ was overwritten under the same version). Reading snapshot $1$ takes each cell's newest record with version $\le 1$ (amber): cell $0$ gives $7$, cell $2$ gives $1$, and cell $1$ has none, so it reads the default $0$.
+
+:::
+
+@fig-ds-anim-snap replays the same operations one at a time, so you can see that `snap()` never touches a record.
+
+::: {#fig-ds-anim-snap}
+
+```{python}
+#| echo: false
+sn_ops = [("set", 0, 5), ("set", 2, 1), ("snap",), ("set", 0, 6), ("set", 0, 7), ("snap",),
+          ("set", 1, 4), ("snap",), ("set", 0, 9)]
+sn_arr = VersionedArray(3)
+sn_frames = []
+
+
+def sn_rows(arr):
+    return [[f"v{s}: {x}" for s, x in zip(arr.vers[i], arr.vals[i])] or ["-"] for i in range(3)]
+
+
+sn_frames.append((sn_rows(sn_arr), sn_arr.version, {}, "empty: no records, version 0"))
+for op in sn_ops:
+    if op[0] == "set":
+        _, i, x = op
+        sn_arr.set(i, x)
+        cap = f"set({i},{x}): cell {i}'s last record now carries version {sn_arr.version}"
+        hl = {(i, len(sn_arr.vers[i]) - 1): "cyan"}
+    else:
+        sid = sn_arr.snap()
+        cap = f"snap() returns {sid}: only the counter moved, to {sn_arr.version}"
+        hl = {}
+    sn_frames.append((sn_rows(sn_arr), sn_arr.version, hl, cap))
+assert sn_rows(sn_arr) == va_rows and len(sn_frames) == 10
+
+
+def sn_frame(ax, p, k):
+    rows, ver, hl, _ = sn_frames[k]
+    V.grid(ax, p, rows, row_labels=["cell 0", "cell 1", "cell 2"], colors=hl, cell_w=1.3)
+    V.text(ax, p, 2.0, 1.8, f"version = {ver}", color="indigo")
+
+
+V.animate(sn_frame, len(sn_frames), captions=[f[3] for f in sn_frames], interval=1000)
+```
+
+A versioned array taking three snapshots. A `set` touches one cell's record list (cyan); a `snap()` changes only the version counter shown above the table.
+
+:::
+
+### Undo by logging old values {#sec-ds-a2-rollback}
+
+Sometimes the past is not *read*, it is *returned to*: "undo everything since the checkpoint". Then the cheapest history is a **change log**: before each write, push `(index, old value)` onto a stack. A checkpoint is the current length of the log, and rolling back pops entries and restores the old values, newest first. Each write is logged and undone at most once, so rollback is $O(1)$ amortised per write. This is how a disjoint-set union "with rollback" and many backtracking searches undo their changes.
+
+```{python}
+class RollbackArray:
+    def __init__(self, n):
+        self.a = [0] * n
+        self.log = []                      # stack of (index, old value)
+
+    def set(self, i, v):
+        self.log.append((i, self.a[i]))
+        self.a[i] = v
+
+    def checkpoint(self):
+        return len(self.log)
+
+    def rollback(self, cp):
+        while len(self.log) > cp:
+            i, old = self.log.pop()
+            self.a[i] = old
+
+
+ra = RollbackArray(3)
+ra.set(0, 5)
+cp = ra.checkpoint()
+ra.set(0, 6); ra.set(2, 8)
+ra.rollback(cp)
+assert ra.a == [5, 0, 0] and ra.log == [(0, 0)]
+for _ in range(200):                       # nested checkpoints against saved copies
+    n = random.randint(1, 4)
+    ra, saved = RollbackArray(n), []
+    for _ in range(30):
+        r = random.random()
+        if r < 0.5:
+            ra.set(random.randrange(n), random.randint(1, 9))
+        elif r < 0.75:
+            saved.append((ra.checkpoint(), ra.a[:]))
+        elif saved:
+            cp, copy = saved.pop()
+            ra.rollback(cp)
+            assert ra.a == copy
+```
+
+Versions and rollback answer different questions. A versioned array reads *any* old version at any time, at $O(\log k)$ per read; a rollback log returns to the most recent checkpoints only (last in, first out), but the current array is always a plain array with $O(1)$ reads. Full persistence, where an old version can itself be modified, needs persistent trees and belongs to the tree volume.
+
+## A3. Counters of counters {#sec-ds-a3}
+
+::: {.callout-note title="In plain words"}
+Some questions are not about a value but about its **count**: "is some value present exactly 3 times?", "give me the most frequent element", "give me a key with the smallest count". A dictionary `value -> count` makes updates cheap but the query a scan. The fix is a **second container indexed by the count itself**. In its smallest form, `cnt[f]` says *how many* values have frequency $f$. In richer forms, `levels[f]` holds *which* values have it. Because one update changes one value's count by exactly one, it moves that value between two **adjacent** levels, and the extreme non-empty level can be tracked with a single integer.
+:::
+
+The smallest version, the **count of counts**:
+
+```{python}
+def count_of_counts(stream):
+    """freq[x] = occurrences of x; cnt[f] = how many values occur exactly f times."""
+    freq, cnt = Counter(), Counter()
+    for x in stream:
+        if freq[x]:
+            cnt[freq[x]] -= 1                  # x leaves its old level ...
+        freq[x] += 1
+        cnt[freq[x]] += 1                      # ... and joins the next one
+    return freq, cnt
+
+
+cc_freq, cc_cnt = count_of_counts([4, 4, 2, 4, 2, 7])
+assert cc_freq == Counter({4: 3, 2: 2, 7: 1})
+assert {f: c for f, c in cc_cnt.items() if c} == {1: 1, 2: 1, 3: 1}
+for _ in range(200):
+    s = [random.randint(0, 5) for _ in range(random.randint(0, 20))]
+    fr, ct = count_of_counts(s)
+    assert all(ct[f] == sum(1 for c in fr.values() if c == f) for f in range(1, 21))
+```
+
+When the query must *return* an extreme value, the levels hold the values themselves. A value is pushed onto `levels[f]` at the moment its count *reaches* $f$, and an integer `top` remembers the highest non-empty level:
+
+```
+push(x):
+    f = freq[x] + 1; freq[x] = f       # 1) update the plain counter
+    levels[f].push(x)                  # 2) x joins the level of its NEW count
+    top = max(top, f)                  # 3) one cursor tracks the highest non-empty level
+pop_most():
+    x = levels[top].pop()              # newest value that reached the top count
+    freq[x] -= 1
+    if levels[top] is empty: top -= 1  # the level below is non-empty: x itself is on it
+```
+
+@fig-ds-a3 shows the levels this produces; the cell below builds them and checks the cursor.
+
+```{python}
+a3_freq = defaultdict(int)
+a3_levels = defaultdict(list)
+a3_top = 0
+for x in [4, 4, 2, 4, 2]:
+    a3_freq[x] += 1
+    f = a3_freq[x]
+    a3_levels[f].append(x)
+    a3_top = max(a3_top, f)
+assert a3_top == 3 and a3_levels[3] == [4]          # 4 is the only value at count 3
+assert a3_levels[2] == [4, 2] and a3_levels[1] == [4, 2]
+# pop the top level; it empties, so the cursor drops by exactly one
+assert a3_levels[3].pop() == 4
+a3_freq[4] -= 1
+assert not a3_levels[3]
+a3_top -= 1
+assert a3_top == 2 and a3_levels[2][-1] == 2        # 2 was the most recent to reach count 2
+```
+
+```cpp
+// count -> stack of values that reached it, plus an integer cursor for the top level
+unordered_map<int, int> freq;               // value -> count
+unordered_map<int, vector<int>> levels;     // count -> values that reached it, in order
+int topLevel = 0;
+void bump(int x) {
+    topLevel = max(topLevel, ++freq[x]);
+    levels[freq[x]].push_back(x);
+}
+int popMost() {
+    int x = levels[topLevel].back(); levels[topLevel].pop_back(); --freq[x];
+    if (levels[topLevel].empty()) --topLevel;
+    return x;
+}
+```
+
+::: {#fig-ds-a3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a3_fig_levels = defaultdict(list)
+a3_fig_freq = Counter()
+for x in [4, 4, 2, 4, 2]:
+    a3_fig_freq[x] += 1
+    a3_fig_levels[a3_fig_freq[x]].append(str(x))
+a3_rows = [a3_fig_levels[f] for f in (1, 2, 3)]
+assert a3_rows == [["4", "2"], ["4", "2"], ["4"]]
+
+
+def draw(ax, p):
+    V.grid(ax, p, a3_rows, row_labels=["count 1", "count 2", "count 3  (top)"],
+           colors={(2, 0): "amber", (1, 1): "cyan"}, cell_w=1.0)
+V.show(draw)
+```
+
+The levels after pushing `4, 4, 2, 4, 2`. A value appears on every level up to its count, in the order it reached each level. The amber `4` is alone on the top level, so it pops first; the cyan `2` is the newest value at count $2$, so it pops second. The level map is a counter (rows) indexed by the values of the frequency counter.
+
+:::
+
+Three strengths of the idea, used by the three problems of P3: `cnt[f]` answers "is anyone at frequency $f$?" (@sec-ds-p3-freqtracker); a stack per level plus `top` answers "pop the most frequent, newest first" (@sec-ds-p3-freqstack); levels kept in a linked list ordered by count answer "name a key with the minimum or maximum count" without removing it (@sec-ds-p3-allone).
+
+## A4. Array-backed hashing {#sec-ds-a4}
+
+::: {.callout-note title="In plain words"}
+A hash table is an **array** plus a rule that turns a key into an index. When the keys are small integers, the key *is* the index: a **direct-address table** (or, for a set, a **bit array** with one bit per possible key) gives $O(1)$ for everything at the price of memory proportional to the key range $U$. When $U$ is large, fold it into $m$ slots with a hash function such as $h(k) = k \bmod m$. Two keys with the same slot *collide*, and there are two classic ways to cope: **chaining** (each slot holds a short list) and **open addressing** (the colliding key moves to the next free slot). Either way the cost depends on the **load factor** $\alpha = n/m$, so the table **resizes** (doubles $m$ and re-inserts every key) when $\alpha$ gets too large.
+:::
+
+@sec-hash-sets explains why chains stay short on average and @sec-hash-anti how an attacker breaks a predictable hash. This lesson builds the tables.
+
+**Direct addressing and bit arrays.** `present[k]` for $k \in [0, U)$, or one bit per key packed into bytes (`bits[k >> 3] >> (k & 7) & 1`), is the right answer whenever $U$ fits in memory: $10^6$ keys cost 1 MB as bytes or 125 KB as bits. It has no collisions and no worst case. `std::bitset` and `std::vector<bool>` are the library forms.
+
+**Chaining.** Bucket $h(k)$ holds a list of the keys that hash there. Under uniform hashing the expected chain length is $\alpha$, so an operation costs $O(1 + \alpha)$ expected. A **resize** genuinely moves keys, because $k \bmod m$ depends on $m$:
+
+```{python}
+def a4_hash(keys, m):
+    buckets = [[] for _ in range(m)]
+    for k in keys:
+        buckets[k % m].append(k)          # chain by appending to bucket h(k)
+    return buckets
+
+
+a4_keys = [1, 5, 9, 2, 6]
+a4_m4 = a4_hash(a4_keys, 4)
+assert a4_m4 == [[], [1, 5, 9], [2, 6], []]   # alpha = 5/4: one chain of three
+a4_m8 = a4_hash(a4_keys, 8)                    # double m and re-insert every key
+assert a4_m8 == [[], [1, 9], [2], [], [], [5], [6], []]   # 5 and 6 moved to new buckets
+```
+
+The resize itself costs $\Theta(n + m)$, but with doubling it happens only after $\Omega(m)$ inserts since the previous one, so the amortised cost per insert is $O(1)$: the argument of @sec-arr-vec, with re-insertions in place of copies.
+
+```cpp
+// Chained buckets with a load-factor-triggered rehash.
+struct ChainedMap {
+    vector<vector<pair<int,int>>> tbl;
+    int cap = 4, n = 0;
+    ChainedMap() : tbl(4) {}
+    void rehash() {
+        vector<vector<pair<int,int>>> old;
+        old.swap(tbl);
+        cap *= 2; tbl.assign(cap, vector<pair<int,int>>());
+        for (const auto& b : old) for (const auto& kv : b) tbl[kv.first % cap].push_back(kv);  // NEW homes
+    }
+    void put(int k, int v) {
+        for (auto& p : tbl[k % cap]) if (p.first == k) { p.second = v; return; }
+        tbl[k % cap].push_back(make_pair(k, v)); ++n;
+        if (4 * n > 3 * cap) rehash();     // alpha > 0.75
+    }
+};
+```
+
+@fig-ds-anim-rehash replays the resize of the example above one key at a time.
+
+::: {#fig-ds-anim-rehash}
+
+```{python}
+#| echo: false
+rh_frames = []
+rh_old = a4_hash(a4_keys, 4)
+
+
+def rh_rows(buckets):
+    return [[str(k) for k in b] or ["-"] for b in buckets]
+
+
+rh_frames.append((rh_rows(rh_old), 4, {(1, 0): "amber", (1, 1): "amber", (1, 2): "amber"},
+                  "m = 4, n = 5: alpha = 1.25 and bucket 1 holds a chain of three"))
+rh_new = [[] for _ in range(8)]
+rh_frames.append((rh_rows(rh_new), 8, {}, "alpha > 0.75: allocate m = 8 empty buckets"))
+for k in a4_keys:
+    rh_new[k % 8].append(k)
+    rh_frames.append((rh_rows(rh_new), 8, {(k % 8, len(rh_new[k % 8]) - 1): "cyan"},
+                      f"re-insert {k}: {k} mod 8 = {k % 8}" +
+                      (" (it moved)" if k % 8 != k % 4 else " (same index as before)")))
+assert rh_new == a4_m8 and len(rh_frames) == 7
+
+
+def rh_frame(ax, p, t):
+    rows, m, hl, _ = rh_frames[t]
+    V.grid(ax, p, rows, row_labels=[f"b{i}" for i in range(m)], colors=hl, cell_w=0.9)
+
+
+V.animate(rh_frame, len(rh_frames), captions=[f[3] for f in rh_frames], interval=1000)
+```
+
+A rehash from $m = 4$ to $m = 8$. Every key is re-inserted under the new modulus; keys $5$ and $6$ land in buckets they did not share before, and the longest chain drops from three to two.
+
+:::
+
+**Open addressing.** Store the keys in the array's own cells. To insert $k$, start at $h(k)$ and walk right (wrapping around) to the first free cell; to search, walk the same path until you find $k$ or an **empty** cell. Deletion is the subtle part: emptying the cell would cut the search path of every key that was placed beyond it. So a deleted cell becomes a **tombstone**: searches walk past it, inserts may reuse it. Tombstones count toward the load, and a rebuild clears them.
+
+The two helpers below are the bare probing loops, enough to see why tombstones are needed (@fig-ds-a4-probe). `oa_insert` assumes $k$ is absent and that the table has a free cell; the full set in @sec-ds-p4-hashset also checks for $k$ before it reuses a tombstone, and rebuilds the table before it fills.
+
+```{python}
+def oa_insert(t, k):
+    i = k % len(t)
+    while t[i] not in (None, "T"):         # None = empty, "T" = tombstone
+        i = (i + 1) % len(t)
+    t[i] = k
+
+
+def oa_contains(t, k):
+    i = k % len(t)
+    while t[i] is not None:                # stop only at a truly empty cell
+        if t[i] == k:
+            return True
+        i = (i + 1) % len(t)
+    return False
+
+
+oa = [None] * 8
+for k in [3, 11, 19]:                      # all three have home 3
+    oa_insert(oa, k)
+assert oa[3:6] == [3, 11, 19]
+oa_tomb = oa[:]
+oa_tomb[4] = "T"                           # delete 11 correctly: leave a tombstone
+assert oa_contains(oa_tomb, 19) and not oa_contains(oa_tomb, 11)
+oa_bad = oa[:]
+oa_bad[4] = None                           # delete 11 by emptying the cell
+assert not oa_contains(oa_bad, 19)         # 19 is still stored, but the search stops early
+```
+
+::: {#fig-ds-a4-probe}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+oa_cells = ["" if x is None else ("tomb" if x == "T" else x) for x in oa_tomb]
+assert oa_cells == ["", "", "", 3, "tomb", 19, "", ""]
+
+
+def draw(ax, p):
+    V.array(ax, p, oa_cells, colors={3: "cyan", 4: "muted", 5: "amber"},
+            pointers=[(3, "h(19)", "indigo"), (6, "empty", "pink")], cell_w=1.1)
+V.show(draw)
+```
+
+Open addressing with $h(k) = k \bmod 8$ after inserting $3, 11, 19$ (all with home $3$) and deleting $11$. The search for $19$ starts at its home (cell $3$), walks over the tombstone in cell $4$ and finds $19$ in cell $5$; a search for an absent key with home $3$ stops at the empty cell $6$. Had the deletion emptied cell $4$, the search for $19$ would have stopped there.
+
+:::
+
+**Which table when?** Direct addressing when $U$ is small. Chaining is simple, tolerates high load factors and makes deletion trivial. Open addressing stores no pointers and walks adjacent memory, which is cache-friendly (@sec-arr-cache), but needs a lower load factor (keep it at most about $1/2$ for linear probing) and tombstones. Python's `dict` uses open addressing; `std::unordered_map` uses chaining. @sec-ds-p4-hashmap builds the chained table and @sec-ds-p4-hashset the open-addressing one.
+
+## A5. Lazy resets with timestamps {#sec-ds-a5}
+
+::: {.callout-note title="In plain words"}
+A structure that is cleared often but touched sparsely should never pay $O(n)$ to wipe itself. Keep one global integer, the **clock** (or epoch). Every cell stores, beside its value, the clock reading at its last write: its **stamp**. "Clear everything" becomes `clock += 1`: $O(1)$, touching nothing. A read decides *lazily* whether a cell is current: if its stamp equals the clock, the value is live; otherwise the cell is logically cleared. The reset is not skipped, only deferred into a comparison that each later access pays once.
+:::
+
+```{python}
+a5_val = [0] * 100000
+a5_stamp = [0] * 100000
+a5_clock = 0
+
+
+def a5_clear():
+    global a5_clock
+    a5_clock += 1                       # O(1) "reset": not a single cell is written
+
+
+def a5_set(i, v):
+    a5_val[i] = v
+    a5_stamp[i] = a5_clock              # tag the write with the clock in effect NOW
+
+
+def a5_get(i):
+    return a5_val[i] if a5_stamp[i] == a5_clock else 0   # stale stamp -> reads as cleared
+
+
+a5_set(7, 42)
+assert a5_get(7) == 42
+a5_clear()
+assert a5_get(7) == 0 and a5_val[7] == 42   # the old 42 is still stored, but invisible
+a5_set(7, 5)
+assert a5_get(7) == 5 and a5_get(8) == 0
+```
+
+```cpp
+// A stamp equal to the current epoch means "live"; anything else is logically empty.
+const int N = 100000;
+vector<int> val(N, 0), stamp(N, 0);
+int epoch = 0;                                  // not "clock": that name is taken by <ctime>
+void clearAll() { ++epoch; }                    // O(1)
+void setv(int i, int v) { val[i] = v; stamp[i] = epoch; }
+int getv(int i) { return stamp[i] == epoch ? val[i] : 0; }
+```
+
+@fig-ds-anim-stamps runs a short sequence on five cells. Watch the stamps row: a clear changes nothing in the arrays, only the clock.
+
+::: {#fig-ds-anim-stamps}
+
+```{python}
+#| echo: false
+st_val, st_stamp, st_clock = [0] * 5, [0] * 5, 0
+st_ops = [("set", 1, 7), ("set", 3, 9), ("clear",), ("set", 3, 4), ("get", 1), ("get", 3),
+          ("clear",), ("get", 3)]
+st_frames = [(st_val[:], st_stamp[:], st_clock, {}, "five cells, clock 0, every stamp 0")]
+st_reads = []
+for op in st_ops:
+    if op[0] == "set":
+        st_val[op[1]], st_stamp[op[1]] = op[2], st_clock
+        cap, hl = f"set({op[1]},{op[2]}): value and stamp {st_clock} written together", {op[1]: "cyan"}
+    elif op[0] == "clear":
+        st_clock += 1
+        cap, hl = f"clear(): clock becomes {st_clock}; no cell is touched", {}
+    else:
+        live = st_stamp[op[1]] == st_clock
+        r = st_val[op[1]] if live else 0
+        st_reads.append(r)
+        cap = (f"get({op[1]}) = {r}: stamp {st_stamp[op[1]]} " +
+               ("equals the clock, live" if live else f"is older than clock {st_clock}, reads 0"))
+        hl = {op[1]: "green" if live else "amber"}
+    st_frames.append((st_val[:], st_stamp[:], st_clock, hl, cap))
+assert st_reads == [0, 4, 0] and len(st_frames) == 9
+
+
+def st_frame(ax, p, k):
+    vals, stamps, clk, hl, _ = st_frames[k]
+    V.array(ax, p, vals, colors=hl, label="val")
+    V.array(ax, p, stamps, y=-2.4, colors=hl, index=False, label="stamp")
+    V.text(ax, p, 2.5, -3.9, f"clock = {clk}", color="indigo")
+
+
+V.animate(st_frame, len(st_frames), captions=[f[4] for f in st_frames], interval=1100)
+```
+
+Lazy clearing with stamps. The stale value $7$ in cell $1$ stays in memory but reads as $0$ after the first clear, because its stamp is older than the clock; cell $3$ is rewritten after the clear and reads $4$, until the second clear makes it stale too.
+
+:::
+
+**Three relatives of the timestamp.**
+
+- **"Assign all" instead of "clear all".** Store the last assigned value `base` with the clock; a stale cell reads `base` instead of $0$. Refresh a cell (copy `base` into it and stamp it) before adding to it. @sec-ds-p5-assign is exactly this.
+- **A dirty list.** Record the indices written since the last clear; a clear resets only those. Each write is reset at most once, so the total is $O(\text{writes})$, and unlike stamps, the array really is clean afterwards (useful before handing it to code that does not know about stamps).
+- **A lazy flag.** When the global operation is an involution such as "flip every bit", the clock needs only two values: store each bit relative to a flag (@sec-ds-p5-bitset).
+
+### The sparse-set trick {#sec-ds-a5-sparse}
+
+Stamps still need the stamp array initialised once. The **sparse set** of Briggs and Torczon avoids even that: it is a set of integers in $[0, U)$ with $O(1)$ `add`, `remove`, `contains` and `clear`, which works on **uninitialised** memory. It keeps a packed array `dense[0..n-1]` of the members and an array `sparse` with `sparse[k]` = the position of $k$ in `dense`. The membership test cross-checks the two:
+
+$$k \in S \iff \texttt{sparse}[k] < n \ \text{ and } \ \texttt{dense}[\texttt{sparse}[k]] = k.$$
+
+Garbage in `sparse[k]` cannot fool the test: if $k$ is not a member, either the garbage points outside $[0, n)$, or it points at a slot of `dense` that holds some *other* member. `clear()` is `n = 0`, and `remove` is swap-with-last on `dense` (@sec-ds-a1), which closes the loop of this chapter.
+
+```{python}
+class SparseSet:
+    """Briggs-Torczon sparse set on keys in [0, U): O(1) add, remove, contains, clear."""
+
+    def __init__(self, U):
+        self.sparse = [random.randrange(3 * U) for _ in range(U)]   # simulate uninitialised memory
+        self.dense = [random.randrange(U) for _ in range(U)]
+        self.n = 0
+
+    def contains(self, k):
+        i = self.sparse[k]
+        return i < self.n and self.dense[i] == k
+
+    def add(self, k):
+        if not self.contains(k):
+            self.dense[self.n] = k
+            self.sparse[k] = self.n
+            self.n += 1
+
+    def remove(self, k):                   # swap-with-last on the dense array
+        if self.contains(k):
+            i, last = self.sparse[k], self.dense[self.n - 1]
+            self.dense[i] = last
+            self.sparse[last] = i
+            self.n -= 1
+
+    def clear(self):
+        self.n = 0                         # O(1): sparse and dense keep their garbage
+
+    def members(self):
+        return self.dense[:self.n]         # iteration in O(n), not O(U)
+
+
+for _ in range(300):                       # stress against Python's set
+    U = random.randint(1, 12)
+    ss, model = SparseSet(U), set()
+    for _ in range(40):
+        k, r = random.randrange(U), random.random()
+        if r < 0.45:
+            ss.add(k); model.add(k)
+        elif r < 0.8:
+            ss.remove(k); model.discard(k)
+        elif r < 0.9:
+            ss.clear(); model.clear()
+        assert all(ss.contains(x) == (x in model) for x in range(U))
+        assert sorted(ss.members()) == sorted(model)
+```
+
+@fig-ds-a5-sparse runs the cross-check on a small example whose arrays start full of garbage.
+
+::: {#fig-ds-a5-sparse}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+sp = SparseSet(8)
+sp.sparse = [0, 5, 7, 6, 2, 6, 4, 3]       # fixed garbage, so the picture is reproducible
+sp.dense = [4, 4, 1, 0, 6, 2, 5, 7]
+for k in [6, 1, 3]:
+    sp.add(k)
+assert sp.dense[:3] == [6, 1, 3] and [k for k in range(8) if sp.contains(k)] == [1, 3, 6]
+assert sp.sparse[0] == 0 and sp.dense[0] == 6        # garbage sparse[0] points at 6, not 0
+
+
+def draw(ax, p):
+    V.array(ax, p, sp.dense, regions=[(0, 3, "green", "dense[0..n-1] = members")],
+            label="dense")
+    V.array(ax, p, sp.sparse, y=-3.2, colors={6: "cyan", 1: "cyan", 3: "cyan", 0: "amber"},
+            label="sparse")
+V.show(draw)
+```
+
+A sparse set over keys $0..7$ after adding $6, 1, 3$ to arrays full of garbage. Members (cyan in `sparse`) point into the green prefix of `dense` and are pointed back at. Key $0$ (amber) is not a member: its garbage `sparse[0] = 0` lands inside the prefix, but `dense[0]` is $6$, not $0$, so the cross-check rejects it.
+
+:::
+
+## Part B — Patterns
+
+## Pattern 1: Swap-with-last — one move, no shift {#sec-ds-p1}
+
+**Where we are.** The chapter climbs in five steps, each adding one idea to the packed array. **P1** deletes in $O(1)$ by moving the tail into the hole and keeping a `value -> slot` map. **P2** keeps the past by tagging writes with a version instead of copying. **P3** indexes by a count, so frequency questions become lookups. **P4** turns any key into an array index, by direct addressing, chaining or probing. **P5** defers whole-array work with a clock, a flag or a running fold.
+
+**Recognise it.** "Insert, delete *and* get a random element in $O(1)$"; a pool of objects whose order nobody reads; "delete any occurrence".
+
+::: {.callout-important title="Template"}
+A packed list `a` plus a map `pos[value] = slot` is a set with $O(1)$ insert, delete and uniform sampling. Delete `v`: `i = pos[v]`; `a[i] = a[-1]`; `pos[a[i]] = i`; `del pos[v]`; `a.pop()`. Sample: `a[randrange(len(a))]`. With duplicates, `pos[v]` is a set of slots and the deletion takes any one of them (@sec-ds-a1).
+:::
+
+**Complexity.** $O(1)$ expected per operation (the map is a hash map), $O(1)$ amortised for the appends, $O(n)$ space.
+
+{{< include ../problems/lc-0380-insert-delete-getrandom-o1/problem.qmd >}}
+
+[**From a set to a multiset.** A distinct set maps `value -> one slot`; allow duplicates and the map becomes `value -> set of slots`, but the move itself is unchanged: you may evict *any* copy.]{.flow-bridge}
+
+{{< include ../problems/lc-0381-insert-delete-getrandom-duplicates/problem.qmd >}}
+
+## Pattern 2: Snapshots and versions — tag the write, copy nothing {#sec-ds-p2}
+
+**From deleting the present to keeping the past.** Swap-with-last lets the current state change cheaply but forgets every earlier state. P2 adds one idea: tag each write with the version it belongs to, so that old states can be read (or returned to) without ever copying the array.
+
+**Recognise it.** "Take a snapshot", "value at time $t$", "undo", "back and forward"; many cheap writes between expensive-looking copies.
+
+::: {.callout-important title="Template"}
+An $O(1)$ snapshot is a counter, never a copy:
+
+- `snap()` returns `version` and then increments it; nothing is written.
+- `set(i, v)` appends `(version, v)` to cell $i$'s history, or overwrites the last record if it already carries the current version.
+- `get(i, s)` is the floor search `bisect_right(versions_i, s) - 1` (@sec-ds-a2, @sec-bst-a2); seed each cell with `(0, default)` or treat "no record" as the default.
+- To go *back* rather than read old versions, keep one array and a cursor, or a log of old values to roll back.
+:::
+
+**Complexity.** $O(1)$ `snap` and `set`, $O(\log k)$ `get` for $k$ records on the cell, $O(n + \text{writes})$ space.
+
+{{< include ../problems/lc-1146-snapshot-array/problem.qmd >}}
+
+[**From reading old versions to moving between them.** A snapshot array answers "what did cell $i$ hold at version $s$?" for any $s$. A browser history only ever moves a cursor back and forth along one line of versions, and a new visit throws away the versions ahead of the cursor, so one array and one index replace the per-cell histories.]{.flow-bridge}
+
+{{< include ../problems/lc-1472-design-browser-history/problem.qmd >}}
+
+The same per-key history appears with caller-chosen timestamps in the time-based key-value store, solved in @sec-lang-p4-timemap. Its new angle here: timestamps arrive in increasing order, so each key's history is appended in sorted order for free, exactly like the version lists above.
+
+{{< include ../problems/lc-0981-time-based-key-value-store/card.qmd >}}
+
+## Pattern 3: Counters of counters — index by the count {#sec-ds-p3}
+
+**From versions to frequencies.** P1 and P2 index the array by *position* or *version*. Many queries ask about *how often* things occur, and a `value -> count` map answers those only by scanning. P3 adds a container indexed by the count itself, and the problems climb by what the query needs from it: how many values sit at a count, which value is newest at the top count, and which keys sit at the minimum and maximum counts.
+
+**Recognise it.** "Some value occurs exactly $f$ times", "most frequent, ties by recency", "key with max/min count", "LFU"; updates change one count by $\pm 1$.
+
+::: {.callout-important title="Template"}
+When the question is about a count, make the count an index:
+
+- `cnt[f]` = how many values have frequency $f$; an update moves one unit between two adjacent levels (@sec-ds-a3).
+- `levels[f]` = stack of the values that *reached* $f$, plus `top`, the highest non-empty level: pop from `levels[top]` and lower `top` only when it empties.
+- To *name* the extremes without removing them, keep the non-empty levels in a doubly linked list ordered by count; a $\pm 1$ change moves a key to a neighbouring node.
+:::
+
+**Complexity.** $O(1)$ expected per update and query (hash maps), $O(1)$ worst case when the values and counts are small enough for arrays; $O(n)$ space.
+
+{{< include ../problems/lc-2671-frequency-tracker/problem.qmd >}}
+
+[**From counting a level to popping from it.** Frequency Tracker only needs *how many* values sit at a count. Maximum Frequency Stack must hand back *which* value, the newest among the most frequent, so each level becomes a stack of values and one cursor tracks the top level.]{.flow-bridge}
+
+{{< include ../problems/lc-0895-maximum-frequency-stack/problem.qmd >}}
+
+[**From popping the extreme to naming it.** FreqStack *removes* the top-frequency value, so a stack per level and one cursor suffice. AllOne must *report* a min- and a max-count key on demand without removing anything, so the levels gain an order: a doubly linked list of buckets where a $\pm1$ count change moves a key to the neighbouring node.]{.flow-bridge}
+
+{{< include ../problems/lc-0432-all-oone-data-structure/problem.qmd >}}
+
+## Pattern 4: Array-backed hashing — turn a key into an index {#sec-ds-p4}
+
+**From counts to arbitrary keys.** P3 assumed that a hash map turns any key into a place to store its count. P4 builds that map on a plain array: first with keys small enough to be indices, then with a modulus and chains, then with probing inside the array itself.
+
+**Recognise it.** "Design a hash map / hash set without libraries"; keys from a small range (rooms, letters, values up to $10^6$); an adversary who knows your hash.
+
+::: {.callout-important title="Template"}
+- **Direct address** (small universe $U$): `table[key]`, or one bit per key. $O(1)$ worst case, $O(U)$ memory.
+- **Chaining**: bucket `h(k)` holds a list; cost $O(1 + \alpha)$ expected for $\alpha = n/m$. Resize (double $m$, **re-insert every key**) when $\alpha > 0.75$.
+- **Open addressing**: probe `h(k), h(k)+1, ...` inside the array; delete with a **tombstone**; rebuild when live keys plus tombstones exceed half the table (@sec-ds-a4).
+:::
+
+**Complexity.** $O(1)$ expected per operation and $O(1)$ amortised for the resizes; $O(n)$ space (direct addressing: $O(U)$).
+
+{{< include ../problems/cf-1200a-hotelier/problem.qmd >}}
+
+[**From a key that is the slot to a key that must be folded.** The hotel has ten rooms, so the room number already is an index. Widen the keys to $[0, 10^6]$ and allocate only for the keys present: fold each key into $m$ buckets with $k \bmod m$, chain the collisions, and resize to keep the chains short.]{.flow-bridge}
+
+{{< include ../problems/lc-0706-design-hashmap/problem.qmd >}}
+
+[**From chains to probing.** Chaining stores a list per bucket. A hash set can keep the keys in the array's own cells instead: collisions walk to the next cell, and a deletion must leave a tombstone so that the walks of other keys stay intact. When the universe is small enough, a bit array beats both.]{.flow-bridge}
+
+{{< include ../problems/lc-0705-design-hashset/problem.qmd >}}
+
+## Pattern 5: Lazy resets with timestamps — defer the clear {#sec-ds-p5}
+
+**From storing keys to forgetting them cheaply.** P1–P4 make each single-cell operation $O(1)$. An operation on *all* cells (clear, assign, flip) still costs $O(n)$. P5 adds the last idea: record the global operation once (a clock, a base value, a flag) and let each cell catch up the next time it is touched. The problems climb from the plain timestamp, to a two-valued flag, to timestamps that answer a question by themselves, to a fold that never stores the items at all.
+
+**Recognise it.** "Assign to every element", "reset", "flip all", many test cases on one big array; answers that depend only on *when* something first happened; aggregates (sum, count, average) over a growing set.
+
+::: {.callout-important title="Template"}
+Never do work you can defer with a tag:
+
+- Keep a value beside a **stamp**; a global reset bumps the clock, a stale stamp means "reset" (@sec-ds-a5). For "assign all to $x$", a stale cell reads the stored `base`; refresh it before modifying it.
+- For an involution such as "flip all", store each cell relative to a global flag and keep counters consistent (`ones = n - ones`).
+- When only *first* touches matter, record first-arrival times and answer from them, without simulating.
+- For an aggregate query, fold each new item into `(sum, count)` when it arrives, and pop pending records when they are used.
+:::
+
+**Complexity.** $O(1)$ per global operation and per touched cell; $O(n)$ space for the stamps (or none, with a sparse set).
+
+{{< include ../problems/ac-abc278_d-all-assign-point-add/problem.qmd >}}
+
+[**From a clock to a flag.** "Assign all" needs a clock, because each cell must know *whether* it missed an assignment. "Flip all" is its own inverse, so only the *parity* of missed flips matters: the clock collapses to one bit, and each stored bit is read through it.]{.flow-bridge}
+
+{{< include ../problems/lc-2166-design-bitset/problem.qmd >}}
+
+[**From stamps that mark staleness to stamps that are the answer.** In the bitset and the assign-all array, the stamp only says whether a cell is current. In Recent Actions the first-arrival times of new posts *are* the eviction times of the old ones, so recording them replaces the whole simulation.]{.flow-bridge}
+
+{{< include ../problems/cf-1799a-recent-actions/problem.qmd >}}
+
+[**From timestamps to running totals.** Recent Actions answers from recorded times. Underground System must answer averages over a growing set of trips; it folds each finished trip into a per-route `(sum, count)` the moment it ends and pops the traveller's open record, so nothing is ever re-summed or swept.]{.flow-bridge}
+
+{{< include ../problems/lc-1396-design-underground-system/problem.qmd >}}
+
+**Looking back.** Every structure in this chapter is a packed array plus one extra piece of bookkeeping, and each pattern added one idea to the last. Swap-with-last kept the array dense with a `value -> slot` map; versions kept the past with a tag per write; counters of counters added an index on frequencies; hashing turned any key into an index; lazy resets turned whole-array operations into one counter. Each $O(1)$ was bought with a licence that you should name before writing code: "nobody reads the order", "a snapshot sees only the last write before it", "any key at the extreme count will do", "keys spread evenly", "the reset can wait until the cell is touched". When the licence is missing, the trick is wrong, not slow.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "$O(1)$ insert, delete *and* random element" | Packed array + `value -> slot`, swap-with-last | @sec-ds-a1, @sec-ds-p1-randset |
+| "Duplicates allowed; delete any occurrence in $O(1)$" | `value -> set of slots`, evict any member | @sec-ds-p1-randcol |
+| "Snapshot an array; read a past version" | Tag writes with a version; floor search per cell | @sec-ds-a2, @sec-ds-p2-snapshot |
+| "Undo to a checkpoint" | Log of `(index, old value)`, pop to roll back | @sec-ds-a2-rollback |
+| "Back / forward through a history" | One array, one cursor, an end marker | @sec-ds-p2-history |
+| "Does some value occur exactly $f$ times?" | Count of counts `cnt[f]` | @sec-ds-a3, @sec-ds-p3-freqtracker |
+| "Pop the most frequent, ties by recency" | `levels[f]` stacks + top cursor | @sec-ds-p3-freqstack |
+| "All $O(1)$: min / max key by count" | Count buckets in a doubly linked list | @sec-ds-p3-allone |
+| "Keys are small integers (rooms, letters, $\le 10^6$)" | Direct addressing, bit array | @sec-ds-a4, @sec-ds-p4-hotel |
+| "Design a hash map from scratch" | Chaining, load factor, rehash every key | @sec-ds-p4-hashmap |
+| "Design a hash set; memory proportional to $n$" | Open addressing with tombstones | @sec-ds-p4-hashset |
+| "Assign $x$ to all elements" between point queries | Global base + clock, refresh on touch | @sec-ds-a5, @sec-ds-p5-assign |
+| "Flip all bits", "negate all" | Lazy flag, counters kept consistent | @sec-ds-p5-bitset |
+| "Clear the structure" many times; iterate members | Stamps, dirty list, or sparse set | @sec-ds-a5, @sec-ds-a5-sparse |
+| "When is each original item pushed out?" | First-arrival times; answer by rank | @sec-ds-p5-recent |
+| "Average over many incremental updates" | Fold into `(sum, count)`; pop the pending record | @sec-ds-p5-underground |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Deleting `v` from the index map before repairing it.** The safe order in `swap_remove` (@sec-ds-a1) is `i = pos[v]`, `pos[last] = i`, `del pos[v]`. Write `i = pos.pop(v)` first and, when `v` *is* the tail, the following `pos[last] = i` re-inserts the key you just deleted: `pos` then claims a slot past the end of the array.
+- **Keeping the slot sets of a multiset inconsistent.** When the tail moves from `n-1` to `i`, discard `n-1` from its value's set *and* add `i`; when a value's set empties, delete the key, or `insert` will report "already present" (@sec-ds-p1-randcol).
+- **Buying the $O(1)$ delete and keeping the order.** Swap-with-last exists only because no caller of a set reads slot order. If the order matters, use tombstones with periodic compaction, or a different structure (@sec-ds-a1).
+- **Shrinking at half full.** A dynamic array that doubles when full and halves when half full thrashes at the boundary; halve at a quarter (@sec-ds-a1-grow).
+- **`snap()` returning the bumped counter.** The id handed out must be the one the writes so far were tagged with: `return version++`, not `return ++version` (@sec-ds-a2).
+- **`bisect_left` where a floor search is needed.** With versions $[0, 2, 5]$, `get(i, 2)` must return the record of version $2$; `bisect_left(vers, 2) - 1` gives index $0$, the record *before* it. The floor is `bisect_right(vers, s) - 1` (@sec-ds-p2-snapshot).
+- **A `top` cursor that never comes down,** or one recomputed with `max(levels)`: lower it by one exactly when its level empties, which keeps every pop $O(1)$ (@sec-ds-a3, @sec-ds-p3-freqstack).
+- **Asserting *which* key `getMinKey` returns.** Several keys may share the minimum count; any of them is correct, so tests must check the count, not the key (@sec-ds-p3-allone).
+- **Resizing a hash table by copying buckets.** $k \bmod m$ depends on $m$, so every key must be re-inserted; copied lists leave keys where no search will look (@sec-ds-a4, @sec-ds-p4-hashmap).
+- **Deleting by emptying a cell in open addressing.** It cuts the probe paths of other keys; leave a tombstone and count tombstones toward the load (@sec-ds-a4, @sec-ds-p4-hashset).
+- **Occupying before walking in the hotel.** A bound that is moved only after its door is used can point at a room the other door filled; walk to a free room first, then occupy (@sec-ds-p4-hotel).
+- **Writing the value but not the stamp,** or refreshing a stale cell *after* modifying it: value and stamp change together, and a stale cell is brought up to date before anything else touches it (@sec-ds-a5, @sec-ds-p5-assign).
+- **Counting every arrival instead of every *first* arrival.** In Recent Actions a repeated post evicts nobody (@sec-ds-p5-recent).
+- **Re-summing what you could have folded.** A list of durations per route makes every average query $O(\text{trips})$ (@sec-ds-p5-underground).
+:::
+
+## Exercises
+
+**1. [E] With `a = [7, 3, 5, 1]` and `pos` built from `enumerate`, run `swap_remove(a, pos, 3)`. Report the returned index, the final `a` and the final `pos`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`i = pos[3] = 1`, `last = a[-1] = 1`. Slot $1$ takes the value $1$, `pos[1] = 1`, `del pos[3]`, then the tail is popped: `a == [7, 1, 5]` and `pos == {7: 0, 1: 1, 5: 2}`, and the function returns $1$. Only slot $1$ changed; nothing shifted (@sec-ds-a1).
+:::
+
+**2. [E] Now delete the tail value itself: `swap_remove([7, 1, 5], {7: 0, 1: 1, 5: 2}, 5)`. What does the correct order give, and what does `i = pos.pop(v)` first give instead?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Correct: `i = pos[5] = 2`, `last = 5`, `a[2] = 5` (no change), `pos[5] = 2`, `del pos[5]`, pop: `a == [7, 1]`, `pos == {7: 0, 1: 1}`, returns $2$. With the pop-first order, `pos.pop(5)` returns $2$ and then `pos[last] = i` *re-creates* `pos[5] = 2` for a value no longer in the array: `len(a)` is $2$ but `pos` has three keys, so a later `remove(5)` reports success and corrupts the array (@sec-ds-a1).
+:::
+
+**3. [E] After `insert(4), insert(4), insert(3)` in the duplicates variant, what is the probability that `getRandom()` returns $4$? Which slot may `remove(4)` take?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The packed list is $[4, 4, 3]$, so $\Pr[4] = 2/3$ and $\Pr[3] = 1/3$: exactly the multiplicities, because `getRandom` picks a uniform slot of a dense array. `pos[4]` is the slot set $\{0, 1\}$ and the contract says "remove one occurrence", so either slot is legal (@sec-ds-p1-randcol).
+:::
+
+**4. [E] Starting from an all-zero array of length $3$: `set(0,5)`, `snap()`$\to s_0$, `set(0,6)`, `set(0,7)`, `snap()`$\to s_1$, `set(0,9)`. List cell $0$'s `(version, value)` records, then give `get(0,0)`, `get(0,1)` and `get(1,0)`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$s_0 = 0$, $s_1 = 1$, and the running version is $2$. Cell $0$ holds $[(0,5), (1,7), (2,9)]$: the two writes under version $1$ collapsed into one record, because a snapshot sees the *state* when it is taken, not the writes in between. `get(0,0) = 5`, `get(0,1) = 7`, and `get(1,0) = 0` because cell $1$ has no records at all. (Version $2$ has no snapshot yet; `get(0, 2)` is not a legal query.) See @sec-ds-a2.
+:::
+
+**5. [E] Using A3's structure, push `4, 4, 2, 4, 2` and then pop four times. Report `top` after the pushes and the four popped values.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Levels: $L_1=[4,2]$, $L_2=[4,2]$, $L_3=[4]$ (a value joins a level when it *reaches* that count), so `top = 3`. Pops: $4$ (level $3$ empties, `top = 2`), then $2$ (the newest at count $2$), then $4$ (level $2$ empties, `top = 1`), then $2$. The sequence is $[4, 2, 4, 2]$, each pop the highest frequency with ties broken by recency (@sec-ds-a3, @sec-ds-p3-freqstack).
+:::
+
+**6. [E] Hash `keys = [1, 5, 9, 2, 6]` into $m=4$ buckets with $h(k)=k\bmod m$. Give the chains, $\alpha$ and the longest lookup scan; then redo it after a resize to $m=8$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$m=4$: `b0=[], b1=[1,5,9], b2=[2,6], b3=[]`, so $\alpha = 5/4 = 1.25$ and the worst lookup compares $3$ keys. $m=8$: `b1=[1,9], b2=[2], b5=[5], b6=[6]`, $\alpha=0.625$, worst chain $2$. Keys $5$ and $6$ changed buckets, which is why a resize must recompute $k\bmod m$ (@sec-ds-a4).
+:::
+
+**7. [E] Run the request string `LLRL1RL1` through the free-end-bounds hotel. Give the occupancy after each request and the final bounds `pl`, `pr`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`1000000000, 1100000000, 1100000001, 1110000001, 1010000001, 1010000011, 1110000011, 1010000011`. The two digits are checkouts of room $1$: the first lets the following `L` reuse room $1$, the second leaves the final state `1010000011`, the sample output. The bounds end at `pl = 1` (a free room) and `pr = 8` (an occupied room): a bound only walks when a guest arrives at its door, and the invariant only promises that rooms *outside* $[\,$`pl`$,$ `pr`$\,]$ are occupied (@sec-ds-p4-hotel).
+:::
+
+**8. [M] For the browser design, give the return value of each call in: `visit("gmail")`, `visit("maps")`, `back(1)`, `back(1)`, `forward(2)`, `visit("facebook")`, `forward(1)`, `back(2)` (home page `"homepage"`), and the live history at the end.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`visit` returns nothing; the others return `gmail, homepage, maps, facebook, gmail`. The live history is `[homepage, gmail, maps, facebook]` with the cursor on `gmail` (index $1$). `visit("facebook")` from `maps` discards nothing here (the cursor was at the end after `forward(2)`); the following `forward(1)` is clamped to the last index and returns `facebook` again (@sec-ds-p2-history).
+:::
+
+**9. [M] Using only the arrival-rank rule, answer Recent Actions for (a) $n=5$, actions $6,7,8,9,10$; (b) $n=4$, actions $5,9,9,5,7$; (c) $n=3$, actions $4,4,4$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let `firsts` be the times of the *distinct* arrivals; post $i$ dies at `firsts[n-i]` if it exists. (a) `firsts = [1,2,3,4,5]` gives `5 4 3 2 1`. (b) `firsts = [1,2,5]` ($5$ at $t=1$, $9$ at $t=2$, the repeats evict nobody, $7$ at $t=5$): post $1$ needs `firsts[3]`, which does not exist, so `-1 5 2 1`. (c) `firsts = [1]`: only the bottom post $3$ is pushed out, at $t=1$, so `-1 -1 1` (@sec-ds-p5-recent).
+:::
+
+**10. [M] In the bucket design of @sec-ds-p3-allone, apply `inc("a"), inc("b"), inc("a"), inc("c")`. Which nodes exist and what do they hold? Then apply `dec("b"), dec("a")` and name the legal answers to `getMinKey()`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+After the increments the counts are $a:2, b:1, c:1$: two nodes, count $1 = \{b, c\}$ and count $2 = \{a\}$, linked in that order. `dec("b")` deletes $b$ (its count was $1$), leaving $\{c\}$ at count $1$; `dec("a")` moves $a$ to count $1$ and empties the count-$2$ node, which is unlinked. One node remains, $\{a, c\}$ at count $1$, so `getMinKey()` and `getMaxKey()` may each return either `a` or `c`.
+:::
+
+**11. [M] A chained table starts at capacity $4$ and resizes (doubling) when $\alpha$ *exceeds* $0.75$. Insert keys $0..7$. What is the final capacity, and how many keys are re-inserted in total by the resizes?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The fourth insert makes $\alpha = 1 > 0.75$: grow to $8$, re-inserting $4$ keys. The sixth makes $6/8 = 0.75$, not *over* the threshold; the seventh makes $7/8$: grow to $16$, re-inserting $7$ keys. The eighth lands at $\alpha = 0.5$. Final capacity $16$ and $4 + 7 = 11$ re-insertions, more than the $8$ inserts themselves. Over a long run the re-insertions are a geometric sum below $2n$, so the amortised cost per insert is $O(1)$ (@sec-ds-a4, @sec-arr-vec).
+:::
+
+**12. [M] A $10^5$-slot array is cleared $500$ times, with about one write between consecutive clears. Count the cell writes made by an eager reset and by the stamp scheme. What does each scheme return for a cell that was never written?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Eager: $500 \times 10^5 = 5\cdot10^7$ writes. Stamps: $500$ clock increments plus one value and one stamp write per real update, about $10^3$ writes in total. A never-written cell reads $0$ in both: in the eager scheme because it was overwritten $500$ times, in the lazy one because its stamp ($0$) is older than the clock (@sec-ds-a5).
+:::
+
+**13. [M] A snapshot array of length $n$ receives $w$ `set` calls and $s$ `snap` calls. How much memory do the copy-every-snapshot design and the versioned design use, and what does `get` cost in each?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Copying: $s$ arrays of $n$ integers, $O(ns)$ memory; at LC 1146's limits ($5\cdot10^4$ cells and up to $5\cdot10^4$ calls) that can reach $2.5\cdot10^9$ integers, which is not a solution at all. Versioned: at most $w$ records plus $n$ seeds, $O(n + w)$, independent of $s$. `get` is $O(1)$ when copying and $O(\log k_i)$ with versions ($k_i$ records on cell $i$); `snap` is $O(n)$ versus $O(1)$ (@sec-ds-a2, @sec-ds-p2-snapshot).
+:::
+
+**14. [M] Prove that in the frequency-level structure `top` decreases by at most one per `pop`, and never needs a search.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A pop changes only the count of the returned value $x$, from $f = \text{top}$ to $f-1$. No other count moves, so the levels above `top` stay empty. If `levels[top]` still has members, `top` is unchanged. Otherwise the new maximum is $\text{top}-1$, and that level is non-empty because $x$ itself was pushed onto it when it climbed from $f-1$ to $f$, and has not left it (a value leaves only its *highest* level when popped). One `if` suffices (@sec-ds-a3).
+:::
+
+**15. [M] In @sec-ds-p5-underground, three trips finish on the route `A -> B`. How many numbers does the structure keep for that route, and what does `checkOut` pop? What would storing durations cost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Two numbers, `(sum, count)`, so `getAverageTime` is one division whatever the number of trips. `checkOut` pops the single entry `open[id] = (startStation, t_in)`; the pop is what keeps finished travellers from lingering. Storing the durations themselves costs $O(\text{trips})$ memory and $O(\text{trips})$ per average query.
+:::
+
+**16. [M] Insert $3, 11, 19, 27$ into an open-addressing table of size $8$ with $h(k) = k \bmod 8$ and linear probing. Delete $11$ and $19$ with tombstones, then insert $35$. Where does $35$ go, and how many cells does `contains(27)` inspect?**
+
+::: {.callout-note collapse="true" title="Solution"}
+All four keys have home $3$: they occupy cells $3, 4, 5, 6$. After the deletions, cells $4$ and $5$ are tombstones. Inserting $35$ (home $3$) walks from cell $3$, remembers the first tombstone (cell $4$), continues to make sure $35$ is not already stored, stops at the empty cell $7$, and writes $35$ into cell $4$. `contains(27)` inspects cells $3, 4, 5, 6$: four cells, two of them tombstones, which is why tombstones count toward the load (@sec-ds-a4, @sec-ds-p4-hashset).
+:::
+
+**17. [M] Run `Bitset(4)` through `fix(0), flip(), fix(1), flip(), unfix(2), count(), toString()` in the lazy-flag design, giving `stored`, `flipped` and `ones` after every call.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Start `stored=0000, flipped=0, ones=0`. `fix(0)`: true bit $0$ is $0$, write `1^0`: `1000`, ones $1$. `flip()`: `flipped=1`, ones $3$ (true bits `0111`). `fix(1)`: true bit is `0^1 = 1`, nothing changes. `flip()`: `flipped=0`, ones $1$ (true `1000`). `unfix(2)`: true bit $0$ already, nothing. `count() = 1`, `toString() = "1000"`. The two flips touched no stored bit (@sec-ds-p5-bitset).
+:::
+
+**18. [H] Suppose @sec-ds-p1-randset must also list its elements in insertion order. Is swap-with-last still usable, and what are two honest designs?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Not on the sampled array alone: swap-with-last's licence is "slot order means nothing", and an order requirement revokes it. Design 1: keep the packed array for sampling and, separately, an insertion-ordered structure that supports deletion, such as a doubly linked list with a `value -> node` map (or Python's insertion-ordered `dict`); deletions update both in $O(1)$. Design 2: allow holes, so the array is in insertion order with tombstones, compacted when half the slots are dead; sampling then needs rejection (draw again when you hit a tombstone, expected at most $2$ draws while at most half the slots are dead). The $O(1)$ delete is bought with a licence, not given (@sec-ds-a1).
+:::
+
+**19. [H] Replace @sec-ds-p3-allone's linked buckets with one ordered map `count -> set of keys` (a balanced search tree). What does each method cost, and which argument for $O(1)$ is lost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+`inc` and `dec` move a key from count $c$ to $c \pm 1$: two ordered-map operations plus a deletion when a set empties, $O(\log L)$ for $L$ distinct counts; `getMinKey`/`getMaxKey` read the first or last entry, $O(\log L)$ (or $O(1)$ with cached iterators). Correct and simpler, but no longer $O(1)$. What is lost is *adjacency*: because counts change by $\pm1$, the destination bucket is always next to the current one, and a linked list turns "find the neighbour" into a pointer hop instead of a search.
+:::
+
+**20. [H] An adversary feeds your chained table the keys $r, r+m, r+2m, \ldots$ for your current capacity $m$. What happens, and give three independent defences.**
+
+::: {.callout-note collapse="true" title="Solution"}
+All keys share residue $r$, so one bucket holds all $n$ keys and every operation is a linear scan: $\Theta(n^2)$ for $n$ inserts (@sec-hash-anti builds such tests against `std::unordered_map`). Defences: (i) a hash the attacker cannot predict, such as a strong mixing function with a seed chosen at run time (@sec-hash-anti); (ii) store long chains as balanced trees, so a crowded bucket costs $O(\log n)$; Java's `HashMap` does this since Java 8, while GCC's `std::unordered_map` does not; (iii) avoid hashing when keys are bounded: sort and compress the keys, or use direct addressing. Resizing alone does not help, because the attacker targets the new $m$.
+:::
+
+**21. [H] Prove that the sparse-set membership test `sparse[k] < n and dense[sparse[k]] == k` is correct even though `sparse` and `dense` start full of garbage.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Invariant: `dense[0..n-1]` holds the members, each once, and `sparse[dense[j]] == j` for every $j < n$. `add`, `remove` (swap-with-last) and `clear` all preserve it. If $k$ is a member at position $j$, then `sparse[k] = j < n` and `dense[j] = k`: the test says yes. If $k$ is not a member and `sparse[k]` is garbage $g$: either $g \ge n$ and the test says no, or $g < n$, and then `dense[g]` is a member $k' \ne k$ (because $k$ is not a member), so the test says no. No cell outside `dense[0..n-1]` and `sparse` of members is ever trusted (@sec-ds-a5-sparse).
+:::
+
+**22. [H] A dynamic array doubles when full. Give a rule for shrinking that keeps both `append` and `pop` $O(1)$ amortised, and prove it.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Halve the capacity when the size drops to a quarter of it. Right after any resize, the array is exactly half full (size $c/2$ of capacity $c$). The next resize is a growth (size reaches $c$) or a shrink (size drops to $c/4$), so at least $c/4$ operations happen in between, while the resize copies at most $c$ elements. Charging $4$ copies to each of those operations pays for it, so every operation is $O(1)$ amortised. Halving at half full fails: right after a growth to $2c$ the size is $c+1$, one `pop` brings it to $c = 2c/2$ and triggers a shrink, so a push/pop pair copies $\Theta(c)$ elements (@sec-ds-a1-grow).
+:::
+
+## Interview questions
+
+**1. Design a set with `insert`, `remove` and `getRandom`, all $O(1)$. Why does neither a plain hash set nor a plain list do it, and what does the `value -> index` map buy?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A list gives $O(1)$ sampling and append but $O(n)$ removal from the middle (the shift of @sec-arr-vec) and $O(n)$ membership. A hash set gives $O(1)$ insert and remove but no index to sample uniformly from. Combine them: a *packed* array (so `a[randrange(len(a))]` is uniform) plus `pos` (so "find the doomed slot" is a lookup); removal is one copy from the tail, one map repair and one pop (@sec-ds-a1, @sec-ds-p1-randset). State the invariant: the live elements are exactly `a[0..n-1]`, and `pos` records each one's slot.
+:::
+
+**2. Now duplicates are allowed. What changes in the map, and what does "remove any occurrence" let you keep?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`pos` becomes `value -> set of slots`; `insert` adds the new last slot, `remove` takes an arbitrary member of the set, moves the tail into it, re-points the tail value's set, and deletes the key when the set empties. Because the array stays dense, sampling probabilities are automatically the multiplicities. "Any occurrence" is the licence that keeps it $O(1)$; "remove the oldest copy" would need an ordered structure per value (@sec-ds-p1-randcol).
+:::
+
+**3. How would you add `deleteRandom()` in $O(1)$ to the same structure?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`i = randrange(len(a)); v = a[i]; remove(v)`. Do not `del a[i]`: that is the $O(n)$ shift and it breaks `pos` for the whole tail. Reusing `remove` costs nothing extra, and every element is deleted with probability $1/n$ (@sec-ds-a1).
+:::
+
+**4. Snapshot array: what are three designs, and what does each cost?**
+
+::: {.callout-note collapse="true" title="Answer"}
+(i) Copy on every `snap()`: $O(n)$ per snapshot and $O(ns)$ memory, up to $2.5\cdot10^9$ integers at LC 1146's limits. (ii) Per-cell `(version, value)` lists with a linear walk: $O(1)$ `snap` and `set`, $O(k_i)$ `get`, $O(n + w)$ memory. (iii) The same lists with `bisect_right`: $O(\log k_i)$ `get`. Two details decide correctness: `snap()` returns the version before the increment, and a second write under the same version overwrites rather than appends (@sec-ds-a2, @sec-ds-p2-snapshot).
+:::
+
+**5. Browser history: one array and a cursor, or two stacks? Why does `visit` destroy the forward branch?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The array version makes `back`/`forward` $O(1)$ clamps, `max(0, i - k)` and `min(end - 1, i + k)`, and `visit` writes at `i + 1` and moves the end marker. Two stacks avoid index arithmetic but move one page per step, $O(\text{steps})$. `visit` discards the forward pages because the history is one line: a new page cannot coexist with the future you abandoned. Keeping branches turns the line into a tree with a parent pointer per page (@sec-ds-p2-history).
+:::
+
+**6. FreqStack: why does "a stack per frequency" break ties by recency for free? How far can `top` move on a pop?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A value is pushed onto `levels[f]` exactly when it *reaches* count $f$, so within a level the order is the order in which values reached it: the top is the most recent. On a pop only the returned value's count changes, so either its level still has members (the cursor stays) or it emptied and the answer is $\text{top}-1$, which is non-empty because the popped value is on it. One step, never a search (@sec-ds-a3, @sec-ds-p3-freqstack, exercise 14).
+:::
+
+**7. AllOne needs `getMinKey`/`getMaxKey` without removing anything. Why linked buckets rather than a sorted container, and what are the sentinels for?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Counts change by $\pm 1$, so a key's new bucket is always adjacent to its old one: a doubly linked list of buckets ordered by count turns `inc`/`dec` into "move the key to the neighbouring node, creating it if the neighbour has another count, unlink the old node if it emptied". `getMin`/`getMax` read `head.next`/`tail.prev`. The sentinels remove every special case for the first and last node. A sorted map is correct but $O(\log L)$ per call (@sec-ds-p3-allone, exercise 19).
+:::
+
+**8. How do you design a hash map from scratch, covering buckets, load factor, resizing and adversarial input?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`table[h(k)]` holds a chain; `get` walks it, `put` updates or appends, `remove` unlinks. The expected chain length is $\alpha = n/m$, so keep $\alpha \le 0.75$ by doubling $m$ and **re-inserting every key**, since $k \bmod m$ changes; the doubling makes the resizes $O(1)$ amortised. With a predictable hash, an attacker sends keys with one residue and makes one chain of length $n$; defend with a seeded mixing hash or tree-shaped chains (@sec-ds-a4, @sec-ds-p4-hashmap, @sec-hash-anti).
+:::
+
+**9. LRU cache, AllOne, FreqStack: is this one pattern three times?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Largely, yes: each keeps a `key -> position` map into an *ordered* collection whose order changes by one step per operation. LRU orders keys by recency (a doubly linked list, evict the tail; @sec-lang-p1-lru); AllOne orders buckets by count; FreqStack orders values within each frequency level by push time and tracks the top level with a scalar. The LFU cache (LC 460) combines two of them: frequency levels whose members are kept in LRU order.
+:::
+
+**10. Ten thousand slots are cleared thousands of times, with one write between clears. How do you design it, and what is the design bad at?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`val[]` and `stamp[]` plus a global clock: a write sets `stamp[i] = clock`, a clear is `clock += 1`, a read is `stamp[i] == clock ? val[i] : default`. Bad at: (a) listing the live cells, which still needs a pass over all stamps (a dirty list or a sparse set fixes that); (b) memory, since stale values are never freed; (c) a clock that wraps around, which a 64-bit counter makes impossible in practice (@sec-ds-a5, @sec-ds-a5-sparse).
+:::
+
+**11. Underground system answers averages in $O(1)$. Now the interviewer asks for the median, then for the average of only the last $k$ trips. What changes?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`(sum, count)` is exactly enough for a mean and not enough for anything order-based. Median of all trips: keep a per-route pair of heaps (or a sorted multiset), $O(\log t)$ per check-out. Average of the last $k$: the structure must *forget*, so keep a per-route queue of the last $k$ durations and a running sum that adds the new duration and subtracts the one that leaves. A fold works only for statistics that can be updated from the summary plus one new item (@sec-ds-p5-underground).
+:::
+
+**12. Recent Actions: why is the arrival-rank rule correct, and which constraint makes it true?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Every action's post id is $> n$, so a new post is always placed above the surviving initial posts, and the bottom of the field is always the highest-numbered initial post still present. Hence the $k$-th distinct arrival evicts initial post $n-k+1$, and a repeat evicts nobody. Post $i$'s answer is `firsts[n-i]` if at least $n-i+1$ distinct ids arrived, else $-1$: $O(n + m)$. Drop the constraint $p_t > n$ and an initial post can be moved back to the top, so the rule breaks (@sec-ds-p5-recent).
+:::
+
+**13. Your `getRandom` uses `random.randrange(len(a))`. Why is the density of `a` essential?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Uniform over slots is uniform over elements only when every slot holds a live element: no gaps, one slot per copy, so $\Pr[v] = \text{count}(v)/n$. The same invariant makes `len(a)` the size and makes swap-with-last legal. A design with holes (tombstones) must either reject and redraw, which is cheap only while few slots are dead, or use a counting structure to find the $r$-th live slot, $O(\log n)$ (@sec-ds-a1).
+:::
+
+**14. Which guarantees in this chapter are worst-case and which are expected or amortised?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Worst-case $O(1)$: array reads and writes, `snap()` as a counter bump, the frequency cursor, linked-bucket hops once the node is found, bit arrays and direct addressing, a clock or flag update. Expected: anything that goes through a hash map (`pos`, `at`, buckets, probes), which depends on the hash spreading the keys (@sec-hash-anti). Amortised: appends to a dynamic array, rehashing, rollback, the dirty-list reset. Two honest caveats: a single resize is $\Theta(n)$, and the hotel's bounds are not $O(1)$ amortised at all when checkouts happen deep inside an occupied block (@sec-ds-p4-hotel).
+:::
+
+**15. Chaining or open addressing: which would you pick, and why?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Chaining is simpler, degrades gracefully at high load factors and makes deletion trivial; it pays a pointer per entry and a cache miss per chain step. Open addressing stores keys in the array itself, so probes walk adjacent memory and there are no pointers; it needs a lower load factor (about $1/2$ for linear probing), tombstones for deletion, and a good hash, because linear probing amplifies clustering. For small integer keys, neither: use direct addressing (@sec-ds-a4, @sec-ds-p4-hashset).
+:::
+
+**16. How do you support `setAll(x)`, `set(i, v)` and `get(i)` in $O(1)$ each?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Keep `base`, a clock `epoch`, and per cell `val[i]`, `stamp[i]`. `setAll(x)`: `base = x; epoch += 1`. `set(i, v)`: `val[i] = v; stamp[i] = epoch`. `get(i)`: `val[i] if stamp[i] == epoch else base`. The invariant is "a cell whose stamp is current holds its own value; any other cell holds `base`". For "add to one cell" the cell must first be refreshed to `base` (@sec-ds-a5, @sec-ds-p5-assign).
+:::
+
+**17. How can you clear a set of integers in $O(1)$ without initialising any memory, and still list its members in $O(\text{size})$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The sparse set: `dense[0..n-1]` holds the members, `sparse[k]` is the position of $k$ in `dense`, and membership requires both `sparse[k] < n` and `dense[sparse[k]] == k`, so garbage in either array cannot produce a false positive. `clear()` sets `n = 0`; deletion is swap-with-last on `dense`; iteration walks `dense[0..n-1]` (@sec-ds-a5-sparse, exercise 21).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Swap-with-last:** `i = pos[v]`; `a[i] = a[-1]`; `pos[a[i]] = i`; `del pos[v]`; `a.pop()`. Sample with `a[randrange(len(a))]`; duplicates make `pos` a `value -> set of slots`. Shrink a dynamic array at a quarter full, not half (@sec-ds-a1).
+- **$O(1)$ snapshot:** per-cell `(version, value)` records; `snap()` returns `version++`; a write under the current version overwrites; `get(i, s)` is `bisect_right(versions, s) - 1`. To undo instead, log `(index, old value)` and pop back to a checkpoint (@sec-ds-a2).
+- **Counter of counters:** `cnt[f]` for "anyone at $f$?", `levels[f]` stacks plus a `top` cursor for "pop the most frequent", count buckets in a linked list for "name the min/max key" (@sec-ds-a3).
+- **Array-backed hashing:** direct address or bit array for small keys; chaining with $\alpha = n/m \le 0.75$ and re-insert-everything resizes; open addressing with tombstones and a rebuild at half full (@sec-ds-a4).
+- **Lazy reset:** `clock += 1` instead of a wipe and `stamp[i] == clock` instead of a scan; `base` for "assign all", a flag for "flip all", a dirty list or a sparse set to also list the live cells; fold aggregates into `(sum, count)` (@sec-ds-a5).
+:::
+
+- Every structure in this chapter is a packed array plus one index, and the design work is choosing that index: `value -> slot` (@sec-ds-p1-randset), `cell -> versions` (@sec-ds-p2-snapshot), `count -> values` (@sec-ds-p3-freqstack), `key -> bucket` (@sec-ds-p4-hashmap), `cell -> stamp` (@sec-ds-p5-assign).
+- $O(1)$ is bought with a licence: no caller reads the order (swap-with-last), a snapshot sees only the last write before it (versions), any extreme key will do (count buckets), keys spread evenly (hashing), the reset can wait until a cell is touched (stamps). Name the licence before writing the code.
+- Deferring work beats doing it: a snapshot is a tag, a reset is a clock tick, a global flip is a flag, an average is a fold. The deferred cost comes back as one comparison per touched cell.
+- Counts that change by $\pm 1$ move between *adjacent* levels; that adjacency is what makes a single cursor or a linked list of levels enough.
+- A hash table is an array; its cost is the load factor, and a resize must recompute every key's home. Deletion in open addressing needs tombstones.
+- Amortised is not an apology: a doubling, a rehash or a rollback is $\Theta(n)$ once and $O(1)$ per operation in aggregate. Say which one an interviewer is asking about.
+- Write every design as a class with its invariant, check the invariant after each operation in a stress test, and compare against a naive model class that implements the statement literally.
+
+## Practice ladder
+
+Ordered by concept, following the five patterns. Each solved problem above has at least one practice problem here.
+
+::: {.practice}
+- [LC 641 · Design Circular Deque](https://leetcode.com/problems/design-circular-deque/){difficulty="Medium"} — a fixed array with two wrapping indices: the "array plus index" discipline with the half-open ranges of @sec-arr-ranges.
+- [LC 710 · Random Pick with Blacklist](https://leetcode.com/problems/random-pick-with-blacklist/){difficulty="Hard"} — remap blacklisted values in the sampled prefix to free values in the tail: swap-with-last on a virtual array (@sec-ds-p1-randset).
+- [LC 519 · Random Flip Matrix](https://leetcode.com/problems/random-flip-matrix/){difficulty="Medium"} — draw from a shrinking range without storing it; a dictionary records where each drawn index was swapped (@sec-ds-p1-randcol).
+- [LC 2034 · Stock Price Fluctuation](https://leetcode.com/problems/stock-price-fluctuation/){difficulty="Medium"} — records keyed by timestamp that can be corrected later (@sec-ds-p2-snapshot).
+- [LC 2296 · Design a Text Editor](https://leetcode.com/problems/design-a-text-editor/){difficulty="Hard"} — a cursor moving over text, the two-stack form of @sec-ds-p2-history.
+- [LC 1224 · Maximum Equal Frequency](https://leetcode.com/problems/maximum-equal-frequency/){difficulty="Hard"} — `freq` plus `cnt` over a growing prefix (@sec-ds-p3-freqtracker).
+- [CF 1278A · Shuffle Hashing](https://codeforces.com/problemset/problem/1278/A){rating="1000"} — compare letter-frequency counters over windows; fluency with count arrays (@sec-ds-a3).
+- [LC 460 · LFU Cache](https://leetcode.com/problems/lfu-cache/){difficulty="Hard"} — frequency levels whose members are kept in LRU order (@sec-ds-p3-freqstack).
+- [LC 2349 · Design a Number Container System](https://leetcode.com/problems/design-a-number-container-system/){difficulty="Medium"} — two-way bookkeeping between an index map and ordered groups (@sec-ds-p3-allone).
+- [CF 447A · DZY Loves Hash](https://codeforces.com/problemset/problem/447/A){rating="800"} — place keys at $k \bmod p$ and report the first collision: direct addressing of the hash values (@sec-ds-p4-hotel).
+- [CF 4C · Registration system](https://codeforces.com/problemset/problem/4/C){rating="1300"} — a name-to-count map; implement it with your own chained table (@sec-ds-p4-hashmap).
+- [LC 217 · Contains Duplicate](https://leetcode.com/problems/contains-duplicate/){difficulty="Easy"} — answer with your own open-addressing set (@sec-ds-p4-hashset).
+- [LC 1622 · Fancy Sequence](https://leetcode.com/problems/fancy-sequence/){difficulty="Hard"} — global "add to all" and "multiply all" as one lazy affine map (@sec-ds-p5-assign).
+- [LC 1381 · Design a Stack With Increment Operation](https://leetcode.com/problems/design-a-stack-with-increment-operation/){difficulty="Medium"} — a lazy increment attached to a stack position (@sec-ds-p5-bitset).
+- [LC 1352 · Product of the Last K Numbers](https://leetcode.com/problems/product-of-the-last-k-numbers/){difficulty="Medium"} — prefix products where a zero resets the whole list in $O(1)$ (@sec-ds-a5).
+- [CF 500C · New Year Book Reading](https://codeforces.com/problemset/problem/500/C){rating="1600"} — a move-to-front stack whose initial order is fixed by the first reads (@sec-ds-p5-recent).
+- [LC 1797 · Design Authentication Manager](https://leetcode.com/problems/design-authentication-manager/){difficulty="Medium"} — expiry stamps compared with the current time instead of a sweep (@sec-ds-p5-underground).
+- [LC 307 · Range Sum Query - Mutable](https://leetcode.com/problems/range-sum-query-mutable/){difficulty="Medium"} — the next step: a design where both updates and range queries must be fast, which needs blocks or a tree.
+- [LC 355 · Design Twitter](https://leetcode.com/problems/design-twitter/){difficulty="Medium"} — per-user feeds, follows and a merged query: several of this chapter's tools at once.
+:::
+
+## Further reading
+
+- [CLRS — Introduction to Algorithms](https://en.wikipedia.org/wiki/Introduction_to_Algorithms) — the standard textbook (4th edition): chapter 11 covers direct-address tables, chaining and open addressing; chapter 16 analyses dynamic tables that grow and shrink, the argument behind @sec-ds-a1-grow.
+- [Russ Cox — Using Uninitialized Memory for Fun and Profit](https://research.swtch.com/sparse) — a short, clear account of the Briggs–Torczon sparse set of @sec-ds-a5-sparse.
+- [Wikipedia — Hash table](https://en.wikipedia.org/wiki/Hash_table) — chaining versus open addressing, load factors and resizing strategies.
+- [Wikipedia — Linear probing](https://en.wikipedia.org/wiki/Linear_probing) — the probing scheme of @sec-ds-p4-hashset, its clustering behaviour and deletion.
+- [Wikipedia — Amortized analysis](https://en.wikipedia.org/wiki/Amortized_analysis) — aggregate, accounting and potential methods, applied to dynamic arrays.
+- [Wikipedia — Persistent data structure](https://en.wikipedia.org/wiki/Persistent_data_structure) — partial and full persistence; the per-cell version lists of @sec-ds-a2 are the "fat node" method.
+- [cppreference — std::unordered_map](https://en.cppreference.com/w/cpp/container/unordered_map) — a production chained table: `bucket_count`, `max_load_factor`, `rehash` and iterator invalidation.
+- [Jeff Erickson — Algorithms](https://jeffe.cs.illinois.edu/teaching/algorithms/) — free textbook and lecture notes, including hashing.

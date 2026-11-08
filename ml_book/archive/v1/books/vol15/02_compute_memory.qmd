@@ -1,0 +1,78 @@
+---
+title: "Compute, memory, and batching"
+---
+
+# Compute, memory, and batching
+
+**Reference question.** Which resource is binding: arithmetic, memory movement, or latency?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Arithmetic | FLOPs or integer ops. A matmul's count is a function of the shapes. |
+| Memory | Bytes moved. A model can be slow because the weights do not fit in cache or RAM, not because the FLOP count is high. |
+| Batch | Larger batches improve arithmetic intensity and worsen the latency of the last example in the batch. |
+| Latency | The time until one decision. Throughput is decisions per second. They trade off. |
+| Measure | A timer around the actual call, with a warmup, beats a FLOP formula you did not check. |
+
+## Theory
+
+Systems problems in this series start with a budget. A reference model that misses the budget is not "more accurate" in the sense the product means. The earlier volumes produced a function. This chapter asks what it costs to evaluate it.
+
+Arithmetic intensity is operations per byte moved. Small batches and memory-heavy layers are often bandwidth bound. A formula that counts only FLOPs will rank a convolution and an attention block incorrectly if one of them is waiting on memory. Attention's quadratic score matrix, from Volume 12, is a memory object as well as a FLOP object. At long $T$ it may not fit.
+
+Batching raises throughput and delays the first response until the batch is full or a timeout fires. Interactive systems need a timeout. Offline scoring can wait. The serving card says which one you are. A benchmark that uses batch 128 does not describe a batch-1 robot or a batch-1 reviewer tool.
+
+## Derivation
+
+A dense layer $y = x W$ with $x \in \mathbb{R}^{b \times d}$ and $W \in \mathbb{R}^{d \times m}$ performs about $2 b d m$ FLOPs. It reads $bd + dm$ numbers and writes $bm$ numbers. Intensity is roughly $2bdm / (bd + dm + bm)$ operations per element moved, up to the constant for the dtype size. When $b$ is small and $d, m$ are large, the $dm$ term can dominate: you reload the weights for a few outputs. Increasing $b$ amortizes the weight read. The latency of an example that arrived just after a batch closed includes the wait for the next batch. That wait is not in the FLOP count.
+
+## Code
+
+```python
+def dense_flops(batch, d_in, d_out):
+    return 2 * batch * d_in * d_out
+
+def attention_score_elements(batch, heads, seq, dim):
+    # Elements in the score tensor Q K^T, not a full systems model.
+    return batch * heads * seq * seq
+```
+
+## Experiment
+
+**Hypothesis.** Predicted dense FLOPs scale linearly in batch size, while a measured NumPy matmul on a small layer may not, because of overhead. Attention score elements grow quadratically in sequence length.
+
+**Protocol.** Time `X @ W` for batches 1, 16, and 128 on a layer of shape $(256, 256)$, with warmup. Compute `attention_score_elements` at sequence lengths 128 and 1024.
+
+**Metric.** Measured time per example and the quadratic ratio $(1024/128)^2 = 64$ for the score elements.
+
+**Decision rule.** The FLOP prediction must scale exactly in the formula. The timer may not. The note should say "overhead" rather than "the formula is false" when the constant term dominates. The quadratic ratio must be exact in the element count.
+
+## Project
+
+**Deliverable.** A cost card for one model you trained: parameter count, a FLOP or element estimate for one forward pass, a measured latency at the batch you will deploy, and a sentence on whether you are latency bound or throughput bound.
+
+**Constraints.** The batch size on the card is the deployment batch, not the largest batch that looked good.
+
+**Rubric.** A reader can see the quadratic attention term if the model has one, or a statement that it does not.
+
+## Depth tracks
+
+**Beginner.** Compute dense FLOPs at two batch sizes.
+
+**University.** Time the matmul and write the overhead caveat.
+
+**Research.** Explain, without a vendor number you cannot measure, the difference between a weight that lives in RAM and a weight that must be read from disk for every request. Name the artifact that would make the second case visible: time that scales with cold start.
+
+## Failure modes
+
+- A throughput benchmark used as a latency promise.
+- Ignoring dtype: float64 and int8 are not the same bytes.
+- An attention model designed at $T = 128$ and deployed at $T = 4096$ without a new measurement.
+
+## See also
+
+CS249r Volume I for hardware-level intensity and Volume II for scale. Volume 12 for the attention definition.

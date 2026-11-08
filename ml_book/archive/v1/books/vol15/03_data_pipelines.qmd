@@ -1,0 +1,74 @@
+---
+title: "Data pipelines"
+---
+
+# Data pipelines
+
+**Reference question.** What does a pipeline guarantee about time, schema, and backfill?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Snapshot | Training reads a named snapshot, not whatever happens to be in the table now. |
+| Schema | A column addition, a unit change, or a null policy is a contract change with a new hash. |
+| Backfill | Recomputing a feature with today's code over yesterday's keys. It can create a feature the past decision did not have. |
+| Late labels | A label that arrives after the decision may be used for a later training snapshot and must not be used as a feature. |
+| Test | A golden batch with expected features, checked in the pipeline, not only in a notebook. |
+
+## Theory
+
+Pipelines fail by being helpful. A backfill that uses a better definition of a feature improves the training matrix and silently diverges from what serving computed last year. A snapshot freezes the bytes you trained on. A new definition is a new feature and a new model, even if the column name is unchanged.
+
+Late labels are the supervised version of leakage. If the decision at time $t$ could not have seen the label, the label is a target, not an input. Aggregates that include events after $t$ are also inputs the decision did not have. Point-in-time joins are the implementation. A random row from a feature store is not a point-in-time join.
+
+The golden batch is the known case for data. It is small, hand-checked, and run whenever the pipeline code changes. A distributional monitor, later in this volume, catches drift. It does not catch a wrong join that has been wrong since the first day, if the wrongness is stable.
+
+## Derivation
+
+Let a feature at decision time $t$ be $\phi_t = \Phi(\mathrm{events}_{\le t})$. A backfill that computes $\Phi'(\mathrm{events}_{\le T})$ for $T > t$ using a new function $\Phi'$ is a different random variable. Training on $\Phi'$ and serving $\Phi$ is the unit-mismatch bug with a schema. The equality test is the same: compute both on the golden keys and compare. A null policy is part of $\Phi$. Filling nulls with zero in training and dropping nulls in serving changes the population as well as the number.
+
+## Code
+
+```python
+def point_in_time(events, decision_time):
+    return [e for e in events if e["time"] <= decision_time]
+```
+
+## Experiment
+
+**Hypothesis.** A feature equal to the count of events up to $t$ differs from a count that includes a late event, and a golden batch catches the difference.
+
+**Protocol.** Three events, one after the decision. Compare `point_in_time` counts with a full count.
+
+**Metric.** The two counts.
+
+**Decision rule.** They must differ. A pipeline test that uses the full count as the expected value of the decision-time feature encodes the bug as the specification. The expected value must be the decision-time count.
+
+## Project
+
+**Deliverable.** A tiny pipeline: raw events, a point-in-time feature, a snapshot id, and a golden test. Include one backfill that you refuse to mix into the old snapshot.
+
+**Constraints.** The snapshot id changes when the feature code changes.
+
+**Rubric.** The golden test fails if a future event leaks into the feature.
+
+## Depth tracks
+
+**Beginner.** Run the three-event example by hand.
+
+**University.** Add the golden test and the snapshot id.
+
+**Research.** Describe a training-serving skew that comes from a library default, such as a categorical encoder's handling of unseen levels, and the golden row that would catch it.
+
+## Failure modes
+
+- Training on a live view that moves during the job.
+- A backfill that overwrites the only copy of the old feature.
+- Nulls filled differently in two languages.
+
+## See also
+
+Volume 03 for contracts. Volume 07 for leakage. CS249r for production data systems at scale.

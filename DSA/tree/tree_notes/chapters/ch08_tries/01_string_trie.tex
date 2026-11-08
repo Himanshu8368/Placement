@@ -1,0 +1,483 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  11.1  The Trie of Strings                    sec:c08-triebasics
+%  Exports: def:c08-trie  thm:c08-searchcost  def:c08-nodelayout
+%           lst:c08-trie-ops  ex:c08-trie-run
+%           prob:c08-implement  lst:c08-implement-soln   (practices: LC 677, LC 648)
+%           (fig:c08-wordstrie, fig:c08-triebasics are defined in 00_opener.tex)
+% =====================================================================
+\section{The Trie of Strings}\label{sec:c08-triebasics}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item In a BST, one comparison at a node costs up to $L$ character reads and sends you left or right.
+        What if a node could instead hold \emph{one edge per possible next character}? (then a single
+        character decides the edge, no comparison chain -- \chref{c05})
+  \item A hash map answers ``is key $x$ present?'' in $\bigO{1}$ amortised. What does it \emph{cannot}
+        answer quickly? (``list all keys starting with \texttt{ca}'', or ``what is the next key in
+        order?'' -- no prefix or order structure)
+  \item DFS visits a tree by following child pointers; a tree's height bounds the recursion depth. What
+        is the ``height'' of a tree whose levels are the positions inside a key? (the key length $L$)
+  \item Chapter~10 stored a heap as ``an array plus index arithmetic,'' no pointers. What does a trie
+        store in a node instead of a value? (a small symbol-to-child table + one end flag)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Stop storing keys \emph{at} nodes and start storing them \emph{in the edges}. A \term{trie} (prefix tree)
+encodes a set of strings so that the letters of a key are read one per level, from the root down: the
+word \texttt{care} lives on the path from the root via $c\!\to\!a\!\to\!r\!\to\!e$. Two words that share a prefix share that many top edges, which is the entire source of
+the trie's power and its frugality -- \texttt{car}, \texttt{care}, \texttt{cares} together cost only
+five nodes, not twelve. To mark where a word actually ends (as opposed to merely being a prefix of
+another) each node keeps a single boolean \term{end-of-word} flag (\figref{c08-triebasics},
+\defref{c08-trie}).
+
+Once the key is a path, searching is walking: feed the query's characters one at a time and follow (or
+fail to follow) the matching edge. You never compare two stored keys, and you never branch on the
+\emph{number} of stored keys -- the depth you traverse is the query's own length $L$, so \code{search}
+and \code{startsWith} are both $\bigO{L}$ regardless of $N$ (\thmref{c08-searchcost}). That is the
+rebuilt promise this chapter keeps buying: \textbf{cost in the length of what you ask, not in the size
+of what you stored}. We fix the node, prove the cost, hand-write the three operations, and spend them
+on LeetCode~208 -- the ``just build the structure'' design task that every later section leans on.
+\textbf{Prerequisites.} Trees and DFS from Chapters~1--4; the BST (\chref{c05}) as the $\bigO{L\log N}$
+foil; a hash map as the ``fast but prefix-blind'' foil. No bit arithmetic yet -- that is \secref{c08-binary}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item draw a trie for a small word set, and state what an end-of-word flag adds over raw paths;
+        \hfill\lv{2}--\lv{3}
+  \item write \code{insert}, \code{search}, \code{startsWith} cold and prove each is $\bigO{L}$
+        independent of $N$; \hfill\lv{3}
+  \item choose between a fixed \code{child[26]} array, a \code{map}, and a sorted edge list using the
+        memory/speed trade-off in \defref{c08-nodelayout}; \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- a key you read a symbol at a time]
+\reckey{you are storing many \emph{strings} (or fixed-length bit patterns) and the operations read a key
+\emph{prefix by prefix} -- membership, ``does any key start with $p$'', ``enumerate keys under $p$'' --
+rather than comparing whole keys or asking for their order.}
+\recuse{
+  \item ``implement a dictionary / autocomplete / contact suggestions'' -- the walk of
+        \coderef{c08-trie-ops}, \probref{c08-implement};
+  \item ``replace each word by its shortest dictionary prefix'' -- first end-node on the walk
+        (the Replace Words practice, LC~648);
+  \item ``sum values of all keys with a given prefix'' -- walk to the prefix, then count the subtree
+        (the Map Sum Pairs practice, LC~677), and every application in \secref{c08-applications}.
+}
+\recnotuse{
+  \item only \emph{exact} membership, no prefix ever -- a hash set is simpler and faster; a trie's
+        extra machinery would be dead weight;
+  \item you need predecessor/successor or ``the $k$-th key in sorted order'' -- that is a total order,
+        the BST / balanced trees of Chapters~5--6 (\chref{c05}, \chref{c06});
+  \item you must find dictionary words as \emph{substrings} of a big text -- that is Aho--Corasick,
+        previewed in \secref{c08-variants}, not the plain trie of this section.
+}
+One-line test: \emph{can I answer the query by reading the key one character at a time, without ever
+comparing two stored keys? Then it is a trie walk, and $\bigO{L}$ is the price.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Look at the running word set $\mathcal{W}=\{\text{car},\text{cares},\text{care},\text{cat},\text{dog}\}$
+drawn as \figref{c08-wordstrie}. Read it like a choose-your-own-adventure: start at the blank root, and to
+insert \texttt{care} you take the $c$ edge, then $a$, then $r$, then $e$, painting nodes as you go and
+flagging the final $e$ green. Now insert \texttt{car}: you retrace $c$-$a$-$r$ -- those nodes already
+exist -- and just flag the $r$ green too. That is the whole trick: \emph{shared prefixes are stored once}.
+Adding \texttt{cares} costs only two fresh nodes ($e$ exists, so just $s$), and \texttt{cat} branches off
+the existing $a$ with a single new $t$.
+
+Because information sits in the edges, the shape of a trie looks nothing like a BST. There is no
+``smaller to the left.'' A node's children are indexed by \emph{character}, not by value, and can be
+numerous ($26$ in the worst case, or just $2$ once we switch to bits in \secref{c08-binary}). Searching
+\texttt{care} never asks ``care $<$ node?''; it asks ``is there a $c$ edge? a following $a$ edge?'' and
+stops after $4$ steps whether the dictionary held $5$ words or $5$ million. That invariance -- depth
+$=$ key length, not key count -- is the difference between $\bigO{L}$ and $\bigO{L\log N}$, and it is a
+fact about the \emph{layout}, not a lucky constant.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Trie node and the trie of a key set}{c08-trie}
+A \term{trie} for a set of strings over an alphabet $\Sigma$ is a rooted tree, one node per distinct
+prefix, in which each edge is labelled by a single symbol $c\in\Sigma$ and a node stores a table
+$\mathit{child}[\cdot]$ mapping symbols to child nodes, together with a boolean $\mathit{end}$ that is
+true iff some stored key ends exactly at that node. The root represents the empty prefix and holds no
+symbol. A key $k=k_1k_2\cdots k_L$ is stored by walking/creating the path
+root$\xrightarrow{k_1}$$\xrightarrow{k_2}$$\cdots$$\xrightarrow{k_L}$ and setting $\mathit{end}$ at the
+last node. A string is \emph{present} (a full word) iff its path exists \emph{and} the terminal node has
+$\mathit{end}=\text{true}$; it is a \emph{prefix} iff its path merely exists.
+\end{definition}
+
+\noindent\textbf{In plain words.} A node is ``which letters can come next, and does a word stop right
+here?'' The word itself is not in any node -- it is the \emph{route} from the root. That is why
+\code{search} (needs $\mathit{end}$) and \code{startsWith} (does not) share one walk and differ by one
+flag (\coderef{c08-trie-ops} below).
+
+\begin{theorem}{Trie search is $\bigO{L}$, independent of $N$}{c08-searchcost}
+In a trie over strings, \code{insert}, \code{search} and \code{startsWith} each take time and space
+$\Theta(L)$ for a query of length $L$ (plus the $\bigO{1}$ per-symbol edge lookup), regardless of the
+number $N$ of keys already stored. Contrast: a self-balancing BST comparing length-$L$ keys costs
+$\bigO{L\log N}$ (about $\log N$ nodes, each up to $L$ characters), and a hash map costs $\bigO{L}$ for a
+whole-key hash but then answers \emph{no} prefix query.
+\end{theorem}
+\begin{proofbox}
+The walk consumes the query one symbol at a time and moves down exactly one level per symbol, so it
+performs $L$ steps and cannot take more or fewer -- the number of stored keys changes \emph{which}
+children exist, never \emph{how deep} you go. Each step is one table lookup in the current node's
+$\mathit{child}[\cdot]$ (array $\bigO{1}$, map $\bigO{1}$ amortised), so the total is $\Theta(L)$ lookups.
+Depth is bounded by the longest key, not by $N$, because siblings -- not levels -- absorb extra keys:
+adding a million words that all begin ``ca'' grows the trie sideways at the bottom, leaving the $c,a$
+prefix walk still $2$ steps. A BST instead multiplies its node-visits by the depth $\log N$, each paying
+an $L$-character comparison, hence $\bigO{L\log N}$. \end{proofbox}
+
+\begin{definition}{Node layout: fixed array vs map vs edge list}{c08-nodelayout}
+The $\mathit{child}[\cdot]$ table admits three standard encodings. A \term{fixed array} of size
+$|\Sigma|$ (e.g.\ \code{child[26]}) makes lookup $\bigO{1}$ and creation trivial, but allocates
+$|\Sigma|$ pointers \emph{per node} -- about $26\cdot 8=208$ bytes even for a leaf with one child -- so
+total memory is $\Theta(|\Sigma|\cdot\text{nodes})$, dangerous when nodes reach $10^6$. A
+\term{hash map} (an \code{unordered\_map} from char to child pointer) allocates only the edges that exist,
+ideal for a large or sparse alphabet, at a higher per-lookup constant. A \term{sorted edge list}
+(a \code{vector} of (char, child) pairs) is the most compact and is fine when a node has few children,
+costing $\bigO{\deg}$ (or $\bigO{\log\deg}$ with binary search) per step. Budget nodes first: the array layout
+fits roughly when $|\Sigma|\cdot\text{nodes}$ stays inside the memory limit.
+\end{definition}
+
+\begin{insightbox}
+Every layout choice trades the \emph{same} $\bigO{L}$ walk for a different \emph{constant} and a
+different \emph{memory footprint}; none changes \thmref{c08-searchcost}. This is why tries feel
+``easy to design, easy to blow the memory limit'': the algorithm is trivial, the engineering is
+whether you can afford $26$ pointers a node. When you cannot, \secref{c08-variants}'s radix compression
+folds long single-child chains (the shared part of \texttt{care}/\texttt{cares}) into one node, keeping
+one edge instead of twenty-six pointers per level.
+\end{insightbox}
+
+\subsection{The Algorithm: Three Walks, One Pointer Chase}
+
+All three operations share a private helper that walks a string and returns the node it lands on, or
+\texttt{nullptr} when an edge is missing. \code{search} is ``landed and $\mathit{end}$''; \code{startsWith}
+is ``landed''; \code{insert} is the same walk but \emph{creates} missing edges instead of failing. We use
+the fixed-array layout (\code{child[26]}) here for clarity; \defref{c08-nodelayout} tabulates the swap to
+a map.
+
+\begin{lstlisting}[caption={Hand-written string trie: one \code{walk} helper, and insert / search / startsWith}, label={lst:c08-trie-ops}]
+struct TrieNode {
+    TrieNode* child[26]{};              // fixed array layout; {} zero-inits all pointers
+    bool end = false;                   // true iff a stored word ends exactly here
+};
+class Trie {
+    TrieNode* root = new TrieNode();
+    // Follow (or, if make, create) the path for s; returns final node, or null if missing.
+    TrieNode* walk(const string& s, bool make) {
+        TrieNode* cur = root;
+        for (char ch : s) {
+            int i = ch - 'a';
+            if (!cur->child[i]) {
+                if (!make) return nullptr;          // search cannot invent nodes
+                cur->child[i] = new TrieNode();     // insert fills the missing edge
+            }
+            cur = cur->child[i];
+        }
+        return cur;
+    }
+public:
+    void insert(const string& s) {                    // O(L)
+        TrieNode* n = walk(s, /*make=*/true);
+        n->end = true;                                // mark the word's terminal node
+    }
+    bool search(const string& s) {                    // O(L)
+        TrieNode* n = walk(s, /*make=*/false);
+        return n != nullptr && n->end;                // path AND end flag required
+    }
+    bool startsWith(const string& p) {                // O(L)
+        return walk(p, /*make=*/false) != nullptr;    // path alone is enough
+    }
+};
+\end{lstlisting}
+
+\begin{complexitybox}
+Time: every call walks the query's characters once, so $\bigO{L}$ with $L=|s|$ -- no dependence on $N$
+(\thmref{c08-searchcost}); $\mathit{child}[\cdot]$ is a $\bigO{1}$ array hit here. Memory: one node per
+distinct prefix, at most $\sum |s|$ over all inserted keys, each node $26\cdot 8$ bytes in this layout
+(see \defref{c08-nodelayout} for the sparse alternatives). Verdict: the structure is trivial to write and
+\emph{only} the memory constant needs thinking about; keep \coderef{c08-trie-ops} in muscle memory, it is
+the engine of the next three sections.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Insert $\mathcal{W}$, then search vs startsWith, on $\{$car, cares, care, cat, dog$\}$}{c08-trie-run}
+\emph{Inserts (in set order).}\\
+\texttt{car}: create $c,a,r$, flag $r$ end. \quad \texttt{cares}: $c,a,r$ exist; create $e$; create $s$;
+flag $s$. \quad \texttt{care}: $c,a,r,e$ exist; flag $e$. \quad \texttt{cat}: $c,a$ exist; create $t$;
+flag $t$. \quad \texttt{dog}: create $d,o,g$; flag $g$. Total fresh nodes $=3+2+0+1+3=9$ paths added on
+a $13$-node trie (many shared).\\[2pt]
+\emph{Queries.}\\
+\code{search("car")}: walk $c$-$a$-$r$, land on $r$, $\mathit{end}{=}$true $\Rightarrow$ \textbf{true}.\\
+\code{search("ca")}: walk $c$-$a$, land on $a$, $\mathit{end}{=}$false $\Rightarrow$ \textbf{false} (it is
+only a prefix).\\
+\code{startsWith("ca")}: land on $a$, path exists $\Rightarrow$ \textbf{true}.\\
+\code{search("careful")}: $c$-$a$-$r$-$e$ ok, but no $f$ edge under $e$ $\Rightarrow$ walk returns null
+$\Rightarrow$ \textbf{false}. \quad \checkmark\ Every answer used at most $5$ steps -- the depth of the
+deepest word, never the $5$-word count.
+\end{example}
+\begin{tracebox}[Node-by-node view of \exref{c08-trie-run}]
+after all inserts, ends set: r(car), e(care), s(cares), t(cat), g(dog).\\
+search("car"): c->a->r, node.r.end=1 -> true.\\
+search("ca"):  c->a,   node.a.end=0 -> false (but startsWith("ca")=true).\\
+startsWith("do"): d->o, path exists -> true. search("do"): node.o.end=0 -> false.\\
+search("careful"): ...->e, e.child['f']=null -> walk returns null -> false.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{End-flag vs count}: store an integer ``words ending here'' instead of a boolean when the
+        multiset can hold duplicates -- needed once \secref{c08-binary} adds/removes values, and the same
+        field powers deletion (drop the count, prune the node when it hits zero). \hfill\lv{3}
+  \item \textbf{Prefix aggregation}: keep a per-node ``number of stored keys in my subtree'' count so
+        \code{countPrefix(p)} is one walk, not a DFS -- the basis of \defref{c08-prefixcount}. \hfill\lv{3}
+  \item \textbf{Delete}: walk to the terminal, clear its $\mathit{end}$, then recurse up removing nodes
+        that have no remaining children and no $\mathit{end}$; stop pruning at the first ancestor that is
+        still useful. \hfill\lv{4}
+  \item \textbf{Different alphabet}: nothing in \coderef{c08-trie-ops} cares that edges are letters. Make
+        them bits ($\Sigma=\{0,1\}$, depth $=30$) and you have \secref{c08-binary} verbatim. \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- conflating search with startsWith]
+A path existing does not mean a word exists. ``car'' creates the path $c$-$a$-$r$, so
+\code{startsWith("ca")} and \code{startsWith("car")} are both \textbf{true}, but \code{search("ca")} is
+\textbf{false} unless a word literally equalled \texttt{ca}. Implementing \code{search} as ``the walk
+didn't fail'' forgets the $\mathit{end}$ check (\defref{c08-trie}) -- every word becomes a prefix of
+itself and phantom shorter words appear.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: search accepts any existing path, not only words}, language=C++, basicstyle=\ttfamily\small]
+bool search(const string& s) {
+    return walk(s, false) != nullptr;   // this is startsWith, not search!
+}                                       // "ca" would report true even if only "car" was inserted
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: search requires the path AND the end flag}, language=C++, basicstyle=\ttfamily\small]
+bool search(const string& s) {
+    TrieNode* n = walk(s, false);
+    return n != nullptr && n->end;      // terminal node must be marked as a word
+}
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- letting \code{search} create nodes]
+Only \code{insert} may allocate. A query path that reaches a missing child must return failure; if your
+\code{walk} builds edges on a read (a copy-paste of \code{insert}) the trie silently grows on every
+misspelled lookup, leaking memory and corrupting \code{startsWith}. The \code{make} flag in
+\coderef{c08-trie-ops} is exactly the ``reads never write'' guard.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- assuming 26-way arrays always fit]
+Fixed \code{child[26]} costs about $208$ bytes a node. A dictionary of $10^6$ words totalling $10^7$
+characters can approach $10^7$ nodes $\Rightarrow\approx 2$~GB -- \re. Budget nodes against the memory
+limit and switch to a map / edge list, or compress (\secref{c08-variants}), when the array is too fat
+(\defref{c08-nodelayout}).
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's anchor is LeetCode~208, \probref{c08-implement}: implement the whole \code{Trie} class --
+\code{insert}, \code{search}, \code{startsWith}. It is the most literal possible ``build the structure
+from its definition'' task, so \coderef{c08-trie-ops} \emph{is} the solution; writing it cold is the gate
+to every later section.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c08-implement}{Implement Trie (Prefix Tree)}{LeetCode 208}
+  {https://leetcode.com/problems/implement-trie-prefix-tree/}{LC Medium · L2}
+  {string trie, child[26] node, end-of-word flag, insert/search/startsWith walks}
+
+\begin{problemstatement}[Implement Trie (Prefix Tree)]
+Design a \texttt{Trie} class supporting three operations: \texttt{insert(word)} adds a string;
+\texttt{search(word)} returns \texttt{true} iff the exact string was inserted;
+\texttt{startsWith(prefix)} returns \texttt{true} iff some inserted string begins with \texttt{prefix}.
+All inputs are lowercase English letters. Constraints: $1\le$ word/prefix length $\le 7$ for this
+problem, and at most $2\cdot 10^4$ calls total.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{2}, give yourself 12 minutes]
+This is not a trick problem; it is a ``can you build the node'' problem. Decide the node fields, then
+write one shared walk and derive the three operations from it.
+\peek{What two pieces of information does a single node need to hold?}
+\nudge{A node needs \emph{children indexed by next letter} and \emph{a flag saying a word stops here}.
+Insert walks creating missing children; search walks requiring them.}
+\fullhint{\code{insert}: for each char, take/create the child slot, then set \code{end=true} at
+the last node. \code{search}: walk, and return true only when the node exists \emph{and} its end flag is
+set. \code{startsWith}: walk, and return true when the node exists. All three are $\bigO{L}$; nothing
+ever compares two words.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+We must maintain a growing set of lowercase strings and answer two \emph{different} yes/no questions: full
+membership (\code{search}) and prefix existence (\code{startsWith}). A vector of strings answers both in
+$\bigO{N\cdot L}$; a hash set answers \code{search} in $\bigO{L}$ but \code{startsWith} only by enumerating
+every key. The operations read a string \emph{left to right, one character at a time} -- the signature of
+a trie. The design goal is a node that lets the next character pick the next edge in $\bigO{1}$.
+
+\solstep{Key Observations}
+\begin{observation}
+Lowercase letters give a fixed $26$-ary alphabet, so a node's children are a \code{child[26]} array and an
+edge is chosen in $\bigO{1}$ with no comparison -- the whole walk is a pointer chase of length $L$.
+\end{observation}
+\begin{observation}
+\code{search} and \code{startsWith} are the \emph{same} walk differing by one boolean: a word must end on
+a node with $\mathit{end}=\text{true}$; a prefix merely must land somewhere (\defref{c08-trie}).
+\end{observation}
+\begin{observation}
+Words sharing a prefix share those top nodes, so total nodes is the count of \emph{distinct prefixes},
+$\le\sum|{\text{word}}|$, independent of how many words pile onto shared paths.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Store words in a hash set and answer startsWith by scanning all keys.}
+{\code{search} is then $\bigO{L}$, but \code{startsWith} is $\bigO{N L}$ -- with $2\cdot 10^4$ calls
+that is quadratic and misses the point that prefixes are structured.}
+\deadend{Sort the words and binary-search the prefix.}
+{Works ($\bigO{L\log N}$ per query), but you rebuild/re-sort every insert and still pay the BST's extra
+$\log N$; the trie gives $\bigO{L}$ \emph{and} supports the richer subtree queries of the next sections.}
+\aha{One node per prefix, one edge per next character. \coderef{c08-trie-ops}: a single \code{walk} with a
+\code{make} flag yields all three operations, each $\bigO{L}$.}
+\end{thinkbox}
+
+\solstep{Solution}
+Keep a \texttt{root} node. Factor the shared pointer-chase into \code{walk(s, make)} that follows (and
+with \code{make} creates) the path for $s$, returning the terminal node or \texttt{nullptr} if an edge is
+missing and creation is off. Then \code{insert} is \code{walk(s,true)}$+$set \code{end}; \code{search} is
+\code{walk(s,false)}$+$test \code{end}; \code{startsWith} is \code{walk(s,false)}$+$test non-null. This is
+exactly \coderef{c08-trie-ops}; the ``solution'' is recognising that one helper does all three jobs.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The three operations are correct and $\bigO{L}$]
+By \defref{c08-trie} a string $t$ is a \emph{prefix} of some inserted word iff its root-to-$|t|$ path
+exists, and $t$ is an inserted \emph{word} iff that path exists and its terminal node was flagged during
+the insertion that ended there. \code{insert} creates precisely the path for $s$ and flags its terminal
+node, so after inserting a set $S$, a node is flagged iff some $s\in S$ ends there (flags are never
+cleared). \code{walk(s,false)} returns the terminal node iff the path exists and creates nothing, so
+\code{search} returns true iff the path exists \emph{and} the node is flagged, i.e.\ iff $s\in S$;
+\code{startsWith} returns true iff the path exists, i.e.\ iff $p$ is a prefix of some stored word. Each
+walk advances one level per input character, so all three run in $\Theta(L)$ by \thmref{c08-searchcost}.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={LeetCode 208 -- the Trie class, three operations over one walk}, label={lst:c08-implement-soln}]
+class Trie {                          // LeetCode 208
+    struct Node { Node* nxt[26]{}; bool term = false; };
+    Node* rt = new Node();
+    Node* go(const string& s, bool create) {
+        Node* u = rt;
+        for (char c : s) {
+            int k = c - 'a';
+            if (!u->nxt[k]) { if (!create) return nullptr; u->nxt[k] = new Node(); }
+            u = u->nxt[k];
+        }
+        return u;
+    }
+public:
+    void insert(string& w)      { go(w, true)->term = true; }   // build path, mark word end
+    bool search(string& w)      { Node* u = go(w, false); return u && u->term; }
+    bool startsWith(string& p)  { return go(p, false) != nullptr; }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official style sequence: insert apple; search app / api; startsWith app / apple]
+insert("apple"): create a,p,p,l,e; flag the final e.\\
+search("app"): a->p->p lands, but that node.term=false -> false.\\
+search("api"): a->p ok, then a has no 'i' edge -> go returns null -> false.\\
+startsWith("app"): lands on the p node, path exists -> true.\\
+startsWith("apple"): lands on flagged e, path exists -> true.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time: every operation is one $\bigO{L}$ walk (\thmref{c08-searchcost}); with $L\le 7$ and $\le 2\cdot
+10^4$ calls this is instantaneous. Memory: $\le$ one node per distinct prefix, each $26$ pointers $+$
+a flag ($\approx 216$ bytes) -- here the dictionary is tiny so it is far under the limit, but the
+$26\cdot$-nodes budget of \defref{c08-nodelayout} is the habit to keep. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+The classic slips mirror the traps above: (i) returning ``path exists'' from \code{search} (drop the
+\code{term} test) -- \re; (ii) letting \code{search}/\code{startsWith} allocate missing children (a
+\code{create}-flag leak); (iii) reusing one node across two test cases without clearing it. \emph{Variant:}
+the Map Sum Pairs practice (LC~677) adds a \emph{value} at terminal nodes and asks for a prefix's subtree
+sum; the Replace Words practice (LC~648) reports the first terminal node reached on a walk. Both are this exact
+structure with one field added -- do them to feel how little separates a trie from a whole problem family.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A trie stores keys in the \emph{edges}: the word is the path from the root, and a node holds a
+        symbol-to-child table plus an $\mathit{end}$ flag (\defref{c08-trie}).
+  \item \code{insert}/\code{search}/\code{startsWith} are one $\bigO{L}$ walk differing only in
+        ``create or not'' and ``check the flag or not'' (\coderef{c08-trie-ops}, \thmref{c08-searchcost}).
+  \item The algorithm is free; the \emph{memory} is the design decision -- array vs map vs edge list is
+        settled by $|\Sigma|\cdot\text{nodes}$ (\defref{c08-nodelayout}).
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Write \coderef{c08-trie-ops} from memory}, then run $\mathcal{W}$'s insert sequence through
+        your code and confirm the $13$-node shape of \figref{c08-wordstrie} and the four query answers of
+        \exref{c08-trie-run}.
+  \item \textbf{Add a \code{remove(word)}}: walk, clear the flag, prune nodes with no children and no
+        flag back up to the nearest still-useful ancestor. Test that removing \texttt{care} keeps
+        \texttt{car} and \texttt{cares} intact.
+  \item \textbf{Read ahead}: swap the $26$ letters for two bits and depth $7$ for depth $30$, and you have
+        the binary trie of \secref{c08-binary} -- same \code{go}, new question.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you keep one shared walk so the three operations cannot drift out of sync?
+  \item Does \code{search} test the end flag \emph{and} the path, while \code{startsWith} tests only the path?
+  \item Did you size the node layout against the memory limit, not just correctness?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Map Sum Pairs}{LeetCode 677}
+    {https://leetcode.com/problems/map-sum-pairs/}{LC Medium · L3}
+    {Support \texttt{insert(key,val)} and \texttt{sum(prefix)} returning the total of values whose keys
+    start with \texttt{prefix}. Build the trie of \coderef{c08-trie-ops} and store, at every node, the sum
+    of the values of all keys passing \emph{through} it: on \texttt{insert(key,val)} walk the key and add
+    $val$ to each node's running subtotal (an \emph{update} to a per-node aggregate, not just the terminal
+    flag); then \texttt{sum(prefix)} is a single $\bigO{L}$ walk returning the subtotal at the node the
+    prefix lands on -- no DFS needed, because the answer is already aggregated on the spine
+    (\defref{c08-prefixcount}). Handle re-inserting an existing key by overwriting its value (subtract the
+    old contribution first, or keep a map from key to last value).}
+  \practice{Replace Words}{LeetCode 648}
+    {https://leetcode.com/problems/replace-words/}{LC Medium · L3}
+    {Given a dictionary, replace every word in a sentence by its \emph{shortest} dictionary prefix. Insert
+    the dictionary into a trie; then for each sentence word walk its letters and stop at the \emph{first}
+    node carrying $\mathit{end}=\text{true}$ -- that path is the shortest root -- emitting the letters
+    consumed so far; if you fall off the trie before any $\mathit{end}$, keep the original word. The
+    point is that the walk naturally returns the \emph{shortest} prefix first, so no length comparisons
+    are needed: the shared-prefix property of \defref{c08-trie} does the work for you.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 11.1 The Trie of Strings]
+A trie keeps keys in the \emph{edges}: one symbol per level, a node $=$ a child table $+$ an
+$\mathit{end}$ flag (\defref{c08-trie}, \figref{c08-triebasics}). Because depth $=$ key length, \code{insert}
+/ \code{search} / \code{startsWith} are each $\bigO{L}$ \emph{regardless of $N$} (\thmref{c08-searchcost}),
+one shared walk with a create-flag (\coderef{c08-trie-ops}). \code{search} needs path $+$ end flag,
+\code{startsWith} needs only the path. Layout -- array vs map vs edge list -- is a memory decision, not a
+time one (\defref{c08-nodelayout}). LeetCode~208 (\probref{c08-implement}) is the build; LC~677/LC~648
+add a per-node subtotal and a first-end stop.
+\selftest{
+  \item Where does a trie store the key -- in the node or along the path?
+  \item State \thmref{c08-searchcost} and explain why it beats the BST's $\bigO{L\log N}$.
+  \item Why do \code{search} and \code{startsWith} need the $\mathit{end}$ flag treated differently?
+  \item When is a fixed \code{child[26]} array the wrong choice, and what replaces it?
+  \item What single field turns the plain trie into the Map Sum Pairs machine?
+}
+\end{recallbox}

@@ -1,0 +1,412 @@
+% =====================================================================
+%  20.1  The Pending Tag: apply / push / pull          sec:c15-core
+%  Exports: def:c15-tag  thm:c15-lazy
+%           lst:c15-apply  lst:c15-push  lst:c15-rupdate  lst:c15-rquery
+%           lst:c15-295-soln  prob:c15-greg
+%  All numbers agree with 00_opener (fig:c15-tree + fold table):
+%    A = (3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2), sum 49.
+%    base sum grid t1..t15 = 49,24,25,14,10,13,12,5,9,2,8,7,6,7,5.
+%    lazy range-add [2..5] += 3:  apply stops at covered t9 ->
+%      t9 = 9 + 3*2 = 15 with pending tag +3 (children t18,t19 untouched,
+%      still leaf values 4,5); descends the two partial ends only:
+%      t17 (A2: 2->5), t20 (A5: 1->4); pulls t8=8, t4=23, t10=5, t5=13,
+%      t2=36, t1=61 (= 49 + 3*4).
+%    read-backs: range-sum [3..6] = 20 (fold covered t9=15 + t10=5, no push);
+%      range-sum [4..6] = 13 (partially overlaps t9 -> PUSH +3 to t18:4->7,
+%      t19:5->8, clear tag; fold t19=8 + t10=5).
+%  CF 295A sample (live-verified on codeforces.com): n=3 m=3 k=3,
+%    a=(1,2,3); ops (1,2,1)(1,3,2)(2,3,4); queries (1,2)(1,3)(2,3) -> 9 18 17.
+% =====================================================================
+\section{The Pending Tag: apply, push, pull}\label{sec:c15-core}
+
+\begin{previouslybox}[Ch.~19 could read a range; Ch.~18 could add a range -- but only one of them could do both at once]
+Chapter~19 fixed the \emph{point}-update segment tree: any range \(\min/\max/\gcd/\text{sum}\) in \(\bigO{\log n}\), but every write touched a single leaf and re-folded its \(O(\log n)\) ancestors.  Chapter~18's difference Fenwick tree could add to a whole range in \(O(1)\) amortised -- but only because addition has an inverse you could subtract back out.  Both chapters explicitly \emph{handed off} the case neither could finish: \emph{add (or set, or flip) a whole range and still answer a range query}, where the update is not a plain invertible sum.  This section is that hand-off, discharged.  One extra array \(\mathit{tag}[]\) bolted onto the exact tree you can already build cold is the whole new object.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{lazy propagation} segment tree keeps, beside each node's aggregate, a \term{pending tag}: an update that has been folded into the node's stored value but \emph{not yet} applied to its children.  The reason is purely arithmetic.  If an update covers a node's whole interval, you do not need to descend -- you can recompute the node's aggregate directly (a range-add \(\Delta\) raises a subtree-sum by \(\Delta\cdot\text{length}\)) and simply \emph{remember} \(\Delta\) for later.  Descending to the \(r-l+1\) leaves is the \(\bigO{n}\) disaster this avoids.  The remembered work is paid for only when a later operation is \emph{forced} to walk through a node that carries a tag -- then you \term{push} it one level down.  Three verbs do everything: \code{apply} (fold a tag into a node's aggregate \emph{and} stash it), \code{push} (hand the stash to both children and clear), \code{pull} (re-fold a parent from its children on the way back up).  Build is Ch.19's unchanged; range-update and range-query become \(\bigO{\log n}\).
+
+\textbf{Prerequisites.} Ch.~19's build / point-update / range-query (\chref{c13}), assumed and \emph{not} re-taught -- we layer \(\mathit{tag}[]\) on that exact tree.  The running array \(A\) and its sum grid from the chapter opener (\figref{c15-tree}).  Ch.~18's difference trick (\chref{c14}) is the contrast: it is what you reach for when the update is a plain add and the read a plain sum.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item read a pending tag off a drawn tree and \emph{push} it by hand, naming exactly which nodes are stale; \hfill\lv{2}
+  \item write \code{apply}/\code{push}/\code{rupdate}/\code{rquery} from memory for range-add + range-sum; \hfill\lv{2}--\lv{3}
+  \item state the golden rule -- \emph{only push when you are forced to descend} -- and explain why a fully-covered node never pushes; \hfill\lv{3}
+  \item solve a batched range-add input end to end (CF~295A) and say where a difference BIT would have been enough. \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``modify a whole range, read a range, keep the work logarithical'']
+\reckey{``add \(d\) to every element of \([l,r]\)'' or ``set every element of \([l,r]\) to \(v\)'' interleaved with ``now give me the sum / max / count over \([a,b]\)''; the phrase ``\(q\) operations, each of which touches a \emph{range}''; any brute force that re-walks \(r-l+1\) positions per update and gets \(\bigO{q\cdot n}\) -- the \tle tells you the update must stop at covered nodes.}
+\recuse{
+  \item range \emph{add} + range sum/max read -- this section's \code{apply}/\code{push} (CF~295A);
+  \item the update changes the \emph{shape} of the aggregate you store, or two updates can land on one node before you push -- that is tag \emph{composition}, \(\secref{c15-compose}\);
+  \item the update is a \emph{set}, not an add -- range assign, \(\secref{c15-assign}\);
+  \item the ranges are tree \emph{subtrees} -- flatten with Ch.~5 first, \(\secref{c15-trees}\).
+}
+\recnotuse{
+  \item update a whole range by a plain \emph{add}, read plain \emph{sums}, no non-invertible op -- Ch.~18's difference BIT (\chref{c14}) is \(O(1)\) amortised with less code; reach here only when the update is not invertible or the read needs a tuple;
+  \item only \emph{point} writes ever happen -- Ch.~19's plain tree; a tag would be dead weight;
+  \item the update does not fold into one pending value (range \(\bmod\), range \(\mathit{chmin}\)) -- segment-tree beats, Ch.~23 (\chref{c29}); see \(\secref{c15-strains}\).
+}
+One-line test: \emph{a whole range is written, a range is read back, and per operation you cannot afford to touch every covered leaf -- then the pending tag below turns an \(\bigO{n}\) update into \(\bigO{\log n}\).}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: stop at the covered node, remember the rest}
+% ---------------------------------------------------------------
+
+Run Ch.19's point-update logic on a range of length \(r-l+1\) and you re-fold \(r-l+1\) root paths -- \(\bigO{n}\) in the worst case.  The fix is to notice that a node whose \emph{entire} interval lies inside \([l,r]\) can be updated without touching its children at all, because its aggregate is a closed-form function of the update:
+
+\[
+  \text{range add }\Delta:\quad t_v \leftarrow t_v + \Delta\cdot(r_v-l_v+1),
+  \qquad\text{and set }\ \mathit{tag}_v \mathrel{+}= \Delta .
+\]
+
+The node's stored sum already reflects the update, so any future \emph{read} that covers \(v\) whole gets the right answer instantly.  The only thing missing is the children: they are now \emph{stale} by exactly \(\Delta\).  We do not fix them now -- we write \(\Delta\) into \(\mathit{tag}_v\) as an \term{IOU} and fix them lazily, only when someone must descend.
+
+\begin{definition}{Pending tag and the covered-node rule}{c15-tag}
+Beside the aggregate array \(t[\cdot]\) we keep a parallel \(\mathit{tag}[\cdot]\), one entry per node.  The pair has the invariant: \emph{\(t_v\) is always correct for node \(v\)'s whole interval}, while \(\mathit{tag}_v\) is an update that has been folded into \(t_v\) but \emph{not} into \(t_{2v},t_{2v+1}\).  A node with \(\mathit{tag}_v\neq\) (identity) is \term{dirty}; its descendants' stored values may be stale.  When an update or query reaches a node \(v\): if \(v\)'s interval is \emph{disjoint} from the range, do nothing; if \emph{fully covered}, \code{apply} (fold into \(t_v\), merge into \(\mathit{tag}_v\)) and stop; if \emph{partial}, \code{push} \(v\)'s tag to its children first, then descend.
+\end{definition}
+
+\begin{theorem}{Range update and range query stay logarithmic}{c15-lazy}
+On a lazy segment tree of \(n\) leaves whose merge is a sum (and whose pending tag is a range-add), \code{rupdate} (\([l,r]\) add \(\Delta\)) and \code{rquery} (\(\sum\) over \([l,r]\)) each cost \(\bigO{\log n}\) node-visits, and \code{apply}/\code{push}/\code{pull} each cost \(O(1)\).  The invariant \((\dag)\) \emph{every} node's \(t_v\) equals the true aggregate of its interval over all updates applied so far is maintained; correctness does not depend on \(\mathit{tag}\) ever being pushed.
+\end{theorem}
+\begin{proofbox}
+\textbf{Cover-size bound.} The recursion \(\coderef{c15-rupdate}\)/\(\coderef{c15-rquery}\) descends only into nodes whose interval \emph{partially} overlaps \([l,r]\); a node that is disjoint stops (do nothing) and a node fully covered stops (\code{apply}).  Exactly as in \thmref{c13-merge}, at most two partial nodes exist per depth level (one containing \(l\), one containing \(r\)), and depth is \(\lceil\log_2 n\rceil\), so \(O(\log n)\) partial nodes are expanded and \(O(\log n)\) fully-covered nodes are \code{apply}-ed.  Pushing a partial node is \(O(1)\).
+\textbf{Invariant \((\dag\).} \code{apply} sets \(t_v\) to the updated aggregate, so \((\dag)\) holds at \(v\) even though its children are stale -- this is why the query returning \(t_v\) on a full cover is correct.  \code{push} propagates the folded update to children (\(t\) corrected for each) and clears \(\mathit{tag}_v\), preserving \((\dag)\) for the children.  \code{pull} sets \(t_v=t_{2v}+t_{2v+1}\); since after the recursive calls both children satisfy \((\dag)\), so does \(v\).  Every exit path restores \((\dag)\), hence queries that stop early on a covered node read a valid \(t_v\).
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  A dirty node is a fully-updated \emph{summit} sitting on a pile of un-updated leaves.  You may keep reading the summit (its number is right) forever without ever touching the leaves.  The only rule that matters: \emph{before you walk \emph{through} a node to reach its children, push that node}.  Forget it, and a query that descends past a dirty node reads stale grandchildren and returns garbage -- the single most common lazy WA.
+
+% ---------------------------------------------------------------
+\subsection{The three verbs and the two walks}
+% ---------------------------------------------------------------
+
+Everything below is the Ch.19 skeleton plus \(\mathit{tag}[]\).  We write a \term{range-add / range-sum} tree; \(\mathcal{M}=+\) and the identity is \(0\), so \(\mathit{tag}\) is also a plain addend.
+
+\begin{lstlisting}[caption={apply: fold a tag into a node's aggregate AND stash it for its children}, label={lst:c15-apply}]
+void apply(int v, int tl, int tr, long long d){
+    t[v]   += d * (tr - tl + 1);   // aggregate is correct for WHOLE interval now
+    tag[v] += d;                   // remember to pay the children later (0->d)
+}
+// for a SUM tree the fold is d*len; for MIN/MAX the fold is just d (len irrelevant)
+// composing ADD with an existing pending ADD is another ADD (see 20.2)
+\end{lstlisting}
+
+\begin{lstlisting}[caption={push: hand the stash one level down, then clear -- only when forced to descend}, label={lst:c15-push}]
+void push(int v, int tl, int tr){
+    if (tag[v] == 0) return;            // clean node: nothing to do
+    int tm = (tl + tr) / 2;
+    apply(2*v,   tl,   tm, tag[v]);     // fold + stash into left child
+    apply(2*v+1, tm+1, tr, tag[v]);     // fold + stash into right child
+    tag[v] = 0;                         // our debt is now the children's
+}
+// NEVER call push on a leaf; never call it on a fully-covered node in rupdate --
+// there you apply() and stop.
+\end{lstlisting}
+
+\begin{lstlisting}[caption={range update: add d to A[l..r] in O(log n)}, label={lst:c15-rupdate}]
+void rupdate(int v, int tl, int tr, int l, int r, long long d){
+    if (l > r) return;                            // empty intersection
+    if (l == tl && r == tr){                      // node fully COVERED
+        apply(v, tl, tr, d);                      // fold + stash, DO NOT descend
+        return;
+    }
+    push(v, tl, tr);                              // partial: pay the stash first
+    int tm = (tl + tr) / 2;
+    rupdate(2*v,   tl,   tm, l,        min(r, tm), d);   // intersect, don't re-split
+    rupdate(2*v+1, tm+1, tr, max(l, tm+1), r,      d);
+    t[v] = t[2*v] + t[2*v+1];                     // PULL: re-fold from children
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={range query: sum of A[l..r] in O(log n); push only when you must}, label={lst:c15-rquery}]
+long long rquery(int v, int tl, int tr, int l, int r){
+    if (l > r) return 0;                          // identity for a sum fold
+    if (l == tl && r == tr) return t[v];          // cover: stored value already
+                                                  // includes this node's own tag
+    push(v, tl, tr);                              // partial: descend through v
+    int tm = (tl + tr) / 2;                        //   -> must push v first
+    return rquery(2*v,   tl,   tm, l,        min(r, tm))
+         + rquery(2*v+1, tm+1, tr, max(l, tm+1), r);
+}
+\end{lstlisting}
+
+Note the asymmetry: \(\coderef{c15-rquery}\) returns \(t_v\) \emph{without} pushing \(v\) when \(v\) is fully covered -- the stored aggregate already includes \(v\)'s tag.  It pushes \(v\) only when it must reach \emph{through} \(v\) into a child.  That is the golden rule, in code.
+
+% ---------------------------------------------------------------
+\subsection{The hand trace on \(A\)}
+% ---------------------------------------------------------------
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.5, transform shape]
+  % subtree around t4 -> {t8[1-2], t9[3-4]} -> {t16,t17,t18,t19}; show t9 pending +3, children stale
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t4) at (2,3.2) {\(t_4{=}23\)};
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t8) at (0.6,1.7) {\(t_8{=}8\)};
+  \node[boxnode, difforange, minimum size=8mm, font=\scriptsize, fill=difforange!12] (t9) at (3.4,1.7) {\(t_9{=}15\)};
+  \node[font=\scriptsize\bfseries, text=difforange, anchor=south] at (4.4,2.0) {\(+3\) pending};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=north] (b8) at (0.6,1.32) {\([1..2]\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=north] (b9) at (3.4,1.32) {\([3..4]\)};
+  \node[boxnode, successgreen, minimum size=7mm, font=\scriptsize] (t17) at (-0.2,0.2) {\(t_{17}{=}5\)};
+  \node[boxnode, difforange, minimum size=7mm, font=\scriptsize, fill=difforange!10] (t18) at (1.4,0.2) {\(t_{18}{=}4\)};
+  \node[boxnode, difforange, minimum size=7mm, font=\scriptsize, fill=difforange!10] (t19) at (2.6,0.2) {\(t_{19}{=}5\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=north] at (1.4,-0.2) {\emph{stale}};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=north] at (2.6,-0.2) {\emph{stale}};
+  \draw[flow] (t4)--(t8); \draw[flow] (t4)--(t9);
+  \draw[flow] (t8)--(t17); \draw[flow] (t8)--(b8 |- t17);
+  \draw[flow] (t9)--(t18); \draw[flow] (t9)--(t19);
+  \draw[flow, difforange, dashed, line width=0.9pt] (t9) -- (t18);
+  \node[font=\scriptsize, text=darkgray, anchor=east] at (-0.8,0.2) {leaves};
+\end{tikzpicture}
+\caption{Zoom on \(t_9\) right after \(\text{range-add }[2..5]\mathrel{+}=3\).  \(t_9\)'s aggregate is already \(15\) (folded), its \(+3\) sits \emph{only} in its tag, so its two leaves \(t_{18},t_{19}\) still show the OLD values \(4,5\) -- \textbf{stale by \(+3\)}, shown by the dashed orange edge.  \code{rquery} that covers \(t_9\) whole never touches those leaves (it returns \(15\)); \code{rquery} that overlaps \(t_9\) \emph{partially} must \code{push}, turning \(t_{18},t_{19}\) into \(7,8\) and clearing the tag.  \(t_{17}\) (leaf \(A_2\)) was written directly to \(5\) because the update reached it on the partial end -- no tag sits above it.}
+\label{fig:c15-push}
+\end{figure}
+
+\begin{tracebox}[build \(\to\) range-add \(+3\) on \(2..5\) \(\to\) a clean read \(3..6\) \(\to\) a read \(4..6\) that forces a push]
+\textbf{Build.} \(\coderef{c13-build}\) folds \(A\) to Ch.19's sum grid; every \(\mathit{tag}=0\), root \(t_1=49\).\\
+\textbf{range-add \([2,5]\mathrel{+}=3\)} (\(\coderef{c15-rupdate}\), root \([1..16]\)). Root is partial \(\Rightarrow\) push (no tag) \(\Rightarrow\) descend left into \(t_2[1..8]\) (partial) \(\Rightarrow\) \(t_4[1..4]\) (partial) \(\Rightarrow\) two children: \(t_8[1..2]\) partial (leaf \(t_{17}[2..2]\) covered \(\Rightarrow\) \code{apply} \(2{\to}5\)); \(t_9[3..4]\) \textbf{fully covered} \(\Rightarrow\) \code{apply}: \(t_9=9+3{\cdot}2=15\), \(\mathit{tag}[9]\mathrel{+}=3\), \emph{stop}.  Back on the right path \(t_5[5..8]\) partial \(\Rightarrow\) \(t_{10}[5..6]\) partial \(\Rightarrow\) leaf \(t_{20}[5..5]\) \code{apply} \(1{\to}4\).  Now \emph{pull} the touched ancestors: \(t_8{=}3{+}5{=}8,\;t_4{=}8{+}15{=}23,\;t_{10}{=}4{+}1{=}5,\;t_5{=}5{+}8{=}13,\;t_2{=}23{+}13{=}36,\;t_1{=}36{+}25{=}61\).  Leaves \(A_3,A_4\) were \emph{never touched} -- their \(+3\) lives whole in \(t_9\)'s tag.\\
+\textbf{range-sum \([3,6]\).} At \(t_4[1..4]\) we take the right piece \([3..4]=t_9\) fully covered \(\Rightarrow\) contribute \(t_9=15\) (its tag is already folded, no push).  At \(t_5[5..8]\) we take left piece \([5..6]=t_{10}=5\).  Total \(15+5=\boxed{20}\).\\
+\textbf{range-sum \([4,6]\).} At \(t_4\): piece \([4..4]\) overlaps \(t_9[3..4]\) \emph{partially} \(\Rightarrow\) \textbf{must descend through \(t_9\)} \(\Rightarrow\) \code{push(9)}: \(t_{18}:4{\to}7,\;t_{19}:5{\to}8,\;\mathit{tag}[9]\to0\).  Now leaf \(t_{19}[4..4]=8\) contributes.  \(t_{10}[5..6]=5\) contributes.  \(8+5=\boxed{13}\).  The push is the deferred work finally being paid -- only because this query could not be answered at a covered node.
+\end{tracebox}
+
+\begin{complexitybox}[The lazy segment tree]
+\textbf{Build} \(\bigO{n}\).  \textbf{Range update} / \textbf{Range query} \(\bigO{\log n}\) -- \(O(\log n)\) \code{apply}/\code{push} nodes (the theorem), each \(O(1)\).  \textbf{Memory} \(4n\) aggregates \emph{plus} \(4n\) tags -- double Ch.~19's footprint, the price of the pending IOUs.  \(4n\) (not \(2n\)) for the recursive heap layout, exactly as in \secref{c13-core}.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 295A Greg and Array}
+% ---------------------------------------------------------------
+
+\solvedproblem{c15-greg}{Greg and Array}{CF 295A}
+  {https://codeforces.com/problemset/problem/295/A}{CF 1400}
+  {two stacked range-add passes on a lazy sum tree; the ``range updates done right'' hello-world}
+
+\begin{problemstatement}[CF 295A Greg and Array]
+An array \(a[1..n]\).  There are \(m\) \emph{operations}; operation \(i\) is \((l_i,r_i,d_i)\) meaning ``add \(d_i\) to every \(a_j\) with \(l_i\le j\le r_i\).''  There are \(k\) \emph{queries}; query \((x,y)\) means ``perform operations \(x,x{+}1,\dots,y\) once each.''  After all \(k\) queries, print the final array.
+
+\textbf{Input.} \(1\le n,m,k\le 10^5\); \(1\le a_i,d_i\le 10^5\); each operation \(1\le l_i\le r_i\le n\); each query \(1\le x\le y\le m\).
+
+\textbf{Output.} The \(n\) final values, space-separated.
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+3 3 3
+1 2 3
+1 2 1
+1 3 2
+2 3 4
+1 2
+1 3
+2 3
+
+Output:
+9 18 17
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 25 minutes]
+A direct simulation applies each requested block of operations by walking \(r_i-l_i+1\) array slots -- up to \(k\cdot m\) operation-firings, each up to \(n\) wide: \(\bigO{n\cdot m\cdot k}=10^{15}\), a hard \tle.  The two levels of ``range'' are hiding: you fire \emph{ranges of operations}, and each operation touches \emph{a range of the array}.  Both are range-adds.
+\peek{how many times does each operation actually get fired?}
+\nudge{that is a range-add / point-read problem \emph{on the operation axis}: a query \((x,y)\) adds \(1\) to the counter of every operation in \([x,y]\).  Solve the outer axis first, the inner later.}
+\fullhint{Pass~1 over \([1,m]\): for each query \((x,y)\) do \code{rupdate}(1,1,m,x,y,1); then read \(\mathit{cnt}[i]=\) the accumulated add at \(i\) (a point query, or \code{rquery}\((i,i)\)).  Pass~2 over \([1,n]\): for each operation \(i\) fire \(\mathit{cnt}[i]\) times at once -- \code{rupdate}(1,1,n,\(l_i\),\(r_i\),\(d_i\cdot\mathit{cnt}[i]\)).  Read out \(a_j+\mathit{rquery}(j,j)\).  \(\mathit{cnt}\le k=10^5\), \(d\le10^5\Rightarrow d\cdot\mathit{cnt}\le10^{10}\) and array sums reach \(\sim10^{15}\): use \code{long long} throughout.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The two nested ``ranges'' decouple.  Whether the final array is right depends only on \emph{how many times each operation fires}, not the order (all operations are pure additions and addition commutes).  So collapse the outer \(k\) queries into a per-operation count via one axis of range-adds, then collapse the inner \(m\) operations (weighted by their count) into the array via a second axis of range-adds.  Both axes are the exact \code{rupdate} we just built; the query axis is a range-add with point-read, the array axis likewise.
+
+\solstep{Key Observations}
+\begin{observation}
+The whole problem is \emph{invertible} range-adds -- the pending tag never has to compose with a set or flip.  That is why it is \lv{3} and why a plain difference array would also do both passes: CF~295A is chosen to drill the \emph{mechanics} of \code{apply}/\code{push}, not the hard composition cases (\(\secref{c15-compose}\) does those).
+\end{observation}
+\begin{observation}
+Two range-add passes, not one.  Pass~1 measures operation multiplicities on \([1,m]\); pass~2 spends them on \([1,n]\).  Doing them in one sweep is what makes an unprepared solver hit \(\bigO{nmk}\).
+\end{observation}
+\begin{observation}
+Overflow is the hidden test.  \(d_i\cdot\mathit{cnt}_i\) and the running sums exceed \(2^{31}\); every aggregate, tag, and the read-out must be \code{long long}.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Simulate: for each query, loop \(i=x..y\) and apply operation \(i\) to \(a\)}
+{A query fires up to \(m=10^5\) operations, each writing up to \(n=10^5\) slots; \(k=10^5\) queries \(\Rightarrow 10^{15}\) writes.  The wall is that you re-fire the same operation once per query that names it.}
+\deadend{Count operations with a BIT of \emph{point} updates}
+{You would need \(m\) point-updates per query (the block \([x,y]\)).  The point of this section is that a block is a \emph{range-add} \(\mathrel{+}=1\): \code{rupdate} \([x,y]\), one \(\bigO{\log n}\) act, then read all counts at the end.}
+\aha{Reduce to multiplicities first (one range-add axis), then apply each operation \(cnt\) times in \(O(1)\) by scaling its increment (a second range-add axis).}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}c p{0.22\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ direct simulate & loop queries \(\times\) ops \(\times\) slots & \(\bigO{n\cdot m\cdot k}\) & \tle \\
+2 & \lv{3}\ diff-array twice & count ops + apply weighted, two difference arrays & \(\bigO{n+m+k}\) & \ac \\
+3 & \lv{3}\ \textbf{lazy tree twice} & \code{rupdate} on both axes (\(\coderef{c15-rupdate}\)) & \(\bigO{(k+m+n)\log n}\) & \ac \\
+4 & \lv{4}\ one mega-tree & nest ops inside array; composes nothing & -- & worse \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 (two difference arrays) is legal \emph{because} every update here is an invertible add -- the exact Ch.~18 licence.  We write rung~3 so the lazy mechanics are drilled and so the pattern extends unchanged when a later problem's update is \emph{not} a plain add.
+
+\solstep{Solution}
+Build an \([1,m]\) lazy tree (counts).  For each query \((x,y)\): \code{rupdate}(1,1,m,x,y,1).  Read \(\mathit{cnt}[1..m]\).  Build an \([1,n]\) lazy tree.  For each operation \(i\): \code{rupdate}(1,1,n,\(l_i\),\(r_i\),\(d_i\cdot\mathit{cnt}[i]\)).  For each \(j\): print \(a_j+\mathit{rquery}(1,1,n,j,j)\).  All \code{long long}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Counts are right.} Query \((x,y)\) increments the firing count of every operation in \([x,y]\) by one; after all \(k\) queries, node-leaf \(i\)'s accumulated add equals the number of queries with \(x\le i\le y\), i.e.\ \(\mathit{cnt}[i]\), by the range-add semantics of \(\coderef{c15-rupdate}\) (thmref{c15-lazy} invariant).
+\textbf{Array is right.} Operation \(i\) is exactly ``\(+d_i\) to \([l_i,r_i]\)'', so firing it \(\mathit{cnt}[i]\) times is ``\(+d_i\mathit{cnt}[i]\) to \([l_i,r_i]\)''; pass~2 applies that single weighted \code{rupdate}.  Additions commute, so the total added to \(a_j\) is \(\sum_{i:\,l_i\le j\le r_i} d_i\mathit{cnt}[i]\), matching the sequential simulation's net effect.
+\textbf{Read-out.} \(\mathit{rquery}(j,j)=\) the accumulated add at \(j\); adding the initial \(a_j\) gives the final value.  \textbf{Bounds.} \(O(1)\)-per-node arithmetic with \code{long long}; every value \(<10^{15}<2^{63}\).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 295A full solution: two stacked lazy range-add passes (long long)}, label={lst:c15-295-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 100005;
+int n, m, k;
+long long a[MX], L[MX], R[MX], D[MX], cnt[MX];
+long long t[4*MX], tag[4*MX];
+
+void apply(int v, int tl, int tr, long long d){
+    t[v] += d * (tr - tl + 1);
+    tag[v] += d;
+}
+void push(int v, int tl, int tr){
+    if (tag[v] == 0) return;
+    int tm = (tl + tr) / 2;
+    apply(2*v,   tl,   tm, tag[v]);
+    apply(2*v+1, tm+1, tr, tag[v]);
+    tag[v] = 0;
+}
+void rupdate(int v, int tl, int tr, int l, int r, long long d){
+    if (l > r) return;
+    if (l == tl && r == tr){ apply(v, tl, tr, d); return; }
+    push(v, tl, tr);
+    int tm = (tl + tr) / 2;
+    rupdate(2*v,   tl,   tm, l,        min(r, tm), d);
+    rupdate(2*v+1, tm+1, tr, max(l, tm+1), r,      d);
+    t[v] = t[2*v] + t[2*v+1];
+}
+long long rquery(int v, int tl, int tr, int l, int r){
+    if (l > r) return 0;
+    if (l == tl && r == tr) return t[v];
+    push(v, tl, tr);
+    int tm = (tl + tr) / 2;
+    return rquery(2*v, tl, tm, l, min(r, tm))
+         + rquery(2*v+1, tm+1, tr, max(l, tm+1), r);
+}
+int main(){
+    scanf("%d%d%d", &n, &m, &k);
+    for (int i = 1; i <= n; i++) scanf("%lld", &a[i]);
+    for (int i = 1; i <= m; i++) scanf("%lld%lld%lld", &L[i], &R[i], &D[i]);
+    // pass 1: how many times is each operation fired?  range-add [x,y] += 1
+    for (int i = 0; i < 4*MX; i++) t[i] = tag[i] = 0;
+    while (k--){ int x, y; scanf("%d%d", &x, &y); rupdate(1, 1, m, x, y, 1); }
+    for (int i = 1; i <= m; i++) cnt[i] = rquery(1, 1, m, i, i);
+    // pass 2: spend each operation cnt[i] times at once -> range-add [L,R] += D*cnt
+    for (int i = 0; i < 4*MX; i++) t[i] = tag[i] = 0;
+    for (int i = 1; i <= m; i++) rupdate(1, 1, n, L[i], R[i], D[i] * cnt[i]);
+    for (int j = 1; j <= n; j++)
+        printf("%lld ", a[j] + rquery(1, 1, n, j, j));
+    printf("\n");
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CF 295A: \(a=(1,2,3)\); ops \((1,2,1),(1,3,2),(2,3,4)\); queries \((1,2),(1,3),(2,3)\)]
+\textbf{Pass~1} adds \(1\) to the operation-count on each query interval: \([1,2]\), \([1,3]\), \([2,3]\).  \(\mathit{cnt}[1]=2\) (queries 1,2), \(\mathit{cnt}[2]=3\) (all three), \(\mathit{cnt}[3]=2\) (queries 2,3).\\
+\textbf{Pass~2} weighted increments: op1 \(1\cdot2=2\) on \([1,2]\); op2 \(2\cdot3=6\) on \([1,3]\); op3 \(4\cdot2=8\) on \([2,3]\).\\
+Read-out: \(a_1=1+2+6=9\); \(a_2=2+2+6+8=18\); \(a_3=3+6+8=17\).  Output \(\boxed{9\;18\;17}\) -- the official answer.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Pass~1 \(O(k\log m)\), reads \(O(m\log m)\); pass~2 \(O(m\log n)\), read-out \(O(n\log n)\).  Total \(\bigO{(n+m+k)\log n}\) with \(n,m,k\le10^5\Rightarrow\sim6\cdot10^6\) node-visits -- \ac.  Two trees of \(4\cdot10^5\) \code{long long}s \(\approx 13\) MB (reuse one and clear, as above).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.22\linewidth} p{0.30\linewidth} p{0.36\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+\(x=y\) & single operation & \code{rupdate} covers one leaf; count \(+1\) there \\
+op never fired & \(\mathit{cnt}[i]=0\) & weighted add \(d_i\cdot0=0\), harmless \\
+full range \([1,n]\) & root-covered & \code{apply} at root, one tag, \(\bigO{1}\) \\
+big values & overflow & every field \code{long long}; read-out \(a_j+\mathit{rquery}\) \\
+clearing between passes & stale tree & re-zero \(t,\mathit{tag}\) before pass~2 (done above) \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{The segment length in \code{apply} is \((tr-tl+1)\), not the query length.}  A covered node contributes its \emph{own} interval size; using \(r-l+1\) (the request width) silently mis-scales sums.
+  \item \textbf{Two arrays, both sized \(4n\).}  You need \(t[\,]\) \emph{and} \(\mathit{tag}[\,]\); sizing only one to \(4n\) (or forgetting to clear \(\mathit{tag}\) between passes) corrupts the second axis.
+  \item \textbf{Zero the tree between passes.}  \(\coderef{c15-295-soln}\) reuses \(t,\mathit{tag}\); skipping the re-zero carries pass-1 counts into the array axis.
+  \item \textbf{\code{long long} for the weighted increment.}  \(d_i\cdot\mathit{cnt}_i\) is up to \(10^{10}\); an \code{int} product overflows before you ever store it.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: forgetting to \code{push} before descending]
+On a partial overlap the recursion walks \emph{through} the node into children.  If the node is dirty and you did not push, the children are stale and the answer is wrong -- the signature lazy WA.  Rule: \emph{push at the top of any partial branch}, in both \code{rupdate} and \code{rquery}.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: pushing (or descending) on a fully-covered node]
+On a full cover you must \code{apply} and \emph{return}.  Pushing there (or recursing to the leaves) is what re-introduces the \(\bigO{n}\) cost the tag was added to remove -- you get the right answer at \tle.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: forgetting to \code{pull} on the way back up]
+After the two recursive calls, \(t_v\) must be re-set to \(t_{2v}+t_{2v+1}\).  Skip it and an update that changed a child leaves the parent's stale aggregate, so a later full-cover read returns the pre-update number.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: half-open vs closed intervals]
+Every listing here uses \emph{closed} \([tl,tr]\) and \emph{closed} requests \([l,r]\), with the empty case \(l>r\).  Mixing a half-open \([l,r)\) request with a closed tree shifts answers by one.  Pick one convention and convert at the door.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item In your partial branch, did you \code{push} \emph{before} the two recursive calls?
+  \item In your full-cover branch, did you \code{apply} and \code{return} -- without pushing?
+  \item Did you \code{pull} (\(t_v=t_{2v}+t_{2v+1}\)) after both children returned?
+  \item Is your \code{apply} multiplying by the \emph{node's} interval length \((tr-tl+1)\)?
+  \item Is everything that can exceed \(2^{31}\) stored in \code{long long}?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Progressions Covering}{CF 1661D}
+    {https://codeforces.com/problemset/problem/1661/D}
+    {CF 1900 L3}
+    {Start from all-zero \(a\); an operation picks a length-\(k\) window and adds the arithmetic progression \(1,2,\dots,k\); make \(a_i\ge b_i\) for all \(i\) with the fewest operations.  The pending value is now a \emph{linear} function of position (a slope plus an intercept), so keep \emph{two} range-add tags (coefficient of \(i\), constant term) -- a direct extension of \(\coderef{c15-rupdate}\) where \code{apply} folds both.  Greedy right-to-left: at position \(i\), read how much the already-chosen operations still cover it, fire the deficit at \([i-k+1,i]\).  The read is a point value, so a difference-pair (Ch.~18's licence) also works -- do both and note which code you reused from \(\coderef{c15-apply}\).}
+  \practice{DZY Loves Fibonacci Numbers}{CF 446C}
+    {https://codeforces.com/problemset/problem/446/C}
+    {CF 2400 L4}
+    {Two query types: add the Fibonacci sequence \(f_1,f_2,f_3,\dots\) elementwise onto \([l,r]\); or print \(\sum a_l..a_r\bmod(10^9{+}9)\).  The pending tag is a \emph{Fibonacci state} -- the pair \((\)first term, second term\()\) of the progression still owed -- and \code{apply} on a covered node of length \(\mathit{len}\) adds \(\sum\) of that fib-run, a closed form in the two seed values (use \(\sum_{j=1}^{\mathit{len}} F_j\)-style identities, all mod \(10^9{+}9\)).  This is the same \code{apply}/\code{push}/\code{pull} as \(\coderef{c15-rupdate}\); only the type of \(\mathit{tag}\) and its fold change -- a preview of \(\secref{c15-compose}\).}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+Chapter~19 (\chref{c13}) owns the plain tree this section bolts a tag onto; nothing about build / point-update / canonical-cover is re-derived.  Forward: \secref{c15-compose} handles two tags meeting at one node before a push (assign beats add, the affine pair) -- the reason CF~295A was ``easy'' is that all its tags were pure adds and compose by simple summation; \secref{c15-assign} treats the \emph{set} tag that overrides; \secref{c15-trees} runs this engine on a flattened subtree; \secref{c15-strains} marks the wall where no single tag suffices and beats (Ch.~23, \chref{c29}) begin.  Chapter~18 (\chref{c14}) owns the difference-BIT shortcut that CF~295A also admits.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 20.1 in 10 seconds]
+Lazy = the Ch.~19 tree plus \(\mathit{tag}[]\): one pending update per node, \emph{already folded} into \(t_v\) but not into the children.  \code{apply} folds \(\Delta\) into the aggregate (\(t_v\mathrel{+}=\Delta\cdot(r_v-l_v+1)\)) \emph{and} stashes \(\Delta\); \code{push} hands the stash to both children and clears; \code{pull} re-folds a parent from its children.  Golden rule: \textbf{push only when forced to descend} (partial branch); on a full cover \code{apply} and \emph{stop}.  Build \(\bigO{n}\), range update \emph{and} query \(\bigO{\log n}\).  Worked: CF~295A (\(\probref{c15-greg}\), \(\coderef{c15-295-soln}\)) -- two stacked range-add passes.
+\selftest{
+  \item After range-add \([2..5]\mathrel{+}=3\) on \(A\), which node is dirty and what is its tag?
+  \item Why does \(\mathit{rquery}[3..6]=20\) return \(t_9\) without pushing, but \(\mathit{rquery}[4..6]=13\) must push \(t_9\)?
+  \item Write the \code{apply} fold for a \(\min\)-tree under range-add -- why is there no \((r-l+1)\)?
+  \item State the golden rule in one sentence.
+  \item Give the two overflow points in CF~295A that force \code{long long}.
+}
+\end{recallbox}

@@ -1,0 +1,811 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  4.1  Pointers vs Arrays                                  sec:c04-reps
+%  Exports: def:c04-rep  def:c04-forms  thm:c04-implicit
+%           lst:c04-reps  ex:c04-storage
+%           prob:c04-nary-depth  prob:c04-validate-array  prob:c04-inform
+%           lst:c04-nary-depth   lst:c04-validate-array   lst:c04-inform
+% =====================================================================
+\section{Pointers vs Arrays}\label{sec:c04-reps}
+
+\begin{topicintro}
+A tree is an abstract relation -- ``these nodes are the children of that node.'' To
+compute on it you must commit that relation to memory, and there is more than one way
+to do it. This section catalogues the \term{representations} a competitive programmer
+actually meets -- \term{pointer nodes}, \term{adjacency lists}, \term{parent arrays}
+and \term{implicit array indices} -- and, more importantly, \emph{when each wins}. The
+same DFS (\chref{c03}) runs on top of every one; only the way you fetch a node's
+children changes.
+\textbf{Prerequisites.} \secref{c01-what-is-tree} (rooted vs unrooted, $\degop$), the
+\code{TreeNode} model of \secref{c02-model}, the adjacency-build loop \coderef{c01-build}.
+The two running examples $R$ (\figref{c04-running-r}) and $G$ (\figref{c04-running-g}).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item name the four storage models and fetch a node's children under each;      \hfill\lv{1}
+  \item read an input format (edge list / \code{parent[]} / \code{leftChild[]}) and
+        know which model it hands you;                                            \hfill\lv{2}
+  \item convert a parent array into a children adjacency in one loop;             \hfill\lv{2}
+  \item decide, from the operation mix, whether pointers or arrays are cheaper
+        (cache, memory, upward navigation);                                       \hfill\lv{3}
+  \item check whether an array-described graph is \emph{one} valid binary tree.    \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- how the tree is \emph{stored}]
+\reckey{the problem's \emph{input} is a bunch of parallel arrays (\code{leftChild},
+\code{rightChild}, \code{parent}), $n{-}1$ undirected \emph{edges}, or a pointer
+\code{TreeNode}/\code{Node}; the difficulty is getting from a node to its children (or
+parent) \emph{at all}, not what you do once you have them.}
+\recuse{
+  \item you are handed an \emph{edge list} or \code{parent[]} and must ``make a tree''
+        before any recursion makes sense;
+  \item the operation is ``go to the parent'' a lot -- pointers give $\bigO{1}$ only if
+        you \emph{add} a \code{parent} pointer; arrays give it free;
+  \item the tree is complete / heap-shaped and a flat array with $2i{+}1$ indexing is
+        leaner than allocating nodes.
+}
+\recnotuse{
+  \item the structure is given and the real work is the \emph{visit order} -- that is
+        Chapter~3 (\chref{c03});
+  \item you need subtree-as-contiguous-range times \code{tin}/\code{tout} -- Euler tour,
+        \chref{c24};
+  \item the array is a \emph{priority queue} with sift-up/down -- that is heaps,
+        \chref{c07} (only the layout is teased here).
+}
+One-line test: \emph{is my bottleneck ``I cannot cheaply reach a node's children or
+parent''? If yes, this is a representation choice -- this section.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Forget the pictures for a moment and ask a machine question: node $u$ says ``I have
+children'' -- \emph{where} are they written down? There are exactly four honest answers,
+and every contest tree problem uses one of them.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, node distance=3mm,
+   m/.style={boxnode, text width=39mm, minimum height=11mm, font=\scriptsize, align=left}]
+  \node[m, fill=primaryblue!10, draw=primaryblue] (p) at (0,0)
+    {\textbf{Pointer nodes}\\ \code{TreeNode*}/\code{Node*}\\ children are raw addresses\\
+     \emph{up navigation: none}};
+  \node[m, fill=accentorange!10, draw=accentorange, right=of p] (a)
+    {\textbf{Adjacency list}\\ \code{vector<int> adj[N]}\\ children $=$ neighbours\\
+     \emph{undirected; needs a root}};
+  \node[m, fill=successgreen!10, draw=successgreen, right=of a] (par)
+    {\textbf{Parent array}\\ \code{par[i] = p}\\ one entry per node\\
+     \emph{up: $\bigO{1}$; down: rebuild}};
+  \node[m, fill=softpurple!10, draw=softpurple, below=8mm of p] (im)
+    {\textbf{Implicit index}\\ node $i$'s kids at $2i{+}1,2i{+}2$\\ zero pointers\\
+     \emph{needs a \emph{complete} tree}};
+  \draw[flow] (p) -- (a); \draw[flow] (a) -- (par);
+\end{tikzpicture}
+\caption{The four storage models. They describe the \emph{same} tree; they differ in
+what a ``child'' physically is, whether you can step \emph{upward} in $O(1)$, and how
+much memory the edges cost. Section~\ref{sec:c04-rooting} adds the fifth act: choosing
+which node is the root once you have an adjacency list.}\label{fig:c04-models}
+\end{figure}
+
+The tension that generates every trade-off is simple. A \emph{pointer} tree knows its
+children but not its parent, and every node is a separate heap allocation -- random-ish
+addresses that scatter the data across RAM and defeat the CPU cache. An \emph{array}
+tree keeps everything contiguous (great cache, tiny constants) but only expresses a
+\emph{fixed arity} cleanly, and an implicit index $2i{+}1$ silently assumes the tree is
+\emph{complete}. An \emph{adjacency list} is the general, contest-native compromise:
+one contiguous vector per node, arbitrary arity, but \emph{undirected} -- which is why
+rooting (\secref{c04-rooting}) is inseparable from it. Reading this chapter, hold one
+question: \emph{which navigation (down? up? both?) does the problem need, and how many
+edges can I afford to store?}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Tree representation}{c04-rep}
+A \term{representation} of a tree $T$ on $n$ nodes is an injective encoding of the
+``is-a-child-of'' relation into a data structure supporting, at minimum, a
+\texttt{children(v)} query returning $v$'s children in some order. A
+representation is \term{rooted} if children are directed away from a distinguished root,
+and \term{unrooted} if it stores the symmetric adjacency (neighbours) instead.
+\end{definition}
+
+\noindent\textbf{In plain words.} A representation is just \emph{where the edges live} so
+that ``give me $v$'s children'' is a cheap, well-defined operation. All
+four models below implement that one query; picking a model is picking the price of that
+query and of the operations you can \emph{not} afford.
+
+\begin{definition}{The four concrete models}{c04-forms}
+For nodes labelled $0,\dots,n-1$:
+\begin{itemize}[nosep]
+  \item \textbf{Pointer}: \code{struct Node \{ int val; vector<Node*> kids; \};} -- a
+        binary node instead stores \code{left},\ \code{right} (\code{nullptr} $=$ absent).
+  \item \textbf{Adjacency list}: \code{vector<int> adj[n];} with each undirected edge
+        $(u,v)$ stored \emph{both} ways: \code{adj[u].push\_back(v); adj[v].push\_back(u);}.
+  \item \textbf{Parent array}: \code{int par[n];} with \code{par[root] = -1}; every other
+        node stores its single parent.
+  \item \textbf{Implicit index}: node $i$ has children at array slots $2i{+}1$ and
+        $2i{+}2$ (and parent at $\lfloor (i-1)/2\rfloor$); the tree \emph{is} the array.
+\end{itemize}
+\end{definition}
+
+\begin{notebox}[Adjacency \emph{list} vs \emph{matrix}]
+A contest tree is \emph{sparse} ($n-1$ edges), so an adjacency \emph{matrix} ($O(n^2)$
+memory) is never worth it; the list (or the parent array) is the default. Matrix form
+only reappears for dense \emph{graph} adjacency in special chapters, not trees.
+\end{notebox}
+
+\subsection{Key Property: what implicit indexing costs}
+
+\begin{theorem}{Implicit array indexing is exact only for complete trees}{c04-implicit}
+Place a binary tree in an array $A$ with the root at index $0$ and node $i$'s
+children at $2i+1$ (left) and $2i+2$ (right), for every non-leaf. Then this layout stores
+the tree with no wasted slots \textbf{iff} the tree is \term{complete} (every level full
+except possibly the last, which is filled left-to-right). A tree of height $h$ that is
+\emph{not} complete can force $\size$ to occupy a slot $\ge 2^{h}-1$, so the array needs
+up to $2^{h}$ entries to hold $h{+}1$ nodes.
+\end{theorem}
+\begin{proofbox}
+By induction on the level. A node at index $i$ sits at depth $d=\lfloor\log_2(i+1)\rfloor$:
+base $i=0$ has depth $0$; each step to $2i{+}1$ or $2i{+}2$ sends $i+1 \to 2(i+1)$ or
+$2(i+1)+1$, doubling the ``offset $i{+}1$'', so depth rises by exactly $1$. Thus depth $d$
+occupies indices $[\,2^{d}-1,\ 2^{d+1}-2\,]$, precisely the $2^{d}$ slots a full level
+needs. A \emph{complete} tree fills each level left-to-right, so the $k$-th node (in
+level order) is written to the $k$-th slot with zero gaps, and the count of slots equals
+the node count. Conversely a right-leaning chain $0\to 2\to 5\to\dots$ (always the right
+child) drives the index by $i\mapsto 2i+2$, i.e.\ slot $\ge 2^{d}$ at depth $d$, giving an
+array of size $2^{\height{}}$ for only $\height{}+1$ nodes -- exponentially wasteful.
+\end{proofbox}
+\begin{insightbox}
+This is the whole reason heaps (\chref{c07}) use the array layout and general trees do
+not: a heap is \emph{complete by definition}, so $2i{+}1/2i{+}2$ is free navigation with
+no pointers at all. The moment the tree can skew, that guarantee collapses -- which is
+exactly what happens to running example $R$ (\figref{c04-running-r}), whose node $3$ has
+no left child and therefore punches a \emph{hole} in the implicit array.
+\end{insightbox}
+
+\subsection{The Algorithm: fetching children under each model}
+
+\begin{lstlisting}[caption={The same ``visit all children'' loop, four storages}, label={lst:c04-reps}]
+#include <bits/stdc++.h>
+using namespace std;
+
+// (A) POINTER nodes -- binary, LeetCode's default. Up-navigation is IMPOSSIBLE
+//     unless you pass the parent down or pre-store a parent pointer.
+struct TreeNode { int val; TreeNode *left, *right;
+    TreeNode(int x=0): val(x), left(nullptr), right(nullptr) {} };
+void dfsPtr(TreeNode* v) {
+    if (!v) return;
+    // children are just the two fields; "none" is nullptr
+    dfsPtr(v->left); dfsPtr(v->right);
+}
+
+// (B) ADJACENCY LIST -- general tree, contest default. UNDIRECTED, so you MUST
+//     pass the parent to avoid bouncing back along the edge you came from.
+vector<vector<int>> adj;              // adj[u] = neighbours of u
+void dfsAdj(int u, int p) {
+    for (int v : adj[u]) if (v != p)   // the parent guard: skip where we came from
+        dfsAdj(v, u);
+}
+
+// (C) PARENT ARRAY par[i] = parent of i (par[root] = -1). Cheap to GO UP, but to
+//     go DOWN you first rebuild children lists in one linear pass.
+vector<int> par;                       // given
+vector<vector<int>> buildKids(int n) {
+    vector<vector<int>> kids(n);
+    for (int i = 0; i < n; ++i)
+        if (par[i] != -1) kids[par[i]].push_back(i);   // O(n), the key idiom
+    return kids;
+}
+
+// (D) IMPLICIT INDEX -- the tree IS an array A; children of i are 2i+1, 2i+2.
+//     Valid / compact only for a COMPLETE tree (thm:c04-implicit).
+vector<int> A;                         // level-order packing
+void dfsImpl(int i, int n) {
+    if (i >= n) return;                // past the array = no node
+    // visit A[i]; then
+    dfsImpl(2*i + 1, n);               // left child slot
+    dfsImpl(2*i + 2, n);               // right child slot
+}
+\end{lstlisting}
+\begin{complexitybox}
+All four walks are $\bigO{n}$ \emph{work} (each node once) plus the $\bigO{h}$ stack.
+The representation changes only the \textbf{constants and side costs}: pointer $=$ one
+heap allocation per node, scattered, no parent; adjacency $=$ contiguous per node but
+$2(n{-}1)$ stored entries (each edge twice) and needs the parent guard; parent array $=$
+$\bigO{1}$ up, $\bigO{n}$ to rebuild down; implicit index $=$ zero pointers, best cache,
+but up to $O(2^{h})$ slots (thm:c04-implicit). Memory for the four: $O(n)$, $O(n)$,
+$O(n)$, $O(2^{h})$ respectively.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{$R$ and $G$ in every model}{c04-storage}
+\textbf{Binary $R$ (\figref{c04-running-r}).} As pointers, node $1$ has \code{left}
+$=\&2$, \code{right} $=\&3$; node $3$'s \code{left} is \code{nullptr}. As an
+implicit array with root slot $0$: $1$ at $0$, $2$ at $1$, $3$ at $2$, $4$ at $3$, $5$ at
+$4$, and node $6$ (right child of $3$) at $2\cdot2{+}2 = 6$ -- so slot $5$ is a
+\textbf{hole}, exactly as \thmref{c04-implicit} predicts ($R$ is not complete).
+
+\medskip
+\noindent\textbf{General $G$ (\figref{c04-running-g}).} Adjacency (undirected):
+$\code{adj} = \{\{1,2,3\},\{0,4,5\},\{0\},\{0,6\},\{1\},\{1\},\{3\}\}$. Rooted at $0$
+(\secref{c04-rooting}) the children are $0{:}\{1,2,3\},\ 1{:}\{4,5\},\ 3{:}\{6\}$, giving
+parent array $\parent = [-1,0,0,0,1,1,3]$ and subtree sizes $\size=[7,3,1,2,1,1,1]$. Note
+$\degop(1)=3$ in the \emph{undirected} graph equals $|\text{neighbours}|$, but its
+\emph{child} count after rooting is only $2$ -- degree and child-count diverge the moment
+a node has a parent, a distinction that trips up \probref{c04-validate-array}.
+\end{example}
+\begin{tracebox}[Parent array $\to$ children lists, one pass on $G$]
+Start with \code{kids} $=$ seven empty vectors. Read $\parent=[-1,0,0,0,1,1,3]$:
+$i{=}0$: $\parent[0]{=}-1$, skip (root). $i{=}1$: push $1$ under $0$. $i{=}2$: push $2$
+under $0$. $i{=}3$: push $3$ under $0$. $i{=}4$: push $4$ under $1$. $i{=}5$: push $5$
+under $1$. $i{=}6$: push $6$ under $3$. Result:
+$\code{kids}=\{\{1,2,3\},\{4,5\},\{\},\{6\},\{\},\{\},\{\}\}$ -- $G$'s rooted
+children, built in $n$ steps (\coderef{c04-reps}, block C). \checkmark\ \probref{c04-inform}.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{N-ary pointer}: \code{vector<Node*> children} instead of fixed
+        \code{left}/\code{right} -- the model behind LC 559 (\probref{c04-nary-depth}). \hfill\lv{1}
+  \item \textbf{Add a parent pointer} to a binary \code{TreeNode} to get $\bigO{1}$
+        up-navigation (turn it into a quasi-linked structure) -- LC 2385 practice. \hfill\lv{3}
+  \item \textbf{Edge list with a root given}: adjacency $+$ parent guard is the standard
+        contest shape; the root is decided for you (\secref{c04-rooting}).          \hfill\lv{3}
+  \item \textbf{Compressed adjacency} (\code{head[]/to[]/next[]} forward-star) to kill
+        the per-node vector overhead when $n \sim 10^{6}$.                       \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c04-reps-pitfalls}
+
+\begin{warningbox}[Trap 1 -- forgetting the parent guard on an \emph{undirected} adjacency list]
+\code{adj} stores each edge twice, so a bare DFS recurses $u \to v \to u \to v$ forever
+(and overflows the stack). The guard \code{if (v == p) continue} is load-bearing.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: bounces back along the edge}, language=C++, basicstyle=\ttfamily\small]
+void dfs(int u) {
+    for (int v : adj[u]) dfs(v);       // v can be u's parent -> infinite recursion
+}
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: carry the parent, skip it}, language=C++, basicstyle=\ttfamily\small]
+void dfs(int u, int p) {
+    for (int v : adj[u]) if (v != p) dfs(v, u);   // orient away from where we came
+}
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- assuming implicit $2i{+}1$ indexing is compact for \emph{any} tree]
+A skewed tree drives a node to slot $2^{d}$ at depth $d$, so an ``array of size $n$''
+silently overflows or misreads. Implicit indexing is safe \emph{only} for complete trees
+(\thmref{c04-implicit}); otherwise store real node indices in a vector, not heap slots.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: right-skew blows the index up}, language=C++, basicstyle=\ttfamily\small]
+A[2*i + 2] = x;        // depth d lands near slot 2^d -- array explodes on a chain
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: use 2i indexing ONLY because a heap is complete}, language=C++, basicstyle=\ttfamily\small]
+// guarantee: tree is complete (heap / full level-order) -> 2i+1, 2i+2 fit in n slots
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- conflating undirected $\degop$ with rooted child-count]
+After rooting, a non-root node has $\text{children} = \degop - 1$ (the edge to its parent
+is not a child edge). Counting children as $\degop$ mislabels leaves and breaks
+leaf/root detection -- the exact bug in \probref{c04-validate-array} if you are careless.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: degree is not child count}, language=C++, basicstyle=\ttfamily\small]
+bool isLeaf = (adj[u].size() == 0);   // a rooted LEAF may still have 1 neighbour (its parent)
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: count children after the guard}, language=C++, basicstyle=\ttfamily\small]
+int kids = 0; for (int v : adj[u]) if (v != p) ++kids;
+bool isLeaf = (kids == 0);
+\end{lstlisting}
+
+\subsection{Problem Lab}
+
+Two model-reading exercises then a genuine validation problem. LC 559 is a $\lv{2}$
+warm-up that is pure ``the children are a vector''; LC 1376 is a $\lv{3}$ core whose
+\emph{entire} difficulty is turning a parent array into children lists; LC 1361 is a
+$\lv{3}$ core that hands you parallel child arrays and asks whether they even describe
+one tree -- a question only the storage model can answer.
+
+
+\solvedproblem{c04-nary-depth}{Maximum Depth of N-ary Tree}{LeetCode 559}
+  {https://leetcode.com/problems/maximum-depth-of-n-ary-tree/}{LC Easy L2}
+  {N-ary pointer children vector, recursive depth}
+
+\begin{problemstatement}[Maximum Depth of N-ary Tree]
+Given the root of an \emph{N-ary} tree, return its depth -- the number of nodes on the
+longest root-to-leaf path. Each node stores \code{int val} and \code{vector<Node*>
+children} (an arbitrary, possibly empty, list). $0 \le n \le 10^4$, $0 \le \text{children}
+\le 100$. An empty tree has depth $0$.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+This is Chapter~2's maximum-depth recursion (\secref{c02-bottomup}) with one
+representation change: a node has a \emph{variable-length} list of children instead of a
+fixed \code{left}/\code{right}. The whole exercise is reading model (A) of
+\coderef{c04-reps} in its general form -- ``children'' is now a vector you loop over.
+
+\solstep{Solution}
+A leaf (empty \code{children}) has depth $1$; an internal node has depth $1 + \max$ over
+its children's depths; \code{nullptr} gives $0$. One recursive pass, taking the max of the
+child depths inside a \code{for}.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Maximum Depth of an N-ary Tree (LeetCode 559)}, label={lst:c04-nary-depth}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Node {
+public:
+    int val;
+    vector<Node*> children;             // model (A), general arity
+    Node() {}
+    Node(int v) : val(v) {}
+};
+
+class Solution {
+public:
+    int maxDepth(Node* root) {
+        if (!root) return 0;                        // empty tree has depth 0
+        int best = 0;
+        for (Node* c : root->children)              // loop replaces the 2 fixed calls
+            best = max(best, maxDepth(c));          // deepest child so far
+        return best + 1;                            // +1 for this node
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ read as an N-ary tree: root $1$ has children $2,3$; $2$ has $4,5$; $3$ has $6$]
+\code{maxDepth(4)}$=1$, \code{maxDepth(5)}$=1$ $\Rightarrow$ \code{maxDepth(2)}$=1{+}\max(1,1)=2$.
+\code{maxDepth(6)}$=1$ $\Rightarrow$ \code{maxDepth(3)}$=2$. \code{maxDepth(1)}$=1{+}\max(2,2)=3$.
+Depth $=3$ nodes ($1,3,6$), i.e.\ $\height(R){=}2$ edges $+1$. \checkmark\ \probref{c04-nary-depth}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (each node once), space $\bigO{h}$ recursion ($\bigO{n}$ worst case, a
+chain). The iterative BFS-by-level alternative (\chref{c03}) uses $\bigO{w}$ width.
+Verdict: \ac.
+\end{complexitybox}
+
+\begin{insightbox}[Key takeaway]
+Nothing about the \emph{representation} (N-ary \code{children} vector) changes the
+recursion -- only the loop that fetches children does. ``$\max$ over children, then $+1$''
+is \secref{c02-bottomup} verbatim; the arity is a storage detail.
+\end{insightbox}
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-inform}{Time Needed to Inform All Employees}{LeetCode 1376}
+  {https://leetcode.com/problems/time-needed-to-inform-all-employees/}{LC Medium L3}
+  {parent-array $\to$ children adjacency, max-path DFS}
+
+\begin{problemstatement}[Time Needed to Inform All Employees]
+There are $n$ employees, a \emph{head} with id \code{headID}, and a \textbf{parent array}
+\code{manager} where \code{manager[i]} is the direct manager of employee $i$
+($\code{manager}[\code{headID}] = -1$). Employee $i$ needs \code{informTime[i]} minutes to
+inform \emph{all} of his direct reports (each report starts only after $i$ finishes;
+reports proceed in \textbf{parallel}). Return the minutes until every employee is
+informed. $1 \le n \le 10^5$, $\sum \text{informTime} \le 2\cdot10^4$ fits comfortably.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+A fair first attempt: notice the input is a \emph{parent} array and figure out the right
+way to walk it.
+\peek{the tree is given bottom-up (\code{manager[i]} points \emph{up}); what must you
+build before a top-down DFS is even possible?}
+\nudge{once you have children lists, what single number at each node combines the
+parallel informing? think max, not sum -- why?}
+\fullhint{one linear pass turns \code{manager[]} into \code{children[]}; then one DFS
+returns, per node, $\text{informTime}[\text{node}] + \max$ over children. The answer is
+that value at the head. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+In tree language, $\code{manager}[\,]$ is a \term{parent array} (\coderef{c04-reps},
+model C): each node names its parent, and the head is the root ($\parent=-1$). Informing
+flows \emph{down} from root to leaves, so we must first convert the upward pointers into
+downward \code{children} lists, then ask: over all root-to-leaf paths, which one takes
+the longest to inform? Because parallel branches overlap, the finish time is the
+\textbf{maximum} root-to-leaf path sum of $\code{informTime}$, not a total.
+
+\solstep{Key Observations}
+\begin{observation}
+A parent array cannot be DFS'd top-down as given -- there is no way to enumerate a
+manager's reports. The single idiom \code{children[manager[i]].push\_back(i)} (one pass,
+$O(n)$) rebuilds a rooted children adjacency (\figref{c04-running-g}'s $\children$ lists).
+\end{observation}
+\begin{observation}
+Reporting is a forest of chains but there is exactly one root (\code{headID}), so it is a
+single tree. Informing is a longest-path problem: the last-informed employee is on the
+root-to-leaf path maximising the sum of $\code{informTime}$.
+\end{observation}
+\begin{observation}
+$\code{informTime}[\text{leaf}]$ contributes nothing to the answer (a leaf informs no
+one), so leaves return $0$; only internal nodes add their broadcast time.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{For each employee, follow \code{manager[]} up to the head summing times, then
+take the max.}{This \emph{does} give the right max per employee, but naively costs
+$O(n \cdot h)$ -- on a chain manager that is $O(n^2)$ and TLEs at $n=10^5$. Fixable by
+memoising ``time-to-head'', but there is a cleaner $O(n)$ orientation we are missing.}
+\deadend{Sum all $\code{informTime}$ as the total elapsed time.}{Dead wrong even at
+$O(n)$: informing is \textbf{parallel}. If the head spends $t$ minutes then two reports
+each broadcast to their teams \emph{simultaneously} -- those subtrees overlap in time.
+The answer is the single slowest chain, a \emph{max}, never a sum.}
+\aha{Orient the parent array into children lists once ($O(n)$), then one DFS returns
+$\text{informTime}[u] + \max_{c}\text{dfs}(c)$; that value at \code{headID} is the answer.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} sum all times & treat informing as serial & $O(n)$ & \textbf{WA} \\
+2 & \lv{3} walk-up per employee & parent[] to root, max chain & $O(n\,h)$ & \tle \\
+3 & \lv{3} orient $+$ max-path DFS & build children, one DFS, max & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 ignores parallelism (the model, not the maths, is wrong); rung 2 is right but
+re-walks shared chains; rung 3 pays $O(n)$ once to flip the pointers and is the solution.
+
+\solstep{Solution}
+Build \code{children} by the model-C idiom. Then \code{dfs(u)} returns the slowest
+informing time of $u$'s subtree: $0$ if $u$ is a leaf, else
+$\code{informTime}[u] + \max_c \code{dfs}(c)$. Return $\code{dfs}(\code{headID})$.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Induction on subtree height]
+\emph{Claim:} $\code{dfs}(u)$ equals the minimum minutes from the moment $u$ starts
+informing until the last employee in $\subtree(u)$ is informed. \emph{Base:} $u$ a leaf --
+it informs no one, so $\code{dfs}(u)=0$. \emph{Step:} $u$ takes $\code{informTime}[u]$
+minutes to reach all its direct reports; each report $c$ then independently informs
+$\subtree(c)$, finishing $\code{dfs}(c)$ minutes after $c$ is notified. Since reports are
+\textbf{parallel}, the subtree finishes when the \emph{slowest} report finishes:
+$\code{informTime}[u] + \max_c \code{dfs}(c)$ -- exactly the code. By induction $\code{dfs}$
+is correct at the root, and the root (\code{headID}) is where the cascade starts, so
+$\code{dfs}(\code{headID})$ is the total elapsed time.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Time Needed to Inform All Employees (LeetCode 1376)}, label={lst:c04-inform}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+public:
+    int numOfMinutes(int n, int headID, vector<int>& manager, vector<int>& informTime) {
+        // model C -> rooted children adjacency, one linear pass
+        vector<vector<int>> children(n);
+        for (int i = 0; i < n; ++i)
+            if (manager[i] != -1) children[manager[i]].push_back(i);
+
+        // slowest inform path in subtree(u): leaf -> 0
+        function<int(int)> dfs = [&](int u) -> int {
+            int best = 0;
+            for (int c : children[u]) best = max(best, dfs(c));
+            return best + informTime[u];          // + broadcast time of u
+        };
+        return dfs(headID);                        // headID is the root (manager == -1)
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$G$ re-read as the org chart, headID $=0$]
+$\parent=[-1,0,0,0,1,1,3]$, $\code{informTime}=[1,2,3,4,0,0,0]$.
+Children: $0\!\to\!\{1,2,3\}$, $1\!\to\!\{4,5\}$, $3\!\to\!\{6\}$.
+Leaves $2,4,5,6$: $\code{dfs}(2)=3,\ \code{dfs}(4)=0,\ \code{dfs}(5)=0,\ \code{dfs}(6)=0$
+(leaf $2$ still adds its own informTime).
+$\code{dfs}(1)=2+\max(0,0)=2$; $\code{dfs}(3)=4+\max(0)=4$.
+$\code{dfs}(0)=1+\max(\code{dfs}1{=}2,\code{dfs}2{=}3,\code{dfs}3{=}4)=1+4=\mathbf{5}$.
+Answer $5$ -- the chain $0\!\to\!3\!\to\!6$ is slowest. \checkmark\ \probref{c04-inform}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$: one pass to build children, one DFS touching each node/edge once. Space
+$\bigO{n}$ for the children lists plus $\bigO{h}$ recursion (worst-case $n$ on a chain --
+see the hardening box). Fits $n=10^5$ with room.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+$n=1$ (head only) & children empty, $\code{dfs(headID)}=0+\text{informTime}[\text{head}]$; a lone head informing nobody should give $\code{informTime}$ only if he had reports -- LC guarantees the answer here is the head's own time only when he reports; with no reports the loop is empty, returns $\code{informTime[head]}$ \\
+star (head, all report to it) & $\max$ over many leaves each returning their own informTime; the answer is $\code{informTime[head]} + \max$ leaf \\
+deep chain ($n$ in a line) & correct but $\bigO{h}$ recursion $=\bigO{n}$ -- RE risk, hardening below \\
+manager[] lists head not at index 0 & root found purely by $\text{manager}[i]{=}-1$, index-independent \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+(i) Trying to DFS \code{manager[]} directly -- it points \emph{up}, so you can never
+enumerate reports; the children-list rebuild is mandatory. (ii) Summing instead of
+max-ing (rung 1). (iii) Adding $\code{informTime}$ at a \emph{leaf}: a leaf informs
+nobody, but the code still adds $\code{informTime[leaf]}$ -- that is \emph{correct} here
+because LC sets $\code{informTime[leaf]}=0$; do not assume so in a variant with non-zero
+leaf times. Variant: report each employee's finish time = the same DFS
+threading an accumulated path-sum downward (a top-down parameter, \secref{c02-topdown}).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A \textbf{parent array} is a top-down-blind representation: your first move is
+        almost always \code{children[par[i]].push\_back(i)}, one $O(n)$ pass.
+  \item \emph{Parallel} work on subtrees turns a sum into a \textbf{max} -- the depth of
+        the process, not its total volume.
+  \item The root is wherever the parent pointer is $-1$; never assume it is node~$0$.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Chain $\Rightarrow$ recursion RE}: at $n=10^5$ a line-shaped org drives
+        the \code{dfs} stack to $\bigO{n}$. Swap to an \emph{iterative} post-order (explicit
+        stack, or process nodes in reverse BFS order once you have levels) -- the children
+        array is unchanged, only the walk is.
+  \item \textbf{Memory}: \code{vector<vector<int>> children} is $n$ separate small
+        allocations; for $n \sim 10^6$ a forward-star \code{head/to/nxt} or a single flat
+        array with an offset table beats it.
+  \item \textbf{Overflow}: here $\sum\text{informTime}$ is bounded and fits \code{int};
+        if a variant lets each of $10^5$ nodes add up to $10^9$, switch to \code{long long}.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-validate-array}{Validate Binary Tree Nodes}{LeetCode 1361}
+  {https://leetcode.com/problems/validate-binary-tree-nodes/}{LC Medium L3}
+  {parallel child arrays, indegree + reachability, one-tree test}
+
+\begin{problemstatement}[Validate Binary Tree Nodes]
+You have $n$ nodes labelled $0\dots n-1$. Node $i$'s two children are
+\code{leftChild[i]} and \code{rightChild[i]} (a value of $-1$ means no such child). Return
+\code{true} \textbf{iff} the given arrays describe \emph{exactly one valid binary tree}.
+$1 \le n \le 10^4$. Example: $n=4$, $\code{leftChild}=[1,-1,3,-1]$,
+$\code{rightChild}=[2,-1,-1,-1]$ is \code{true} (root $0$ with left $1$, right $2$; $1$ has
+left $3$).
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 25 minutes]
+A fair first attempt: think about how many parents a single node may have.
+\peek{in a \emph{tree}, how many nodes can point \emph{at} node $i$? What about the root?}
+\peek{``one valid tree'' vs ``a forest of valid trees'' -- which extra check separates them?}
+\nudge{compute the in-degree of every node from the two arrays; what does exactly one
+in-degree-$0$ node with all others in-degree-$1$ fail to guarantee?}
+\fullhint{Require every node in-degree $\le 1$, exactly one in-degree-$0$ root, and a
+reachability DFS from that root visiting all $n$ nodes (which also kills cycles). Build
+the DFS directly from \code{leftChild/rightChild} -- that \emph{is} the child adjacency.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The input \emph{is} a representation -- model (A) as two \textbf{parallel arrays}: instead
+of pointers, node $i$'s children are stored by \emph{index} in
+\code{leftChild[i]}/\code{rightChild[i]}. ``Is this one valid tree?'' is a structural
+question about that array: (i) no node has two parents, (ii) there is a single root, and
+(iii) everything is reachable from that root (no disconnected component, no cycle). Note
+we are \emph{not} asked to build pointers -- the arrays already encode the same edges.
+
+\solstep{Key Observations}
+\begin{observation}
+Each entry \code{leftChild[i]} $\neq -1$ declares an edge $i \to \code{leftChild[i]}$, so
+the target's in-degree rises by $1$. A node with in-degree $>1$ has two parents -- not a
+tree. A node with in-degree $0$ is a candidate root; a valid single tree has \textbf{exactly
+one} such node.
+\end{observation}
+\begin{observation}
+In-degree $\le 1$ everywhere and exactly one root are \emph{necessary but not sufficient}:
+a two-node component that is a directed \emph{cycle} can leave an unrelated node as the
+only in-degree-$0$ vertex, and a second valid-but-disconnected tree also passes those
+two counts. Reachability is the missing axiom.
+\end{observation}
+\begin{observation}
+A DFS (or BFS) from the unique root that never revisits a node and counts $n$ visited
+nodes simultaneously proves connectivity, acyclicity, and the no-two-parents property --
+so it can substitute for the explicit in-degree scan if you then also assert exactly one
+root. We keep both checks: they are each one line and catch distinct bugs.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Check every node has in-degree $\le 1$ and stop.}
+{$n=4$, $\code{leftChild}=[1,0,-1,-1]$, $\code{rightChild}=[-1,-1,3,-1]$: in-degrees are
+$\{1,1,0,1\}$ -- all $\le 1$ -- yet node $0$ and node $1$ point at each other (a $2$-cycle),
+and node $3$ hangs off $2$ which hangs from nowhere reachable from a root. Valid counts,
+invalid tree: there is \textbf{no} in-degree-$0$ root that reaches them.}
+\deadend{Count in-degree-$0$ nodes; accept iff there is exactly one.}{Add to the above a
+genuinely disconnected second tree, e.g.\ edges $0\to1$ and $2\to3$ with $n=4$: there are
+\textbf{two} in-degree-$0$ nodes ($0$ and $2$), so this is a \emph{forest}, not one tree.
+Exactly-one-root is necessary but, as the cycle case shows, still not sufficient.}
+\aha{One root \emph{and} full reachability: run a DFS from the unique in-degree-$0$ node,
+reject any revisit (cycle / two-parent) and finally demand \code{visited}$=n$. That single
+walk closes all three gaps at once.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} in-degree $\le 1$ only & every node has $\le 1$ parent & $O(n)$ & \textbf{WA} \\
+2 & \lv{2} exactly one in-degree-$0$ & a single root exists & $O(n)$ & \textbf{WA} \\
+3 & \lv{3} root $+$ reachability DFS & one root, DFS visits all $n$, no revisit & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rungs 1 and 2 each check one structural axiom; the fourth (connectivity/acyclicity)
+needs an actual traversal -- rung 3.
+
+\solstep{Solution}
+Compute in-degrees by scanning both child arrays. Reject if any in-degree $>1$. Find all
+in-degree-$0$ nodes; reject unless there is exactly one (the root). DFS from the root over
+\code{leftChild/rightChild}; reject if a node is entered twice (cycle); accept iff exactly
+$n$ nodes were visited.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+A directed graph is a valid rooted binary tree on $n$ nodes iff (a) one node has in-degree
+$0$ (the root), (b) every other node has in-degree $1$, and (c) all $n$ nodes are reachable
+from the root. \emph{(a),(b):} the code rejects any in-degree $>1$ and any count of
+in-degree-$0$ nodes $\neq 1$, so at most one root and at most one parent per node. \emph{(c):}
+the DFS from the root visits the root-connected component; a \textbf{revisit} would mean a
+node entered along two paths, i.e.\ a cycle or a second parent -- both rejected
+immediately. If the walk ends having visited \code{seen}$=n$, every node is reachable from
+the unique root and none is repeated, so the edges form a single acyclic connected
+structure with correct in-degrees -- exactly a valid binary tree. Conversely any valid tree
+satisfies (a)--(c), passes both guards and yields $\code{seen}=n$. Hence the procedure is
+true on exactly the valid inputs.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Validate Binary Tree Nodes (LeetCode 1361)}, label={lst:c04-validate-array}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+public:
+    bool validateBinaryTreeNodes(int n, vector<int>& leftChild, vector<int>& rightChild) {
+        vector<int> indeg(n, 0);
+        for (int i = 0; i < n; ++i) {
+            if (leftChild[i]  != -1) ++indeg[leftChild[i]];   // edge i -> left
+            if (rightChild[i] != -1) ++indeg[rightChild[i]];  // edge i -> right
+        }
+        for (int d : indeg) if (d > 1) return false;          // some node has two parents
+
+        int root = -1, roots = 0;
+        for (int i = 0; i < n; ++i) if (indeg[i] == 0) { root = i; ++roots; }
+        if (roots != 1) return false;                         // zero (cycle) or many (forest)
+
+        vector<char> vis(n, 0);                               // reachability from the root
+        stack<int> st; st.push(root); int seen = 0;
+        while (!st.empty()) {
+            int u = st.top(); st.pop();
+            if (vis[u]) return false;                         // entered twice -> cycle
+            vis[u] = 1; ++seen;
+            if (leftChild[u]  != -1) st.push(leftChild[u]);
+            if (rightChild[u] != -1) st.push(rightChild[u]);
+        }
+        return seen == n;                                      // one tree over all nodes
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ re-coded as parallel arrays (the running binary tree)]
+$n=6$, $\code{leftChild}=[1,3,-1,-1,-1,-1]$, $\code{rightChild}=[2,4,-1,-1,-1,5]$.
+In-degrees: node $0{:}0$; $1{:}1$ (by $0$); $2{:}1$ (by $0$); $3{:}1$ (by $1$); $4{:}1$ (by $1$);
+$5{:}1$ (by $2$). All $\le 1$; exactly one in-degree-$0$ (node $0$) $\Rightarrow$ root $=0$.
+DFS from $0$ pushes children $1,2$, then $3,4$ and $5$ -- visits $0,1,2,3,4,5$ with no
+revisit, $\code{seen}=6=n$ $\Rightarrow$ \textbf{true}. \checkmark\ \probref{c04-validate-array}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$: one scan to fill in-degrees, one scan for the root, one DFS touching each
+edge once. Space $\bigO{n}$ (\code{indeg}, \code{vis}, explicit \code{stack}). Iterative
+stack avoids any recursion-depth $\bigO{n}$ risk. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+$n=1$, empty child arrays & indeg$\{0\}$, one root, DFS sees $1$ $=n$ $\Rightarrow$ true \\
+two parents & indeg of that node $=2$ $\Rightarrow$ immediate false \\
+cycle $0\leftrightarrow1$ & some node has indeg $\ge1$ but no valid single root reaches all; revisit or seen$\neq n$ $\Rightarrow$ false \\
+forest $0\to1,\ 2\to3$ & two in-degree-$0$ nodes $\Rightarrow$ roots$\neq1$ false \\
+self-loop \code{leftChild[i]=i} & indeg[i] increments, and DFS would revisit $\Rightarrow$ false \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+The classic wrong answer is stopping at ``all in-degrees $\le 1$ and one root'' (rung 2) --
+it accepts a cycle-with-a-bystander-root and accepts nothing about connectivity. The
+reachability DFS is not optional. Also, do not ``find the root by $\degop$'': root here is
+the unique \textbf{in-degree-$0$} node, a directed notion -- a node with undirected degree
+$1$ can be a leaf, not the root (cf.\ the degree-vs-children trap in
+Trap~3 of \secref{c04-reps}). Variant: return the root index too (needed before a
+downward traversal); the same in-degree scan finds it for free.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Is this a tree?'' $=$ ``one root $+$ everyone has exactly one parent $+$
+        all reachable'' -- three axioms, and a single DFS can enforce the last two.
+  \item Parallel child arrays \emph{are} an adjacency representation; you never need to
+        build \code{TreeNode}s to reason about the structure.
+  \item Root $=$ in-degree $0$ (directed), \emph{not} a degree heuristic -- mixing
+        undirected degree with directed parentage is the most common source of wrong answers here.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Deep $+$ wide}: the explicit \code{stack} keeps you safe for a $10^4$-long
+        chain where a recursive DFS would risk stack overflow; keep it iterative even when
+        recursion is shorter to write.
+  \item \textbf{Union-Find alternative}: the same three axioms can be checked by counting
+        components ($=1$) and edges ($=n-1$) with a DSU -- see \chref{c28}; equivalent
+        $O(n\,\alpha)$, useful if the input is a genuine undirected \emph{edge} list.
+  \item \textbf{Two-parent subtlety}: an in-degree $>1$ is caught before the DFS, but a
+        node that is its \emph{own} child also survives in-degree $\le1$ -- the DFS
+        revisit check is what actually rejects it, so keep both.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Given a \code{parent[]}/\code{manager[]} array -- have you built \code{children[]}
+        \emph{before} attempting any top-down DFS? (Trap 1.)
+  \item On an undirected adjacency list, does every DFS carry the parent guard?
+  \item If the input is edge/child arrays, is your ``is it a tree?'' check enforcing
+        \emph{reachability}, not just in-degree counts? (LC 1361 rung 2 vs rung 3.)
+  \item Are you counting \emph{children} after rooting, or mistakenly using undirected
+        $\degop$? (Trap 3.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Minimum Time to Collect All Apples in a Tree}{LeetCode 1443}
+    {https://leetcode.com/problems/minimum-time-to-collect-all-apples-in-a-tree/}{LC Medium L3}
+    {The input is $n{-}1$ \emph{undirected} edges: build \code{adj} with both directions,
+    root at $0$ with a parent guard, and a subtree contributes $2$ per edge \emph{iff} it
+    (or some descendant) holds an apple. Model (B) + one bottom-up DFS.}
+  \practice{Amount of Time for Binary Tree to Be Infected}{LeetCode 2385}
+    {https://leetcode.com/problems/amount-of-time-for-binary-tree-to-be-infected/}{LC Medium L3}
+    {Infection spreads to parent \emph{and} children, but a \code{TreeNode} has no upward
+    pointer -- first \textbf{augment} the pointer tree with a $\text{node}\to\text{parent}$
+    map (or re-root pointers), then BFS from the start node; the answer is the farthest
+    distance. The whole problem is a representation fix before any traversal.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 4.1 Pointers vs Arrays]
+Four homes for the edges: \emph{pointer} (children $=$ addresses, no parent), \emph{adjacency
+list} (undirected, parent guard required), \emph{parent array} (up $\bigO{1}$, rebuild
+children to go down), \emph{implicit index} ($2i{+}1/2i{+}2$, only for complete trees).
+Convert parent arrays with \code{children[par[i]].push\_back(i)}. Root $=$ in-degree $0$, not
+degree.
+\selftest{
+  \item List the four storage models and the one query each makes \emph{cheap} and the one
+        it makes \emph{impossible}.
+  \item Write the parent-array $\to$ children-lists loop from memory (the \coderef{c04-reps}
+        block C idiom).
+  \item Why is implicit $2i{+}1$ indexing compact only for a \emph{complete} tree? Give the
+        slot a right-chain at depth $d$ reaches.
+  \item State the three axioms that make an array-described graph ``one valid tree'', and
+        name the check that enforces all three at once.
+  \item On $G$, build $\children$ and $\parent$ from \figref{c04-running-g} without looking.
+}
+\end{recallbox}

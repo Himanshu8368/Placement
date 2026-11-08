@@ -1,0 +1,345 @@
+### Problem: Design Underground System {#sec-ds-p5-underground}
+
+::: {.p-statement}
+Model a metro system with three calls:
+
+- `checkIn(id, stationName, t)` — traveller `id` starts at `stationName` at time `t`;
+- `checkOut(id, stationName, t)` — the same traveller ends at `stationName` at time `t`;
+- `getAverageTime(startStation, endStation)` — the average duration of **all trips so far** that went from `startStation` to `endStation`.
+
+Calls are consistent: a traveller checks out only after checking in, is in at most one trip at a time, and `getAverageTime` is only asked about a route with at least one finished trip. $1 \le$ `id`, `t` $\le 10^6$, station names have at most $10$ characters, there are at most $2\cdot10^4$ calls, and answers within $10^{-5}$ are accepted. The first LeetCode sample answers its four queries with `14.0`, `11.0`, `11.0` and `12.0`.
+
+Source: [LC 1396 · Design Underground System](https://leetcode.com/problems/design-underground-system/){.solved difficulty="Medium"}
+:::
+
+::: {.p-intuition}
+An average needs only two numbers per route: the sum of the durations and their count. So fold each finished trip into `route -> (sum, count)` at `checkOut`, and `getAverageTime` becomes one division. The trip in progress lives in a small map `id -> (station, t_in)` that `checkIn` writes and `checkOut` pops: the record is cleared the moment it has been used, so no later sweep is needed.
+:::
+
+::: {.p-approach}
+1. **Store every trip.** `route -> list of durations`; `getAverageTime` sums and divides the whole list. $O(\text{trips on the route})$ per query. This class is the model for the stress tests.
+2. **Running totals.** `route -> (sum, count)`; `checkOut` folds the new duration in, `getAverageTime` is $O(1)$ (@fig-ds-p5-underground).
+3. **One mutable record per route.** The same fold, with `total[route]` a mutable `[sum, n]` updated in place (a `pair` in C++, keyed by one string `start + ">" + end`), so a check-out does one lookup instead of a read and a write.
+
+**Operation contract (final form).** Invariant **I**: `open` holds exactly the travellers currently in a trip, with their start; for every route, `total[route]` is the (sum, count) of its finished trips.
+
+| Operation | What it does | How **I** survives | Cost |
+|---|---|---|---|
+| `checkIn(id, s, t)` | `open[id] = (s, t)` | the traveller is now in a trip | $O(1)$ expected |
+| `checkOut(id, e, t)` | `(s, t0) = open.pop(id)`; add `t - t0` and $1$ to `total[(s, e)]` | the trip leaves `open` and joins its route's fold | $O(1)$ expected |
+| `getAverageTime(s, e)` | `sum / count` of `total[(s, e)]` | read only | $O(1)$ expected |
+:::
+
+::: {#fig-ds-p5-underground}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ug_trips = [("Leyton", "Waterloo", 15 - 3), ("Leyton", "Waterloo", 20 - 10),
+            ("Paradise", "Cambridge", 22 - 8)]          # the first three check-outs of the sample
+ug_fold = {}
+for s, e, d in ug_trips:
+    tot, cnt = ug_fold.get((s, e), (0, 0))
+    ug_fold[(s, e)] = (tot + d, cnt + 1)
+ug_rows = [[str(tot), str(cnt), f"{tot / cnt:.1f}"] for tot, cnt in ug_fold.values()]
+assert ug_rows == [["22", "2", "11.0"], ["14", "1", "14.0"]]
+
+
+def draw(ax, p):
+    V.grid(ax, p, ug_rows, row_labels=[f"{s}>{e}" for s, e in ug_fold],
+           col_labels=["sum", "n", "avg"], colors={(0, 2): "amber", (1, 2): "cyan"}, cell_w=1.2)
+V.show(draw)
+```
+
+After the first three check-outs of the sample: Leyton to Waterloo has two trips ($12 + 10 = 22$, average $11.0$) and Paradise to Cambridge one trip ($14$). Each route keeps only `sum` and `count`, and the average is read off in $O(1)$.
+
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Store every trip
+
+::: {.form-next}
+The direct definition. `checkIn` parks `(station, t)`; `checkOut` pairs it into one stored duration appended to the route's list; `getAverageTime` re-sums the list. Correct, $O(\text{trips})$ per query.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("underground", "trips")
+    assert str(final) == "outputs None None None None None None 14.0 11.0 None 11.0 None 12.0"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+from collections import defaultdict
+
+OPS = [("checkIn", 45, "Leyton", 3), ("checkIn", 32, "Paradise", 8),
+       ("checkIn", 27, "Leyton", 10), ("checkOut", 45, "Waterloo", 15),
+       ("checkOut", 27, "Waterloo", 20), ("checkOut", 32, "Cambridge", 22),
+       ("getAvg", "Paradise", "Cambridge"), ("getAvg", "Leyton", "Waterloo"),
+       ("checkIn", 10, "Leyton", 24), ("getAvg", "Leyton", "Waterloo"),
+       ("checkOut", 10, "Waterloo", 38), ("getAvg", "Leyton", "Waterloo")]
+EXP = [None, None, None, None, None, None, 14.0, 11.0, None, 11.0, None, 12.0]
+
+
+def close(a, b):
+    return (a is None and b is None) or (a is not None and abs(a - b) < 1e-9)
+
+
+class UndergroundTrips:
+    def __init__(self):
+        self.open = {}
+        self.trips = defaultdict(list)
+
+    def checkIn(self, _id, st, t):
+        self.open[_id] = (st, t)
+
+    def checkOut(self, _id, st, t):
+        s, t0 = self.open.pop(_id)
+        self.trips[(s, st)].append(t - t0)
+
+    def getAverageTime(self, s, e):
+        lst = self.trips[(s, e)]
+        return sum(lst) / len(lst)
+
+
+u = UndergroundTrips()
+out = []
+for op in OPS:
+    if op[0] == "checkIn":
+        u.checkIn(op[1], op[2], op[3]); out.append(None)
+    elif op[0] == "checkOut":
+        u.checkOut(op[1], op[2], op[3]); out.append(None)
+    else:
+        out.append(u.getAverageTime(op[1], op[2]))
+assert all(close(a, b) for a, b in zip(out, EXP))
+```
+
+##### C++
+
+```cpp
+class UndergroundTrips {
+    unordered_map<int, pair<string,int>> open;
+    map<pair<string,string>, vector<int>> trips;
+ public:
+    void checkIn(int id, string st, int t) { open[id] = make_pair(st, t); }
+    void checkOut(int id, string st, int t) {
+        pair<string,int> in = open[id]; open.erase(id);
+        trips[make_pair(in.first, st)].push_back(t - in.second);
+    }
+    double getAverageTime(string s, string e) {
+        const vector<int>& v = trips[make_pair(s, e)];
+        return (double)accumulate(v.begin(), v.end(), 0LL) / v.size();
+    }
+};
+```
+:::
+
+#### Running totals
+
+::: {.form-next}
+Fold at `checkOut`: add the duration into `sum[route]` and increment `count[route]`, then drop the stored list. `getAverageTime` divides two integers in $O(1)$. Same open-trip map, but the per-route list is replaced by a pair of counters.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("underground", "runavg")
+    assert str(final) == "outputs None None None None None None 14.0 11.0 None 11.0 None 12.0"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class UndergroundRun:
+    def __init__(self):
+        self.open = {}
+        self.stats = {}                      # route -> (sum, count)
+
+    def checkIn(self, _id, st, t):
+        self.open[_id] = (st, t)
+
+    def checkOut(self, _id, st, t):
+        s, t0 = self.open.pop(_id)
+        total, n = self.stats.get((s, st), (0, 0))
+        self.stats[(s, st)] = (total + (t - t0), n + 1)
+
+    def getAverageTime(self, s, e):
+        total, n = self.stats[(s, e)]
+        return total / n
+
+
+u = UndergroundRun()
+out = []
+for op in OPS:
+    if op[0] == "checkIn":
+        u.checkIn(op[1], op[2], op[3]); out.append(None)
+    elif op[0] == "checkOut":
+        u.checkOut(op[1], op[2], op[3]); out.append(None)
+    else:
+        out.append(u.getAverageTime(op[1], op[2]))
+assert all(close(a, b) for a, b in zip(out, EXP))
+# agree with the store-every-trip baseline on random trips
+ref, run = UndergroundTrips(), UndergroundRun()
+stations = ["A", "B", "C"]
+for _ in range(300):
+    _id = random.randint(0, 8)
+    if _id not in ref.open:
+        s = random.choice(stations); t0 = random.randint(0, 1000)
+        ref.checkIn(_id, s, t0); run.checkIn(_id, s, t0)
+    else:
+        e = random.choice(stations); t1 = ref.open[_id][1] + random.randint(1, 50)
+        ref.checkOut(_id, e, t1); run.checkOut(_id, e, t1)
+    for a in stations:
+        for b in stations:
+            if ref.trips[(a, b)]:
+                assert abs(ref.getAverageTime(a, b) - run.getAverageTime(a, b)) < 1e-9
+```
+
+##### C++
+
+```cpp
+class UndergroundRun {
+    unordered_map<int, pair<string,int>> open;
+    map<pair<string,string>, pair<long long,int>> st;
+ public:
+    void checkIn(int id, string s, int t) { open[id] = make_pair(s, t); }
+    void checkOut(int id, string e, int t) {
+        pair<string,int> in = open[id]; open.erase(id);
+        pair<long long,int>& f = st[make_pair(in.first, e)];
+        f.first += t - in.second; ++f.second;
+    }
+    double getAverageTime(string s, string e) {
+        const pair<long long,int>& f = st[make_pair(s, e)];
+        return (double)f.first / f.second;
+    }
+};
+```
+:::
+
+#### One mutable record per route
+
+::: {.form-next}
+`total[route]` is a mutable `[sum, n]` record bumped in place, and `open[id]` is popped at check-out so no finished traveller lingers. Three $O(1)$ methods: one map for trips in progress, one for finished-route aggregates. The stress test runs random legal call sequences against the store-every-trip model and checks invariant **I** after every call.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("underground", "oneline")
+    assert str(final) == "outputs None None None None None None 14.0 11.0 None 11.0 None 12.0"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class UndergroundSystem:
+    def __init__(self):
+        self.open = {}
+        self.total = defaultdict(lambda: [0, 0])   # route -> [sum, n]
+
+    def checkIn(self, _id, st, t):
+        self.open[_id] = (st, t)
+
+    def checkOut(self, _id, st, t):
+        s, t0 = self.open.pop(_id)                 # pop == lazy reset of the pending record
+        self.total[(s, st)][0] += t - t0
+        self.total[(s, st)][1] += 1
+
+    def getAverageTime(self, s, e):
+        total, n = self.total[(s, e)]
+        return total / n
+
+
+u = UndergroundSystem()
+out = []
+for op in OPS:
+    if op[0] == "checkIn":
+        u.checkIn(op[1], op[2], op[3]); out.append(None)
+    elif op[0] == "checkOut":
+        u.checkOut(op[1], op[2], op[3]); out.append(None)
+    else:
+        out.append(u.getAverageTime(op[1], op[2]))
+assert all(close(a, b) for a, b in zip(out, EXP))
+assert not u.open                                   # every traveller popped at checkout
+# stress: random legal call sequences against the store-every-trip model, invariant I each call
+for _ in range(100):
+    model, fast = UndergroundTrips(), UndergroundSystem()
+    for _ in range(60):
+        _id = random.randint(0, 6)
+        if _id not in model.open:
+            s = random.choice("ABCD"); t0 = random.randint(1, 999)
+            model.checkIn(_id, s, t0); fast.checkIn(_id, s, t0)
+        else:
+            e = random.choice("ABCD"); t1 = model.open[_id][1] + random.randint(1, 40)
+            model.checkOut(_id, e, t1); fast.checkOut(_id, e, t1)
+        assert fast.open == model.open
+        for route, durs in model.trips.items():
+            if durs:
+                assert fast.total[route] == [sum(durs), len(durs)]
+                assert abs(fast.getAverageTime(*route) - model.getAverageTime(*route)) < 1e-9
+```
+
+##### C++
+
+```cpp
+class UndergroundSystem {
+    unordered_map<int, pair<string,int>> open;
+    unordered_map<string, pair<long long,int>> total;   // "s>e" -> {sum, n}
+ public:
+    void checkIn(int id, string st, int t) { open[id] = make_pair(st, t); }
+    void checkOut(int id, string st, int t) {
+        pair<string,int> in = open[id]; open.erase(id);
+        pair<long long,int>& cell = total[in.first + ">" + st];
+        cell.first += t - in.second; ++cell.second;
+    }
+    double getAverageTime(string s, string e) {
+        const pair<long long,int>& cell = total[s + ">" + e];
+        return (double)cell.first / cell.second;
+    }
+};
+```
+:::
+
+:::
+
+::: {.p-complexity}
+**Store every trip:** $O(1)$ expected `checkIn`/`checkOut`, $O(k)$ `getAverageTime` for $k$ trips on the route; $O(\text{trips})$ space. **Running totals** and **One mutable record per route:** $O(1)$ expected for all three calls (hash lookups; strings of at most $10$ characters are hashed in constant time); $O(\text{routes} + \text{open travellers})$ space, independent of the number of trips.
+:::
+
+::: {.p-edge}
+- **A route queried before any trip** would divide by zero; the contract never asks, but a robust version returns $0$ (or raises) when $n = 0$. Note that the `defaultdict` creates an empty record for every route it is asked about.
+- **`checkOut` must clear the open record** (`pop`): leaving it means a later reuse of that `id` reads a stale start station and time.
+- **Integer sums, float answer**: keep `sum` as an integer (a `long long` in C++) and divide only at query time, so no precision is lost across the fold.
+:::
+
+::: {.callout-warning title="Common mistakes"}
+- **Storing per-trip durations** just to average them later: $O(k)$ per query for arithmetic that `checkOut` could have folded once.
+- **Updating only one field of the pair**: the fold `(sum, count) -> (sum + dur, count + 1)` must change *both*; forgetting the count makes every later average too high, and forgetting the sum makes it too low.
+- **A list where two numbers suffice**: `defaultdict(list)` with an append per trip, when the running total gives both an $O(1)$ query and $O(1)$ memory per route.
+:::
+
+**Variants.** A fold works for any statistic that can be updated from the old summary and one new value: sum, count, minimum, maximum, sum of squares (for the variance). A median or "the average of the last $k$ trips" cannot be folded this way and needs the durations themselves (interview question 11).
+
+::: {.practice}
+- [LC 1797 · Design Authentication Manager](https://leetcode.com/problems/design-authentication-manager/){difficulty="Medium"} — tokens with expiry times: store the expiry stamp and decide liveness by comparing it with the current time, instead of sweeping out expired tokens.
+:::

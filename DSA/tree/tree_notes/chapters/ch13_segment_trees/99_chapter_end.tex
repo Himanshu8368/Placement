@@ -1,0 +1,893 @@
+% =====================================================================
+%  Chapter 19 review -- the 14-station revision contract.
+%  Revision-only: tables, one-liners, pointers back via \secref/\thmref/
+%  \propref/\defref/\coderef/\figref/\probref.  No re-derivations.
+%  Summit: CF 414D Mashmokh and Water Tanks -- a litre at depth d reaches the
+%  root d moves after release; to win X dollars land X litres on ONE move.
+%  Binary-search the largest X <= min(k, m-1) whose synchronisation cost
+%      min over level r of  ( X*r - sum of the X deepest depths among tanks
+%                             at depth <= r )  <= p
+%  is affordable; the inner "X deepest depths up to r" is an order-statistic
+%  DESCEND (19.3, lst:c13-kthseg's shape) over a depth-axis tree storing the
+%  (count, sum-of-depths) record (19.2, thm:c13-subarray-style tuple node).
+%  Samples verified live against the CF statement:
+%    (1) m=10 k=2 p=1  (edges)              -> 2   (X capped by k=2)
+%    (2) m=5  k=1000 p=1000 (edges)         -> 4   (all 4 non-root tanks)
+%  The official editorial frames it as a linear two-pointer over depth levels;
+%  we give the segment-tree reading and note that alternative honestly.
+%  Exports prob:c13-summit, lst:c13-kit, lst:c13-summit.
+% =====================================================================
+
+\chaptersection{Chapter 19 Summary}
+
+One sentence: \emph{a segment tree is a binary tree whose nodes are intervals of
+an index axis and whose payload is any associative fold with an identity, so a
+single \(\bigO{\log n}\) walk folds a range and a second walks a point update to
+the root -- and every question Chapter~18's Fenwick tree had to refuse because its
+combine was not an invertible sum (range \(\min/\max/\gcd\) under arbitrary writes,
+a maximum subarray, "the first position clearing a threshold") is one canonical
+cover or one root-to-leaf descent away.} Chapter~18 kept an array that hid a tree
+over the \emph{lowbit} blocks; this chapter keeps the whole tree and pays a modest
+constant for the power to combine \emph{anything} associative. Each row is a
+pointer, not a proof.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} p{0.48\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement} & \textbf{Where} \\
+\midrule
+Node and interval & Each node \(v\) is tagged with a closed interval \([tl,tr]\);
+its children split at the midpoint, in a \(4n\) heap. & \defref{c13-node} \\
+Merge contract & An \emph{associative} fold \(\mathcal{M}\) with identity \(e\)
+makes build/update/query correct and \(\bigO{\log n}\). & \thmref{c13-merge} \\
+Identity element & A fold needs \(e\): \(\min\!\to\!+\infty\), \(\max\!\to\!-\infty\),
+sum/gcd/xor\(\to0\); a node may be a whole \emph{record}. & \defref{c13-identity} \\
+Four-field merge & Max-subarray stores \((\mathit{tot},\mathit{pref},\mathit{suff},
+\mathit{best})\); merge is \(O(1)\) but \emph{not} commutative. & \thmref{c13-subarray} \\
+Monotone descend & If an aggregate decides "is there a target below?", walk
+root-to-leaf, pruning whole subtrees, in \(\bigO{\log n}\). & \thmref{c13-descend} \\
+\(2n\) iterative & Complete tree in a flat array: one build loop, one climbing
+update, one two-accumulator half-open query. & \propref{c13-iter} \\
+Static + offline & Build once, then every read-only fold or threshold descend is
+an \(\bigO{\log n}\) oracle; sort the queries to reuse one pass. & \propref{c13-offline} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter.}}
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.27\linewidth} l l >{\raggedright\arraybackslash}p{0.26\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Prep} & \textbf{Per op} & \textbf{Code} \\
+\midrule
+Build / point update / range fold & \(\bigO{n}\) build & \(\bigO{\log n}\) & \coderef{c13-build}, \coderef{c13-update}, \coderef{c13-query} \\
+CSES 1649 (Dynamic Range Min) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-1649-soln} \\
+Max-subarray tuple merge & \(\bigO{n}\) & \(\log n\) & \coderef{c13-combine} \\
+CSES 1190 (Subarray Sum Queries) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-1190-soln} \\
+gcd / count-of-max combine & \(\bigO{n}\) & \(\log n\) & \coderef{c13-gcdcount} \\
+Descend: first prefix \(\ge\) target & \(\bigO{n}\) & \(\log n\) & \coderef{c13-descend} \\
+\(k\)-th live item by counts (descend) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-kthseg} \\
+CF 1179C (Serge and Dining Room) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-1179-soln} \\
+Iterative \(2n\) tree (build/update/query) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-iter}, \coderef{c13-iter-range} \\
+CF 514D (R2D2 and Droid Army) & \(m\) trees & \(\log n\) & \coderef{c13-514-soln} \\
+Static leftmost \(\ge x\) (no updates) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-firstge} \\
+CF 940E (Cashback, DP + range-min) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-940-soln} \\
+CF 414D (Summit, Water Tanks) & \(\bigO{n}\) & \(\log n\) & \coderef{c13-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches. It
+decides \emph{whether a segment tree is even the right object} and, if so,
+\emph{which flavour}, then hands off what this chapter does \emph{not} own: range
+updates with a lazy tag (Ch.~20 \(\chref{c15}\)), \(k\)-th-value-in-a-static-range
+and persistence (Ch.~21 \(\chref{c19}\)), and path queries on a tree
+(Ch.~22 \(\chref{c16}\)).
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You need a live RANGE aggregate over an index axis.  Which structure?
+  |
+  |-- is the combine a plain SUM (invertible) with point adds?
+  |     +-- no segtree needed: a prefix array (Ch.5) or a BIT (Ch.18, c14)
+  |        is smaller and answers a range sum as two prefixes.
+  |
+  |-- non-invertible fold -- min / max / gcd / count -- with a point SET?
+  |     +-- recursive segtree (19.1, lst:c13-build / -update / -query).
+  |        CSES 1649 range-min-with-set is the hello-world (prob:c13-dynmin);
+  |        this is the fold a BIT structurally cannot maintain.
+  |
+  |-- the answer is a RECORD, not a scalar (max subarray, brackets, pair-best)?
+  |     +-- tuple node + O(1) ASSOCIATIVE merge (19.2, lst:c13-combine).
+  |        Keep the merge order: it is NOT commutative (thm:c13-subarray).
+  |
+  |-- "first / last position whose aggregate crosses a threshold x"?
+  |     +-- DESCEND root-to-leaf, pruning on the stored aggregate
+  |        (19.3, lst:c13-descend; 19.5 static form lst:c13-firstge).
+  |        A fold returns a value; a descend returns an index -- a BIT cannot
+  |        see inside a range at all.
+  |
+  |-- "k-th live item / select by counts"?
+  |     +-- count segtree + descend (19.3, lst:c13-kthseg) -- same answer as
+  |        Ch.18's lowbit-lift, but by walking the tree, not lifting bits.
+  |
+  |-- fixed length, commutative fold, want the smallest constant and least code?
+  |     +-- iterative 2n tree (19.4, lst:c13-iter + lst:c13-iter-range):
+  |        half-open [l,r), two accumulators if the fold is order-sensitive.
+  |
+  |-- array NEVER changes; many read-only folds / descends; a DP transition?
+  |     +-- build ONCE, query as an oracle (19.5, prop:c13-offline).
+  |        Pure static min/max with ZERO updates?  a sparse table (Ch.21) is
+  |        O(1) per query -- but you then lose updates, descends and records.
+  |
+  |-- a WHOLE INTERVAL is modified (add / set a range), not just a point?
+  |        +-- NOT this chapter: lazy propagation, Ch.20 (c15).
+  |-- "k-th smallest in a STATIC range", or persistent versions?
+  |     +-- merge-sort tree / persistent segtree, Ch.21 (c19).
+  |-- path queries on a TREE?
+        +-- flatten with HLD onto a segtree, Ch.22 (c16).
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Under-sizing the array.} The \(4n\) heap layout of
+        \(\defref{c13-node}\) needs \(4n\), not \(2n\), slots for the \emph{recursive}
+        tree whenever \(n\) is not a power of two; the \(2n\) form of
+        \(\coderef{c13-iter}\) is legal \emph{only} because its tree is complete.
+        A recursive tree in a \(2n\) array runs off the end (RE).
+  \item \textbf{Wrong or missing identity element.} A range query folds the
+        \emph{disjoint} branches to \(e\): \(\min\) needs \(+\infty\), \(\max\) needs
+        \(-\infty\), sum/gcd/xor need \(0\). Returning a real leaf value (\(\coderef{c13-query}\))
+        on a disjoint interval silently corrupts the fold (\(\defref{c13-identity}\)).
+  \item \textbf{Half-open vs closed range drift.} \(\coderef{c13-query}\) folds a
+        \emph{closed} \([L,R]\); \(\coderef{c13-iter-range}\) folds a \emph{half-open}
+        \([l,r)\). Mixing the two conventions mis-answers by one at every boundary.
+  \item \textbf{Assuming the combine is commutative.} The max-subarray merge of
+        \(\thmref{c13-subarray}\) and the bracket triple are associative but \emph{not}
+        commutative, so the iterative query must keep the two accumulators in
+        left/right order; a single accumulator passes \(\min\) and fails those.
+  \item \textbf{Descend going the wrong way.} \(\coderef{c13-descend}\)'s and
+        \(\coderef{c13-firstge}\)'s answer is the \emph{leftmost} qualifier: probe the
+        left (or right, for a "largest") child \emph{first} and only fall through when
+        it fails. Probing the wrong side returns a valid-but-not-extremal index.
+  \item \textbf{\(2n\) padding.} Skipping the power-of-two pad is fine for a
+        commutative fold; for an order-sensitive one pad to \(2^{\lceil\log_2 n\rceil}\)
+        with \(e\) so every leaf sits at the same depth (\(\propref{c13-iter}\)).
+  \item \textbf{64-bit sums.} A sum tree over \(n=2\cdot10^5\) values \(\le10^9\)
+        overflows \code{int} at the root; the payload array is \code{long long} the
+        moment the fold can exceed \(2^{31}\) (\(\coderef{c13-build}\)).
+  \item \textbf{Building with \(n\) updates.} The bottom-up fold
+        (\(\coderef{c13-build}\), \(\coderef{c13-iter}\)) is \(\bigO{n}\); calling
+        \(\coderef{c13-update}\) per element is \(\bigO{n\log n}\) and the TLE when the
+        tree sits inside an outer binary search (\(\probref{c13-r2d2}\)).
+  \item \textbf{Reaching for a segtree on a plain sum.} If the fold is invertible,
+        Ch.~18's BIT or Ch.~5's prefix array already solves it with less code and a
+        smaller constant -- that is the boundary this chapter exists to cross, not
+        re-litigate.
+\end{itemize}
+
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled.
+Diagnose top-down -- every leaf names a listing.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=48mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 5mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=8mm and 5mm of verdict] (tle) {\textbf{TLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {disjoint branch returns a leaf value, not the identity \(e\): a \(\min\) fold
+     answers \(0\), not \(+\infty\) (\(\coderef{c13-query}\))};
+  \node[l, below left=1mm and 2mm of wa.south] (wa2)
+    {closed \([L,R]\) coded as half-open, or the descend probes the wrong side
+     (\(\coderef{c13-descend}\), \(\coderef{c13-iter-range}\))};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {recursive tree sized \(2n\) not \(4n\): a root path runs off the
+     array (\(\defref{c13-node}\))};
+  \node[l, below left=1mm and 2mm of tle.south] (tle2)
+    {\(\bigO{n\log n}\) build inside a binary search; \code{int} sum overflow
+     (\(\coderef{c13-iter}\))};
+  \draw[flow] (verdict) -- (wa);
+  \draw[flow] (verdict) -- (tle);
+  \draw[flow] (wa) -- (wa1);
+  \draw[flow] (wa) -- (wa2);
+  \draw[flow] (tle) -- (tle1);
+  \draw[flow] (tle) -- (tle2);
+\end{tikzpicture}
+\caption*{WA: a non-identity on the empty side, or a range or descend
+convention off by one. TLE or RE: an under-sized \(4n\) array, a build repeated
+inside a search, or an \code{int} overflow.}
+\end{figure}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 19 at a glance]
+\textbf{The object.} A binary tree over closed intervals of an index axis
+(\(\defref{c13-node}\)); each node stores a fold of its interval under an
+associative \(\mathcal{M}\) with identity \(e\). Build \(\bigO{n}\), point update
+and range query \(\bigO{\log n}\) (\(\thmref{c13-merge}\),
+\(\coderef{c13-build}\)/\(\coderef{c13-update}\)/\(\coderef{c13-query}\)).
+
+\medskip
+\textbf{The fold.} \(\min\!\to\!e{=}{+}\infty\), \(\max\!\to\!{-}\infty\),
+sum/xor/gcd\(\to0\). A node may be a \emph{record}: max-subarray is
+\((\mathit{tot},\mathit{pref},\mathit{suff},\mathit{best})\) merged in \(O(1)\),
+associative but \textbf{not} commutative (\(\defref{c13-identity}\),
+\(\thmref{c13-subarray}\), \(\coderef{c13-combine}\)).
+
+\medskip
+\textbf{The search.} If a stored aggregate decides "no target in this subtree",
+walk root-to-leaf and prune: first prefix \(\ge\) target, leftmost \(\ge x\) in a
+range, \(k\)-th by counts (\(\thmref{c13-descend}\),
+\(\coderef{c13-descend}\)/\(\coderef{c13-kthseg}\)/\(\coderef{c13-firstge}\)).
+This is binary search whose array is the tree -- Ch.~18's lowbit-lift is the
+cousin (\(\secref{c13-search}\)).
+
+\medskip
+\textbf{\(2n\) form.} Complete tree in a flat array: one build loop, one climbing
+update \code{p>>=1} with sibling \code{p\textasciicircum1}, one half-open query
+\([l,r)\) using two order-keeping accumulators (\(\propref{c13-iter}\),
+\(\coderef{c13-iter}\)/\(\coderef{c13-iter-range}\)).
+
+\medskip
+\textbf{Static/offline.} Build once, answer read-only folds/descends as an
+\(\bigO{\log n}\) oracle; sort the queries and sweep to reuse one pass
+(\(\propref{c13-offline}\)). Pure static \(\min/\max\) with no updates: a sparse
+table is \(O(1)\) but gives up updates, descends, and records (Ch.~21 \(\chref{c19}\)).
+
+\medskip
+\textbf{Translation.} "range min/max/gcd under point set" \(\to\) recursive tree.
+"max subarray / brackets / pair-best" \(\to\) tuple node + ordered merge. "first /
+leftmost / \(k\)-th" \(\to\) descend. "fixed length, tight constant" \(\to\) \(2n\)
+tree. "array never changes, many lookups" \(\to\) build once, query as oracle.
+"add to a whole range" \(\to\) \emph{not here}: lazy, Ch.~20 (\(\chref{c15}\)).
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 19 kit: the recursive tree, the iterative 2n form, and the max-subarray combine, complete and production-shaped}, label={lst:c13-kit}]
+// ---- recursive segment tree (4n): ANY associative fold M with identity e ----
+struct Seg{
+    int n; vector<long long> t; long long (*M)(long long,long long); long long e;
+    Seg(int n, long long (*M)(long long,long long), long long e)
+        : n(n), t(4*n+4, e), M(M), e(e) {}
+    void build(vector<long long>&a,int v,int l,int r){              // O(n)
+        if(l==r){ t[v]=a[l]; return; }
+        int m=(l+r)/2; build(a,2*v,l,m); build(a,2*v+1,m+1,r);
+        t[v]=M(t[2*v],t[2*v+1]);
+    }
+    void update(int pos,long long val,int v,int l,int r){           // O(log n) point SET
+        if(l==r){ t[v]=val; return; }
+        int m=(l+r)/2;
+        if(pos<=m) update(pos,val,2*v,l,m); else update(pos,val,2*v+1,m+1,r);
+        t[v]=M(t[2*v],t[2*v+1]);
+    }
+    long long query(int L,int R,int v,int l,int r){                 // CLOSED [L,R] fold
+        if(L>r || R<l) return e;                                    // disjoint -> identity
+        if(L<=l && r<=R) return t[v];                               // covered -> whole node
+        int m=(l+r)/2;
+        return M(query(L,R,2*v,l,m), query(L,R,2*v+1,m+1,r));
+    }
+};
+// ---- iterative 2n tree: fixed length, commutative (or two-accumulator) fold ----
+int N; vector<long long> bi;                                        // t[1..2N-1], leaves t[N..2N-1]
+long long mergeOp(long long a,long long b){ return min(a,b); }      // swap the fold here
+const long long ID=(1LL<<60);                                       // identity e for THAT fold
+void ibuild(vector<long long>&a){ N=(int)a.size(); bi.assign(2*N,ID);
+    for(int i=0;i<N;i++) bi[N+i]=a[i];
+    for(int i=N-1;i>0;i--) bi[i]=mergeOp(bi[2*i],bi[2*i+1]); }
+void iupd(int p,long long val){ for(bi[p+=N]=val; p>1; p>>=1)
+    bi[p>>1]=mergeOp(bi[p], bi[p^1]); }                             // p^1 = sibling
+long long iqry(int l,int r){ long long L=ID,R=ID;                   // HALF-OPEN [l,r)
+    for(l+=N,r+=N; l<r; l>>=1, r>>=1){
+        if(l&1) L=mergeOp(L,bi[l++]);                               // left edge, L->R order
+        if(r&1) R=mergeOp(bi[--r],R);                               // right edge, kept ordered
+    } return mergeOp(L,R); }
+// ---- max-subarray node: the 4-field combine a BIT cannot maintain ----
+struct Node{ long long tot,pref,suff,best; };
+Node mergeNode(Node a,Node b){ Node r;                              // associative, NOT commutative
+    r.tot  = a.tot + b.tot;
+    r.pref = max(a.pref, a.tot + b.pref);
+    r.suff = max(b.suff, b.tot + a.suff);
+    r.best = max( max(a.best, b.best), a.suff + b.pref );
+    return r; }
+// identity Node: tot=0, pref=suff=best = a very small number (-inf)
+\end{lstlisting}
+
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter.
+Cover the marked line, reproduce from memory, then check the answer one line
+below.
+
+\begin{lstlisting}[caption={Drill 1 -- build: fold leaves up to the root (from lst:c13-build)}]
+void build(vector<long long>& a, int v, int l, int r) {
+    if (l == r) { t[v] = a[l]; return; }         // leaf: the singleton interval
+    int m = (l + r) / 2;
+    build(a, 2*v, l, m); build(a, 2*v+1, m+1, r);
+    t[v] = M(t[2*v], t[2*v+1]);                  // one merge per internal node -> O(n)
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: every internal node is exactly the fold of its two
+children, so a single post-order pass writes all \(2n\) nodes in \(\bigO{n}\) --
+never build by calling \(\coderef{c13-update}\) \(n\) times (\(\thmref{c13-merge}\)).}
+
+\begin{lstlisting}[caption={Drill 2 -- point update: set A[pos]=val, retrace one root path (from lst:c13-update)}]
+void update(int pos, long long val, int v, int l, int r) {
+    if (l == r) { t[v] = val; return; }          // SET, not add: a segtree does writes
+    int m = (l + r) / 2;
+    if (pos <= m) update(pos, val, 2*v,   l, m);
+    else          update(pos, val, 2*v+1, m+1, r);
+    t[v] = M(t[2*v], t[2*v+1]);                  // re-fold on the way back up
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: only the \(\bigO{\log n}\) ancestors of the leaf change;
+a \emph{set} (not a delta) is precisely what a BIT cannot do for \(\min/\max\)
+(\(\probref{c13-dynmin}\), \(\coderef{c13-update}\)).}
+
+\begin{lstlisting}[caption={Drill 3 -- closed-range query: fold the canonical cover (from lst:c13-query)}]
+long long query(int L, int R, int v, int l, int r) {   // fold over CLOSED [L,R]
+    if (L > r || R < l) return e;                        // disjoint -> identity
+    if (L <= l && r <= R) return t[v];                   // covered -> take the node
+    int m = (l + r) / 2;
+    return M(query(L,R,2*v,l,m), query(L,R,2*v+1,m+1,r));
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the two base cases are the whole method -- a disjoint
+branch contributes \(e\), a covered branch is folded as one node; the recursion
+visits \(\bigO{\log n}\) nodes (\(\thmref{c13-merge}\), \(\defref{c13-identity}\)).}
+
+\begin{lstlisting}[caption={Drill 4 -- max-subarray merge: the four-field combine (from lst:c13-combine)}]
+Node mergeNode(Node a, Node b) {                 // LEFT child a, RIGHT child b
+    Node r;
+    r.tot  = a.tot + b.tot;
+    r.pref = max(a.pref, a.tot + b.pref);        // best prefix stays left or crosses
+    r.suff = max(b.suff, b.tot + a.suff);        // best suffix stays right or crosses
+    r.best = max( max(a.best, b.best), a.suff + b.pref );  // or spans the seam
+    return r;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the merge is \textbf{order-sensitive} -- \(a\) must be
+the left interval -- and the identity node has \(\mathit{tot}{=}0\), the rest
+\(-\infty\); this combine has no BIT analogue (\(\thmref{c13-subarray}\)).}
+
+\begin{lstlisting}[caption={Drill 5 -- descend to the first prefix >= target (from lst:c13-descend)}]
+int descend(long long target, int v, int l, int r) {   // SUM tree; find least p
+    if (l == r) return l;                               // with prefix[1..p] >= target
+    int m = (l + r) / 2;
+    if (t[2*v] >= target) return descend(target, 2*v, l, m);        // answer is left
+    return descend(target - t[2*v], 2*v+1, m+1, r);                 // else right, minus left
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the stored aggregate decides which half can hold the
+target, so one child is pruned per level -- \(\bigO{\log n}\) descent, the tree's
+form of binary search (\(\thmref{c13-descend}\)); this is the cousin of Ch.~18's
+lowbit-lift (\(\secref{c13-search}\)).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, worked entries,
+practice, and one Summit. Tick \emph{only} after an unaided solve; a hinted
+attempt counts as half.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.24\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 19.1 -- the segment tree core}} \\
+W19.1 & Dynamic Range Minimum Queries & CSES 1649 & \lv{3} min-tree, point set & set \(=\) write to leaf, retrace one path; disjoint \(=+\infty\) & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 19.2 -- arbitrary combine}} \\
+W19.2 & Subarray Sum Queries & CSES 1190 & \lv{4} four-field tuple node & \((\mathit{tot},\mathit{pref},\mathit{suff},\mathit{best})\); non-commutative merge & \(\square\) \\
+W19.2b & gcd / count-of-max combine & worked & \lv{4} swap the fold & same skeleton, new \(\mathcal{M}\); identity for gcd is \(0\) & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 19.3 -- searching the tree}} \\
+W19.3 & Serge and Dining Room & CF 1179C & \lv{5} suffix-max tree + descend & descend to first prefix \(\le x\); two point writes per move & \(\square\) \\
+W19.3b & \(k\)-th live item by counts & worked & \lv{4} count-tree descend & prune on subtree count; contrast Ch.18 lift & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 19.4 -- iterative tree}} \\
+W19.4 & R2D2 and Droid Army & CF 514D & \lv{5} \(m\) max-trees + binary search & half-open \([l,r)\); monotone feasibility; print the \(m\) maxima & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 19.5 -- static / offline}} \\
+W19.5a & leftmost \(\ge x\) in a range & worked & \lv{4} static max-tree descend & build once; prune on \(\mathit{mx}<x\); left child first & \(\square\) \\
+W19.5b & Cashback & CF 940E & \lv{5} range-min oracle + DP & optimal runs length \(1\) or \(c\); window min is a static query & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+W19 & Mashmokh and Water Tanks & CF 414D & \lv{5} binary-search answer + order-statistic descend & depth-axis record tree; cost \(Xr - \sum\) deepest \(X\) & \(\square\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day~1 internalises the build/update/query triple; day~2 the
+tuple record and its ordered merge; day~3 the descend and its Ch.~18 contrast;
+day~4 the iterative \(2n\) form and the BIT-vs-segtree accounting; day~5 the
+static/offline oracle, the DP pairing, and the Summit.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 19.1 & re-trace build, one point update, one range query on the shared array \(A\) (\figref{c13-tree}) by hand; write \coderef{c13-build}/\coderef{c13-update}/\coderef{c13-query} cold; CSES~1649 end to end \\
+2 & Read + do 19.2 & derive the four-field merge from scratch; re-derive the identity node; CSES~1190; then swap the fold to gcd and count-of-max (\(\coderef{c13-gcdcount}\)) \\
+3 & Read + do 19.3 & the first-prefix \(\ge\) descend on \(A\); the \(k\)-th-by-counts descend; side-by-side with Ch.~18's lowbit-lift; CF~1179C \\
+4 & Read + do 19.4 & the \(2n\) build/update/query loops; the two-accumulator half-open walk; fill the BIT / recursive / iterative cost table; CF~514D \\
+5 & Do 19.5 + Summit & static leftmost-\(\ge x\) oracle (\(\coderef{c13-firstge}\)); the 940E length-\(1\)-or-\(c\) DP; then CF~414D; walk the flowchart; first 3 mixed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.34\linewidth}p{0.38\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+\lv{3}--\lv{4} \ \(\bigstar\bigstar\bigstar\bigstar\)
+  & CSES~1649, worked gcd/count swap, static leftmost-\(\ge x\)
+  & you build the tree cold, drive the point update and range fold, and change the \emph{stored quantity} without touching the skeleton \\
+\lv{4}--\lv{5} \ \(\bigstar\bigstar\bigstar\bigstar\bigstar\)
+  & CSES~1190, CF~1179C, CF~514D, CF~940E
+  & you store a \emph{record} per node, keep an ordered (non-commutative) merge straight, and turn a threshold question into a descend \\
+\lv{5}{+} \ \(\bigstar\bigstar\bigstar\bigstar\bigstar\)
+  & CF~414D (Summit), CF~1208E, CF~515E, CF~500E, CF~675E
+  & you compose a segtree with an outer binary search or a DP, descend for an order statistic, and harden for \(n\le10^5\), values \(\le10^{15}\), \(k,p\le10^{9}\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+Every entry is ``one segtree flavour + one twist.'' Each line collapses a problem
+family onto a listing already in the chapter.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``range min/max with a point \emph{set}'' (CSES~1649) \(\to\) recursive
+        tree, write to leaf, retrace one path (\(\coderef{c13-update}\),
+        \(\probref{c13-dynmin}\)) -- the fold a BIT structurally refuses.
+  \item ``best subarray under edits'' (CSES~1190) \(\to\) four-field record merged
+        in \(O(1)\), order-sensitive (\(\thmref{c13-subarray}\), \(\coderef{c13-combine}\)).
+  \item ``range gcd / how many equal the range max'' (worked) \(\to\) same skeleton,
+        new associative \(\mathcal{M}\) (\(\coderef{c13-gcdcount}\), \(\defref{c13-identity}\)).
+  \item ``first position with prefix \(\ge\) target / \(k\)-th live item'' (CF~1179C,
+        hotel) \(\to\) descend the tree, prune on the stored aggregate
+        (\(\thmref{c13-descend}\), \(\coderef{c13-descend}\)/\(\coderef{c13-kthseg}\)).
+  \item ``longest window whose per-column maxima fit a budget'' (CF~514D) \(\to\)
+        \(m\) iterative max-trees + a binary search on the length
+        (\(\coderef{c13-iter}\), \(\probref{c13-r2d2}\)).
+  \item ``partition so each run drops its smallest'' (CF~940E) \(\to\) DP whose
+        transition is a static range-min oracle (\(\coderef{c13-940-soln}\),
+        \(\probref{c13-cashback}\), \(\propref{c13-offline}\)).
+  \item ``land X water on one move, cheapest'' (CF~414D) \(\to\) binary-search the
+        answer + an order-statistic descend over a depth-axis record tree
+        (\(\probref{c13-summit}\), \(\coderef{c13-summit}\)).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+Ten entries from CF~1900 to CF~2300, all verified against the live problem set
+and absent from the rest of the book. None says ``use a segment tree'' --
+recognise the flavour from what the problem folds, descends to, or sweeps. Each
+hint names its reduction and the chapter listing it leans on.
+
+\begin{mixedset}
+  \practice{Bash and a Tough Math Puzzle}{CF 914D}
+    {https://codeforces.com/problemset/problem/914/D}{CF 1900 L3}
+    {Type-1 query asks whether the \(\gcd\) of \([l,r]\) can be made a multiple of
+     \(x\) by changing \emph{at most one} element; type-2 is a point set. A range
+     \(\gcd\) fold (identity \(0\), \(\coderef{c13-gcdcount}\)) plus a
+     \emph{descend} that counts elements not divisible by \(x\) and stops the moment
+     it exceeds one -- prune a whole subtree when its stored \(\gcd\) is already
+     divisible (\(\thmref{c13-descend}\), \(\coderef{c13-descend}\)) (\(\secref{c13-combine}\), \(\secref{c13-search}\)).}
+  \practice{Pillars}{CF 474E}
+    {https://codeforces.com/problemset/problem/474/E}{CF 2000 L4}
+    {Longest jump sequence where consecutive pillars differ in height by at least
+     \(d\): an LIS-style \(\mathit{dp}[j]=1+\max\{\mathit{dp}[i]:h_i\le h_j-d\) or
+     \(h_i\ge h_j{+}d\}\). Compress heights to ranks and keep a \emph{max}-segtree over
+     the height axis: each transition is a range-max fold + a point update
+     (\(\coderef{c13-query}\), \(\coderef{c13-update}\)); store parent pointers to
+     rebuild the sequence (\(\secref{c13-core}\)).}
+  \practice{Babaei and Birthday Cake}{CF 629D}
+    {https://codeforces.com/problemset/problem/629/D}{CF 2000 L4}
+    {Stack cylinders in index order, each strictly larger in volume than the one
+     below, maximising total volume: \(\mathit{dp}[i]=\mathit{vol}[i]+\max\{\mathit{dp}[j]:j<i,\ \mathit{vol}[j]<\mathit{vol}[i]\}\).
+     Compress volumes, drive a prefix range-max + point update on a segtree
+     (\(\coderef{c13-build}\), \(\coderef{c13-query}\)) -- the same max-fold as
+     Pillars, one axis per coordinate (\(\secref{c13-core}\)).}
+  \practice{SUM and REPLACE}{CF 920F}
+    {https://codeforces.com/problemset/problem/920/F}{CF 2000 L4}
+    {Range update \(a_i\leftarrow D(a_i)\) (divisor count) and range-sum query. No
+     lazy tag is needed: store \((\text{sum},\max)\) per node and \emph{descend} only
+     into leaves whose value is not yet a fixed point (\(\max\le2\) prunes the whole
+     subtree, since \(D(1){=}1,D(2){=}2\)) -- a \(\secref{c13-search}\) descend on the
+     \(\max\) aggregate, sum fold from \(\coderef{c13-combine}\).}
+  \practice{Gifts Order}{CF 2057D}
+    {https://codeforces.com/problemset/problem/2057/D}{CF 2000 L4}
+    {Maximise \(\max(a_l..a_r)-\min(a_l..a_r)-(r-l)\) over all intervals after each
+     point set. Rewrite the span term as a per-node \emph{record}: keep
+     \(\max/\min\) of \(a_i-i\) and of \(a_i+i\) and merge in \(O(1)\) exactly like
+     the four-field max-subarray node (\(\thmref{c13-subarray}\),
+     \(\coderef{c13-combine}\)); point update retraces one path (\(\coderef{c13-update}\)).}
+  \practice{Friends and Subsequences}{CF 689D}
+    {https://codeforces.com/problemset/problem/689/D}{CF 2100 L4}
+    {Count pairs \((l,r)\) with \(\max(a_l..a_r)=\min(b_l..b_r)\) over two fixed
+     arrays. For a \emph{fixed} \(l\), \(\max a\) is non-decreasing and \(\min b\)
+     non-increasing in \(r\), so their difference is monotone -- binary-search the
+     \(r\)-window where they are equal, reading each \(\max/\min\) from a tree
+     built \emph{once} on \(a\) and \(b\): the static range-fold oracle of
+     \(\coderef{c13-build}\)/\(\coderef{c13-query}\) and \(\propref{c13-offline}\).
+     A sparse table is the pure-static rival this section flags (\(\secref{c13-static}\)).}
+  \practice{Let Them Slide}{CF 1208E}
+    {https://codeforces.com/problemset/problem/1208/E}{CF 2200 L4}
+    {Each row's array may slide within \(w\) cells; per column take the max
+     contribution. For every row you need \(\max\) over a \emph{window of positions}
+     that can reach column \(j\) -- a static range-max oracle (\(\coderef{c13-firstge}\)'
+     build-once idea), accumulated onto the columns with a difference array; the whole
+     thing is the ``array never changes, many read-only folds'' regime of
+     \(\propref{c13-offline}\) (\(\secref{c13-static}\)).}
+  \practice{Drazil and Park}{CF 515E}
+    {https://codeforces.com/problemset/problem/515/E}{CF 2300 L5}
+    {On a circular park, per query exclude one arc and maximise
+     \(2(h_x+h_y)+\mathit{dist}(x,y)\) over a pair on the free arc. Double the array
+     and give each node a \emph{tuple} (best pair, best prefix/suffix of the two
+     derived quantities \(2h_i\pm\mathit{pref}_i\)) merged \(O(1)\) in order -- a
+     non-commutative combine like \(\thmref{c13-subarray}\), queried over the
+     wrap-around range (\(\coderef{c13-combine}\), \(\secref{c13-combine}\)).}
+  \practice{Trains and Statistic}{CF 675E}
+    {https://codeforces.com/problemset/problem/675/E}{CF 2300 L5}
+    {Sum, over all station pairs, the minimum tickets to travel: a left-to-right
+     greedy that needs, for each \(i\), the index \(k\le i\) with the \emph{maximum}
+     reach \(a_k\). A static range-max-with-argmax oracle answers each step
+     (\(\coderef{c13-firstge}\)' descend returns the \emph{position}, not just the
+     value; \(\thmref{c13-descend}\)) folded into a running \(\mathit{dp}\) sum
+     (\(\secref{c13-search}\), \(\secref{c13-static}\)).}
+  \practice{New Year Domino}{CF 500E}
+    {https://codeforces.com/problemset/problem/500/E}{CF 2300 L5}
+    {Pushing domino \(x\) must reach \(y\); pay to lengthen. Precompute
+     \(\mathit{nxt}[i]\) = the first domino \emph{not} covered by the chain from \(i\),
+     which is a ``first position whose \(\max_j(p_j+l_j)\) clears a reach threshold''
+     -- the descend of \(\coderef{c13-descend}\) on a max-segtree over the
+     right-reach axis, then sum the gap costs along the jump chain
+     (\(\thmref{c13-descend}\), \(\secref{c13-search}\)).}
+\end{mixedset}
+
+
+\chaptersection{The Summit -- CF 414D Mashmokh and Water Tanks}
+
+\begin{notebox}[Why this is the chapter top rope -- and an honest caveat]
+Sections 19.2 and 19.3 each own one half: 19.2 lets a node be a \emph{record}
+folded by an associative merge; 19.3 lets you \emph{descend} to an order statistic
+the tree can see but a BIT cannot. The Summit is both at once: it searches an
+answer with a binary search and, inside every predicate, descends a depth-axis tree
+of \((\text{count},\text{sum of depths})\) records for the \(X\) deepest usable
+tanks. \textbf{Honest note:} the official editorial solves it in \(O(m)\) with a
+\emph{two-pointer} over depth levels -- that is the intended route and it is faster.
+This chapter asked for a segment-tree treatment, so we give one and pay a
+\(\log\) for it; read the two-pointer as the optimisation exercise at the end.
+\end{notebox}
+
+\solvedproblem{c13-summit}{Mashmokh and Water Tanks}{CF 414D}
+  {https://codeforces.com/problemset/problem/414/D}{CF 2300 L5}
+  {binary-search the answer X + an order-statistic DESCEND over a depth-axis tree storing (count, sum-of-depths) records}
+
+\begin{problemstatement}[CF 414D Mashmokh and Water Tanks]
+A rooted tree of \(m\) vertices (vertex \(1\) is the root) is given; every vertex
+holds a water tank, empty at the start. Mashmokh has \(k\) litres and \(p\) coins.
+He first pours exactly one litre into each of \emph{at most} \(k\) chosen non-root
+tanks. Then he performs moves until no tank holds water. In one move he may close
+the door of any non-root tank holding \(w\) litres, paying \(w\) coins for that
+move; a closed tank keeps its water, an open tank passes all its water up to its
+parent. Tanks are processed shallowest-first (the root first, and the root is
+\emph{emptied} at the start of every move), so a litre climbs at most one edge per
+move. If \(l\) moves are made and \(w_i\) is the water in the root after move \(i\),
+he wins \(\max(w_1,\dots,w_l)\) dollars. Report the maximum dollars he can guarantee.
+
+\textbf{Input.} \(m,k,p\) (\(2\le m\le 10^{5}\); \(0\le k,p\le 10^{9}\)); then \(m-1\)
+edges \(a_i,b_i\) (\(1\le a_i,b_i\le m\)).
+
+\textbf{Output.} One integer -- the maximum dollars.
+
+\textbf{Sample 1.} \(m{=}10,k{=}2,p{=}1\) with edges
+\((1,2)\), \((1,3)\), \((3,4)\), \((3,5)\), \((2,6)\), \((6,8)\),
+\((6,7)\), \((9,8)\), \((8,10)\) \(\to\) \texttt{2}.\\
+\textbf{Sample 2.} \(m{=}5,k{=}1000,p{=}1000\) with edges
+\((1,2),(1,3),(3,4),(3,5)\) \(\to\) \texttt{4}.
+\end{problemstatement}
+
+\solstep{Key Observations}
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item Because the root is emptied at the start of every move, the win is the water
+        that arrives \emph{on a single move}, never an accumulation. A litre released
+        from depth \(d\) reaches the root exactly \(d\) moves later, so to win \(X\)
+        dollars \(X\) litres must land on the \emph{same} move.
+  \item Release a litre from depth \(d_i\) and it arrives at move \(d_i\). To make it
+        arrive instead at move \(T\ge\max_i d_i\) he closes its (single-litre) tank for
+        \(T-d_i\) early moves, costing \(T-d_i\) coins; synchronising \(X\) litres at
+        level \(T\) therefore costs \(\sum_i(T-d_i)=XT-\sum_i d_i\).
+  \item For a fixed number \(X\) and a fixed synchronising level \(r=T\), the cheapest
+        choice is the \(X\) \emph{deepest} tanks at depth \(\le r\) (a deeper tank needs
+        less holding). \(\text{Cost}(X)=\min_{r}\big(Xr-\!\sum(\text{the \(X\) deepest depths}\le r)\big)\).
+  \item Feasibility ``\(\text{Cost}(X)\le p\) and \(X\le k\) and \(X\le m-1\)'' is
+        \textbf{monotone} in \(X\) (each extra litre only raises the minimum cost), so
+        the answer is the largest affordable \(X\) -- a binary search -- and each
+        predicate needs an order-statistic \emph{descend}.
+\end{enumerate}
+
+\solstep{Reduction to a Descend over a Depth Axis}
+Root the tree and bucket the \(m-1\) non-root vertices by depth; let
+\(\mathit{cnt}[d]\) be the count at level \(d\) and \(D\) the maximum depth. Build a
+segment tree on the closed axis \([0,D]\) whose leaf \(d\) stores the record
+\((\mathit{cnt}[d],\,d\cdot\mathit{cnt}[d])\) and whose internal node is the
+componentwise sum -- an associative, commutative merge with identity \((0,0)\),
+exactly the record idea of \(\thmref{c13-subarray}\) and the \(O(n)\) build of
+\(\coderef{c13-iter}\). A prefix array \(\mathit{cc}[r]=\sum_{d\le r}\mathit{cnt}[d]\)
+answers ``how many tanks at depth \(\le r\)'' in \(O(1)\).
+
+To evaluate \(\text{Cost}(X)\): for each level \(r\) with \(\mathit{cc}[r]\ge X\),
+\emph{descend} the tree to collect the sum of the \(X\) largest depths that are
+\(\le r\) -- visit the right (deeper) child first, swallow a whole node when its
+\(\mathit{cnt}\le\) the remaining need, else recurse, stopping at the \(r\) cap
+(\(\thmref{c13-descend}\), the sibling of \(\coderef{c13-kthseg}\)); the descend costs
+\(\bigO{\log D}\). Take the minimum of \(Xr-\text{got}\) over \(r\). Binary-search \(X\)
+over \([0,\min(k,m-1)]\) on the monotone predicate \(\text{Cost}(X)\le p\). Total
+\(O(D\log m\log R)\) with \(D\le m\) and \(R\le m\) -- the editorial's two-pointer
+collapses the outer two scans to a single \(O(m)\) pass.
+
+\solstep{Trace on a Hand Instance}
+\begin{tracebox}[Synchronise tanks of depth profile 1,2,3,3 with k=4 and p=2]
+Non-root depths \(\{1,2,3,3\}\), so \(\mathit{cnt}[1]{=}1,\mathit{cnt}[2]{=}1,
+\mathit{cnt}[3]{=}2\), \(D{=}3\), and \(\mathit{cc}=(0,1,2,4)\). The depth-axis tree
+(root interval \([0,3]\)) stores \((\text{count},\text{sum})\) per node; the leaf
+records are \((0,0),(1,1),(1,2),(2,6)\).
+
+\textbf{Cost(4).} Only \(r{=}3\) has \(\mathit{cc}[3]{=}4\ge4\). Descend for the \(4\)
+largest depths \(\le3\): the root count \(4\le4\) sits inside the cap, so swallow the
+whole tree, \(\text{got}=1{+}2{+}3{+}3=9\). Cost \(=4\cdot3-9=3\). \(3>p{=}2\) \(\Rightarrow\) infeasible.
+
+\textbf{Cost(3).} \(r{=}3\): descend \(3\) largest \(\le3\). The right child \([2,3]\)
+holds count \(1{+}2=3\le3\), swallow it, \(\text{got}=2+6=8\), need satisfied. Cost
+\(=3\cdot3-8=1\). (\(r{=}2\) has \(\mathit{cc}[2]{=}2<3\), skipped.) Min cost \(=1\le p\) \(\Rightarrow\) feasible.
+
+So the largest affordable \(X\) is \(3\): hold the depth-\(2\) tank for one move so all
+three land on move \(3\) -- keep tanks \(\{2,3,3\}\), closing the depth-\(2\) one once.
+The binary search over \(X\in[0,4]\) returns \(3\).
+\end{tracebox}
+
+\noindent\textbf{Replaying the official samples.} \emph{Sample~1:} \(k=2\) caps
+\(X\le2\); \(\text{Cost}(2)=0\le p=1\) (two level-\(2\) tanks land together on move~2,
+needing no coins), so the answer is \(2\). \emph{Sample~2:} depths
+\(\{1,2,3,3\}\) again with \(k=p=1000\), \(D=3\); all four non-root tanks are usable,
+\(\text{Cost}(4)=4\cdot3-9=3\le1000\), and \(X=5\) is impossible (only \(m-1=4\) tanks),
+so the answer is \(4\) -- matching both judge outputs.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 414D: a depth-axis (count,sum) record tree, an order-statistic descend for the X deepest, wrapped in a binary search on the answer}, label={lst:c13-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Node{ long long cnt=0, sum=0; };              // (tanks here, sum of their depths)
+static inline Node mg(Node a,Node b){ return {a.cnt+b.cnt, a.sum+b.sum}; }  // assoc, commut
+int H; long long CAP; vector<Node> t;
+long long NEED, GOT;                                 // descend accumulators
+void takeDeepest(int v,int l,int r){                 // grab NEED largest depths <= CAP
+    if(NEED<=0 || l>CAP) return;                     // past the cap: nothing here
+    if(r<=CAP && t[v].cnt<=NEED){ NEED-=t[v].cnt; GOT+=t[v].sum; return; }  // whole node
+    if(l==r){ long long kk=min(NEED,t[v].cnt); NEED-=kk; GOT+=kk*l; return; }
+    int m=(l+r)>>1;
+    takeDeepest(2*v+1,m+1,r);                        // rightmost (deepest) child FIRST
+    takeDeepest(2*v,l,m);
+}
+int main(){
+    int m; long long k,p; scanf("%d%lld%lld",&m,&k,&p);
+    vector<vector<int> > adj(m+1);
+    for(int i=1,a,b;i<m;i++){ scanf("%d%d",&a,&b); adj[a].push_back(b); adj[b].push_back(a); }
+    vector<int> dep(m+1,-1), bfs; bfs.push_back(1); dep[1]=0; int maxD=0;
+    for(int s=0;s<(int)bfs.size();s++){ int u=bfs[s]; if(dep[u]>maxD) maxD=dep[u];
+        for(int w:adj[u]) if(dep[w]<0){ dep[w]=dep[u]+1; bfs.push_back(w); } }   // BFS depths
+    H=1; while(H<=maxD+1) H<<=1; t.assign(2*H, Node());
+    for(int v=2;v<=m;v++){ t[H+dep[v]].cnt++; t[H+dep[v]].sum+=dep[v]; }
+    for(int i=H-1;i>0;i--) t[i]=mg(t[i<<1], t[i<<1|1]);        // O(n) build (lst:c13-iter)
+    vector<long long> cc(maxD+1,0);                            // #tanks at depth <= r
+    for(int r=1;r<=maxD;r++) cc[r]=cc[r-1]+t[H+r].cnt;
+    auto cost=[&](long long X)->long long{
+        long long best=(long long)4e18;
+        for(int r=1;r<=maxD;r++){
+            if(cc[r]<X) continue;                               // not enough tanks <= r
+            CAP=r; NEED=X; GOT=0; takeDeepest(1,0,H-1);         // sum of X deepest <= r
+            long long c=X*r-GOT; if(c<best) best=c;             // hold cost to sync at level r
+        }
+        return best;
+    };
+    long long lo=0, hi=min(k,(long long)m-1), ans=0;            // monotone in X -> binary search
+    while(lo<=hi){ long long mid=(lo+hi)/2;
+        if(cost(mid)<=p){ ans=mid; lo=mid+1; } else hi=mid-1; }
+    printf("%lld\n", ans);
+}
+// Depth-axis tree stores (count, sum-of-depths): the record-node merge of 19.2.  takeDeepest
+// is the 19.3 order-statistic descend (right child first) that a BIT cannot run -- it reads
+// the X largest depths among tanks at level <= CAP.  Binary-searching X on the monotone
+// Cost(X) <= p is 19.4's outer-loop pattern.  X*r and GOT reach 1e10, so every accumulator is
+// long long.  The official O(m) two-pointer is faster; this is the segment-tree reading.
+\end{lstlisting}
+
+\noindent\textbf{Complexity.} A BFS to bucket depths is \(\bigO{m}\); the \(2n\) build is
+\(\bigO{D}\). Each predicate \(\text{Cost}(X)\) scans the \(D\) levels and runs one
+\(\bigO{\log D}\) descend, so \(\bigO{D\log D}\); the answer binary search repeats it
+\(\bigO{\log m}\) times for \(\bigO{D\log D\log m}\) overall -- fine inside \(m\le10^5\),
+with the editorial's two-pointer the \(O(m)\) upgrade.
+
+\begin{hardeningbox}[AC to red: hardening the Summit]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{The root is cleared every move.} The win is litres arriving on \emph{one}
+        move, not the running total; do not model water as accumulating in the root.
+  \item \textbf{Pick the \(X\) DEEPEST tanks, not shallowest.} Cost \(\sum(r-d_i)\) is
+        minimised by large \(d_i\); taking the shallowest tanks inflates the hold cost
+        and rejects feasible \(X\).
+  \item \textbf{Guard \(\mathit{cc}[r]\ge X\) before descending.} With fewer than \(X\)
+        tanks at depth \(\le r\) the descend returns a short sum and \(\text{Cost}(X)\)
+        silently reads the wrong value -- the \code{continue} is load-bearing.
+  \item \textbf{Monotonicity is what licenses the search.} \(\text{Cost}(X)\) is
+        non-decreasing in \(X\); verify it before binary searching, or the standard
+        \(\bigO{\log}\) answer trick breaks (\(\thmref{c13-descend}\)' predicate framing).
+  \item \textbf{Levels start at \(1\).} Depth \(0\) is the root, which is never filled and
+        never closed; scanning \(r\) from \(1\) skips it and keeps the cap honest.
+  \item \textbf{64-bit throughout.} \(X\cdot r\) and the sum-of-depths reach
+        \(10^{10}\); \code{int} overflows the cost and the sentinel \(\text{best}\).
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[Chapter 19 in ten seconds]
+A segment tree is a binary tree of \emph{intervals} whose node holds any associative
+fold with an identity (\(\defref{c13-node}\), \(\thmref{c13-merge}\)): build
+\(\bigO{n}\), point set and range fold \(\bigO{\log n}\) (\(\coderef{c13-build}\),
+\(\coderef{c13-query}\)). Change the payload to a \emph{record} and you fold things a
+BIT cannot -- the four-field max-subarray of \(\thmref{c13-subarray}\) is the type
+example (\(\coderef{c13-combine}\)). Let the stored aggregate decide ``is the target
+under me'' and you can \emph{descend} for the first/\(k\)-th qualifier in
+\(\bigO{\log n}\) (\(\thmref{c13-descend}\), \(\coderef{c13-descend}\)) -- the tree's
+answer to Ch.~18's lowbit-lift. Compact the recursion into a complete \(2n\) array and
+you get the fastest, shortest version, at the price of a two-accumulator half-open walk
+for order-sensitive folds (\(\propref{c13-iter}\), \(\coderef{c13-iter}\)). Build once
+and never update, and the tree is a pure read-only oracle feeding offline sweeps and
+DP transitions (\(\propref{c13-offline}\)).
+\selftest{
+  \item What two ingredients make a range query correct, and what breaks if the disjoint
+        base case returns a leaf value instead of \(e\)? \hfill\lv{3}
+  \item Why is the max-subarray merge associative but not commutative, and what does the
+        iterative query do differently as a result? \hfill\lv{4}
+  \item State the difference between a fold query and a descend query, with one problem
+        each. \hfill\lv{4}
+  \item In the Summit, which two chapter techniques compose, and what does each contribute? \hfill\lv{5}
+}
+\end{recallbox}
+
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled through Chapter~19. Earlier chapters' rows are carried
+forward; this chapter's are appended. Pointers only.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.21\linewidth} l c p{0.25\linewidth} p{0.17\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Lv} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Carried forward} \\
+Euler tour \(\tin/\tout\) flatten & 5 & \lv{3} & ``a subtree is a contiguous range'' & \chref{c24} \\
+Binary lifting / lowbit-lift select & 11, 18 & \lv{4} & ``the descend's bit-walking cousin'' & \chref{c11}, \coderef{c14-kth} \\
+Invertible prefix sum & 5, 18 & \lv{2} & ``the fold that needs NO segtree'' & \chref{c14} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 19 -- new this chapter} \\
+Recursive segtree (build/update/query) & 19.1 & \lv{3} & ``range min/max/gcd under point set'' & \coderef{c13-build}, \coderef{c13-query} \\
+Arbitrary associative fold + identity & 19.2 & \lv{3} & ``a combine with no inverse'' & \thmref{c13-merge}, \defref{c13-identity} \\
+Tuple/record node (max-subarray) & 19.2 & \lv{4} & ``best subarray / brackets / pair-best'' & \thmref{c13-subarray}, \coderef{c13-combine} \\
+Descend to a threshold / \(k\)-th & 19.3 & \lv{4} & ``first position clearing a bound'' & \thmref{c13-descend}, \coderef{c13-descend} \\
+Iterative \(2n\) tree (half-open) & 19.4 & \lv{3} & ``fixed length, tight constant, least code'' & \propref{c13-iter}, \coderef{c13-iter} \\
+Static/offline range oracle & 19.5 & \lv{4} & ``array never changes, many lookups'' & \propref{c13-offline}, \coderef{c13-firstge} \\
+Answer-search + record-descend & Summit & \lv{5} & ``binary-search the answer, descend inside'' & \coderef{c13-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c14} (Ch.~18, Fenwick Trees) --- backward/forward: Ch.~18 drew the
+        expressiveness line (a BIT owns invertible prefix sums; arbitrary-range
+        \(\min/\max\) under arbitrary writes is a segtree) and pointed it HERE;
+        19.4's comparison box discharges that promise, and 19.3 contrasts the segtree
+        descend against \(\coderef{c14-kth}\)'s lowbit-lift (no BIT re-teach).
+  \item \chref{c15} (Ch.~20, Segment Trees II: Lazy) --- forward: the moment a whole
+        interval is \emph{modified} (range add / range assign), the point-update tree
+        of this chapter is not enough and lazy tags take over; 19.2 and 19.4 note
+        exactly where that boundary falls but ship no lazy code.
+  \item \chref{c19} (Ch.~21, Merge-Sort / Persistent Trees) --- forward: a \emph{pure}
+        static \(\min/\max\) is \(O(1)\) via the sparse table, and ``\(k\)-th smallest
+        in a static range'' needs the merge-sort or persistent tree; 19.5 forward-cites
+        both rather than building either here.
+  \item \chref{c16} (Ch.~22, Heavy-Light Decomposition) --- forward: path queries on a
+        tree are Euler-flattened onto exactly this segment tree; mentioned by prose only.
+  \item \chref{c24} (Ch.~5, Euler Tour) --- backward: owns \(\tin/\tout\) and the
+        ``subtree \(=\) interval'' fact the 19.5 pointer reuses by label; the dynamic
+        subtree engine is handed forward to Ch.~20/22.
+  \item \chref{c11} (Ch.~11, Binary Lifting) --- backward: 19.3's descend is the
+        tree-walk sibling of lifting by bits; back-cited, not re-derived.
+  \item \chref{c01} (Ch.~1, complexity \& binary search) --- backward: the Summit's
+        outer loop is the monotone binary search Ch.~1 frames; here the array being
+        searched is the segment tree's answer axis.
+  \item Ch.~6's treap section --- backward (prose only): it worked a range-sum with a
+        self-balancing tree and forward-pointed to the segment-tree treatment 19.2
+        supplies (LC 307 stays Ch.~6's link and is named, never re-linked).
+\end{itemize}
+
+\begin{lastword}[Last Word --- Chapter 19]
+\emph{``Keep the whole interval tree, not just the lowbit shadows, and any
+associative combine becomes a \(\bigO{\log n}\) walk: fold a range up from the
+canonical cover, write a point down one root path, and -- when a stored aggregate can
+answer `is the target under me?' -- descend root-to-leaf to find the very position a
+Fenwick tree is blind to.''}
+
+\medskip
+The tree is one skeleton, many payloads. Store a scalar and you have range
+\(\min/\max/\gcd\) under point set (\(\coderef{c13-query}\), the fold Ch.~18 could not
+host). Store a four-field record and the max subarray folds in \(O(1)\) per merge, order
+matters and the two iterative accumulators keep it straight (\(\thmref{c13-subarray}\),
+\(\coderef{c13-iter-range}\)). Compact the recursion into a complete \(2n\) array and
+the code shrinks to two loops and a half-open walk (\(\propref{c13-iter}\)). Read-only
+and never updated, the same build is an oracle an offline sweep or a DP transition
+calls a thousand times (\(\propref{c13-offline}\), CF~940E).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Fold vs descend.} A query that returns a \emph{value} is a fold over the
+        cover; a query that returns an \emph{index} (first/leftmost/\(k\)-th) is a
+        prune-as-you-go descent -- and only the tree can do the second
+        (\(\thmref{c13-descend}\)).
+  \item \emph{Identity is not optional.} Every fold needs the true neutral element;
+        a disjoint branch returning anything but \(e\) is a silent wrong answer
+        (\(\defref{c13-identity}\)).
+  \item \emph{Composability is the payoff.} A segtree is the read engine inside a
+        binary search (CF~514D, the Summit) and inside a DP (CF~940E); recognising the
+        monotone predicate wrapped around a fold is the whole advanced game.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: size the recursive array \(4n\) and the
+complete array \(2n\) and know which you are typing; re-check the half-open/closed
+convention and the descend's probe order against the smallest sample that could expose
+them; and before writing a segment tree, ask whether your combine is a plain invertible
+sum -- if it is, Chapter~18 already owns the cheaper answer.
+
+\medskip
+\textbf{Next:} \chref{c15} (Segment Trees II: Lazy Propagation) removes the last
+restriction this chapter left standing -- instead of editing one leaf, you will add or
+assign to a \emph{whole interval} and still answer range queries, by deferring writes
+with lazy tags pushed down on demand. The point-update tree you can now build cold is
+exactly the object that grows its shadow.
+\end{lastword}

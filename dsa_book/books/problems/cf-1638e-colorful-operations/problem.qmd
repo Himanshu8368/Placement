@@ -1,0 +1,265 @@
+### Problem: Colorful Operations {#sec-sqrt-p4-colorops}
+
+::: {.p-statement}
+An array $a_1, \ldots, a_n$ starts with every element having value $0$ and colour $1$. Perform $q$ operations:
+
+- `Color l r c` — set the colour of $a_\ell, \ldots, a_r$ to $c$ (values are unchanged);
+- `Add c x` — add $x$ to the value of every element whose **current colour is $c$** ($-10^{9} \le x \le 10^{9}$);
+- `Query i` — print the value of $a_i$.
+
+Constraints: $1 \le n, q \le 10^{6}$, colours are in $[1, n]$, $1 \le \ell \le r \le n$.
+
+Source: [CF 1638E · Colorful Operations](https://codeforces.com/problemset/problem/1638/E){.solved rating="2400"}
+
+Example — $n = 5$: `Color 2 4 2` colours cells $2,3,4$; `Add 2 2` gives those cells value $2$; `Query 3` prints $2$; `Color 4 5 3` then `Color 2 2 3` move cells $4,5,2$ to colour $3$ (keeping their current values $2,0,2$); `Add 3 3` lifts colour-$3$ cells by $3$; `Query 2` prints $5$ and `Query 5` prints $3$. Output `2`, `5`, `3`. (Every figure matches the official sample and is asserted against a copy-the-array oracle, then stressed cell-by-cell.)
+:::
+
+::: {.p-intuition}
+`Add c x` reaches every element of colour $c$ *anywhere* in the array — a range of positions defined by a **value (colour)**, not an index. The pivot: hold the additions per colour in a table `add[c]` so `Add c x` is a single $O(1)$ write and `Query i` reads `add[colour[i]]`. Then a cell's true value is (its own base) $+$ `add[its colour]`; recolouring a cell from $c_{\text{old}}$ to $c$ must *preserve* its true value, which means re-basing: $\mathit{base} \mathrel{+}= \texttt{add}[c_{\text{old}}] - \texttt{add}[c]$.
+
+The only expensive operation left is `Color l r c`, a position range — so put @sec-sqrt-a1's grid on the **positions** and give each block a lazy uniform-colour tag. When a whole block is one colour, recolouring it is that same $O(1)$ re-base of the block tag. When a range only clips part of a block, push the tag down to cells and fix the few touched ones — @sec-sqrt-a2's lazy tag and @sec-sqrt-a3's partial rebuild, and the "value table on one axis, position blocks on the other" of @sec-sqrt-p1-mutable2d.
+:::
+
+::: {.p-approach}
+1. **Copy the array.** Keep `colour[i]` and the true `value[i]`. `Add c x` scans all $n$ cells adding to those of colour $c$; `Color l r c` writes the window; `Query i` reads. $O(n)$ for `Add` — the oracle.
+2. **Per-colour add table + position blocks with a lazy colour.** True value $=$ `val[i] + add[col[i]]` (or, for a uniform block, `upad[b] + add[ucol[b]]`). `Add`/`Query` are $O(1)$; `Color` is $O(1)$ per whole uniform block and $O(B)$ per boundary block, where it pushes and rebuilds.
+
+**Invariant.** For every cell the true value equals `val[i] + add[col[i]]` when its block is non-uniform, or `upad[b] + add[ucol[b]]` when it is uniform; `add[c]` is the running total added to colour $c$. A re-base `val += add[old] - add[new]` keeps the true value identical across a colour change, and `_push` turns a uniform `(ucol, upad)` into identical per-cell `(col, val)` — so `Query` reads the same number either way.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Copy the array
+
+::: {.form-next}
+Store the true value and colour of every cell. `Add c x` loops the whole array adding $x$ wherever `colour[i] == c`; `Color l r c` rewrites colours in the window (values untouched); `Query i` prints. $O(n)$ for an Add — the oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+class ColorfulOpsBrute:
+    def __init__(self, n):
+        self.n = n
+        self.col = [1] * n
+        self.val = [0] * n
+
+    def add_colour(self, c, x):
+        for i in range(self.n):
+            if self.col[i] == c:
+                self.val[i] += x
+
+    def color_range(self, l, r, c):
+        for i in range(l, r + 1):
+            self.col[i] = c
+
+    def query(self, i):
+        return self.val[i]
+
+
+bb = ColorfulOpsBrute(5)
+bb.color_range(1, 3, 2)
+bb.add_colour(2, 2)
+assert bb.query(2) == 2
+bb.color_range(3, 4, 3)
+bb.color_range(1, 1, 3)
+bb.add_colour(3, 3)
+assert bb.query(1) == 5 and bb.query(4) == 3
+```
+
+##### C++
+
+```cpp
+// brute force: Add c x touches every cell, O(n) per Add
+struct ColorfulOpsBrute {
+    vector<int> col;
+    vector<long long> val;
+    int n;
+    ColorfulOpsBrute(int n_) : n(n_), col(n_, 1), val(n_, 0) {}
+    void add_colour(int c, long long x) {
+        for (int i = 0; i < n; ++i) if (col[i] == c) val[i] += x;
+    }
+    void color_range(int l, int r, int c) {
+        for (int i = l; i <= r; ++i) col[i] = c;
+    }
+    long long query(int i) { return val[i]; }
+};
+```
+:::
+
+**Reading it line by line.** `add_colour` is $O(n)$, and at $q \le 10^{6}$ an all-`Add`/`Query` run is $10^{12}$ steps — the oracle only, but note it stores the *materialised* value, so it is the ground truth the split `base + add` form is checked against.
+
+#### Per-colour add table with lazy colour blocks
+
+::: {.form-next}
+Keep `add[c]` per colour and block the positions. A uniform block stores `(ucol, upad)`; a non-uniform one stores `col[i], val[i]` with true value $=$ base $+$ `add[colour]`. `Add`/`Query` are $O(1)$. `Color l r c`: whole uniform blocks just re-base the tag (`upad += add[ucol] - add[c]`); boundary blocks are pushed and fixed cell by cell, re-basing each with `val[i] += add[col[i]] - add[c]`.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+co_grid = [["cell", "0", "1", "2", "3", "4"],
+           ["colour", "1", "3", "2", "3", "3"],
+           ["true", "0", "5", "2", "3", "3"]]
+
+
+def draw(ax, p):
+    V.grid(ax, p, co_grid,
+           row_labels=["", "colour", "value"],
+           colors={(1, c): ("green" if c in (1, 2) else "indigo") for c in range(1, 6)},
+           cell_w=1.0)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-sqrt-p4-colorops-sol
+class ColorfulOps:
+    def __init__(self, n):
+        self.n = n
+        self.B = max(1, int(round(n ** 0.5)))
+        self.nb = (n + self.B - 1) // self.B
+        self.add = [0] * (n + 1)              # per colour global add (colours 1..n)
+        self.uni = [True] * self.nb           # is the whole block one colour, one base?
+        self.ucol = [1] * self.nb             # that colour when uni
+        self.upad = [0] * self.nb             # that base value when uni
+        self.col = [1] * n                     # per-cell colour (valid when block !uni)
+        self.val = [0] * n                     # per-cell base; true = val + add[col]
+
+    def _push(self, b):
+        if self.uni[b]:
+            lo, hi = b * self.B, min(self.n, (b + 1) * self.B)
+            for i in range(lo, hi):
+                self.col[i] = self.ucol[b]
+                self.val[i] = self.upad[b]
+            self.uni[b] = False
+
+    def query(self, i):
+        b = i // self.B
+        if self.uni[b]:
+            return self.upad[b] + self.add[self.ucol[b]]
+        return self.val[i] + self.add[self.col[i]]
+
+    def add_colour(self, c, x):
+        self.add[c] += x
+
+    def color_range(self, l, r, c):
+        for b in range(l // self.B, r // self.B + 1):
+            lo = b * self.B
+            hi = min(self.n, (b + 1) * self.B) - 1
+            s = max(l, lo)
+            e = min(r, hi)
+            if s == lo and e == hi and self.uni[b]:
+                self.upad[b] += self.add[self.ucol[b]] - self.add[c]
+                self.ucol[b] = c
+            else:
+                if self.uni[b]:
+                    self._push(b)
+                for i in range(s, e + 1):
+                    self.val[i] += self.add[self.col[i]] - self.add[c]
+                    self.col[i] = c
+                self.uni[b] = False
+
+
+co = ColorfulOps(5)
+co.color_range(1, 3, 2)
+co.add_colour(2, 2)
+assert co.query(2) == 2
+co.color_range(3, 4, 3)
+co.color_range(1, 1, 3)
+co.add_colour(3, 3)
+assert co.query(1) == 5 and co.query(4) == 3
+for _ in range(200):
+    n = random.randint(1, 40)
+    fast = ColorfulOps(n)
+    slow = ColorfulOpsBrute(n)
+    for _ in range(40):
+        t = random.choice("ACQ")
+        if t == 'A':
+            c = random.randint(1, n); x = random.randint(-5, 5)
+            fast.add_colour(c, x); slow.add_colour(c, x)
+        elif t == 'C':
+            l = random.randrange(n); r = random.randrange(n)
+            if l > r: l, r = r, l
+            c = random.randint(1, n)
+            fast.color_range(l, r, c); slow.color_range(l, r, c)
+        else:
+            i = random.randrange(n)
+            assert fast.query(i) == slow.query(i)
+    for i in range(n):                         # verify the whole state, not just queries hit
+        assert fast.query(i) == slow.query(i)
+```
+
+##### C++
+
+```cpp
+struct ColorfulOps {
+    int n, B, nb;
+    vector<long long> add;          // per-colour global add
+    vector<char> uni;               // block is one colour + one base?
+    vector<int> ucol;
+    vector<long long> upad;
+    vector<int> col;                // per-cell colour (used when !uni)
+    vector<long long> val;          // per-cell base; true = val + add[col]
+    ColorfulOps(int n_) : n(n_), add(n_ + 1, 0), col(n_, 1), val(n_, 0) {
+        B = max(1, (int)round(sqrt((double)max(n_, 1))));
+        nb = (n + B - 1) / B;
+        uni.assign(nb, 1);
+        ucol.assign(nb, 1);
+        upad.assign(nb, 0);
+    }
+    void push(int b) {
+        if (uni[b]) {
+            int lo = b * B, hi = min(n, (b + 1) * B);
+            for (int i = lo; i < hi; ++i) { col[i] = ucol[b]; val[i] = upad[b]; }
+            uni[b] = 0;
+        }
+    }
+    long long query(int i) {
+        int b = i / B;
+        if (uni[b]) return upad[b] + add[ucol[b]];
+        return val[i] + add[col[i]];
+    }
+    void add_colour(int c, long long x) { add[c] += x; }
+    void color_range(int l, int r, int c) {
+        for (int b = l / B; b <= r / B; ++b) {
+            int lo = b * B, hi = min(n, (b + 1) * B) - 1;
+            int s = max(l, lo), e = min(r, hi);
+            if (s == lo && e == hi && uni[b]) {
+                upad[b] += add[ucol[b]] - add[c];
+                ucol[b] = c;
+            } else {
+                if (uni[b]) push(b);
+                for (int i = s; i <= e; ++i) { val[i] += add[col[i]] - add[c]; col[i] = c; }
+                uni[b] = 0;
+            }
+        }
+    }
+};
+```
+:::
+
+**Reading it line by line.** The two axes are handled by two different devices — `add[]` is the colour-value table (A4), the `uni/ucol/upad` triple is the position-block lazy tag (A2). A whole-block recolour is $O(1)$ precisely because a uniform block has one colour and one base, so `upad += add[ucol] - add[c]` re-bases all its cells at once. As soon as a range boundary cuts a block, `_push` materialises it and the block can never be a single `(ucol, upad)` again — the cells keep the *same* colour $c$ but have different base values, so we correctly leave `uni[b] = False` instead of falsely coalescing. `query` therefore reads either representation and returns the identical true value, which is exactly what the stress asserts for *every* cell after a random operation sequence.
+
+:::
+
+::: {.p-complexity}
+**Copy the array:** $O(n)$ per `Add`, $O(nq)$ overall. **Lazy colour blocks:** `Add` and `Query` are $O(1)$; `Color l r c` is $O(1)$ per whole uniform block plus $O(B)$ per boundary or non-uniform block, so $O(n/B + B)$ worst and typically far less since full-block recolours leave blocks uniform. With $B \approx \sqrt n$ and $n, q \le 10^{6}$ the $O(1)$ `Add`/`Query` — the majority of operations — is what makes the run feasible; a plain array's $O(n)$ `Add` would be $10^{12}$. Values swing by $q \cdot 10^{9}$, so `add`, `val`, `upad` are 64-bit (@sec-arr-size-trap).
+:::
+
+::: {.p-edge}
+- `Add c x` for a colour $c$ no cell has: `add[c]` changes but no `Query` reads it until a cell becomes colour $c$, whose re-base folds the old `add[c]` out — value preserved.
+- Recolouring a whole uniform block repeatedly stays $O(1)$ each: the tag carries the accumulated re-base.
+- A boundary `_push` of a uniform block: it expands `(ucol, upad)` to identical `col[i]=ucol, val[i]=upad`, true values unchanged.
+- $n$ not a multiple of $B$: the last block is short; `hi = min(n, (b+1)*B) - 1` clamps every loop.
+:::
+
+::: {.practice}
+- [CF 220B · Little Elephant and Array](https://codeforces.com/problemset/problem/220/B){rating="1800"} — the value axis approached by magnitude/heavy-light instead of a lazy table (@sec-sqrt-p4-learray)
+- [LC 308 · Range Sum Query 2D - Mutable](https://leetcode.com/problems/range-sum-query-2d-mutable/){difficulty="Hard"} — the "table on one axis, blocks on the other" shape (@sec-sqrt-p1-mutable2d)
+:::

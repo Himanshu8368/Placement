@@ -1,0 +1,285 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  8.5  Splay Trees (intro; full block stays Ch25 c23)  sec:c06-splay
+%  Exports: def:c06-splay  def:c06-zigzig  thm:c06-amortized
+%           fig:c06-splayfig  ex:c06-splay-run   (practice: CF 343D)
+% =====================================================================
+\section{Splay Trees: Balance by Locality (Introduction)}\label{sec:c06-splay}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item AVL guarantees $\bigO{\log n}$ by \emph{checking} heights; treaps by \emph{flipping coins};
+        red-black by \emph{colouring}. Each stores extra per-node state. What if we stored \emph{none}?
+        (the motivation for splay -- it keeps no balance factor, no priority, no colour.)
+  \item Which single $\bigO{1}$ move lets us reshape a BST without disturbing the sorted inorder?
+        (\thmref{c06-rotation}, \coderef{c06-rotcode}.)
+  \item What does \emph{amortised} mean, and where have we used it before? (charging a rare expensive op
+        against many cheap ones; \chref{c05}'s container discussion.)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Every structure so far spends a \emph{worst-case} effort on every operation to keep \emph{all} keys
+equally reachable. Splay trees, Sleator and Tarjan's invention, make a different bet: real access
+patterns are \emph{skewed} -- a few hot keys dominate -- so why not spend rotations to drag whatever you
+just touched to the root, letting hot data settle near the top and cold data sink? The rule is
+astoundingly simple: after any access to node $x$, \term{splay} $x$ to the root with a bottom-up sequence
+of rotations (\defref{c06-splay}), using only the zig / zig-zig / zig-zag moves of
+\defref{c06-zigzig}. There is no auxiliary field and no coin flip. The payoff is a genuinely surprising
+\emph{amortised} guarantee: $m$ operations cost $\bigO{(n+m)\log n}$, i.e.\ $\bigO{\log n}$ \emph{per
+operation on average}, even though \emph{no single operation} is bounded better than linear
+(\thmref{c06-amortized}). This section is the \emph{introduction}: the splay idea, the three moves, the
+potential-function \emph{statement} of the amortised bound, and a hands-on splay of the chain $C$. The
+full analysis -- the Access Lemma and its consequences (the static optimality, the working-set
+property) -- and the link-cut trees that run splay on \emph{dynamic} trees live in Chapter~25
+(\chref{c23}), which already expects exactly what you learn here.
+\textbf{Prerequisites.} \secref{c06-rotations} (the rotation, the zig/zig-zag geometry); \secref{c06-avl}
+for contrast. The amortised method is assumed lightly from \chref{c05}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item perform a splay with the zig, zig-zig and zig-zag rotations and explain why zig-zig is two
+        same-direction single rotations; \hfill\lv{3}--\lv{4}
+  \item state the $k$-th-access working-set intuition and why splay exploits locality; \hfill\lv{3}
+  \item state the amortised $\bigO{\log n}$ bound and name the potential ($\sum \log \mathit{size}$); \hfill\lv{4}--\lv{5}
+  \item recognise a ``hot keys dominate / move-to-front'' workload where splay beats a rigid AVL. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- self-adjusting by access pattern]
+\reckey{a search tree whose query distribution is \emph{non-uniform and shifting} (hot keys recur, recent
+keys recur), where a fixed balance policy wastes effort keeping cold keys shallow.}
+\recuse{
+  \item caches, dictionaries, ``move to front'' buffers -- recent / frequent items float to the root for
+        free;
+  \item you want a balanced BST with \emph{zero} per-node bookkeeping (no heights, colours or priorities);
+  \item the entry point to \emph{dynamic trees}: link-cut trees (\chref{c23}) are splay trees whose nodes
+        stand for preferred paths.
+}
+\recnotuse{
+  \item you need a \emph{worst-case} $\bigO{\log n}$ per operation -- splay only gives it \emph{amortised};
+        one access can be $\bigO{n}$ (use AVL/red-black, \secref{c06-avl}/\secref{c06-redblack});
+  \item you need customisable subtree aggregates via clean concatenation -- the treap's
+        \texttt{split}/\texttt{merge} (\secref{c06-treaps}) is far more convenient;
+  \item plain ordered-set needs with no locality angle -- the library \code{set} already balances
+        (\secref{c06-redblack}).
+}
+One-line test: \emph{do recent/frequent keys dominate the queries, and is an average-case (not per-call)
+$\bigO{\log n}$ acceptable? Then let the tree reshape itself around the traffic -- splay.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+A treap is balanced \emph{on average over its random construction}; a splay tree is balanced
+\emph{on average over the sequence of queries you actually ask}. The whole idea is one selfish rule:
+whenever you reach a node, promote it to the root. If you search for $x$ and then immediately search for
+$x$ again, the second search is now $\bigO{1}$ -- $x$ sits at the top. Frequently-used keys are constantly
+re-promoted and thus stay near the root; unfrequently-used keys are almost never promoted and quietly
+drift down. The tree ends up \emph{matched to your habits}, not to a worst-case adversary.
+
+Promotion is not free -- a single splay walks all the way to the root, potentially $\bigO{n}$ rotations --
+but the clever part is the \emph{order} of rotations. Splaying does not naively rotate $x$ up one level at
+a time; it works two levels at a time (the zig-zig and zig-zag moves of \defref{c06-zigzig}) so that each
+rotation roughly \emph{halves} the depth of $x$ \emph{and} flattens the whole path it traversed. That
+``path halving'' is the geometric engine behind \thmref{c06-amortized}: an expensive splay leaves the tree so
+much better shaped for the nodes on its path that the cost, spread over the accesses, averages to
+$\bigO{\log n}$.
+
+\begin{definition}{Splaying a node to the root}{c06-splay}
+A \term{splay tree} is an ordinary binary search tree that stores \emph{no} extra fields. To
+\term{splay} a node $x$: while $x$ is not the root, apply the moves of \defref{c06-zigzig} bottom-up
+until $x$ becomes the root. \texttt{access(x)} --- a search that stops at $x$ (or where it would insert),
+then splay; \texttt{insert(x)} --- normal BST insert then splay the new node; \texttt{delete(x)} --- splay
+$x$, then join its left and right subtrees (splay the max of the left, attach the right). Every operation
+\emph{ends} by splaying the touched key.
+\end{definition}
+
+\begin{definition}{Zig, zig-zig and zig-zag}{c06-zigzig}
+Let $p$ be $x$'s parent and $g$ its grandparent. One splay step looks at the last two edges:
+\begin{itemize}[nosep]
+  \item \textbf{ZIG} ($p$ is the root): a single rotation about $p$ in the direction that lifts $x$. This
+        is the final step and the whole move when $x$'s parent is the root.
+  \item \textbf{ZIG-ZIG} ($x$ and $p$ on the \emph{same} side of $g$, a zig-zig line): rotate about $g$
+        \emph{first}, then about $p$, both in the same direction. $x$ rises two levels and $p$ stays its
+        parent.
+  \item \textbf{ZIG-ZAG} ($x$ and $p$ on \emph{opposite} sides of $g$, a zig-zag bend): rotate about $p$
+        in $x$'s direction, then about $g$ in $x$'s new direction -- $x$ rises two levels through the bend.
+\end{itemize}
+Repeat until $x$ is the root. Zig-zig's ``parent first'' ordering is the crucial design choice; the naive
+``rotate $x$ up one at a time'' does \emph{not} achieve the amortised bound.
+\end{definition}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.8, transform shape]
+  % ---- zig-zig (same side) ----
+  \node[annot, font=\scriptsize\bfseries] at (1.1,0.7) {zig-zig (same side)};
+  \node[troot] (zg) at (1.4,0)    {$g$};
+  \node[tnode] (zp) at (0.5,-1.1) {$p$};
+  \node[tleaf] (zx) at (-0.4,-2.2) {$x$};
+  \draw (zg) -- (zp); \draw (zp) -- (zx);
+  \draw[flow] (2.5,-1.1) -- (3.5,-1.1);
+  \node[troot] (zx2) at (4.7,0)    {$x$};
+  \node[tnode] (zp2) at (4.0,-1.1) {$p$};
+  \node[tleaf] (zg2) at (3.3,-2.2) {$g$};
+  \draw (zx2) -- (zp2); \draw (zp2) -- (zg2);
+  \node[annot, font=\scriptsize, align=left] at (5.6,-1.4) {rotate $g$,\\ then $p$};
+  % ---- zig-zag (bend) ----
+  \node[annot, font=\scriptsize\bfseries] at (9.6,0.7) {zig-zag (bend)};
+  \node[troot] (yg) at (9.4,0)    {$g$};
+  \node[tnode] (yp) at (8.5,-1.1) {$p$};
+  \node[tleaf] (yx) at (9.4,-2.2) {$x$};
+  \draw (yg) -- (yp); \draw (yp) -- (yx);
+  \draw[flow] (10.7,-1.1) -- (11.7,-1.1);
+  \node[troot] (bx) at (12.9,-1.1) {$x$};
+  \node[tleaf] (bp) at (12.0,-2.2) {$p$};
+  \node[tleaf] (bg) at (13.8,-2.2) {$g$};
+  \draw (bx) -- (bp); \draw (bx) -- (bg);
+  \node[annot, font=\scriptsize, align=left] at (14.2,-1.0) {rotate $p$,\\ then $g$};
+\end{tikzpicture}
+\caption{The two two-level splay moves (the ZIG is just the single closing rotation). In \textbf{zig-zig}
+the three nodes were collinear; rotating first about the grandparent, then the parent, lifts $x$ two
+levels \emph{and} promotes $p$, leaving $x\to p\to g$ as a short left spine -- the whole local path
+flattened. In \textbf{zig-zag} $x$ sat in the middle; one rotation each way about $p$ then $g$ brings the
+bent $x$ to the top of the triple. The ``rotate the grandparent first'' order in zig-zig is precisely what
+makes the amortised bound work.}\label{fig:c06-splayfig}
+\end{figure}
+
+\subsection{Why zig-zig, not rotate-$x$-up?}
+
+Suppose we always just rotated $x$ one level at a time (skipping zig-zig). Consider repeatedly accessing
+the deepest leaf of a long chain: each such access rotates $x$ to the root, but in doing so it drags
+\emph{every other node on the path down one level}, so the second-deepest node becomes the new deepest.
+The next access to \emph{it} reproduces the same linear path -- you get $\bigO{n}$ every time and the
+amortisation collapses. Zig-zig fixes exactly this: by rotating the \emph{grandparent} first, the two ends
+of every three-node segment both rise, so nodes \emph{not} accessed but sitting on the path also get pulled
+up toward the root. This is the difference between the two schemes being $\bigO{n}$ versus $\bigO{\log n}$
+amortised, and it is the entire art of \thmref{c06-amortized}.
+
+\subsection{The Amortised Guarantee}
+
+\begin{theorem}{Splay operations are $\bigO{\log n}$ amortised}{c06-amortized}
+Starting from an $n$-node splay tree, any sequence of $m$ operations (access / insert / delete, each a
+splay) costs $\bigO{(n+m)\log n}$ total, hence $\bigO{\log n}$ amortised per operation. No individual
+operation is better than $\bigO{n}$ worst case; the bound is an average over the whole sequence.
+\end{theorem}
+\begin{proofbox}[The potential idea only -- the full proof is \chref{c23}]
+Assign a \term{potential} $\Phi = \sum_{v} \log(\mathit{size}(v))$, the log of every subtree's node count,
+where $\mathit{size}(v)$ is the number of nodes below (and including) $v$. The amortised cost of a splay is
+its rotation count plus the change in $\Phi$. Splaying $x$ to the root grows the subtrees of the nodes on
+the access path (they gain children as they are promoted), so $\Phi$ \emph{increases} for them but shrinks
+everywhere the path thins; a careful accounting -- the \term{Access Lemma} -- bounds a single splay's
+amortised cost by $3\big(\log \mathit{size}(\mathit{root}) - \log \mathit{size}(x)\big) + 1 =
+\bigO{\log n}$. Summing over $m$ splays, the telescoping potential leaves $\bigO{(n+m)\log n}$ actual
+rotations. We state the shape of the argument to make the guarantee credible; the Access Lemma and its
+stronger consequences (dynamic finger, static optimality, working set) are proved in full in
+\chref{c23}. \end{proofbox}
+\begin{insightbox}
+Note the tradeoff that \thmref{c06-amortized} makes explicit. AVL gives a \emph{worst-case}
+$\bigO{\log n}$ that never lies to you but also never exploits locality (\thmref{c06-fixheight}); splay
+gives an \emph{amortised} $\bigO{\log n}$ that can spike to $\bigO{n}$ on one call but in exchange is
+\emph{asymptotically optimal for skewed access} -- a single hot key costs $\bigO{1}$ amortised once it is
+saturated near the root. Pick the guarantee your problem can actually use.
+\end{insightbox}
+
+\subsection{Worked Example}
+
+\begin{example}{Splaying the deep end of the chain $C$}{c06-splay-run}
+Take the right-skew chain $C$: $1\to2\to3\to\cdots\to7$ (each the parent's right child) -- the shape AVL
+was built to forbid and the treap avoids by luck. \texttt{access(7)} finds $7$ at depth $6$, then splays
+it. All edges bend the same way (a pure zig-zig line), so each step rotates the grandparent then the
+parent, and $7$ climbs two levels at a time: over the sequence $7$ reaches the root in $\bigO{6}$
+rotations, and -- the point -- the intermediate nodes $2,3,4,5$ are pulled up too, so the tree is markedly
+shallower for a follow-up access to \emph{them}. Now access the chain's \emph{oldest} hot key: if the
+workload keeps asking $7$, it is at the root and every further query is $\bigO{1}$. Contrast with the same
+chain in AVL (\exref{c06-avl-run}), where reaching the balanced twin required rotations \emph{at
+insertion time}; splay did no work up front and instead spent it lazily, at access time, targeting the key
+you actually asked for. Inorder stays $1,2,\dots,7$ throughout -- every move is a
+\thmref{c06-rotation}-preserving rotation.
+\end{example}
+
+\begin{tracebox}[Zig-zig steps for $x$ on a right-right run $g\to p\to x$]
+$x$ is the right child of $p$, which is the right child of $g$ (a zig-zig line). Step 1:
+\texttt{rotateLeft(g)} -- $p$ rises above $g$, and $x$ is now $p$'s right child one level up. Step 2:
+\texttt{rotateLeft(p)} -- $x$ rises above $p$; the three-node block now reads $x\to p\to g$ going down
+$x$'s left side. $x$ gained two levels and $g,p$ each gained a shallower home. Repeat on the next grandparent
+until $x$ is root. The mirror applies to a left-left run; a left-right or right-left run is the zig-zag
+(rotate $p$ then $g$). \checkmark
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Top-down splaying} -- perform the rotations during the \emph{descent} using a zig-zag-only
+        join, avoiding the upward pointer walk and recursion; the standard efficient implementation. \hfill\lv{4}--\lv{5}
+  \item \textbf{Splay as a move-to-front list} -- the same ``touch it, float it up'' logic underlies
+        self-organising lists (MTF is $\bigO{\log n}$-competitive-ish by the same amortised lens). \hfill\lv{4}
+  \item \textbf{Link-cut trees} -- replace the fixed parent/child with \emph{preferred paths} each stored in
+        a splay tree, so you can \texttt{link}/\texttt{cut}/path-query a \emph{changing} tree in
+        $\bigO{\log n}$ amortised. That is \chref{c23} in one sentence. \hfill\lv{5}
+  \item \textbf{Partial / lazy splay} -- splay only to a fixed depth to bound worst-case spikes in
+        real-time systems, sacrificing a little of the amortised tightness. \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c06-splay-pitfalls}
+
+\begin{warningbox}[Trap 1 -- rotate $x$ one level at a time (skip zig-zig)]
+The amortised bound \thmref{c06-amortized} is false for naive one-level splaying (see the chain argument in
+\secref{c06-splay} above). In a zig-zig you must rotate the \emph{grandparent} first; only then does a
+splay flatten the whole path instead of just fetching $x$.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2 -- calling the guarantee ``$\bigO{\log n}$ per operation'']
+It is \emph{amortised}, not worst-case. A single access can cost $\bigO{n}$, so a hard real-time or
+adversarially-timed setting may prefer AVL/red-black (\thmref{c06-fixheight}, \thmref{c06-rbheight}). Do
+not cite splay when the problem needs a per-call bound.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- forgetting that every edit also splays]
+Splay's shape is defined by \emph{what was last touched}. If you insert or delete without splaying the
+affected node, you break the invariant the analysis assumes and lose the bound -- and, in practice,
+degrade toward the chain $C$ you were trying to avoid.
+\end{warningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item In a zig-zig, did you rotate the \emph{grandparent} before the parent? (Trap~1.)
+  \item Can you state \thmref{c06-amortized}'s potential in one line? ($\Phi=\sum_v \log \mathit{size}(v)$.)
+  \item Is your target a worst-case or an amortised bound? If worst-case, splay is the wrong tool.
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Water Tree}{Codeforces 343D}
+    {https://codeforces.com/problemset/problem/343/D}{CF 2100 · L5}
+    {A rooted tree, all vertices initially empty; three operations: pour water into a vertex \emph{and its
+    whole subtree}, flush the path from a vertex up to the root, and query whether a vertex holds water.
+    This is the chapter's ``keep an ordered index'' idea at full strength. Flatten the tree with an Euler
+    tour so a subtree becomes the interval $[\tin(v), \tout(v)]$ (\chref{c24}); a clean solution keeps a
+    \code{std::set} of currently-wet vertices keyed by $\tin$ -- pouring a subtree inserts $v$ and
+    \texttt{lower\_bound}-and-erases every wet descendant (each vertex is erased at most as often as it is
+    inserted, so the erasures amortise to $\bigO{\log n}$ each -- the balanced BST doing the heavy
+    lifting), flushing records a ``dry at time $t$'' stamp on $v$'s ancestors, and a query compares the
+    newest wet-fill against the newest dry on the path. The fully general route is Euler-tour $+$
+    lazy segment tree with range-assign over timestamps (\chref{c13}, \chref{c15}); reach for splay /
+    link-cut (\chref{c23}) when the \emph{tree itself} changes between operations. Solve it once with the
+    \code{set}, and you will feel \thmref{c06-rbheight}'s $\bigO{\log n}$ index earning its keep.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 8.5 Splay Trees (Introduction)]
+A splay tree stores no balance/priority/colour; after touching $x$ you \term{splay} it to the root with the
+zig / zig-zig / zig-zag rotations (\defref{c06-splay}, \defref{c06-zigzig}) -- rotate the grandparent first
+in a zig-zig, which is what flattens the path. Access patterns then self-balance: hot keys float up, cold
+keys sink. The reward is amortised $\bigO{\log n}$ per operation (total $\bigO{(n+m)\log n}$) via the
+potential $\Phi=\sum_v \log\mathit{size}(v)$ and the Access Lemma (\thmref{c06-amortized}) -- average, not
+worst-case. Full analysis, top-down splaying, and link-cut dynamic trees are Chapter~25 (\chref{c23}).
+\selftest{
+  \item Draw one zig-zig and one zig-zag three-node configuration and the result of each.
+  \item Why does rotating $x$ up one level at a time lose the amortised bound?
+  \item State the splay potential and the total cost bound over $m$ operations.
+  \item Give a workload where splay beats AVL, and one where its amortised-only guarantee disqualifies it.
+  \item Name the chapter that turns splay into a structure for \emph{changing} trees.
+}
+\end{recallbox}

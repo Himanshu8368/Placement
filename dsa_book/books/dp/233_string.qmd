@@ -1,0 +1,1011 @@
+# String DP: Two Sequences at Once {#sec-st}
+
+::: {.callout-note title="Sources"}
+**`dp_book` ch. 5** (the prefix grid, alignments, memory, reductions, and the matching automaton). A cell here is a pair of prefixes. That is the two-index grid of @sec-gd, and a common subsequence is the subsequence view of @sec-lis-views with a second string.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Set up a two-string DP on the prefix grid: the meaning of row 0 and column 0, the three arrows, and the fill order.
+- Solve and reconstruct an LCS, an edit script, and a shortest common supersequence.
+- Fit the same table into one row, and know what reconstruction costs on top of that.
+- Count embeddings and decide an interleaving on the same grid.
+- Match `?`, `*`, and `x*` with a boolean table instead of backtracking.
+- Count strings that contain or avoid a pattern, with the KMP automaton as part of the state.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from functools import lru_cache
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import dp233_traces as Traces
+random.seed(0)
+MOD = 10**9 + 7
+```
+
+## Why this matters
+
+@sec-lis chose a subsequence of one array. This chapter adds a second sequence: the state becomes a pair of prefixes, one per string, and the grid of @sec-gd comes back with a new meaning, where a step right or down drops a letter and a diagonal step uses one from each.
+
+Two strings $s$ and $t$ have lengths $n$ and $m$. Almost every question about both of them — how much they share, how cheaply one becomes the other, how many ways one sits inside the other, whether a pattern matches — is answered by a table of $(n + 1)(m + 1)$ cells. $dp[i][j]$ is the answer for the prefixes $s[0..i)$ and $t[0..j)$. The last letters $s[i - 1]$ and $t[j - 1]$ are the only new information, and using them leaves a smaller pair of prefixes.
+
+The problems in this chapter differ in three places only: which of the three arrows are legal, what an arrow costs, and whether the cell takes a max, a min, a sum, or an OR. Learn the grid once.
+
+## Lesson 1: the prefix grid {#sec-st-grid}
+
+The three predecessors of $(i, j)$ are $(i - 1, j - 1)$, $(i - 1, j)$, and $(i, j - 1)$.
+
+| Arrow | Uses | Typical meaning |
+|---|---|---|
+| Diagonal | both last letters | they match, they are replaced, or a token consumes a character |
+| Vertical | only $s[i - 1]$ | delete it, skip it, or leave it unmatched |
+| Horizontal | only $t[j - 1]$ | insert it, skip it, or a token is used zero times |
+
+Every arrow moves down, right, or down-right, so the table fills row by row, left to right. There is no cycle.
+
+Row 0 and column 0 are the empty prefix, not padding. For an LCS they are 0: nothing has been matched. For edit distance they are the length of the other prefix: the only script is to insert or delete every letter. For a delete-cost they are the sum of the ASCII codes. A 0 in a cost border is a claim that a prefix can vanish for free.
+
+```{python}
+def prefix_lcs(a, b):
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    return dp
+
+grid = prefix_lcs("abcde", "ace")
+assert grid[-1][-1] == 3
+assert grid[0] == [0, 0, 0, 0] and [row[0] for row in grid] == [0, 0, 0, 0, 0, 0]
+```
+
+::: {#fig-st-lcs}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    cells = [[str(c) for c in row] for row in grid]
+    V.grid(ax, p, cells, col_labels=["", "a", "c", "e"], row_labels=["", "a", "b", "c", "d", "e"],
+           colors={(5, 3): "green", (1, 1): "amber", (3, 2): "amber"}, cell_w=0.85, size=9)
+V.show(draw)
+```
+
+The LCS table of `abcde` and `ace`. Amber cells are matches. The green corner is the answer, 3.
+
+:::
+
+Greedy "match the earliest unused letter" fails on `zab` and `abz`: pairing the two `z`s first blocks `ab`, and the optimum skips both `z`s. Whether a letter is worth using depends on what remains in both strings. That is exactly $(i, j)$.
+
+## Lesson 2: an alignment is a path {#sec-st-align}
+
+An alignment writes the two strings in columns. A column holds two equal letters (a match), two different letters (a replacement), or one letter and a gap (an insertion or a deletion). A path from $(0, 0)$ to $(n, m)$ is one alignment: a diagonal is a column of two letters, a vertical step is a gap in $t$, a horizontal step is a gap in $s$.
+
+`KITTEN` against `SITTING` has edit distance 3. One cheapest alignment is two replacements and one insertion, and the same columns are a path of green cells in the table (@fig-st-align). Four of those columns match, which is the LCS `ITTN`.
+
+::: {#fig-st-align}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a, b = "KITTEN", "SITTING"
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
+    assert dp[n][m] == 3
+    i, j = n, m
+    path, top, bot, kind = [(i, j)], [], [], []
+    while i or j:
+        if i and j and a[i - 1] == b[j - 1] and dp[i][j] == dp[i - 1][j - 1]:
+            top.append(a[i - 1]); bot.append(b[j - 1]); kind.append("green")
+            i, j = i - 1, j - 1
+        elif i and j and dp[i][j] == dp[i - 1][j - 1] + 1:
+            top.append(a[i - 1]); bot.append(b[j - 1]); kind.append("amber")
+            i, j = i - 1, j - 1
+        elif i and dp[i][j] == dp[i - 1][j] + 1:
+            top.append(a[i - 1]); bot.append("-"); kind.append("violet")
+            i -= 1
+        else:
+            top.append("-"); bot.append(b[j - 1]); kind.append("violet")
+            j -= 1
+        path.append((i, j))
+    top, bot, kind = top[::-1], bot[::-1], kind[::-1]
+    assert "".join(top) == "KITTEN-" and "".join(bot) == "SITTING"
+    colors = {i: kind[i] for i in range(len(top))}
+    V.array(ax, p, top, y=3.4, label="s", colors=colors, index=False, cell_w=0.72, size=9)
+    V.array(ax, p, bot, y=2.0, label="t", colors=colors, index=False, cell_w=0.72, size=9)
+    cells = [[str(c) for c in row] for row in dp]
+    V.grid(ax, p, cells, y=-0.4, cell_w=0.72, size=8,
+           col_labels=[""] + list(b), row_labels=[""] + list(a),
+           colors={(r, c): "green" for r, c in path})
+V.show(draw)
+```
+
+Green columns match. Amber columns are replacements (`K`/`S` and `E`/`I`). The violet column inserts `G`. Those steps are the green path, and the corner is 3.
+
+:::
+
+Edit distance prices every non-match at 1. The shortest common supersequence writes every letter, but writes a matched pair once: its length is $n + m - \mathrm{LCS}$. The same path, read backwards from the corner, prints the string or the script. The corner stores the cost. The arrows store the object.
+
+## Lesson 3: one row, and reconstruction {#sec-st-mem}
+
+Cell $(i, j)$ reads only row $i - 1$ and the cells to its left on row $i$. Two rows are enough, and one row is enough when the diagonal is saved in a variable before it is overwritten. The length, the cost, and the boolean answer then use $O(\min(n, m))$ memory.
+
+Reconstruction wants the arrows, which the rolling row has thrown away. For a length or a cost, recompute the table if $nm$ fits. When only the string is required and $nm$ does not fit, Hirschberg's trick still uses linear memory: the forward row and the backward row meet in the middle, the optimal midpoint is one cell, and each half is solved the same way. The work stays $O(nm)$. This chapter reconstructs on the full table, which is the right tool at the limits of these problems ($n, m \le 1000$, or $500$ for edit distance). The one-row form is what you keep when the caller only wants the number.
+
+One crossing is enough to see the split. For $s = \texttt{ABCBDAB}$ and $t = \texttt{BDCABA}$, cut $s$ after $\texttt{ABCB}$. The forward LCS row of that prefix, added to the LCS row of the reversed suffix against the reversed $t$, is $3, 4, 3, 4, 3, 4, 3$. The first maximum is $4$ at column $1$ (@fig-st-cross), so the two halves are $(\texttt{ABCB},\ \texttt{B})$ and $(\texttt{DAB},\ \texttt{DCABA})$.
+
+::: {#fig-st-cross}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    def last_row(x, y):
+        prev = [0] * (len(y) + 1)
+        for c in x:
+            cur = [0]
+            for j in range(1, len(y) + 1):
+                cur.append(prev[j - 1] + 1 if c == y[j - 1] else max(prev[j], cur[-1]))
+            prev = cur
+        return prev
+
+    s, t = "ABCBDAB", "BDCABA"
+    mid = (len(s) + 1) // 2
+    f = last_row(s[:mid], t)
+    g = last_row(s[mid:][::-1], t[::-1])[::-1]
+    total = [f[k] + g[k] for k in range(len(t) + 1)]
+    k = total.index(max(total))
+    assert s[:mid] == "ABCB" and f == [0, 1, 1, 2, 2, 3, 3]
+    assert g == [3, 3, 2, 2, 1, 1, 0] and total == [3, 4, 3, 4, 3, 4, 3] and k == 1
+    mark = {k: "amber"}
+    V.array(ax, p, f, y=4.6, label="f", colors=mark, cell_w=0.78, size=9)
+    V.array(ax, p, g, y=2.3, label="g", colors=mark, cell_w=0.78, size=9)
+    V.array(ax, p, total, y=0.0, label="f+g", colors=mark, cell_w=0.78, size=9)
+V.show(draw)
+```
+
+$f$ is the forward row, $g$ the backward row. Amber is the first column where they add to the LCS length, 4.
+
+:::
+
+## Lesson 4: the same grid, four questions {#sec-st-red}
+
+| Question | Combine | Arrows |
+|---|---|---|
+| Longest common subsequence | max, diagonal $+ 1$ on a match | all three |
+| Minimum delete / insert cost | min, pay the letter you drop | all three; a match is free |
+| Edit distance | min, pay 1 unless the letters match | all three |
+| Count of embeddings of $t$ in $s$ | $+$ | skip $s$, or match |
+| Can $s_3$ be coloured as $s_1$ then $s_2$? | OR | the letter comes from one string |
+
+Delete-only distance (no replacements) is $n + m - 2 \cdot \mathrm{LCS}$: every unmatched letter of either string is deleted, and the matched letters are the LCS. A heaviest common subsequence is the LCS recurrence with the letter's weight on the diagonal instead of $+ 1$. Minimum ASCII delete sum is the total of both strings minus twice that weight, because a kept letter is saved on both sides.
+
+## Lesson 5: the pattern becomes a state {#sec-st-auto}
+
+A wildcard and a regular expression are still a grid. `?` is a diagonal that accepts any letter. `*` is a column that means "zero characters" (move left) or "one more character" (move up, stay on the star). `x*` is one token, not a character followed by a star: zero copies jumps two columns left, and one more copy of `x` moves up.
+
+"The string must contain this block" or "must not contain this word" does not fit in $(i, j)$. The text is being built, or scanned, one letter at a time, and the summary of the pattern is how much of it is matched so far. That summary is the state of the Knuth–Morris–Pratt automaton: after every letter, the state is the longest prefix of the pattern that is a suffix of what has been read. The failure links are the borders of the pattern, computed once. Reaching the end of the pattern means the block has occurred. An absorbing copy of that state counts strings that contain it, once, however many times it occurs. Deleting the arrows into that state counts strings that avoid it.
+
+The prefix function of a pattern $p$:
+
+```{python}
+def prefix_function(p):
+    pi = [0] * len(p)
+    k = 0
+    for i in range(1, len(p)):
+        while k and p[i] != p[k]:
+            k = pi[k - 1]
+        if p[i] == p[k]:
+            k += 1
+        pi[i] = k
+    return pi
+
+assert prefix_function("(()") == [0, 1, 0]
+assert prefix_function("abab") == [0, 0, 1, 2]
+assert prefix_function("aabaaab") == [0, 1, 0, 1, 2, 2, 3]
+```
+
+$\pi[6] = 3$ on `aabaaab` because `aab` is both a prefix and the suffix (@fig-st-pi). The automaton of `abab` is that function turned into a table: from the matched length, read one letter and land on the next length (@fig-st-auto). State $4$ means the word just occurred. Reading `a` there returns to state $3$, so `abababab` completes the word three times, including the overlaps.
+
+::: {#fig-st-pi}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    word = "aabaaab"
+    pi = prefix_function(word)
+    assert pi == [0, 1, 0, 1, 2, 2, 3]
+    V.array(ax, p, list(word), y=3.0, label="p", index=True, cell_w=0.78, size=9,
+            regions=[(0, 3, "green", "prefix aab"), (4, 7, "green", "suffix aab")])
+    V.array(ax, p, pi, y=0.0, label="π", cell_w=0.78, size=9, colors={6: "green"})
+V.show(draw)
+```
+
+The two braces are the same string `aab`. The green border length is $\pi[6] = 3$.
+
+:::
+
+::: {#fig-st-auto}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    word = "abab"
+    pi = prefix_function(word)
+    m = len(word)
+
+    def step(k, ch):
+        while True:
+            if k < m and word[k] == ch:
+                return k + 1
+            if k == 0:
+                return 0
+            k = pi[k - 1]
+
+    table = [[step(k, ch) for ch in "ab"] for k in range(m + 1)]
+    assert table == [[1, 0], [1, 2], [3, 0], [1, 4], [3, 0]]
+    state = hits = 0
+    for ch in "abababab":
+        state = step(state, ch)
+        hits += state == m
+    assert hits == 3
+    V.grid(ax, p, [[str(c) for c in row] for row in table], cell_w=0.9, size=10,
+           col_labels=["a", "b"], row_labels=["0", "1", "2", "3", "4"],
+           colors={(3, 1): "green", (4, 0): "violet", (4, 1): "amber"})
+V.show(draw)
+```
+
+Row $k$ is the state after matching $k$ letters of `abab`. Green enters the accepting state. Violet is the overlap: after a full match, `a` is still the prefix `aba`. Amber drops back to $0$.
+
+:::
+
+## Pattern 1: the LCS family {#sec-st-p1}
+
+**Where we are.** The lessons built the prefix grid and showed that an alignment is a path through it. The patterns change one thing at a time: what the diagonal is worth when the last letters agree (this pattern), a price on every column of the alignment (Pattern 2), counting or OR-ing paths instead of scoring them (Pattern 3), a pattern string whose tokens can match many letters (Pattern 4), and finally a word tracked as an automaton state while a string is built (Pattern 5).
+
+**Recognise it.** Both strings are given, order is fixed, and a letter is either kept in both or dropped from one of them. The score is a length or a sum of weights. The diagonal fires when the last letters are equal.
+
+::: {.callout-important title="Template"}
+If $s[i - 1] = t[j - 1]$, then $dp[i][j] = dp[i - 1][j - 1] + \mathrm{weight}$. Otherwise $dp[i][j] = \max$ or $\min$ of the two drops, $dp[i - 1][j]$ and $dp[i][j - 1]$.
+
+The answer is the corner. One common subsequence is the walk back along the arrows that achieved it.
+:::
+
+{{< include ../problems/lc-1143-longest-common-subsequence/problem.qmd >}}
+
+[**From counting letters to paying for them.** LCS gives every kept letter a weight of 1 and every dropped letter 0. Minimum ASCII Delete Sum charges each dropped letter its code, so the border is no longer 0, and the same grid minimises a cost instead of maximising a length.]{.flow-bridge}
+
+{{< include ../problems/lc-0712-minimum-ascii-delete-sum-for-two-strings/problem.qmd >}}
+
+## Pattern 2: edit distance and alignment {#sec-st-p2}
+
+**From keeping to transforming.** The LCS family only keeps or drops letters. Edit distance adds a third arrow, **replace**, a diagonal that is legal even when the letters differ, at a price of 1. The answer is the cheapest path from corner to corner, and the path itself is the alignment.
+
+**Recognise it.** One string must become the other. A column of the alignment can match, replace, insert, or delete. The price of a column is 0 or 1, and the answer is the cheapest path, or the string written by a cheapest path that shares matched letters.
+
+::: {.callout-important title="Template"}
+$dp[i][j] = dp[i - 1][j - 1]$ when the last letters are equal, and otherwise
+
+$$
+1 + \min(dp[i - 1][j],\ dp[i][j - 1],\ dp[i - 1][j - 1]).
+$$
+
+Borders are the lengths. A shortest common supersequence is the LCS table walked backwards, writing a letter on every step and writing a match only once.
+:::
+
+::: {#fig-st-anim-edit}
+
+```{python}
+#| echo: false
+ed_s, ed_t = "horse", "ros"
+ed_n, ed_m = len(ed_s), len(ed_t)
+ed = [[0] * (ed_m + 1) for _ in range(ed_n + 1)]
+for i in range(ed_n + 1):
+    for j in range(ed_m + 1):
+        if i == 0 or j == 0:
+            ed[i][j] = i + j
+        elif ed_s[i - 1] == ed_t[j - 1]:
+            ed[i][j] = ed[i - 1][j - 1]
+        else:
+            ed[i][j] = 1 + min(ed[i - 1][j], ed[i][j - 1], ed[i - 1][j - 1])
+assert ed[ed_n][ed_m] == 3
+
+def ed_frame(ax, p, k):
+    cells = [[str(ed[i][j]) if i <= k else "" for j in range(ed_m + 1)] for i in range(ed_n + 1)]
+    colors = {(k, j): "indigo" for j in range(ed_m + 1)}
+    if k:
+        colors.update({(k, j): "green" for j in range(1, ed_m + 1) if ed_s[k - 1] == ed_t[j - 1]})
+    if k == ed_n:
+        colors[(ed_n, ed_m)] = "amber"
+    V.grid(ax, p, cells, row_labels=["∅"] + list(ed_s), col_labels=["∅"] + list(ed_t), colors=colors)
+
+ed_caps = ["empty row: building each prefix of 'ros' from nothing costs one insertion per letter"]
+for i in range(1, ed_n + 1):
+    hits = [j for j in range(1, ed_m + 1) if ed_s[i - 1] == ed_t[j - 1]]
+    note = f"'{ed_s[i - 1]}' matches column {hits[0]} (green), a free diagonal" if hits else f"'{ed_s[i - 1]}' matches nothing: no free diagonal in this row"
+    ed_caps.append(f"row '{ed_s[:i]}': {note}; row = {ed[i]}")
+ed_caps[-1] += "; distance 3"
+V.animate(ed_frame, ed_n + 1, captions=ed_caps, interval=1100)
+```
+
+Edit distance from `horse` to `ros`, one row per frame. A cell is the cheaper of delete (from above), insert (from the left) and replace (diagonal, plus 1); a green cell has equal letters and takes the diagonal for free. The corner (amber) is 3: replace `h` by `r`, delete `r`, delete `e`.
+
+:::
+
+{{< include ../problems/lc-0072-edit-distance/problem.qmd >}}
+
+[**From the cost to the string.** Edit distance reports a number. Shortest Common Supersequence asks for a string: the LCS grid walked back from the corner, writing every dropped letter and every matched letter once.]{.flow-bridge}
+
+{{< include ../problems/lc-1092-shortest-common-supersequence/problem.qmd >}}
+
+## Pattern 3: counting over two strings {#sec-st-p3}
+
+**From the best path to all paths.** Patterns 1 and 2 took a max or a min over the arrows into a cell. The same grid can **add** them, which counts the ways to embed one string in another, or **OR** them, which decides whether any way exists.
+
+**Recognise it.** The grid is no longer a score. It counts ways, or it only remembers whether a way exists. Distinct subsequences adds the skip and the match. An interleaving ORs the two strings that could have supplied the last letter.
+
+::: {.callout-important title="Template"}
+Embeddings of $t$ in $s$: $dp[i][j] = dp[i - 1][j]$, plus $dp[i - 1][j - 1]$ when the last letters match. $dp[i][0] = 1$ (one way to match the empty target). $dp[0][j] = 0$ for $j > 0$.
+
+An interleaving needs $|s| + |t| = |u|$ first. Then $dp[i][j]$ is true when the letter $u[i + j - 1]$ equals $s[i - 1]$ and $dp[i - 1][j]$, or equals $t[j - 1]$ and $dp[i][j - 1]$.
+:::
+
+This is not @sec-lis-p5-dist. That problem counts distinct strings inside one string. This one counts position sets of $s$ that spell a fixed target $t$.
+
+{{< include ../problems/lc-0115-distinct-subsequences/problem.qmd >}}
+
+[**From two strings to three.** Distinct Subsequences walks two strings. An interleaving reads a third string `s3`, but its position is always $i + j$, so the grid stays two-dimensional; the cell ORs the two strings that could have supplied the last letter.]{.flow-bridge}
+
+{{< include ../problems/lc-0097-interleaving-string/problem.qmd >}}
+
+## Pattern 4: wildcards and regular expressions {#sec-st-p4}
+
+**From letters to tokens.** Every arrow so far consumed at most one letter of each string. A pattern token like `*` can match any number of text letters. In the grid that is not a search: it is a horizontal arrow (the star is empty) and a vertical arrow that stays on the star (it eats one more letter).
+
+**Recognise it.** The text is a string. The pattern is a string with tokens. The question is whether the pattern matches the whole text. `?` and a letter are diagonals. A star is a column, or, for `x*`, a token that spans two characters of the pattern.
+
+::: {.callout-important title="Template"}
+Wildcard `*`: $dp[i][j] = dp[i][j - 1]$ (the star is empty) or $dp[i - 1][j]$ (the star consumes $s[i - 1]$ and stays). `?` or an equal letter: the diagonal.
+
+Regex `x*`: $dp[i][j] = dp[i][j - 2]$ (zero copies) or, when $s[i - 1]$ fits `x`, $dp[i - 1][j]$ (one more copy). The star and its letter are one token.
+:::
+
+::: {#fig-st-anim-wild}
+
+```{python}
+#| echo: false
+wd_s, wd_p = "adceb", "*a*b"
+wd_n, wd_m = len(wd_s), len(wd_p)
+wd = [[False] * (wd_m + 1) for _ in range(wd_n + 1)]
+wd[0][0] = True
+for i in range(wd_n + 1):
+    for j in range(1, wd_m + 1):
+        if wd_p[j - 1] == "*":
+            wd[i][j] = wd[i][j - 1] or (i > 0 and wd[i - 1][j])
+        elif i and wd_p[j - 1] in ("?", wd_s[i - 1]):
+            wd[i][j] = wd[i - 1][j - 1]
+assert wd[wd_n][wd_m] is True
+
+def wd_frame(ax, p, k):
+    cells = [["T" if wd[i][j] else "F" if i <= k else "" for j in range(wd_m + 1)] for i in range(wd_n + 1)]
+    colors = {(i, j): "green" for i in range(k + 1) for j in range(wd_m + 1) if wd[i][j]}
+    colors.update({(k, j): "indigo" for j in range(wd_m + 1) if not wd[k][j]})
+    V.grid(ax, p, cells, row_labels=["∅"] + list(wd_s), col_labels=["∅"] + list(wd_p), colors=colors)
+
+wd_caps = ["empty row: the empty text is matched by the empty pattern and by '*', a star that stays empty"]
+for i in range(1, wd_n + 1):
+    true_cols = [wd_p[:j] or "∅" for j in range(wd_m + 1) if wd[i][j]]
+    wd_caps.append(f"text '{wd_s[:i]}': matched by " + (", ".join(f"'{c}'" for c in true_cols) if true_cols else "no pattern prefix"))
+wd_caps[-1] += " - the whole pattern matches"
+V.animate(wd_frame, wd_n + 1, captions=wd_caps, interval=1100)
+```
+
+Wildcard matching of `adceb` against `*a*b`, one text letter per frame (green = true). A star column copies the cell to its left (empty star) and the cell above (the star eats one more letter), so the first star keeps every row alive and the second star carries `a` across `dce` until `b` closes the match.
+
+:::
+
+{{< include ../problems/lc-0044-wildcard-matching/problem.qmd >}}
+
+[**From a free star to a starred letter.** A wildcard `*` stands alone and matches anything. In a regular expression `x*` repeats only the letter before it, so the star and its letter are one token spanning two pattern characters: zero copies jumps back two columns, one more copy needs that letter to fit.]{.flow-bridge}
+
+{{< include ../problems/lc-0010-regular-expression-matching/problem.qmd >}}
+
+## Pattern 5: automaton DP {#sec-st-p5}
+
+**From matching a given string to building one.** In Patterns 1 to 4 both strings were given. Now one is being **built**, letter by letter, and a fixed word must appear in it, or must not. The second axis of the grid becomes the KMP state of that word, how much of it the built string currently ends with.
+
+**Recognise it.** The object being built or scanned is a string, and a fixed word must occur as a substring, or must not. The word's progress is a KMP state. The rest of the state is whatever else the letter changes: a bracket balance, or the flags "still equal to the lower bound" and "still equal to the upper bound".
+
+::: {.callout-important title="Template"}
+Build the transition `go[state][letter]` from the prefix function. State `m` means the word has been seen.
+
+To require the word, make `m` absorbing and read only the strings that end in `m`. To forbid the word, drop every transition that would enter `m`. Summing over start positions double-counts a string that contains the word twice. The state remembers whether it has happened, not where.
+:::
+
+{{< include ../problems/cf-1015f-bracket-substring/problem.qmd >}}
+
+[**From requiring the word to forbidding it, between bounds.** Bracket Substring makes the matched state absorbing and counts strings that reach it. Find All Good Strings drops every transition into it instead, and adds two flags, still equal to the lower bound and still equal to the upper bound, which the same letter updates.]{.flow-bridge}
+
+{{< include ../problems/lc-1397-find-all-good-strings/problem.qmd >}}
+
+**Looking back.** One grid of prefix pairs carried the whole chapter. What changed was the cell: a max for the longest common part, a min with a price per column for an edit, a sum or an OR for counting and feasibility, star arrows that stay put for patterns, and finally an automaton state in place of the second string. The climb from @sec-dpi to here was the same move each time: name the state in a sentence, ask what the last step was, and add to the state only the fact the future needs.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Longest common subsequence, or one example of it | Prefix grid, diagonal on equal letters | @sec-st-p1-lcs |
+| Delete letters, paying their codes, until the strings match | Same grid, borders are prefix sums | @sec-st-p1-ascii |
+| Insert, delete, replace | Three priced arrows, borders are lengths | @sec-st-p2-edit |
+| Shortest string that has both as subsequences | $n + m - \mathrm{LCS}$, then walk | @sec-st-p2-scs |
+| How many index sets of $s$ spell $t$ | Add the skip and the match | @sec-st-p3-dist |
+| Is $s_3$ a merge of $s_1$ and $s_2$? | OR, index in $s_3$ is $i + j$ | @sec-st-p3-inter |
+| `?` and `*` match the whole text | Star column: empty, or one more | @sec-st-p4-wild |
+| `.` and `x*` match the whole text | `x*` is one token: jump two, or stay | @sec-st-p4-regex |
+| Regular brackets that contain a pattern | Balance plus an absorbing KMP state | @sec-st-p5-brack |
+| Strings between two bounds that avoid a word | Tight flags plus a forbidden KMP state | @sec-st-p5-good |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **The corner is not the answer you were asked for.** An LCS length lives in $dp[n][m]$. A bracket count lives only in balance 0 and the absorbing state. A good-string count lives in the state that never completed `evil` (@sec-st-p5-brack, @sec-st-p5-good).
+- **Row 0 and column 0 left at 0.** Edit distance and ASCII delete pay for the empty prefix. An LCS does not (@sec-st-grid).
+- **One row, wrong direction.** Distinct subsequences sweeps the target from the right. An interleaving sweeps from the left, because the left neighbour is allowed to be new (@sec-st-p3-dist, @sec-st-p3-inter).
+- **A longest common subsequence where a heaviest one is required.** `delete` / `leet` has two LCS of length 3 and only one minimum cost (@sec-st-p1-ascii).
+- **Replacement dropped from edit distance.** The diagonal must be a candidate. Without it the distance is the indel distance (@sec-st-p2-edit).
+- **One printed supersequence compared as text.** Check both subsequences and the length $n + m - \mathrm{LCS}$ (@sec-st-p2-scs).
+- **`x*` treated as a wildcard star.** Zero copies has to jump over the letter and the star together (@sec-st-p4-regex).
+- **The pattern counted by start position.** A string that contains it twice is counted twice. Absorb, or forbid, the matched state (@sec-st-auto).
+:::
+
+## Exercises
+
+**1. [M]** [LC 718 · Maximum Length of Repeated Subarray](https://leetcode.com/problems/maximum-length-of-repeated-subarray/){difficulty="Medium"}. Longest common subarray. ($[1, 2, 3, 2, 1]$, $[3, 2, 1, 4, 7] \to 3$; five zeros against five zeros $\to 5$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+A match extends the diagonal. A mismatch resets to 0: a subarray cannot skip.
+
+```{python}
+def repeated_subarray(a, b):
+    dp = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    best = 0
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            if a[i - 1] == b[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+                best = max(best, dp[i][j])
+    return best
+
+assert repeated_subarray([1, 2, 3, 2, 1], [3, 2, 1, 4, 7]) == 3
+assert repeated_subarray([0, 0, 0, 0, 0], [0, 0, 0, 0, 0]) == 5
+```
+:::
+
+**2. [H]** [LC 1458 · Max Dot Product of Two Subsequences](https://leetcode.com/problems/max-dot-product-of-two-subsequences/){difficulty="Hard"}. Non-empty subsequences. ($[2, 1, -2, 5]$, $[3, 0, -6] \to 18$; $[3, -2]$, $[2, -6, 7] \to 21$; $[-1, -1]$, $[1, 1] \to -1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The diagonal adds the product to a previous subsequence, or starts a new one at that product. Drops of either side stay available. The empty product 0 must not win when every product is negative, so the answer is the maximum cell and the cells start from the products themselves.
+
+```{python}
+def max_dot(a, b):
+    n, m = len(a), len(b)
+    dp = [[-(10**18)] * (m + 1) for _ in range(n + 1)]
+    ans = -(10**18)
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            prod = a[i - 1] * b[j - 1]
+            dp[i][j] = max(prod, dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1] + prod)
+            ans = max(ans, dp[i][j])
+    return ans
+
+assert max_dot([2, 1, -2, 5], [3, 0, -6]) == 18
+assert max_dot([3, -2], [2, -6, 7]) == 21
+assert max_dot([-1, -1], [1, 1]) == -1
+```
+:::
+
+**3. [M]** Longest common subsequence of three strings. (`abcbdab`, `bdcaba`, `badacb` $\to$ 4, for example `bdab`.) Taking an LCS of the first two and then matching the third can miss it: an LCS of the first pair may be the wrong one for the third string.
+
+::: {.callout-note collapse="true" title="Solution"}
+One more index. Equal letters on all three strings take the diagonal. Otherwise drop exactly one string.
+
+```{python}
+def lcs3(a, b, c):
+    dp = [[[0] * (len(c) + 1) for _ in range(len(b) + 1)] for _ in range(len(a) + 1)]
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            for k in range(1, len(c) + 1):
+                if a[i - 1] == b[j - 1] == c[k - 1]:
+                    dp[i][j][k] = dp[i - 1][j - 1][k - 1] + 1
+                else:
+                    dp[i][j][k] = max(dp[i - 1][j][k], dp[i][j - 1][k], dp[i][j][k - 1])
+    return dp[-1][-1][-1]
+
+assert lcs3("abcbdab", "bdcaba", "badacb") == 4
+```
+:::
+
+**4. [M]** [LC 583 · Delete Operation for Two Strings](https://leetcode.com/problems/delete-operation-for-two-strings/){difficulty="Medium"}. Delete until the strings are equal. (`sea`, `eat` $\to$ 2; `leetcode`, `etco` $\to$ 4.)
+
+::: {.callout-note collapse="true" title="Solution"}
+No replacements. Every letter outside an LCS is deleted from one string or the other: $n + m - 2 \cdot \mathrm{LCS}$.
+
+```{python}
+def min_delete(a, b):
+    return len(a) + len(b) - 2 * lcs_row(a, b)
+
+assert min_delete("sea", "eat") == 2
+assert min_delete("leetcode", "etco") == 4
+```
+:::
+
+**5. [M]** Count the interleavings, modulo $10^9 + 7$. (`aabcc`, `dbbca`, `aadbbcbcac` $\to$ 3; `aa`, `aa`, `aaaa` $\to$ 6.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The boolean table with OR replaced by addition. A letter offered by both strings can be attributed either way, and those are different colourings.
+
+```{python}
+def count_inter(a, b, c):
+    if len(a) + len(b) != len(c):
+        return 0
+    dp = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    dp[0][0] = 1
+    for i in range(len(a) + 1):
+        for j in range(len(b) + 1):
+            if i and a[i - 1] == c[i + j - 1]:
+                dp[i][j] = (dp[i][j] + dp[i - 1][j]) % MOD
+            if j and b[j - 1] == c[i + j - 1]:
+                dp[i][j] = (dp[i][j] + dp[i][j - 1]) % MOD
+    return dp[-1][-1]
+
+assert count_inter("aabcc", "dbbca", "aadbbcbcac") == 3
+assert count_inter("aa", "aa", "aaaa") == 6
+```
+:::
+
+**6. [E]** [LC 392 · Is Subsequence](https://leetcode.com/problems/is-subsequence/){difficulty="Easy"}. (`abc` in `ahbgdc` is true; `axc` in `ahbgdc` is false.)
+
+::: {.callout-note collapse="true" title="Solution"}
+One pointer walks the pattern and advances only on a match. Existence is this scan. The count is the grid of pattern 3.
+
+```{python}
+def is_subseq(s, t):
+    i = 0
+    for ch in t:
+        if i < len(s) and s[i] == ch:
+            i += 1
+    return i == len(s)
+
+assert is_subseq("abc", "ahbgdc") is True
+assert is_subseq("axc", "ahbgdc") is False
+```
+:::
+
+**7. [M]** [LC 1653 · Minimum Deletions to Make String Balanced](https://leetcode.com/problems/minimum-deletions-to-make-string-balanced/){difficulty="Medium"}. All `a`s before all `b`s. (`aababbab` $\to$ 2; `bbaaaaabb` $\to$ 2.)
+
+::: {.callout-note collapse="true" title="Solution"}
+A balance point deletes every `b` before it and every `a` after it.
+
+```{python}
+def min_balanced(s):
+    a_right = s.count("a")
+    best = a_right
+    deleted_b = 0
+    for ch in s:
+        if ch == "a":
+            a_right -= 1
+        else:
+            deleted_b += 1
+        best = min(best, deleted_b + a_right)
+    return best
+
+assert min_balanced("aababbab") == 2
+assert min_balanced("bbaaaaabb") == 2
+```
+:::
+
+**8. [M]** [LC 1641 · Count Sorted Vowel Strings](https://leetcode.com/problems/count-sorted-vowel-strings/){difficulty="Medium"}. Non-decreasing strings of length $n$ over the five vowels. ($n = 1 \to 5$; $n = 2 \to 15$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i][v]$ appends a vowel at least $v$. The totals are the combinations $\binom{n + 4}{4}$.
+
+```{python}
+def vowel_strings(n):
+    dp = [1] * 5
+    for _ in range(n - 1):
+        for v in range(3, -1, -1):
+            dp[v] += dp[v + 1]
+    return sum(dp)
+
+assert vowel_strings(1) == 5 and vowel_strings(2) == 15
+```
+:::
+
+**9. [H]** [LC 87 · Scramble String](https://leetcode.com/problems/scramble-string/){difficulty="Hard"}. (`great` / `rgeat` is true; `abcde` / `caebd` is false; `a` / `a` is true.)
+
+::: {.callout-note collapse="true" title="Solution"}
+A cut splits both strings. The right part is either in order or swapped. Equal multisets are necessary; without that prune the recursion repeats itself.
+
+```{python}
+def is_scramble(a, b):
+    memo = {}
+
+    def f(a, b):
+        if (a, b) in memo:
+            return memo[a, b]
+        if a == b:
+            memo[a, b] = True
+            return True
+        if sorted(a) != sorted(b):
+            memo[a, b] = False
+            return False
+        ok = False
+        for i in range(1, len(a)):
+            if f(a[:i], b[:i]) and f(a[i:], b[i:]):
+                ok = True
+                break
+            if f(a[:i], b[-i:]) and f(a[i:], b[:-i]):
+                ok = True
+                break
+        memo[a, b] = ok
+        return ok
+
+    return f(a, b)
+
+assert is_scramble("great", "rgeat") is True
+assert is_scramble("abcde", "caebd") is False
+assert is_scramble("a", "a") is True
+```
+:::
+
+**10. [M]** Optimal string alignment: insert, delete, replace, and one adjacent swap, with no letter in two operations. (`ca` / `ac` $\to$ 1; `abcdef` / `badcfe` $\to$ 3; `ca` / `abc` $\to$ 3.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The edit table, plus $dp[i - 2][j - 2] + 1$ when the last two letters are a transposition.
+
+```{python}
+def osa(a, b):
+    n, m = len(a), len(b)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            dp[i][j] = min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                dp[i][j] = min(dp[i][j], dp[i - 2][j - 2] + 1)
+    return dp[n][m]
+
+assert osa("ca", "ac") == 1
+assert osa("abcdef", "badcfe") == 3
+assert osa("ca", "abc") == 3
+```
+:::
+
+**11. [M]** `x+` means one or more copies of `x`. (`aab` / `a+b` is true; `b` / `a+b` is false; `abbbc` / `ab+c*` is true; empty / `a+` is false.)
+
+::: {.callout-note collapse="true" title="Solution"}
+`x+` is `xx*`. Expand the pattern and run the regex table.
+
+```{python}
+def expand_plus(p):
+    out, i = [], 0
+    while i < len(p):
+        if i + 1 < len(p) and p[i + 1] == "+":
+            out.extend([p[i], p[i], "*"])
+            i += 2
+        else:
+            out.append(p[i])
+            i += 1
+    return "".join(out)
+
+def regex_plus(s, p):
+    return regex_tab(s, expand_plus(p))
+
+assert regex_plus("aab", "a+b") is True
+assert regex_plus("b", "a+b") is False
+assert regex_plus("abbbc", "ab+c*") is True
+assert regex_plus("", "a+") is False
+```
+:::
+
+**12. [M]** A wildcard star covers at most $k$ characters. (`abcde` / `a*e` is true for $k = 3$ and false for $k = 2$; `aaaa` / `**` is true for $k = 2$ and false for $k = 1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+A star still matches zero characters by moving left. It matches $t \le k$ characters by reading the cell $t$ rows above in the previous column, not by an unbounded step up.
+
+```{python}
+def short_star(s, p, k):
+    n, m = len(s), len(p)
+    dp = [[False] * (m + 1) for _ in range(n + 1)]
+    dp[0][0] = True
+    for j in range(1, m + 1):
+        if p[j - 1] == "*":
+            dp[0][j] = dp[0][j - 1]
+    for i in range(n + 1):
+        for j in range(1, m + 1):
+            if p[j - 1] == "*":
+                dp[i][j] = dp[i][j - 1]
+                for t in range(1, k + 1):
+                    if i >= t and dp[i - t][j - 1]:
+                        dp[i][j] = True
+            elif i and (p[j - 1] == "?" or p[j - 1] == s[i - 1]):
+                dp[i][j] = dp[i - 1][j - 1]
+    return dp[n][m]
+
+assert short_star("abcde", "a*e", 3) is True
+assert short_star("abcde", "a*e", 2) is False
+assert short_star("aaaa", "**", 2) is True
+assert short_star("aaaa", "**", 1) is False
+```
+:::
+
+**13. [M]** [AC abc130_e · Common Subsequence](https://atcoder.jp/contests/abc130/tasks/abc130_e). Pairs of equal subsequences, empty included. ($(1, 3)$ and $(3, 1) \to 3$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Skip either side, and subtract the double-counted skip of both. A match also adds the pairs that end with this common value.
+
+```{python}
+def common_pairs(s, t):
+    n, m = len(s), len(t)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = 1
+    for j in range(m + 1):
+        dp[0][j] = 1
+    for i in range(n):
+        for j in range(m):
+            dp[i + 1][j + 1] = (dp[i + 1][j] + dp[i][j + 1] - dp[i][j]) % MOD
+            if s[i] == t[j]:
+                dp[i + 1][j + 1] = (dp[i + 1][j + 1] + dp[i][j]) % MOD
+    return dp[n][m]
+
+assert common_pairs([1, 3], [3, 1]) == 3
+```
+:::
+
+**14. [M]** Strings of length $n$ over `a..z` that do not contain the word `p`, modulo $10^9 + 7$. ($n = 3$, `ab` $\to$ 17524; $n = 5$, `aba` $\to$ 11879349.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The avoid automaton with both bounds free. $26^3 - 2 \cdot 26 = 17524$, since `ab` fits in two windows of a length-3 string and those windows cannot both match.
+
+```{python}
+def avoid_word(n, p):
+    go = _evil_go(p)
+    m = len(p)
+    dp = [0] * (m + 1)
+    dp[0] = 1
+    for _ in range(n):
+        nxt = [0] * (m + 1)
+        for k in range(m):
+            if not dp[k]:
+                continue
+            for c in range(26):
+                nk = go[k][c]
+                if nk < m:
+                    nxt[nk] = (nxt[nk] + dp[k]) % MOD
+        dp = nxt
+    return sum(dp) % MOD
+
+assert avoid_word(3, "ab") == 17524
+assert avoid_word(5, "aba") == 11879349
+```
+:::
+
+**15. [M]** Minimum flips so a binary pattern `p` does not occur in `s`. (`00000`, `00` $\to$ 2; `0110110`, `011` $\to$ 2; `11011`, `01` $\to$ 1.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The same automaton on $\{0, 1\}$. Writing the other bit costs 1. The transition into the matched state is forbidden, so a letter that would complete `p` is not offered.
+
+```{python}
+def min_flips(s, p):
+    pi = prefix_function(p)
+    m = len(p)
+    go = [[0, 0] for _ in range(m)]
+    for state in range(m):
+        for bit in (0, 1):
+            ch = str(bit)
+            k = state
+            while k and p[k] != ch:
+                k = pi[k - 1]
+            if p[k] == ch:
+                k += 1
+            go[state][bit] = k if k < m else m
+    inf = 10**9
+    dp = [inf] * m
+    dp[0] = 0
+    for ch in s:
+        nxt = [inf] * m
+        for k in range(m):
+            if dp[k] == inf:
+                continue
+            for bit in (0, 1):
+                nk = go[k][bit]
+                if nk == m:
+                    continue
+                nxt[nk] = min(nxt[nk], dp[k] + (ch != str(bit)))
+        dp = nxt
+    return min(dp)
+
+assert min_flips("00000", "00") == 2
+assert min_flips("0110110", "011") == 2
+assert min_flips("11011", "01") == 1
+```
+:::
+
+**16. [M]** [LC 2486 · Append Characters to String to Make Subsequence](https://leetcode.com/problems/append-characters-to-string-to-make-subsequence/){difficulty="Medium"}. (`coaching`, `coding` $\to$ 4; `abcde`, `a` $\to$ 0; `z`, `abcde` $\to$ 5.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Greedily match the longest prefix of `t` as a subsequence of `s`. The unmatched suffix of `t` has to be appended.
+
+```{python}
+def append_chars(s, t):
+    j = 0
+    for ch in s:
+        if j < len(t) and ch == t[j]:
+            j += 1
+    return len(t) - j
+
+assert append_chars("coaching", "coding") == 4
+assert append_chars("abcde", "a") == 0
+assert append_chars("z", "abcde") == 5
+```
+:::
+
+## Interview questions
+
+**1.** What does $dp[i][j]$ mean on the prefix grid, and why is the fill order safe?
+
+::: {.callout-note collapse="true" title="Answer"}
+It is the answer for $s[0..i)$ and $t[0..j)$. The three arrows come from shorter prefixes, so every dependency points up or left. Filling by increasing $i$, and increasing $j$ inside the row, meets every arrow.
+:::
+
+**2.** Why are row 0 and column 0 different problems for LCS and for edit distance?
+
+::: {.callout-note collapse="true" title="Answer"}
+An LCS with an empty string has length 0. An edit script that builds a string from nothing inserts every letter, so the border is the length. An ASCII delete pays the prefix sum. A zero in a cost border is a free deletion.
+:::
+
+**3.** When is one row enough, and when do you lose the answer by rolling?
+
+::: {.callout-note collapse="true" title="Answer"}
+The number, the cost, and the boolean live in the corner and need only the previous row. The string and the script live in the arrows, which a rolling row forgets. Reconstruction keeps the table, or reruns a linear-memory divide at the optimal midpoint.
+:::
+
+**4.** How do you recover one LCS, and one shortest common supersequence, from the same table?
+
+::: {.callout-note collapse="true" title="Answer"}
+Walk from the corner. Equal letters that explain the cell are a match: the LCS records the letter, and the supersequence writes it once. A step up or left drops a letter from the LCS and writes that letter into the supersequence. The length of the supersequence is $n + m - \mathrm{LCS}$.
+:::
+
+**5.** What is the indel distance in terms of the LCS?
+
+::: {.callout-note collapse="true" title="Answer"}
+Insert and delete only, no replacement: $n + m - 2 \cdot \mathrm{LCS}$. Each unmatched letter is deleted from one string. Edit distance is smaller or equal because a replacement can fix two unmatched letters at cost 1.
+:::
+
+**6.** Why is minimum ASCII delete sum not "keep an LCS"?
+
+::: {.callout-note collapse="true" title="Answer"}
+The diagonal carries the letter's code, not 1. Two common subsequences of equal length can have different weights. Equivalently the cost is the sum of both strings minus twice the heaviest common subsequence.
+:::
+
+**7.** Distinct subsequences of one string versus embeddings of a target: which problem is which?
+
+::: {.callout-note collapse="true" title="Answer"}
+@sec-lis-p5-dist counts distinct strings, so `aaa` is 3. This chapter's grid counts index sets of `s` that spell a fixed `t`, so `rabbbit` against `rabbit` is 3 even though the string is unique. The rolling row for the count sweeps from the right.
+:::
+
+**8.** Why does a greedy interleaving fail?
+
+::: {.callout-note collapse="true" title="Answer"}
+When both strings offer the next letter, the right choice depends on the future. Preferring `s1` fails `aabcc` / `dbbca` / `aadbbcbcac`. The cell ORs both attributions. The index in the third string is $i + j$, so the lengths must add before the table starts.
+:::
+
+**9.** What is the difference between a wildcard `*` and a regex `x*`?
+
+::: {.callout-note collapse="true" title="Answer"}
+A wildcard star matches any characters, including none: left for empty, up for one more. `x*` matches only copies of `x`, and zero copies jumps two pattern columns because the letter and the star are one token. The wildcard greedy is wrong for regex; `aab` against `a*b*ab` is the counterexample.
+:::
+
+**10.** Why is the KMP state absorbing when you count strings that contain a pattern?
+
+::: {.callout-note collapse="true" title="Answer"}
+A string may contain the pattern many times. Summing over start positions counts it many times. Once the automaton reaches the end of the pattern, further letters stay there, and the string is counted once, at the end, if the other constraints (balance, bounds) also hold.
+:::
+
+**11.** How do you forbid a word instead?
+
+::: {.callout-note collapse="true" title="Answer"}
+Do not take the transition into the matched state. Good strings do this, and they also keep two flags: still equal to the lower bound, still equal to the upper bound. After a flag drops, that side of the next letter is the whole alphabet, not the bound's letter.
+:::
+
+**12.** A checker accepts any shortest common supersequence. What do you test?
+
+::: {.callout-note collapse="true" title="Answer"}
+Both input strings are subsequences of the output, and the length equals $n + m - \mathrm{LCS}$. Equality with one sample string rejects another correct walk.
+:::
+
+## Summary
+
+- $dp[i][j]$ is the answer on two prefixes. The diagonal uses both last letters, the vertical uses only $s$, and the horizontal uses only $t$. Fill by increasing prefixes.
+- Empty borders are 0 for an LCS, the lengths for edit distance, and the prefix sums for a delete cost.
+- One previous row computes the number. The arrows reconstruct the string. A shortest supersequence has length $n + m - \mathrm{LCS}$ and writes each match once.
+- Embeddings add a skip and a match, and the rolling row moves from the right. An interleaving ORs the two sources of the letter at index $i + j$.
+- Wildcard `*` is empty or one more character. Regex `x*` is one token: zero copies jumps two columns, one more copy stays in the column.
+- A pattern that must occur, or must not, is a KMP state beside the rest of the DP. Absorbing counts the occurrence once. Refusing the last transition avoids the word. Bracket balance and dictionary bounds are the other coordinates.
+
+## Practice ladder
+
+These are for later. They are not solved in this chapter. A rating is the Codeforces rating of that problem.
+
+**One string, or a pointer**
+
+- [LC 392 · Is Subsequence](https://leetcode.com/problems/is-subsequence/){difficulty="Easy"}
+- [LC 1653 · Minimum Deletions to Make String Balanced](https://leetcode.com/problems/minimum-deletions-to-make-string-balanced/){difficulty="Medium"}
+- [LC 467 · Unique Substrings in Wraparound String](https://leetcode.com/problems/unique-substrings-in-wraparound-string/){difficulty="Medium"}
+- [LC 1641 · Count Sorted Vowel Strings](https://leetcode.com/problems/count-sorted-vowel-strings/){difficulty="Medium"}
+- [LC 2486 · Append Characters to String to Make Subsequence](https://leetcode.com/problems/append-characters-to-string-to-make-subsequence/){difficulty="Medium"}
+- [CF 1295C · Obtain The String](https://codeforces.com/problemset/problem/1295/C){rating="1600"}
+- [CF 1203D2 · Remove the Substring (hard version)](https://codeforces.com/problemset/problem/1203/D2){rating="1700"}
+
+**Two strings**
+
+- [LC 1639 · Number of Ways to Form a Target String Given a Dictionary](https://leetcode.com/problems/number-of-ways-to-form-a-target-string-given-a-dictionary/){difficulty="Hard"}
+- [LC 32 · Longest Valid Parentheses](https://leetcode.com/problems/longest-valid-parentheses/){difficulty="Hard"}
+- [LC 2430 · Maximum Deletions on a String](https://leetcode.com/problems/maximum-deletions-on-a-string/){difficulty="Hard"}
+- [LC 1977 · Number of Ways to Separate Numbers](https://leetcode.com/problems/number-of-ways-to-separate-numbers/){difficulty="Hard"}
+- [LC 2565 · Subsequence With the Minimum Score](https://leetcode.com/problems/subsequence-with-the-minimum-score/){difficulty="Hard"}
+- [LC 1531 · String Compression II](https://leetcode.com/problems/string-compression-ii/){difficulty="Hard"}
+- [LC 1320 · Minimum Distance to Type a Word Using Two Fingers](https://leetcode.com/problems/minimum-distance-to-type-a-word-using-two-fingers/){difficulty="Hard"}
+- [LC 466 · Count The Repetitions](https://leetcode.com/problems/count-the-repetitions/){difficulty="Hard"}
+- [LC 1754 · Largest Merge Of Two Strings](https://leetcode.com/problems/largest-merge-of-two-strings/){difficulty="Medium"}
+- [CF 1096D · Easy Problem](https://codeforces.com/problemset/problem/1096/D){rating="1800"}
+- [CF 1525D · Armchairs](https://codeforces.com/problemset/problem/1525/D){rating="1800"}
+- [CF 682D · Alyona and Strings](https://codeforces.com/problemset/problem/682/D){rating="1900"}
+- [CF 1272F · Two Bracket Sequences](https://codeforces.com/problemset/problem/1272/F){rating="2200"}
+
+**Automata and harder grids**
+
+- [CF 1120C · Compress String](https://codeforces.com/problemset/problem/1120/C){rating="2100"}
+- [CF 1303E · Erase Subsequences](https://codeforces.com/problemset/problem/1303/E){rating="2200"}
+- [CF 1149B · Three Religions](https://codeforces.com/problemset/problem/1149/B){rating="2200"}
+- [CF 825F · String Compression](https://codeforces.com/problemset/problem/825/F){rating="2400"}
+- [CF 1499E · Chaotic Merge](https://codeforces.com/problemset/problem/1499/E){rating="2400"}
+- [CF 1562E · Rescue Niwen!](https://codeforces.com/problemset/problem/1562/E){rating="2500"}
+- [CF 1363F · Rotating Substrings](https://codeforces.com/problemset/problem/1363/F){rating="2600"}
+- [CF 1584F · Strange LCS](https://codeforces.com/problemset/problem/1584/F){rating="2600"}
+
+## Further reading
+
+The next chapter is interval DP: the state is a substring $s[l..r]$, and the transition picks a split point or a pair of ends.
+
+- [Wikipedia: Longest common subsequence](https://en.wikipedia.org/wiki/Longest_common_subsequence): the prefix table, reconstruction, and the link to diff.
+- [Wikipedia: Wagner–Fischer algorithm](https://en.wikipedia.org/wiki/Wagner%E2%80%93Fischer_algorithm): the edit-distance table and its two-row form.
+- [Wikipedia: Hirschberg's algorithm](https://en.wikipedia.org/wiki/Hirschberg%27s_algorithm): an optimal alignment in linear memory by divide and conquer.
+- [CP-Algorithms: Prefix function and KMP](https://cp-algorithms.com/string/prefix-function.html): the prefix function and the automaton used in Pattern 5.
+- [CP-Algorithms: Aho–Corasick](https://cp-algorithms.com/string/aho_corasick.html): the automaton for many forbidden or required words at once.
+- [Russ Cox, *Regular Expression Matching Can Be Simple And Fast*](https://swtch.com/~rsc/regexp/regexp1.html): why backtracking regex engines blow up and how state sets avoid it.
+- [Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf), ch. 7: dynamic programming for contests, including LIS, grid paths and edit distance.

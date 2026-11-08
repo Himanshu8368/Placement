@@ -1,0 +1,455 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  6.3  Is It a Tree? Identification + Union-Find Pre-Look  sec:c25-identify
+%  Exports: def:c25-comp  prop:c25-uf  cor:c25-istree  lst:c25-uf  ex:c25-id-run
+%           prob:c25-rc1  lst:c25-rc1  (practice: LC 547)
+% =====================================================================
+\section{Is It a Tree? Identification and a Union-Find Pre-Look}\label{sec:c25-identify}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item State the tree certificate and explain why checking only \emph{two} of its three legs
+        suffices. (\thmref{c25-cert})
+  \item In \probref{c25-rc2}, what did a union-find \emph{rejection} (an edge whose endpoints were
+        already connected) tell you? (\probref{c25-rc2})
+  \item A forest with $n$ nodes and $k$ components has how many edges? Guess, then prove it in
+        this section. (\thmref{c25-degsum})
+  \item Why does banning the \emph{later} of two candidate edges and testing for a surviving cycle
+        pick the right redundant edge? (\probref{c25-rc2})
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Sections~6.1 and~6.2 \emph{built} a tree from trustworthy-ish data. This section is the decision
+problem \emph{before} you build: \textbf{given an edge list, is it a tree at all -- or is it a
+forest, or does it hide a cycle, and if there is a cycle, which edge is redundant?} The
+union-find you touched in \probref{c25-rc2} becomes the star: process edges left to right, merging
+components, and the very first edge whose endpoints are \emph{already} in one set is a
+\term{cycle-closing} edge. That single observation \emph{proves} the tree certificate operationally,
+\emph{counts components} for free (the ``number of provinces'' problem), and \emph{identifies and
+deletes} the one surplus edge (LC 684 -- the undirected little sibling of LC 685). This is a
+\textbf{pre-look}: enough union-find to certify trees. The \emph{full} data-structure -- union by
+rank and path compression analysis -- lives in \chref{c28} (its use in Kruskal is Ch.~31,
+\chref{c17}); we borrow only the
+``are these two already connected?'' query here.
+\textbf{Prerequisites.} \thmref{c25-cert} (the certificate), \probref{c25-rc2} (the union-find
+cycle alarm). This section formalises \emph{why} that alarm is exactly acyclicity and turns it into
+a decision procedure.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item decide ``is this a tree?'' in $\bigO{n}$ with the $n-1$-edge count plus one union-find pass; \hfill\lv{2}--\lv{3}
+  \item classify any edge set as tree / forest / unicyclic / multi-cyclic by counting rejections;  \hfill\lv{3}
+  \item count connected components (provinces) with the same machinery;                              \hfill\lv{2}--\lv{3}
+  \item find and delete the last redundant edge that keeps a graph a tree (LC 684).                 \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- certify, classify, or repair a suspicious edge set]
+\reckey{you are given \code{edges} on $n$ nodes and the question is about \emph{validity or shape},
+not a subtree computation: ``is it a tree?'', ``how many connected pieces?'', ``which single edge
+makes it cyclic?'', ``delete one edge to get a tree''.}
+\recuse{
+  \item ``return the redundant connection'' -- the edge closing a cycle, last-in-input wins (\probref{c25-rc1});
+  \item ``number of provinces / friend circles / islands'' -- count components (\secref{c25-identify});
+  \item ``can all pairs be connected / is this network a tree?'' -- $n-1$ edges + connectivity;
+  \item the directed / two-parent version -- \probref{c25-rc2} already used this pre-look.
+}
+\recnotuse{
+  \item you only need to build \code{adj} for a trusted tree -- \secref{c25-parent};
+  \item you need the \emph{minimum spanning tree} weight, not the yes/no shape -- \chref{c17};
+  \item connectivity under edge \emph{insertions and deletions} online -- that needs more than this pre-look.
+}
+One-line test: \emph{is the question ``does this edge set form one acyclic whole?'' Merge
+with union-find and watch for a rejection -- this section.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+A tree is \emph{maximally acyclic} and \emph{minimally connected}: add any edge and you create a
+cycle; delete any edge and you disconnect. That dual tightness is the certificate of
+\thmref{c25-cert}, and union-find is the machine that \emph{enforces} it edge by edge. Feed edges in
+order, each time asking ``are these two endpoints already reachable from each other?'' -- if yes,
+this edge is \emph{redundant} (it closes a cycle); if no, merge the two pieces. After all edges: if
+nothing was rejected and you used exactly $n-1$ edges, you watched $n$ separate nodes coalesce into
+one -- a tree. A single rejection is a cycle; a leftover set of pieces is a forest.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape]
+  % ---- tree ----
+  \begin{scope}[xshift=-4.6cm]
+    \node[annot] at (1.3,0.7) {\small tree ($e=n-1$, 0 rejects)};
+    \node[troot] (a) at (0,0) {$1$};
+    \node[tnode] (b) at (-1,-1.2) {$2$};
+    \node[tnode] (c) at (1,-1.2) {$3$};
+    \node[tleaf] (d) at (-1,-2.4) {$4$};
+    \draw[tedgehl] (a)--(b); \draw[tedgehl] (a)--(c); \draw[tedgehl] (b)--(d);
+  \end{scope}
+  % ---- forest ----
+  \begin{scope}[xshift=0cm]
+    \node[annot] at (1,0.7) {\small forest ($e=n-2$, 2 pieces)};
+    \node[tnode] (f1) at (0,0) {$1$};
+    \node[tnode] (f2) at (1,0) {$2$};
+    \node[tnode] (f3) at (2.4,0) {$3$};
+    \draw[tedgehl] (f1)--(f2);
+    \node[annot, font=\scriptsize] at (2.4,-0.9) {isolated};
+  \end{scope}
+  % ---- unicyclic ----
+  \begin{scope}[xshift=4.4cm]
+    \node[annot] at (0.6,0.7) {\small unicyclic ($e=n$, 1 reject)};
+    \node[tnode] (u1) at (0,0) {$1$};
+    \node[tnode] (u2) at (1.2,0) {$2$};
+    \node[tnode] (u3) at (0.6,-1.2) {$3$};
+    \draw[tedgehl] (u1)--(u2); \draw[tedgehl] (u2)--(u3);
+    \draw[tedge, draw=warningred, line width=1.1pt] (u3)--(u1);
+    \node[annot, font=\scriptsize, text=warningred] at (0.14,-1.05) {close};
+  \end{scope}
+\end{tikzpicture}
+\caption{The three shapes union-find separates. A \textbf{tree}: $n-1$ edges, every merge accepted.
+A \textbf{forest}: acyclic but $<n-1$ edges, several surviving sets. A \textbf{unicyclic} graph: $n$
+edges, the red edge finds its endpoints already joined and is \emph{rejected} -- the redundant
+connection (\probref{c25-rc1}). The number of rejects is the cyclomatic number $e-(n-k)$.}\label{fig:c25-shapes}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Forest, component, spanning tree}{c25-comp}
+A \term{forest} is an acyclic graph. Its maximal connected subgraphs are \term{components}; a
+connected forest (one component) is a tree. A graph on $n$ nodes with $k$ components that is a
+forest has exactly $n-k$ edges. A \term{spanning tree} of a connected graph uses all $n$ nodes and
+exactly $n-1$ of its edges.
+\end{definition}
+
+\begin{proposition}{Union-find pre-look at acyclicity}{c25-uf}
+Process a graph's $m$ edges one at a time, initially $n$ singleton sets, merging (unioning) the two
+endpoint sets for each \emph{accepted} edge and \emph{rejecting} any edge whose endpoints already
+share a set. Then:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item an edge is rejected \textbf{iff} it closes a cycle among the edges seen so far;
+  \item the number of accepted edges is exactly $n-k$, where $k$ is the number of connected
+        components of the whole graph;
+  \item the number of rejections is $m-(n-k)$ -- the graph is a forest \textbf{iff} this is $0$.
+\end{enumerate}
+\end{proposition}
+\begin{proofbox}
+(1) At the moment $[u,v]$ is examined, the accepted edges define reachability; $u,v$ already share a
+set precisely when a path of accepted edges connects them, so adding $[u,v]$ closes a cycle.
+Conversely any cycle's last-processed edge sees its two neighbours already joined. (2) Each accepted
+union lowers the set count by exactly one, from $n$ down; the surviving sets are the connected
+components of the graph (accepted edges and rejected edges connect the same pairs, since a rejected
+edge joined already-connected nodes), so exactly $k$ sets remain and $n-k$ unions were accepted.
+(3) Rejections $=m-\text{accepted}=m-(n-k)$. A forest has no cycles, hence no rejections; a graph
+with no rejections never closed a cycle, hence is acyclic -- a forest. \end{proofbox}
+
+\begin{corollary}{The operational tree test}{c25-istree}
+A graph on $n$ nodes is a tree \textbf{iff} it has $n-1$ edges and union-find rejects none, and
+\textbf{iff} it has $n-1$ edges and union-find merges everything into a single set. This is
+\thmref{c25-cert} turned into a one-pass algorithm: the count is leg~(1), the rejection-free scan
+is leg~(3), and either plus the count forces leg~(2).
+\end{corollary}
+\begin{insightbox}
+You get \emph{three} answers from one scan for free: reject-count $>0$ means ``not a tree, has a
+cycle''; reject-count $=0$ but sets${}_\text{final}>1$ means ``a forest''; reject-count $=0$ and
+exactly one final set with $n-1$ edges means ``a tree''. LC 684 reads off the \emph{last} rejected
+edge; LC 547 reads off the \emph{final set count}.
+\end{insightbox}
+
+\subsection{The algorithm: one union-find pass to certify and classify}
+
+\begin{lstlisting}[caption={Union-find pre-look: decide tree / forest / cyclic, and count components}, label={lst:c25-uf}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct DSU {
+    vector<int> p;
+    DSU(int n) : p(n) { iota(p.begin(), p.end(), 0); }        // p[i]=i: n singleton sets
+    int find(int x) { return p[x] == x ? x : p[x] = find(p[x]); }   // path compression
+    bool uni(int a, int b) {                                  // false => already connected
+        a = find(a); b = find(b);
+        if (a == b) return false;                             // rejected edge: closes a cycle
+        p[b] = a; return true;                                // accepted: merges two sets
+    }
+};
+
+// Is the graph on nodes 0..n-1 exactly ONE tree?
+bool isTree(int n, const vector<pair<int,int>>& edges) {
+    if ((int)edges.size() != n - 1) return false;            // leg (1): the edge count
+    DSU d(n);
+    for (auto& e : edges)
+        if (!d.uni(e.first, e.second)) return false;         // leg (3): a reject = a cycle
+    return true;                                             // n-1 edges + acyclic => connected
+}
+
+// Number of connected components (provinces).
+int countComponents(int n, const vector<pair<int,int>>& edges) {
+    DSU d(n);
+    int comps = n;
+    for (auto& e : edges) if (d.uni(e.first, e.second)) --comps;  // each merge removes one piece
+    return comps;
+}
+\end{lstlisting}
+\begin{complexitybox}
+Time $\bigO{(n+m)\,\alpha(n)}$ -- every \code{find}/\code{uni} is inverse-Ackermann with path
+compression ($\alpha\le4$ in practice), so essentially linear. Memory $\bigO{n}$. This one-pass
+approach is far cheaper than the alternative DFS colouring for cycle detection, and \emph{both}
+answers (tree? how many components?) come from one pass. Full DSU complexity analysis (why path
+compression alone is already near-linear) is \chref{c28}.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Classifying $T$ and $T$ plus one bad edge}{c25-id-run}
+$T$ on $n=8$ has $7=n-1$ edges. \code{isTree}: the count passes, and processing the seven edges in
+\{1-2,1-3,2-4,2-5,3-6,3-7,7-8\} merges $8\!\to\!1$ set with no rejection -- \textbf{a tree}
+\checkmark, \code{countComponents}$=1$. Now append the bad edge $[4,5]$: $8$ edges for $8$ nodes
+fails the count leg instantly, and if you ran the scan anyway, edges up to $7$ build one set, then
+$[4,5]$ finds $4,5$ already joined $\Rightarrow$ \textbf{reject} (one cycle, the
+$2\text{--}4\text{--}5$ triangle). The \emph{last} rejected edge is exactly $[4,5]$ -- the edge LC
+684 would return.
+\end{example}
+\begin{tracebox}[Edge-by-edge on LC 684's Example~2]
+\code{edges=[[1,2],[2,3],[3,4],[1,4],[1,5]]}, nodes $1..5$. Sets start $\{1\}\{2\}\{3\}\{4\}\{5\}$.
+$[1,2]$: merge $\{1,2\}$. $[2,3]$: merge $\{1,2,3\}$. $[3,4]$: merge $\{1,2,3,4\}$. $[1,4]$:
+$\mathit{find}(1)=\mathit{find}(4)$ -- \textbf{already one set} $\Rightarrow$ reject, return $[1,4]$. The scan stops
+at the first rejection; $[1,4]$ is the redundant connection, matching the official answer. \checkmark
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{DFS cycle test}: root the graph and watch for a back-edge to a non-parent ancestor --
+        equivalent to union-find on undirected graphs, $\bigO{n+m}$; union-find is less code. \hfill\lv{3}
+  \item \textbf{Directed version}: acyclicity now means a \emph{topological order} exists (LC 207),
+        and the peel is in-degree based (\secref{c25-degree}'s practice) -- union-find does NOT apply
+        to directed cycles. \hfill\lv{3}--\lv{4}
+  \item \textbf{Multiple surplus edges}: to delete $k$ edges and leave a forest, \emph{count} rejections;
+        a graph is a $k$-cyclomatic forest iff rejections $=k$. \hfill\lv{4}
+  \item \textbf{Dynamic connectivity}: edges arriving over time, ask ``connected yet?'' -- union-find
+        answers monotone insertions directly (this pre-look already does); deletions need more (\chref{c28}). \hfill\lv{4}
+  \item \textbf{Bipartite / 2-colour check}: union-find with parity answers ``can nodes be split into
+        two sets across every edge'' -- the same merge mechanic with an extra flag (\chref{c28}). \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c25-identify-pitfalls}
+
+\begin{warningbox}[Trap 1 -- trusting the edge count alone]
+``$n-1$ edges'' does \emph{not} mean ``tree'': $n$ nodes with $n-1$ edges could be a disconnected
+piece plus a small cycle elsewhere (the two defects cancel in the count). Union-find rejects none
+\emph{and} the count is $n-1$ -- both legs (\corref{c25-istree}); or check connectivity instead of
+acyclicity.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: count only -- a unicyclic disconnected graph slips past}, language=C++, basicstyle=\ttfamily\small]
+return (edges.size() == n-1);        // 4 nodes, edges {1-2,2-3,3-1}: count 3? no. See the trap.
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: count + rejection-free union-find}, language=C++, basicstyle=\ttfamily\small]
+if ((int)edges.size() != n-1) return false;
+DSU d(n);
+for (auto& e : edges) if (!d.uni(e.first, e.second)) return false;   // a reject = cycle
+return true;
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- union-find on a \emph{directed} cycle]
+The rejection test detects \emph{undirected} cycles. On the directed graph of LC 207 the two
+prerequisite edges $a\!\to\!b$ and $b\!\to\!a$ are a genuine directed cycle but union-find would merge
+them silently the same as any pair. Detecting directed cycles needs Kahn's in-degree peel or DFS
+colour -- not this tool (\secref{c25-degree}).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- forgetting path compression / recursion depth]
+Without \code{p[x]=find(p[x])} the trees get tall; at $n\approx2\cdot10^{5}$ a \emph{recursive}
+\code{find} on a degenerate chain can even overflow the stack. Keep compression (as in
+\coderef{c25-uf}) or make \code{find} iterative; the union-by-rank upgrade is \chref{c28}.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+LC 684 is the section distilled: one undirected extra edge, return the last redundant one -- the
+\emph{first} rejection of a union-find run in input order \emph{is} the answer.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c25-rc1}{Redundant Connection}{LeetCode 684}
+  {https://leetcode.com/problems/redundant-connection/}{LC Medium L3}
+  {undirected graph, union-find cycle detection, spanning tree, edge deletion}
+
+\begin{problemstatement}[Redundant Connection]
+A \textbf{tree} on $n$ nodes (labels $1\dots n$) gained exactly \textbf{one} extra \emph{undirected}
+edge, so \code{edges} now has $n$ edges (each \code{[u,v]} with $u\ne v$). Find the edge that can be
+removed to make the graph a tree again; if several answers exist, return the one appearing
+\textbf{last} in \code{edges}. $2\le n\le 1000$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+Fair first attempt: a tree has $n-1$ edges; here there are $n$, so exactly one is on a cycle. Find a
+cycle, return its latest edge.
+\peek{Process edges left to right. When you are about to add $[u,v]$, what simple question tells you
+this edge is the one closing the cycle?}
+\nudge{Maintain connected components with union-find. The first edge whose two endpoints are
+\emph{already connected} closes the only cycle. Because you scan in input order, the \emph{last}
+such edge you could point at is naturally the one you return -- there is exactly one cycle here.}
+\fullhint{Run union-find over $1..n$ (arrays sized $n+1$) in input order; return the first edge
+$[u,v]$ with $\mathit{find}(u)=\mathit{find}(v)$. That edge is redundant and, since the input has a single cycle and
+you scanned in order, it is the latest edge of that cycle. Full build and proof below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The graph has $n$ nodes and $n$ edges: one more edge than a tree needs, so it holds \emph{exactly
+one} cycle (cyclomatic number $m-(n-k)=n-(n-1)=1$ with $k=1$). Removing any cycle edge yields a tree;
+the tie-break wants the \emph{last} cycle edge in input order. A rooted/two-parent complication is
+absent -- edges are undirected, so this is \probref{c25-rc2} with Case~2 only.
+
+\solstep{Key Observations}
+\begin{observation}
+Scanning edges in order and merging with union-find, the \emph{first} edge whose endpoints are
+already connected closes the cycle -- that is the unique redundant edge of a unicyclic graph, and it
+appears \emph{last} among that cycle's edges by construction of the scan.
+\end{observation}
+\begin{observation}
+You never need to find the cycle's \emph{members} -- only its closing edge. Union-find identifies the
+closing edge directly, in $\bigO{n\,\alpha(n)}$, with no DFS and no parent bookkeeping.
+\end{observation}
+\begin{observation}
+This is \corref{c25-istree} run just past the point of failure: a tree would reject nothing; the first
+rejection here names the culprit.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{DFS for the cycle, collect its edges, take the max-index one.}
+{Workable but you must track a back-edge, reconstruct the cycle from parent pointers, then scan for
+the largest input index -- three fiddly steps. The union-find scan \emph{is} the cycle-closing test,
+in-order, so the ``last edge'' tie-break is automatic.}
+\deadend{Check every edge by deleting it and re-testing $\mathit{isTree}$.}{$O(n)$ tests $\times$
+$O(n)$ each $=O(n^{2})$; fine for $n\le1000$ but it re-derives connectivity $n$ times and still needs
+careful tie-breaking. One pass beats it.}
+\aha{Process edges in input order with union-find; return the \emph{first} rejected edge. Because
+there is exactly one cycle, the closing edge is the last-in-order member of it -- the exact answer.}
+\end{thinkbox}
+
+\solstep{Solution}
+Initialise union-find on $1..n$. Walk \code{edges} in order: for $[u,v]$, if $\mathit{find}(u)=\mathit{find}(v)$
+return $[u,v]$ (the cycle-closing redundant edge); otherwise union them. Because a valid input
+guarantees one extra edge, the loop always returns before finishing.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+The graph has $n$ edges on $n$ nodes, so it is connected with cyclomatic number $1$ -- a single
+cycle $C$. Claim: the first edge $e^\ast$ the scan rejects is the member of $C$ appearing last in
+\code{edges}. When $e^\ast=[u,v]$ is rejected, $u,v$ are already joined by accepted edges, forming a
+$u$--$v$ path $P$ that avoids $e^\ast$, so $P\cup\{e^\ast\}$ is a cycle; the input has only one cycle
+$C$, hence $P\cup\{e^\ast\}=C$ and $e^\ast\in C$. All earlier members of $C$ were accepted (they did
+not reject, else the scan had stopped), and every edge processed after $e^\ast$ is not examined, so
+$e^\ast$ is the last member of $C$ in input order. Removing $e^\ast$ breaks $C$ and leaves $n-1$
+edges with no cycle -- a tree (\corref{c25-istree}) -- and it is the latest valid deletion, matching
+the tie-break. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Redundant Connection -- return the first edge union-find rejects (LeetCode 684)}, label={lst:c25-rc1}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+    vector<int> p;
+    int find(int x) { return p[x] == x ? x : p[x] = find(p[x]); }
+public:
+    vector<int> findRedundantConnection(vector<vector<int>>& edges) {
+        int n = (int)edges.size();                 // n nodes, n edges (labels 1..n)
+        p.resize(n + 1);
+        iota(p.begin(), p.end(), 0);
+        for (auto& e : edges) {
+            int a = find(e[0]), b = find(e[1]);
+            if (a == b) return e;                  // already connected => closes the cycle
+            p[a] = b;                              // merge
+        }
+        return {};                                 // unreachable for valid input
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Both official examples]
+\emph{Ex.~1} \code{[[1,2],[1,3],[2,3]]}: merge $1,2$; merge $1,3$ (set $\{1,2,3\}$); $[2,3]$:
+$\mathit{find}(2)=\mathit{find}(3)$ $\Rightarrow$ return $[2,3]$. \checkmark\\
+\emph{Ex.~2} \code{[[1,2],[2,3],[3,4],[1,4],[1,5]]}: merge $1,2,3,4$ into one set across the first
+three edges; $[1,4]$ already connected $\Rightarrow$ return $[1,4]$ (matches expected). \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n\,\alpha(n)}$ -- one in-order union-find pass ($\alpha$ inverse-Ackermann, $\le4$).
+Space $\bigO{n}$ for the parent array. Beats the $O(n^{2})$ delete-and-retest brute force, and at
+$n\le1000$ either passes. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+(i) Size arrays $n+1$ for $1$-indexed labels (Trap~2 of \secref{c25-parent}). (ii) Return the
+\emph{first} rejected edge, not the last rejected -- with a single cycle they coincide, but if you
+kept scanning past the reject you might overwrite the answer; \code{return e} immediately.
+(iii) Do not use this on the directed LC 685 without the in-degree pre-pass (\probref{c25-rc2}).
+\emph{Variant:} LC 685 is this with a possible two-parent node; LC 687-style problems add a second
+edge to delete -- re-run the scan after removing the found edge.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \textbf{A rejection \emph{is} a cycle.} Union-find turns ``is it a tree?'' into ``did I reject
+        an edge?'' -- acyclicity for free, and count components on the same pass (\propref{c25-uf}).
+  \item \textbf{Scan order = tie-break.} The first rejected edge is the last-in-order cycle member; the
+        ``return latest'' rule needs no extra comparison.
+  \item \textbf{684 $\subset$ 685.} This is \probref{c25-rc2}'s Case~2 -- undirected, one cycle, no
+        two-parent node -- the certificate's legs checked one at a time.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Two edges to delete}: run \probref{c25-rc1}, remove the found edge, re-run to find the
+        next reject -- reject-count equals the cyclomatic number $m-(n-k)$.
+  \item \textbf{Bigger inputs}: add union-by-rank to keep $\mathit{find}$ shallow (or make it iterative, Trap~3);
+        full analysis \chref{c28}.
+  \item \textbf{From tree to MSW}: if edges are weighted and you want the \emph{max}-weight edge to
+        delete, sort by weight and run the same reject logic -- that is Kruskal in reverse (\chref{c17}).
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you check the $n-1$ count \emph{and} a rejection-free scan (not just one leg)?
+        (\corref{c25-istree}, Trap~1.)
+  \item Did you return on the \emph{first} rejection instead of scanning past it? (\probref{c25-rc1}.)
+  \item Are your arrays sized for $1$-indexed nodes? (Trap~2 of \secref{c25-parent}.)
+  \item For counting components, did you start the tally at $n$ and decrement on each accepted merge?
+        (\coderef{c25-uf}, \probref{c25-rc1}.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Number of Provinces}{LeetCode 547}
+    {https://leetcode.com/problems/number-of-provinces/}{LC Medium L2}
+    {A $n\times n$ adjacency matrix \code{isConnected} of friend relationships; count the
+    \textbf{provinces} (connected components). Rebuild the edge list from the matrix (read only
+    $i<j$ to skip duplicates) and call \code{countComponents} from \coderef{c25-uf} -- start at $n$
+    and decrement on each accepted union -- or DFS the matrix counting roots. This is exactly the
+    ``reject-count $=0$ but sets${}>1$'' branch of \secref{c25-identify}: the answer is the number of
+    surviving union-find sets (or DFS trees), and it needs \emph{no} edge-count leg since cycles are
+    allowed. Recognise it as the component-counting half of this section.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 6.3 Is It a Tree? (Union-Find pre-look)]
+Certify with \emph{two} certificate legs: exactly $n-1$ edges and a union-find pass that rejects
+nothing (or merges to one set) (\corref{c25-istree}). A rejection is a cycle; rejections${}=m-(n-k)$
+and $k$ is the final set count (\propref{c25-uf}). LC 684 returns the \emph{first} rejected edge in
+input order -- the last cycle member (\probref{c25-rc1}); the directed sibling is LC 685
+(\probref{c25-rc2}); components-province count is LC 547. Full DSU (rank, compression) is
+\chref{c28}, and its use in Kruskal is Ch.~31 (\chref{c17}).
+\selftest{
+  \item Give an $n$-node edge set with $n-1$ edges that is \emph{not} a tree; which certificate leg fails?
+  \item State the reject-count formula and use it to prove a graph with $0$ rejections is a forest.
+  \item In LC 684, why is the \emph{first} rejected edge also the ``last appearing'' valid answer?
+  \item Why must you NOT use union-find to detect a \emph{directed} cycle? (Name the right method.)
+  \item Compute $\mathit{countComponents}$ for $T$ (8 nodes, 7 edges) and for $T$ with a self-loop added.
+}
+\end{recallbox}

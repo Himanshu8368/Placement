@@ -1,0 +1,1077 @@
+# Sorting as a Tool {#sec-srt}
+
+<!--
+Author-facing provenance (not rendered): Chapter 10 of the arrays volume, per outline.yml
+("Sorting as a Tool"). Lessons A1-A5 + patterns P1-P5 as listed in the outline's covers line
+(the array_book ch06 source is only a plan with the same lessons and problem list).
+Registry problems under books/problems/, boards under books/traces/arr010_traces.py.
+Two solved problems per pattern; P2 and P4 also point (card.qmd) to the problems homed in
+@sec-lang-p3 (LC 179, LC 1636) instead of re-solving them. The algorithms themselves belong
+to the Sorting Algorithms and Linear-Time Sorting chapters (not yet written).
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 6–8 (comparison sorts, the $\Omega(n\log n)$ lower bound, counting sort in 8.2 and bucket sort in 8.4) · **CPH** ch. 3 "Sorting" (the "sort, then sweep" habit, comparators) · **Erickson** *Algorithms* ch. 4 (greedy algorithms: exchange arguments as ordering proofs) · the **Python Sorting HOWTO** (keys, `cmp_to_key`, stability as a documented guarantee) · **cppreference** on `std::sort`, `std::stable_sort` and Compare (the strict-weak-ordering contract) · **Wikipedia**: pigeonhole principle, counting sort, radix sort, weighted median · **Problem statements** of the ten problems solved here (LeetCode, Codeforces, CSES), which reduce to the five moves this chapter names.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Name the three things a sort **buys** — adjacency of the answer, a monotone order to sweep or binary-search, and a canonical arrangement to count over — and decide in one sentence whether an $O(n\log n)$ sort is worth its price.
+- Write a **multi-key comparator** with mixed directions (tuple keys, `stable_sort` chains, correct C++ lambdas), turn an **exchange argument** into a comparator (@sec-srt-p2-b), and *test* a comparator for the strict-weak-ordering contract that `<=` breaks.
+- Choose among **counting, bucket, and radix sort** by what the value range and distribution allow, and say why a $10^9$ range prices counting sort out of the market (@sec-srt-p3-b).
+- Compress any sparse set of values into dense ranks $1 \dots n$ **in one line** with `sorted(set(...))` plus a dict, and sort on a **derived key** (counts, ranks) computed from the whole array first (@sec-srt-p4-b).
+- Prove that **the median minimises a sum of absolute deviations** with an exchange argument, place the *weighted* median by walking cumulative costs, and apply the same exchange idea to ordering questions like Largest Number (@sec-lang-p3-largest).
+:::
+
+```{python}
+#| include: false
+import bisect
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+from functools import cmp_to_key, lru_cache
+from itertools import permutations
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr010_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-srt-why}
+
+::: {.callout-note title="In plain words"}
+A sort is the cheapest powerful structure in the book: for $O(n\log n)$ — often a single library call — the array stops being arbitrary. After sorting, the closest pair is a *neighbour*, "how many are smaller" is a *position*, equal values gather into *runs* you can count in one pass, and the best gathering point for absolute errors is the *middle*. Nine times out of ten "just sort it first" is not a hack; it is the whole algorithm, and the scan afterwards is $O(n)$.
+:::
+
+The arrays volume has built its tools one at a time: the scan carries state over positions (@sec-arr), prefix sums tabulate positions (@sec-pref), hashing indexes values (@sec-hash), two pointers exploit order (@sec-tp), and sliding windows keep a moving range valid (@sec-sw). The two-pointer chapter could move its two fingers because many of its arrays arrived sorted. **Sorting is how you buy that order when the input never promised it.** This chapter pays the $n\log n$ price and then spends the three things the purchase returns:
+
+- **Neighbours.** Any question about the *closest* or *largest gap between* two values becomes an adjacent scan of $n-1$ pairs instead of $\binom{n}{2}$ (P1).
+- **Monotonicity.** Once sorted, predicates that only get harder to the right become searchable: a **binary search** — repeatedly halving a sorted array to find where a value or a threshold sits, $O(\log n)$ probes — and the two-pointer sweeps of @sec-tp are re-licensed at will. (The next chapter, @sec-bst, drills this; here a sorted array is simply a place where "the first index with property $P$" exists and is findable.)
+- **Canonical form.** Equal values sit together, so frequencies become runs, ranks become indices, and "the same multiset" becomes "the same string" — the counting and compression patterns (P3, P4) are this sentence with arithmetic.
+
+P5 cashes the deepest fact: sorting puts the **median** in the middle, and the median is the answer to an optimisation question — the exchange argument of @sec-srt-a5. The Sorting Algorithms and Linear-Time Sorting chapters later in this part open the sort box itself (merge sort, quicksort, heapsort, radix sort, the $\Omega(n\log n)$ lower bound); this chapter stays on the application side of that door, and *uses* sorting as freely as the previous chapters used their tools. The library calls themselves (`sorted`, `key=`, `cmp_to_key`, `std::sort` with a lambda) were introduced in @sec-lang-p3; here we use them.
+
+One note before the lessons. Two classic problems of this topic, Largest Number and Sort Array by Increasing Frequency, are already solved end to end in @sec-lang-p3, where keys and comparators first appeared. This chapter does not re-solve them: P2 and P4 point to those solutions with a short card, and solve a Codeforces problem in their place that adds a new idea (an exchange-argument comparator in @sec-srt-p2-b, a sort over counts in @sec-srt-p4-b). Part A is five lessons; Part B is five patterns with ten solved problems.
+
+## A1. What a sort buys: stability, neighbours, monotonicity {#sec-srt-a1}
+
+::: {.callout-note title="In plain words"}
+Two guarantees, one price. **(1) Order:** the output is non-decreasing, so equal values form contiguous runs and the array becomes a place where you can search, sweep, and count. **(2) Stability** (Python's `sorted`, C++'s `stable_sort`): elements that compare equal keep their *input* order, so you can sort by one field, then by another, and the second sort preserves the first's work inside ties. The price is $O(n\log n)$ comparisons for a general comparison sort — and the free lunch is that everything *after* the sort is usually linear.
+:::
+
+Read the guarantee as a shopping list of structures. After `b = sorted(a)`: the **closest pair** is some $b[i+1] - b[i]$ (P1's lemma); **equal values are contiguous**, so a histogram is one linear pass over runs (P3); the array is **monotone**, so thresholds answer to binary search and two fingers never rewind (the licence of @sec-tp, now purchasable); and sorting by a **derived value** costs one extra key function, not a new algorithm (P4). Stability is the quiet one: it is exactly what lets you "sort by grade, ties by name" by sorting twice, the tie-break field first. Python's `sorted` and `list.sort` are guaranteed stable by the language documentation; C++ `std::sort` is not (it is usually an introsort), and `std::stable_sort` is the stable alternative.
+
+```text
+b = sort(a, by key)              # O(n log n) once; buys, for every later question:
+  neighbours   closest/smallest gap is some b[i+1] - b[i]
+  runs         equal keys occupy contiguous blocks -> count in one pass
+  monotone     "first index with P" findable by binary search, sweepable by two pointers
+  stability    ties keep previous order -> sort twice to sort by two fields
+```
+
+The invariant of anything that happens after a sort is worth stating once: **`b` is non-decreasing and a permutation of `a`** — every later scan may assume neighbours are comparable, and may never assume anything about *which* of the equal elements came first unless stability promised it.
+
+::: {#fig-srt-a1-stable}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a1_draw(ax, p):
+    V.trace(ax, p, [
+        dict(values=["Bob/A", "Ann/B", "Cid/A", "Eve/A", "Dan/B"], label="input",
+             note="name/grade", cell_w=1.6),
+        dict(values=["Ann/B", "Bob/A", "Cid/A", "Eve/A", "Dan/B"], label="1. by name",
+             note="alphabetical", cell_w=1.6),
+        dict(values=["Bob/A", "Cid/A", "Eve/A", "Ann/B", "Dan/B"], label="2. stable by grade",
+             colors={0: "cyan", 1: "cyan", 2: "cyan", 3: "amber", 4: "amber"},
+             note="names stay sorted inside each grade", cell_w=1.6),
+    ])
+    V.text(ax, p, 4.0, -9.6, "an UNSTABLE step 2 could scramble the names inside a grade", color="red", size=9)
+V.show(a1_draw)
+```
+
+Sorting by the **secondary** key (name) first and the **primary** key (grade) last is the stable-composition recipe: the final, most-significant sort is stable, so it groups by grade while leaving the alphabetical order it inherited intact inside each grade block. Do it in the other order — grade first, then name — and the last (name) pass is primary and the grade blocks vanish; make the last pass an unstable `std::sort` and the surviving order inside a tie is arbitrary.
+
+:::
+
+```{python}
+#| label: arr-srt-a1-demo
+recs = [("Bob", "A"), ("Ann", "B"), ("Cid", "A"), ("Eve", "A"), ("Dan", "B")]
+s1 = sorted(recs, key=lambda r: r[0])               # secondary key (name) first
+s2 = sorted(s1, key=lambda r: r[1])                 # primary key (grade) last, stable
+assert s2 == [("Bob", "A"), ("Cid", "A"), ("Eve", "A"), ("Ann", "B"), ("Dan", "B")]
+# the one-line equivalent: a tuple key sorts grade-major, name inside ties
+assert sorted(recs, key=lambda r: (r[1], r[0])) == s2
+# stability is what makes the two-pass version work; an unstable final pass could
+# reorder the names inside a grade block
+b = sorted([4, 2, 1, 3])
+assert b == [1, 2, 3, 4]
+assert all(b[i + 1] - b[i] >= 0 for i in range(len(b) - 1))   # runs, gaps, monotone
+print("a1 demo OK")
+```
+
+The demo is small on purpose; the *price discipline* is the lesson. If a question is answered by one scan over an unsorted array (a sum, a max, a membership count), do not sort. If the answer talks about **pairs of values** — closest, gap, overlap, "for each $x$ the smallest $y \ge x$" — the $O(n\log n)$ sort repays itself immediately, because the $O(n)$ scan afterwards replaces an $O(n^2)$ search. That trade is the sentence behind every problem in Part B.
+
+## A2. Comparators: strict weak ordering, several keys, sorting indices {#sec-srt-a2}
+
+::: {.callout-note title="In plain words"}
+A sort needs only one fact about your data: a rule `less(x, y)` answering "must $x$ come before $y$?". Three rules make that rule *usable*: nothing is less than itself (**irreflexive**); the relation is transitive; and "incomparable" (neither less) is transitive too — which forces **ties to form contiguous blocks**. That package is a **strict weak ordering**; `std::sort` demands it and behaves undefined-but-catastrophically without it. Python dodges the whole contract by taking a **key** — one number per element — and ties inherit input order (stability). Two habits unlock everything: sort by a **tuple** for several criteria (negate or invert the descending ones), and **sort indices instead of values** when the values live in parallel arrays or must not move.
+:::
+
+@sec-lang-p3 introduced both forms and the C++ rule behind them (@sec-lang-cpp); this lesson adds what problems demand on top: how to *check* a comparator, how to sort several keys with mixed directions, and how to sort positions instead of values. Python's `sorted(a, key=...)` and C++'s `sort(v.begin(), v.end(), comp)` are two different pacts. The key form computes $f(x)$ once per element and compares *numbers*; "who goes first" never depends on the partner, so any key is legal and ties are stable by contract. The comparator form asks *pairs*; it can express orders no key can (Largest Number's $a{+}b$ against $b{+}a$, @sec-lang-p3-largest) — but only if `comp` is a strict weak ordering. The canonical violation is writing `return a.grade <= b.grade;`: with `<=`, an element is "less than" an equal partner, `std::sort`'s partition logic can walk off the end of the array, and you get a wrong answer or a crash. `cmp_to_key` is the bridge: wrap a three-way comparator (`-1/0/1`) and Python supplies the rest.
+
+```text
+key form    sorted(a, key=lambda x: (k1, -k2))    # k1 ascending, k2 descending; ties: input order
+cmp form    sort(a, comp)  where comp(x, y) = "x strictly before y?"
+            must be a strict weak ordering: never return comp as x <= y
+index form  order = sorted(range(n), key=lambda i: a[i])   # values stay put;
+            order is a permutation; touch a[i] through it
+```
+
+::: {#fig-srt-a2-idx}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a2_draw(ax, p):
+    V.trace(ax, p, [
+        dict(values=[85, 90, 85, 78], label="scores", note="lives in a parallel array"),
+        dict(values=[0, 1, 2, 3], label="indices", note="sorted by scores[i] descending"),
+        dict(values=[1, 0, 2, 3], label="order", colors={0: "green", 1: "indigo", 2: "amber"},
+             note="order = [1, 0, 2, 3]: read through order[i]"),
+    ])
+    V.text(ax, p, 2.0, -9.6,
+           "scores is untouched: order[0] = 1 means the best paper is student 1", size=9)
+V.show(a2_draw)
+```
+
+The students' names, essays, and hashes sit in other arrays; sorting `scores` would tear the records apart. Sorting the *indices* instead gives a permutation to read the truth through — and equal scores ($85$ at students $0$ and $2$) keep index order for free because Python's sort is stable: a deterministic tie-break you did not have to write.
+
+:::
+
+```{python}
+#| label: arr-srt-a2-demo
+def cmp3(a, b):                       # longer string first; equal length, larger value first
+    if len(a) != len(b):
+        return -1 if len(a) > len(b) else 1
+    ia, ib = int(a), int(b)
+    return -1 if ia > ib else (1 if ia < ib else 0)      # a three-way answer
+assert [int(d) for d in sorted(["123", "45", "678", "9"], key=cmp_to_key(cmp3))] == \
+    [678, 123, 45, 9]                 # 678 before 123: same length, larger value leads
+
+scores = [85, 90, 85, 78]
+order = sorted(range(4), key=lambda i: -scores[i])     # sort the indices, not the values
+assert order == [1, 0, 2, 3]
+assert [scores[i] for i in order] == [90, 85, 85, 78]
+# the same order as a tuple key: negate the descending criterion
+assert sorted(range(4), key=lambda i: (-scores[i], i)) == order
+print("a2 demo OK")
+```
+
+A comparator can be tested like any other function. The three conditions are statements about all pairs and triples, so on a small random sample you can check them directly; a `<=` comparator fails the first test immediately.
+
+```{python}
+#| label: arr-srt-a2-swo
+def is_strict_weak(items, less):
+    """Check the three conditions of a strict weak ordering on a small sample."""
+    for x in items:
+        if less(x, x):                                 # irreflexive
+            return False
+    for x in items:
+        for y in items:
+            for z in items:
+                if less(x, y) and less(y, z) and not less(x, z):
+                    return False                       # transitive
+                inc = lambda u, v: not less(u, v) and not less(v, u)
+                if inc(x, y) and inc(y, z) and not inc(x, z):
+                    return False                       # ties are transitive
+    return True
+
+sample = [random.randint(0, 5) for _ in range(8)]
+assert is_strict_weak(sample, lambda x, y: x < y)
+assert not is_strict_weak(sample, lambda x, y: x <= y)          # the classic bug
+# a rule that is not even transitive: "x before y if they differ by exactly 1"
+assert not is_strict_weak([1, 2, 3], lambda x, y: y - x == 1)
+# the pairwise concatenation rule of Largest Number passes on random strings
+words = [str(random.randint(0, 120)) for _ in range(7)]
+assert is_strict_weak(words, lambda a, b: a + b > b + a)
+# the exchange rule of Robot Vacuum Cleaner (@sec-srt-p2-b) passes too
+sh = [(random.randint(0, 3), random.randint(0, 3)) for _ in range(7)]
+sh = [p for p in sh if p != (0, 0)]
+assert is_strict_weak(sh, lambda a, b: a[0] * b[1] > b[0] * a[1])
+print("strict weak ordering checks OK")
+```
+
+Passing on a sample is evidence, not a proof; the proof is an argument like "this rule compares $f(a)$ with $f(b)$ for some number $f$", which is how @sec-srt-p2-b turns its comparator into a key.
+
+Two design notes the stress of real problems will demand. First, **prefer a key over a comparator** whenever the rule compares each element to *nothing but itself* — keys run once per element, comparators run $O(n\log n)$ times, and a wrong comparator is a correctness bug while a slow key is just slow. Second, a pairwise comparator must be **provable**, not intuitive: Largest Number's $a{+}b > b{+}a$ looks transitive but needs an actual proof (@sec-lang-p3-largest gives it); when in doubt, test your comparator against a brute-force scan of all pair arrangements on random small inputs, exactly the habit every solved problem here stress-tests with.
+
+## A3. Non-comparison sorts: counting, bucket, radix, and their limits {#sec-srt-a3}
+
+::: {.callout-note title="In plain words"}
+Comparison sorts pay in *questions* ("is $x < y$?"), and $\Omega(n\log n)$ questions are necessary in general. Non-comparison sorts pay in **structure of the values** instead. **Counting sort** tallies each value in a `count[v]` array indexed *by value*, then walks $v = 0 \dots V{-}1$ emitting copies: $O(n + V)$, no comparisons ever. **Bucket sort** scatters values into wide buckets and sorts (or reasons about) each: $O(n + B)$ when values spread evenly — or, the contest version, when you can *prove* the answer never hides inside a bucket (@sec-srt-p3-b). **Radix sort** sorts digit by digit with a *stable* counting sort, cheapest-key-first: $O(\text{digits} \cdot (n + \text{base}))$. Each is linear, each has a price tag, and the price tag is the lesson.
+:::
+
+The three price tags: counting sort needs the **range** $V$ small — it allocates and walks $V$ cells, so $n = 10^5$ values up to $10^9$ is a $10^9$-cell, $10^9$-step table. Bucket sort needs a **guarantee** — even spread (uniform inputs, sort each bucket) or a structural proof that only bucket *extremes* matter; scatter into arbitrary buckets and sort each the wrong way and you have quicksort with extra steps. Radix needs **fixed-length keys over a small alphabet** (non-negative integers, padded strings); it is linear with a big constant and rarely beats `std::sort` unless $n$ is huge and the keys are short. And the escape hatch when all three prices are too high: **coordinate compression** (@sec-srt-a4) shrinks a $10^9$ *value* range to an $n$ *rank* range — you cannot count $10^9$ values, but you can always count $n$ ranks.
+
+```text
+counting   cnt = array(V); for x: cnt[x] += 1; for v in 0..V-1: emit v  cnt[v] times
+           O(n + V) - needs small V
+bucket     b = bucket_of(x) by position in [min, max]; scatter, sort/scan each
+           O(n + B) - needs spread or a theorem about what matters
+radix      for each digit, low to high: STABLE counting sort by that digit
+           O(d(n + B)) - needs fixed-length, small-alphabet keys
+merge sort, quicksort, quickselect: the Sorting Algorithms chapter
+```
+
+::: {#fig-srt-a3-choose}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a3_draw(ax, p):
+    V.grid(ax, p, [
+        ["sort", "needs", "cost", "breaks when"],
+        ["counting", "small value range V", "O(n + V)", "V reaches 10^9 (LC 164)"],
+        ["bucket", "even spread, or a seam theorem", "O(n + B)", "no guarantee about buckets"],
+        ["radix", "fixed-length small-alphabet keys", "O(d(n + B))", "keys vary in length"],
+        ["comparison", "nothing but <", "O(n log n)", "never - the safe default"],
+    ], row_labels=["", "A3", "A3", "A3", "default"],
+       colors={(1, 0): "cyan", (2, 0): "violet", (3, 0): "amber", (4, 0): "green"})
+V.show(a3_draw)
+```
+
+The decision table, and the honest last row: `std::sort` needs nothing and never breaks, which is why it stays the default. The linear sorts earn their speed only when their *precondition* is written in the constraints — a fixed small range (the $0 \dots 1000$ of @sec-srt-p3-a), provable irrelevance of within-bucket detail (@sec-srt-p3-b), or short fixed keys. Merge sort and quickselect, the *how* of the sorts themselves, belong to the Sorting Algorithms chapter, and the full treatment of the linear sorts to the Linear-Time Sorting chapter.
+
+:::
+
+```{python}
+#| label: arr-srt-a3-demo
+def counting_sort(a, V):
+    cnt = [0] * V
+    for x in a:
+        cnt[x] += 1
+    out = []
+    for v in range(V):                    # values in order; cnt[v] copies each
+        out += [v] * cnt[v]
+    return out
+
+def radix_sort(a):                        # non-negative ints, LSD radix, base 10
+    out = list(a)
+    width = max((len(str(x)) for x in out), default=1)
+    for d in range(width):                # least significant digit first
+        buckets = [[] for _ in range(10)]
+        for x in out:
+            buckets[(x // 10 ** d) % 10].append(x)
+        out = [x for b in buckets for x in b]   # concatenation IS the stable sort
+    return out
+
+def counting_sort_stable(items, key, V):          # records, not just numbers
+    cnt = [0] * (V + 1)
+    for it in items:
+        cnt[key(it) + 1] += 1
+    for v in range(V):                    # prefix sums: cnt[v] = first slot of key v
+        cnt[v + 1] += cnt[v]
+    out = [None] * len(items)
+    for it in items:                      # left to right: equal keys keep input order
+        out[cnt[key(it)]] = it
+        cnt[key(it)] += 1
+    return out
+
+for _ in range(300):
+    a = [random.randrange(1000) for _ in range(random.randint(0, 20))]
+    assert counting_sort(a, 1000) == sorted(a)
+    assert radix_sort(a) == sorted(a)
+    recs = [(random.randrange(5), i) for i in range(random.randint(0, 12))]
+    assert counting_sort_stable(recs, lambda r: r[0], 5) == sorted(recs, key=lambda r: r[0])
+assert counting_sort([2, 0, 2, 1], 3) == [0, 1, 2, 2]
+assert radix_sort([170, 45, 75, 90, 802, 24, 2, 66]) == [2, 24, 45, 66, 75, 90, 170, 802]
+print("a3 demo OK")
+```
+
+`counting_sort_stable` is the version that sorts *records* by a small key: the prefix sums of the counts (@sec-pref) say where each key's block starts, and placing items left to right keeps equal keys in input order, which is exactly the stability radix sort needs from each pass (the stress test compares it with Python's stable `sorted`). @fig-srt-anim-radix shows the radix passes on the classic example.
+
+::: {#fig-srt-anim-radix}
+
+```{python}
+#| echo: false
+a3_rad = [170, 45, 75, 90, 802, 24, 2, 66]
+a3_frames = [(list(a3_rad), None)]
+_cur = list(a3_rad)
+for _d in range(3):
+    _b = [[] for _ in range(10)]
+    for _x in _cur:
+        _b[(_x // 10 ** _d) % 10].append(_x)
+    _cur = [_x for _bb in _b for _x in _bb]
+    a3_frames.append((list(_cur), _d))
+del _d, _b, _x
+assert a3_frames[-1][0] == sorted(a3_rad) == [2, 24, 45, 66, 75, 90, 170, 802]
+_names = ["ones", "tens", "hundreds"]
+
+def a3_frame(ax, p, t):
+    vals, d = a3_frames[t]
+    if d is None:
+        V.array(ax, p, vals, note="input")
+        return
+    digits = [(v // 10 ** d) % 10 for v in vals]
+    pal = ["indigo", "cyan", "green", "amber", "pink", "violet", "red", "muted", "indigo", "cyan"]
+    V.array(ax, p, vals, colors={i: pal[g] for i, g in enumerate(digits)},
+            note=f"after the stable pass on the {_names[d]} digit: digits {digits}")
+
+a3_caps = ["input: 170 45 75 90 802 24 2 66"] + [
+    f"pass {t}: stable by the {_names[d]} digit -> " + " ".join(map(str, vals))
+    for t, (vals, d) in enumerate(a3_frames) if d is not None]
+V.animate(a3_frame, len(a3_frames), captions=a3_caps, interval=1300)
+```
+
+LSD radix sort, one stable pass per digit from the lowest. Colours mark the digit each pass sorted by. Watch $802$ and $2$ on the tens pass: both have tens digit $0$, and stability keeps $802$ before $2$ as the ones pass left them. The hundreds pass then puts $2$ first and $802$ last.
+
+:::
+
+Watch *where* each demo's information comes from: counting sort never looks at two elements together — it looks at a **value as an index**, which is exactly the move @sec-srt-p3-a makes with a histogram, and exactly the move LC 164 cannot make. Radix sort's inner loop is a counting sort by *one digit*, run low digit to high; the concatenation order is load-bearing — drop stability and $802$ outruns $90$ on the tens pass. Both are comparison-free, and both are $O(n)$ only because the *alphabet* ($1000$, $10$) is a constant. When the range is the problem but $n$ is not, do not reach for a wider table: reach for A4.
+
+## A4. Ranks and coordinate compression in one line {#sec-srt-a4}
+
+::: {.callout-note title="In plain words"}
+When only the **relative order** of values matters — ranks, "smaller than how many?", adjacency in a Fenwick tree or segment tree over *values* — the magnitudes are decoration. **Coordinate compression** replaces every value by its position in the sorted list of distinct values: huge sparse numbers ($-10^9 \dots 10^9$) become dense indices $1 \dots n$. The entire recipe is one line: `rank = {v: i + 1 for i, v in enumerate(sorted(set(a)))}`, then look each element up. It is *not* a sorting algorithm; it is sorting used as a translation device, and it is the reason "values up to $10^9$" in a statement is no longer scary.
+:::
+
+Three variants, one idea. **Rank with ties** (equal values share a rank): compress `set(a)` — @sec-srt-p4-a's LC 1331. **Index without ties** (a strict order even for equal values, e.g. "the $i$-th occurrence"): sort `enumerate(a)` pairs — pairs sort tie-safe because the index breaks every tie. **Value range to table index**: when an array is indexed by value and the values are merely *sparse* (a few of $10^9$), compression turns a $10^9$ table into $n+1$ cells — the same move A3's price tag demands, paid in one sort instead of a bigger table.
+
+```text
+rank = {v: i + 1 for i, v in enumerate(sorted(set(a)))}   # dict comprehension:
+  set(a)      collapse duplicates        -> ties share a rank
+  sorted      increasing distinct values -> ranks are dense 1..|set|
+  enumerate   position becomes the rank  -> lookup per element is O(1)
+strict variant:  sorted(enumerate(a), key=lambda t: a[t[0]])   # pairs, tie-safe
+```
+
+::: {#fig-srt-a4-compress}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a4_draw(ax, p):
+    V.trace(ax, p, [
+        dict(values=["-10^9", "7", "7", "123456789"], label="values",
+             note="sparse", cell_w=2.4),
+        dict(values=["1", "2", "2", "3"], label="ranks",
+             colors={0: "cyan", 1: "green", 2: "green", 3: "violet"},
+             note="dense; equal 7's share rank 2", cell_w=2.4),
+    ])
+    V.text(ax, p, 4.8, -5.8,
+           "sorted(set) = [-10^9, 7, 123456789] -> rank dict -> one lookup per element", size=9)
+V.show(a4_draw)
+```
+
+Four values spanning $2 \cdot 10^9$ become three ranks. Whatever downstream structure needed a cell per *value* (a histogram, a Fenwick tree, a "process values in order" sweep) now needs a cell per *rank* — $n+1$ of them. The duplicates mapping to the same rank is the point of taking `set` **before** `sorted`; swap the order and you pay the sort for nothing and lose the tie-sharing.
+
+:::
+
+```{python}
+#| label: arr-srt-a4-demo
+def compress(a):
+    rank = {v: i + 1 for i, v in enumerate(sorted(set(a)))}
+    return [rank[v] for v in a]
+
+assert compress([40, 10, 20, 30]) == [4, 1, 2, 3]              # LC 1331
+assert compress([100, 100, 100]) == [1, 1, 1]
+assert compress([]) == []
+assert compress([-10 ** 9, 7, 7, 123456789]) == [1, 2, 2, 3]   # range -> ranks
+# the strict variant: distinct indices for equal values, via enumerate
+a = [5, 3, 5, 1]
+order = sorted(range(len(a)), key=lambda i: (a[i], i))
+assert order == [3, 1, 0, 2]                                   # first 5 (index 0) before second
+assert len(set(compress(a))) == len(set(a))                     # compression preserves equality
+for _ in range(200):
+    a = [random.randint(-100, 100) for _ in range(random.randint(0, 15))]
+    c = compress(a)
+    assert all((c[i] < c[j]) == (a[i] < a[j]) for i in range(len(a)) for j in range(len(a)))
+print("a4 demo OK")
+```
+
+The stress assert is the contract in one line: compression is **order-reflecting and equality-preserving** — $c_i < c_j \iff a_i < a_j$. Any algorithm that only ever *compares* values can be rewritten over ranks without changing its answer, which is why compression is the standard preliminary to any structure indexed by value (the Fenwick/segment-tree chapters will meet it again as "compress, then index by rank"). The cost is one $O(n\log n)$ sort and a dict; @sec-srt-p4-a is the whole problem once you have this line.
+
+## A5. Sorting to minimise a cost: the median and exchange arguments {#sec-srt-a5}
+
+::: {.callout-note title="In plain words"}
+Sorting is not only a preprocessing step — it *is* the algorithm for a family of optimisation problems, proved by an **exchange argument** (@sec-pf-greedy): show that any solution violating the sorted order can be swapped into sorted order without getting worse, so a best solution is sorted. The flagship: gather everyone to one point, paying distance — $\min_t \sum_i |x_i - t|$ — and the answer is the **median**, the middle of the sorted list. The proof is a slide: move $t$ one step right and the cost changes by (how many sit to the left) minus (how many sit to the right); the change flips sign exactly once, at the middle. Mean? That minimises *squared* deviations — a different objective; absolute values are the median's territory.
+:::
+
+Two faces of the same proof technique. **Ordering exchanges** say the *arrangement* is optimal: Largest Number's swap proof (@sec-lang-p3-largest) shows any adjacent inversion $a{+}b < b{+}a$ can be swapped without decreasing the number, so the best arrangement is comparator-sorted. **Position exchanges** say the *location* is optimal: the median slide above, and its weighted version — treat a value with cost $c$ as $c$ clones of a unit-price stick at that spot, run the same slide with counts replaced by weights, and the flip point becomes the **weighted median**: the first position whose cumulative weight reaches half the total (@sec-srt-p5-b). Both faces need no algorithm theory — just "if it were out of order, swapping would help", checked once, then sortedness does the rest.
+
+```text
+minimise  sum |x_i - t|          -> any median of the x_i   (slide: cost changes by
+                                     #left - #right; flips sign only at the middle)
+minimise  sum w_i |x_i - t|      -> weighted median: sort pairs by x, walk cumulative
+                                     w, stop at 2*cum >= total
+maximise  concatenation          -> exchange adjacent pairs: sort by the pairwise rule
+                                     (a+b beats b+a) - proof per ordering, not per element
+```
+
+::: {#fig-srt-a5-slide}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a5_draw(ax, p):
+    V.trace(ax, p, [
+        dict(values=[1, 2, 4, 4, 9], label="x (sorted)",
+             pointers=[(2, "t = 4", "indigo", "bottom")], note="cost(t) = 10 (median)"),
+        dict(values=[1, 2, 4, 4, 9], label="t = 5",
+             colors={0: "muted", 1: "muted", 2: "muted", 3: "muted"},
+             note="cost 13: four points farther, one closer"),
+        dict(values=[1, 2, 4, 4, 9], label="t = 3",
+             colors={2: "muted", 3: "muted", 4: "muted"},
+             note="cost 11: three points farther, two closer"),
+    ])
+    V.text(ax, p, 2.5, -10.0, "the two 4's pin the median exactly at 4; the cost rises either way",
+           size=9)
+V.show(a5_draw)
+```
+
+The slide made visible on $x = [1, 2, 4, 4, 9]$: at $t = 4$ the total distance is $10$; every direction you move $t$ increases it, because at the median neither side holds a strict majority. The same three-row picture, with counts replaced by cumulative **weights**, is @sec-srt-p5-b's algorithm; the same "swap the inversion" logic is @sec-lang-p3-largest's proof.
+
+:::
+
+```{python}
+#| label: arr-srt-a5-demo
+def mad(a, t):                          # the objective: sum of absolute deviations
+    return sum(abs(x - t) for x in a)
+
+def mad_brute(a):                       # oracle: f is piecewise-linear, so its minimum
+    return min(mad(a, t) for t in set(a))   # sits at a data point
+
+def mad_median(a):                      # claim: at the median
+    b = sorted(a)
+    return mad(b, b[len(b) // 2])
+
+for _ in range(300):
+    a = [random.randint(-30, 30) for _ in range(random.randint(1, 13))]
+    assert mad_median(a) == mad_brute(a)
+odd = [1, 2, 4, 4, 9]
+assert mad_brute(odd) == mad_median(odd) == 10     # the 4 is the unique data-point winner
+even = [1, 2, 4, 9, 9, 20]
+assert mad(even, 4) == mad(even, 9) == mad_median(even) == 31   # any t in [4, 9] ties
+print("mad-median OK")
+```
+
+Read the even case slowly: with $[1, 2, 4, 9, 9, 20]$ every $t$ between the two middle values ($4$ and $9$) scores the same $31$ — the cost curve has a **flat segment**, and `b[len(b)//2]` simply picks one end of it. CSES 1074 does not promise odd $n$, so this flat segment really occurs there; `b[n//2]` lands on one end of it and is still optimal. The reusable trigger: the moment your objective is a sum of **distances** (absolute, priced by a per-item rate, or over tree positions), sort and stand in the middle — @sec-srt-p5-a and @sec-srt-p5-b are this lesson with a story each, and @sec-arr-cost's overflow warning still applies to every accumulator afterwards.
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that say "use me," a boxed template with its invariant, and its complexity. Then its problems: statement, the one key observation, brute force refined into the pattern, runnable Python stress-tested against brute force, matching C++, complexity, and edge cases. P2 and P4 each also point, with a card, to a problem solved in @sec-lang-p3 instead of re-solving it. Every form of each problem carries a trace board, so you watch the brute force and each refinement do their work.
+
+## Pattern 1: Sort, then scan neighbours {#sec-srt-p1}
+
+**Where we are.** Part A listed what a sort buys; Part B spends it in five steps, each adding one idea to the last. P1 spends the plainest purchase, *neighbours*: sort by value, and the answer sits between adjacent elements. P2 changes **which order** you sort into: a rule you design from the problem and prove consistent. P3 changes **how** you sort: when the values are small, or only their position in a range matters, skip comparisons altogether. P4 changes **what you sort on**: ranks, or counts computed from the whole array. P5 uses the sorted order to **place a point**: the median and its weighted version.
+
+Pattern 1 is A1's first purchase: sortedness makes the answer **local**. Over an unsorted array, "the two closest values" or "the biggest successive gap" hides among $\binom{n}{2}$ pairs; over a sorted array it is always realised by two *neighbours*, so one $O(n)$ pass over $n-1$ adjacent pairs finishes the job. Both problems here are the very same scan — one wants the smallest gap (Minimum Absolute Difference), the other wants the smallest gap dressed as a team split (Honest Coach).
+
+**Recognise it.** "Minimum absolute difference between any two elements", "closest pair", "split into two groups minimising the gap at the seam", or any extremum over *pairs of values* where the values themselves carry no positional meaning. Constraints $n \le 10^5$ rule out the $O(n^2)$ pair loop and price in one $O(n\log n)$ sort.
+
+::: {.callout-important title="Template"}
+Sort once; the answer is between neighbours.
+
+```text
+b = sorted(a)
+best = min(b[i+1] - b[i] for i in 0 .. n-2)     # smallest gap
+# collect every pair that ties it, or take the seam directly
+```
+
+**Invariant.** For $i < j$, $b[j] - b[i]$ is a *sum* of adjacent gaps, so it is never smaller than the least adjacent gap; hence $\min$ over all pairs $= \min$ over the $n-1$ adjacent pairs, and every optimal pair is adjacent in sorted order.
+:::
+
+**Complexity.** $O(n\log n)$ time (the sort dominates; the scan is $O(n)$), $O(n)$ space for the sorted copy. The brute $O(n^2)$ pair scan is the oracle both problems test against.
+
+::: {#fig-srt-anim-neighbours}
+
+```{python}
+#| echo: false
+p1_nums = [8, 3, 1, 6]
+p1_b = sorted(p1_nums)                     # [1, 3, 6, 8]
+p1_frames = []                             # (i, gap, best)
+_p1_best = math.inf
+for _i in range(1, len(p1_b)):
+    _g = p1_b[_i] - p1_b[_i - 1]
+    _p1_best = min(_p1_best, _g)
+    p1_frames.append((_i, _g, _p1_best))
+del _i, _g, _p1_best
+assert p1_frames[-1][2] == 2 and p1_b == [1, 3, 6, 8]
+
+def p1_frame(ax, p, t):
+    i, gap, best = p1_frames[t]
+    cols = {j: "muted" for j in range(len(p1_b))}
+    cols[i - 1] = "indigo"; cols[i] = "green"
+    V.array(ax, p, p1_b, colors=cols,
+            pointers=[(i - 1, "a", "indigo", "bottom"), (i, "b", "violet", "top")],
+            note=f"gap {gap}; best so far {best}")
+
+p1_caps = [f"neighbours ({p1_b[i - 1]}, {p1_b[i]}): gap {g}; best {b}"
+           for i, g, b in p1_frames]
+V.animate(p1_frame, len(p1_frames), captions=p1_caps, interval=1100)
+```
+
+The adjacent scan over $[8, 3, 1, 6]$ sorted to $[1, 3, 6, 8]$: each frame compares one neighbour pair, and the minimum gap $2$ is attained twice — $(1, 3)$ and $(6, 8)$ — never needing a non-adjacent check.
+
+:::
+
+{{< include ../problems/lc-1200-minimum-absolute-difference/problem.qmd >}}
+
+[**From the pure closest pair to a story about teams.** Minimum Absolute Difference returns every adjacent pair at the minimum gap. Honest Coach hides the same scan inside a split-into-two-teams question — the seam $|\max(A) - \min(B)|$ is just one adjacent gap, so the smallest achievable seam is the smallest adjacent difference.]{.flow-bridge}
+
+{{< include ../problems/cf-1360b-honest-coach/problem.qmd >}}
+
+## Pattern 2: Custom comparators {#sec-srt-p2}
+
+**From the value order to an order you design.** Pattern 1 sorted by the values themselves; the only design choice was to sort at all. Sometimes the correct order is not "by value" but "by a rule the problem forces on you", and the whole algorithm is a single sort once that rule is stated as a valid comparator (A2's contract). Queue Reconstruction needs a *two-key* order with mixed directions (height down, $k$ up) and a greedy insertion after it; Robot Vacuum Cleaner needs a genuinely *pairwise* rule, derived from an exchange argument and then shown to be a key in disguise.
+
+**Recognise it.** "Largest number by concatenating", "rearrange so that $a$ before $b$ iff some pairwise test holds", "rebuild an order from partial constraints", or any greedy that first sorts by a rule involving *two* elements together. The tell is that the ordering depends on a **pair**, not on each element's own score — so you need a comparator (`cmp_to_key`, a C++ lambda), not just a key.
+
+::: {.callout-important title="Template"}
+Turn the rule into an order; prove it is a strict weak ordering; sort.
+
+```text
+key form   sorted(a, key=lambda x: (k1, -k2))        # several criteria, mixed directions
+cmp  form  cmp_to_key(comp)  /  sort(v, comp)        # pairwise rule:
+           comp(a, b) = "a strictly before b?"  - never <=  (strict weak ordering)
+tie-safe   include the index in the key: sort indices when values must not move
+```
+
+**Invariant.** The comparator agrees with a genuine total order on the (possibly tied) items — irreflexive, transitive, ties transitive — so the sort produces one canonical arrangement and `std::sort`'s partitioning never walks off an endpoint.
+:::
+
+**Complexity.** $O(n\log n)$ comparisons (each costing whatever the rule costs — for string concatenation, the string length); Python caches a key per element, so a *key* sort is $O(n\log n)$ comparisons on $n$ precomputed scores. The design work is proving the comparator, not the sort.
+
+::: {#fig-srt-anim-queue}
+
+```{python}
+#| echo: false
+p2_people = [[7, 0], [4, 4], [7, 1], [5, 0], [6, 1], [5, 2]]
+p2_order = sorted(p2_people, key=lambda q: (-q[0], q[1]))
+p2_out = []
+p2_frames = []                             # (labels, kpos)
+for _q in p2_order:
+    p2_out.insert(_q[1], list(_q))
+    p2_frames.append(([f"{a},{b}" for a, b in p2_out], _q[1]))
+del _q
+assert str(p2_out) == "[[5, 0], [7, 0], [5, 2], [6, 1], [4, 4], [7, 1]]"
+assert p2_order[0] == [7, 0] and p2_order[1] == [7, 1]     # tall-first, k-ascending
+
+def p2_frame(ax, p, t):
+    labels, kpos = p2_frames[t]
+    cols = {j: "muted" for j in range(len(labels))}
+    cols[kpos] = "green"
+    V.array(ax, p, labels, colors=cols,
+            pointers=[(kpos, "k", "indigo", "bottom")],
+            note=f"insert at index {kpos}; queue size {len(labels)}")
+
+p2_caps = [f"place {p2_frames[t][0][p2_frames[t][1]]} at index {k}"
+           for t, (_, k) in enumerate(p2_frames)]
+V.animate(p2_frame, len(p2_frames), captions=p2_caps, interval=1150)
+```
+
+Tall-first, $k$-ascending order $[7,0],[7,1],[6,1],[5,0],[5,2],[4,4]$ dropped into a growing line one position at a time: each person lands at index $k$ among the already-placed (taller-or-equal) people, and later, shorter insertions never disturb an earlier $k$-count.
+
+:::
+
+{{< include ../problems/lc-0406-queue-reconstruction-by-height/problem.qmd >}}
+
+[**From two keys to a pairwise rule.** Queue Reconstruction's order was a tuple key, each person scored alone. In Robot Vacuum Cleaner no single score is visible at first: the order comes from asking what swapping two neighbours changes, and only afterwards turns out to be a ratio.]{.flow-bridge}
+
+{{< include ../problems/cf-922d-robot-vacuum-cleaner/problem.qmd >}}
+
+**The sibling solved in @sec-lang-p3.** The other comparator this pattern is famous for, Largest Number, uses the same exchange reasoning as Robot Vacuum Cleaner on whole strings: put $a$ before $b$ iff $a{+}b > b{+}a$. It is solved in full where comparators first appear; the comparator passes the `is_strict_weak` check of @sec-srt-a2, and its Codeforces mirror (CF 632C, minimise instead of maximise) is in the practice list.
+
+{{< include ../problems/lc-0179-largest-number/card.qmd >}}
+
+## Pattern 3: Counting and bucket sort {#sec-srt-p3}
+
+**From designing the order to skipping comparisons.** Patterns 1 and 2 always paid $O(n\log n)$ comparisons; only the order changed. Pattern 3 keeps the order fixed and changes *how* it is produced, using A3's linear sorts on real inputs. When the **value range** is small, counting sort beats every comparison sort by indexing `count[v]` directly; when the range is huge but the answer provably lives *between* buckets, bucket sort plus the pigeonhole principle keeps it linear anyway. Relative Sort Array is the counting case ($0 \le v \le 1000$); Maximum Gap is the bucket case ($v$ up to $10^9$, histogram impossible).
+
+**Recognise it.** Values bounded by a small constant ($\le 10^3$–$10^6$) with an order to respect → counting sort. Or a "maximum successive difference after sorting" over a huge range where $O(n\log n)$ is explicitly disallowed → bucket + pigeonhole. Or a fixed tiny alphabet (colours, 3 values) → counting in place.
+
+::: {.callout-important title="Template"}
+Index by value (counting), or by position-in-range (bucket).
+
+```text
+counting   cnt = [0]*V; for x: cnt[x] += 1; for v in 0..V-1: emit v cnt[v] times
+           O(n + V) - only when V is small; arr2-first then leftovers = a custom emit order
+bucket     width = max(1, (mx-mn)//(n-1)); b = (x-mn)//width; keep only per-bucket min,max
+           answer = max over seams: min of a non-empty bucket - max of the previous one
+```
+
+**Invariant.** Counting: emitting value $v$ exactly `cnt[v]` times preserves the multiset, and the *walk order* is the sort order. Bucket: the $n-1$ gaps add up to $\max - \min$, so the largest is at least their average, which is $\ge$ the bucket width (pigeonhole); a within-bucket difference is at most width $-1$, so the max gap always joins two different buckets, and storing only per-bucket extremes loses nothing.
+:::
+
+**Complexity.** Counting $O(n + V)$ time, $O(V)$ space — linear when $V$ is a small constant. Bucket $O(n)$ time, $O(n)$ space. Both strictly beat the $O(n\log n)$ comparison route *because* they exploit value structure the comparison model is blind to.
+
+::: {#fig-srt-anim-bucket}
+
+```{python}
+#| echo: false
+p3_nums = [3, 6, 9, 1]
+p3_mn, p3_mx, p3_n = min(p3_nums), max(p3_nums), len(p3_nums)
+p3_w = max(1, (p3_mx - p3_mn) // (p3_n - 1))               # width 2
+p3_nb = (p3_mx - p3_mn) // p3_w + 1                        # 5 buckets
+p3_bmin = [math.inf] * p3_nb
+p3_bmax = [-math.inf] * p3_nb
+for _x in p3_nums:
+    _i = (_x - p3_mn) // p3_w
+    p3_bmin[_i] = min(p3_bmin[_i], _x)
+    p3_bmax[_i] = max(p3_bmax[_i], _x)
+del _x, _i
+p3_frames = []                                             # (b, kind, gap)
+_p3_gap, _p3_prev = 0, p3_bmax[0]
+for _b in range(1, p3_nb):
+    if math.isinf(p3_bmin[_b]):
+        p3_frames.append((_b, "empty", _p3_gap)); continue
+    _p3_gap = max(_p3_gap, int(p3_bmin[_b] - _p3_prev))    # min here - max of previous
+    _p3_prev = p3_bmax[_b]
+    p3_frames.append((_b, "seam", _p3_gap))
+del _b, _p3_gap, _p3_prev
+assert p3_bmin == [1, 3, 6, math.inf, 9] and p3_frames[-1][2] == 3     # answer 3
+assert p3_frames[-1][2] == max(b - a for a, b in zip(sorted(p3_nums), sorted(p3_nums)[1:]))
+
+def p3_frame(ax, p, t):
+    b, kind, gap = p3_frames[t]
+    disp = ["." if math.isinf(v) else int(v) for v in p3_bmin]
+    cols = {j: "muted" for j in range(p3_nb)}
+    cols[b] = "red" if kind == "empty" else "green"
+    V.array(ax, p, disp, colors=cols, index=True,
+            note=f"bucket {b} {'empty: skip it' if kind == 'empty' else 'seam'}; best {gap}")
+
+p3_caps = [(f"bucket {b} is empty: the next seam will jump over it" if kind == "empty"
+            else f"seam into bucket {b} (its min minus the previous max): best gap {gap}")
+           for b, kind, gap in p3_frames]
+V.animate(p3_frame, len(p3_frames), captions=p3_caps, interval=1200)
+```
+
+Maximum Gap on $[3, 6, 9, 1]$ with width $2$: bucket mins $[1, 3, 6, \_, 9]$ (here each bucket holds one value, so its min is also its max). Each seam is a bucket's min minus the previous non-empty bucket's max; bucket $3$ is empty and the seam $6 \to 9$ jumps over it. The answer $3$ is a seam, as the averaging bound promises.
+
+:::
+
+{{< include ../problems/lc-1122-relative-sort-array/problem.qmd >}}
+
+[**From a small range to a huge one.** Relative Sort Array can afford a histogram: values are $0..1000$, so counting sort emits in `arr2` order and the leftovers ascending for free. Maximum Gap cannot: values reach $10^9$, so the same "index it" instinct pivots to bucket sort and a pigeonhole proof that only bucket extremes matter.]{.flow-bridge}
+
+{{< include ../problems/lc-0164-maximum-gap/problem.qmd >}}
+
+
+## Pattern 4: Ranks and sorting by derived keys {#sec-srt-p4}
+
+**From how you sort to what you sort on.** Pattern 3 changed the sorting machinery and kept sorting the values. Pattern 4 keeps the machinery (a plain library sort) and changes the *thing being sorted*: a number computed from the whole array first. Two flavours: **coordinate compression** replaces each value by its rank in `sorted(set(...))` (Rank Transform *is* that dictionary), and **derived-key sorting** sorts counts or any attribute read from a table (Equalize the Array sorts the list of frequencies and forgets the values entirely).
+
+**Recognise it.** "Replace each value by its rank / order-statistic", "values up to $10^9$ but only relative order matters" → compress. Or "sort by how *often* each value appears", "ties broken by value", "order by an attribute you first had to count" → sort on a derived key. The tell is that the sort key is **not** the element itself but a number computed from the whole array first.
+
+::: {.callout-important title="Template"}
+Compute the key from the data, then sort/lookup by it.
+
+```text
+compression  rank = {v: i+1 for i, v in enumerate(sorted(set(a)))};  [rank[v] for v in a]
+derived key  score = Counter(a)  /  any table keyed by value
+             sorted(set(a), key=lambda v: (score[v], -v))   # tuple key: primary + tie-break
+```
+
+**Invariant.** Compression is order-reflecting and equality-preserving: $\mathit{rank}[a] < \mathit{rank}[b] \iff a < b$, and $\mathit{rank}[a] = \mathit{rank}[b] \iff a = b$. A derived-key sort is stable, so a secondary criterion can be layered by a second sort or folded into the tuple key.
+:::
+
+**Complexity.** Compression $O(n\log n)$ time (the sort), $O(n)$ space (set + dict), $O(1)$ lookup per element. Derived-key sort $O(n\log n)$ with an $O(n)$ counting pass first. Both beat any per-element $O(n)$ rescan of the distinct set. If you want to skip the dict and still escape the $O(n \cdot |\text{distinct}|)$ brute rescan, sort the distinct list once and binary-search per element (`bisect_left` + 1): $O(\log n)$ lookup, $O(n\log n)$ overall — the intermediate rung @sec-srt-p4-a walks before settling on the one-line dict.
+
+::: {#fig-srt-anim-rank}
+
+```{python}
+#| echo: false
+p4_arr = [40, 10, 20, 30]
+p4_uniq = sorted(set(p4_arr))                      # [10, 20, 30, 40]
+p4_rank = {v: i + 1 for i, v in enumerate(p4_uniq)}
+p4_res = []
+p4_frames = []                                     # (idx, v, rk, res snapshot)
+for _idx, _v in enumerate(p4_arr):
+    p4_res.append(p4_rank[_v])
+    p4_frames.append((_idx, _v, p4_rank[_v], list(p4_res)))
+del _idx, _v
+assert p4_res == [4, 1, 2, 3] and p4_uniq == [10, 20, 30, 40]
+
+def p4_frame(ax, p, t):
+    idx, v, rk, res = p4_frames[t]
+    cols = {j: "muted" for j in range(len(p4_arr))}
+    cols[idx] = "green"
+    V.array(ax, p, p4_arr, colors=cols,
+            pointers=[(idx, str(rk), "indigo", "bottom")],
+            note=f"{v} -> rank {rk}; ranks so far {res}")
+
+p4_caps = [f"{v} sits at index {rk - 1} of the distinct list -> rank {rk}"
+           for _, v, rk, _ in p4_frames]
+V.animate(p4_frame, len(p4_frames), captions=p4_caps, interval=1150)
+```
+
+Coordinate compression on $[40, 10, 20, 30]$: the distinct values in order $[10, 20, 30, 40]$ assign each value its $1$-based rank, so the array becomes $[4, 1, 2, 3]$ — one sort, one dictionary, one lookup per element, and negative or huge magnitudes stop mattering.
+
+:::
+
+{{< include ../problems/lc-1331-rank-transform-of-an-array/problem.qmd >}}
+
+[**From ranks of values to a sort over counts.** Rank Transform still reports something per element. Equalize the Array throws the values away after counting them, sorts the counts, and reads "how many values occur at least $C$ times" off a position in that sorted list.]{.flow-bridge}
+
+{{< include ../problems/cf-1490f-equalize-the-array/problem.qmd >}}
+
+**The sibling solved in @sec-lang-p3.** The other derived-key problem, sorting the *elements* by how often their value occurs, is solved in full where the `Counter`-then-`sorted(key=...)` idiom first appears. Equalize the Array sorted the counts themselves; that problem sorts the elements by their counts, with the value as a tie-break.
+
+{{< include ../problems/lc-1636-sort-array-by-increasing-frequency/card.qmd >}}
+
+## Pattern 5: The median and exchange arguments {#sec-srt-p5}
+
+**From sorting to placing a point.** Patterns 1 to 4 used the sorted order to *read* something: neighbours, an arrangement, ranks, counts. Pattern 5 uses it to *choose* something, a single target point, with A5's theorem. When the objective is a sum of **distances** to a common point, the answer is a median and the proof is an exchange argument: slide the target and count how many items you come closer to versus move away from. Stick Lengths is the plain median (unit weights); Minimum Cost to Make Array Equal is the **weighted** median (each value carries a price per unit distance).
+
+**Recognise it.** "Make all elements equal, cost $=$ total movement", "choose a point minimising $\sum |x_i - t|$", "gather the sticks", any objective that is a sum of **absolute deviations** — with or without a per-item weight. The absence of squares is the tell: absolute values → median; squared values → mean (a different, easier, calculus-flavoured objective).
+
+::: {.callout-important title="Template"}
+Sort, then stand at the (weighted) median; the exchange argument licenses it.
+
+```text
+plain     b = sorted(x); t = b[n//2]; cost = sum(|xi - t|)
+weighted  pairs = sorted(zip(val, w)); total = sum(w); cum = 0
+          for (v, w): cum += w; if 2*cum >= total: t = v; break   # weighted median
+```
+
+**Invariant.** Moving the target one step right changes the objective by (weight strictly on the left) $-$ (weight strictly on the right); it is negative while the right holds a strict majority. The first position where the running weight reaches half the total has no majority on either side, hence is a minimiser.
+:::
+
+**Complexity.** $O(n\log n)$ time (the sort dominates; the walk and final sum are $O(n)$), $O(n)$ space; a selection algorithm (quickselect) finds the plain median in expected $O(n)$ without a full sort. The oracle is the $O(n \cdot |\text{distinct}|)$ "try every value as target" scan, since the cost function's slope only changes at a data point. Between them sits a rung that needs no median insight at all: sort, build prefix sums (weighted prefix sums for the priced version), and evaluate the cost at every data point in $O(1)$ — $O(n\log n)$ total, exercised in @sec-srt-p5-a and @sec-srt-p5-b. Use 64-bit accumulators: these sums reach $10^{12}$–$10^{14}$ (@sec-arr-cost).
+
+::: {#fig-srt-anim-wmedian}
+
+```{python}
+#| echo: false
+p5_pairs = sorted(zip([1, 3, 5, 2], [2, 3, 1, 14]))   # [(1,2),(2,14),(3,3),(5,1)]
+p5_total = sum(c for _, c in p5_pairs)                # 20
+_p5_cum, _p5_target = 0, None
+p5_frames = []                                        # (i, v, c, cum, target, crossed)
+for _i, (_v, _c) in enumerate(p5_pairs):
+    _p5_cum += _c
+    _crossed = _p5_target is None and 2 * _p5_cum >= p5_total
+    if _crossed:
+        _p5_target = _v
+    p5_frames.append((_i, _v, _c, _p5_cum, _p5_target, _crossed))
+del _i, _v, _c, _crossed
+assert _p5_target == 2 and p5_total == 20
+del _p5_cum, _p5_target
+
+def p5_frame(ax, p, t):
+    i, v, c, cum, tgt, crossed = p5_frames[t]
+    labels = [f"{a}:{b}" for a, b in p5_pairs]        # value:cost
+    cols = {j: "muted" for j in range(len(labels))}
+    for j in range(i):
+        cols[j] = "indigo"
+    cols[i] = "green" if crossed else "cyan"
+    V.array(ax, p, labels, colors=cols, pointers=[(i, "walk", "violet", "top")],
+            note=f"cumulative cost {cum} of {p5_total}; target {tgt if tgt is not None else '-'}")
+
+p5_caps = [f"value {v} (cost {c}): running weight {cum} vs half of {p5_total}"
+           + (" -> weighted median" if crossed else "")
+           for _, v, c, cum, _, crossed in p5_frames]
+V.animate(p5_frame, len(p5_frames), captions=p5_caps, interval=1200)
+```
+
+The weighted-median walk over pairs sorted by value $(1{:}2), (2{:}14), (3{:}3), (5{:}1)$: cumulative cost passes $10$ (half of $20$) at value $2$, so the target is $2$, and the total cost $\sum c_i |\mathit{nums}_i - 2| = 8$. Each weight is $\mathit{cost}_i$ unit-price clones shouting at the same spot.
+
+:::
+
+{{< include ../problems/cses-1074-stick-lengths/problem.qmd >}}
+
+[**From unit weights to priced ones.** Stick Lengths pays $1$ per unit of change on every stick, so the middle element is optimal. Minimum Cost to Make Array Equal gives each value its own price per unit, and the same exchange argument now stops at the value where cumulative *cost* — not cumulative *count* — crosses half the total.]{.flow-bridge}
+
+{{< include ../problems/lc-2448-minimum-cost-to-make-array-equal/problem.qmd >}}
+
+**Looking back.** Five ways a sort earns its $O(n\log n)$, each one idea past the last. Neighbours (P1) make the answer *local*. Comparators (P2) make an order you designed *legitimate*, whether it is a tuple key or an exchange rule. Counting and buckets (P3) trade the value range for linearity. Ranks and derived keys (P4) sort something computed from the array (ranks, counts) instead of the elements. The median and its weighted version (P5) turn a cost function into a position. The thread through all ten problems is the same: pay for the sort once, and the question that remains is a single linear pass over the sorted order. None of them is "a sorting algorithm"; the Sorting Algorithms and Linear-Time Sorting chapters own that, and the next chapter, @sec-bst, spends the remaining purchase, monotonicity, on binary search.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Closest pair", "minimum absolute difference", two-team seam | Sort, then scan neighbours | @sec-srt-p1 |
+| "Rebuild an order", sort by several fields with mixed directions | Tuple key (prove the greedy after it) | @sec-srt-p2-a |
+| "Arrange pieces to maximise/minimise", order depends on two items together | Exchange argument → comparator → key | @sec-srt-p2-b |
+| Values in a small fixed range with an order to respect | Counting sort (histogram + emit) | @sec-srt-p3-a |
+| "Maximum successive gap" over a $10^9$ range, linear time required | Buckets + averaging bound | @sec-srt-p3-b |
+| "Replace by rank", values up to $10^9$ but only order matters | Coordinate compression `sorted(set)` | @sec-srt-p4-a |
+| "Every value occurs the same number of times", only counts matter | Sort the frequencies, read counts from positions | @sec-srt-p4-b |
+| "Make all equal, cost $=$ total movement" | Median | @sec-srt-p5-a |
+| Movement priced per unit per element | Weighted median (cumulative walk) | @sec-srt-p5-b |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **`<=` in a C++ comparator.** A comparator must be a *strict weak ordering*; `return a <= b;` makes an element "less than" an equal partner, and `std::sort` may read past the array end — wrong answers or crashes. Return `a < b` and handle ties in a separate clause (@sec-srt-a2, @sec-lang-cpp).
+- **Assuming stability you did not ask for.** Python's `sorted` is always stable; C++'s `std::sort` is **not**. Two-pass "sort by name, then stably by grade" scrambles the names inside a grade unless the second pass is `std::stable_sort`, or both fields go into one comparator or tuple key (@sec-srt-a1).
+- **A counting sort over a $10^9$ range.** The histogram is $O(V)$ in *value*, not in $n$; `nums[i]` up to $10^9$ prices it out instantly. Use buckets (@sec-srt-p3-b) or coordinate compression (@sec-srt-p4-a) instead.
+- **Bucket width rounded the wrong way.** Maximum Gap needs a width *no larger* than the average gap, $\lfloor (\max-\min)/(n-1) \rfloor$ (at least $1$). Rounding up can put the answer inside one bucket, where the seam scan never looks (@sec-srt-p3-b).
+- **Sorting the values when the records must move together.** Sort `scores` alone and the parallel `names` array desynchronises. Sort the **indices** (@sec-srt-a2) or zip the pairs (@sec-srt-p5-b) so each value carries its payload.
+- **A floating-point key for a ratio.** Ordering by `s / h` in floating point can merge two different fractions or split two equal ones after rounding; compare by cross-multiplication, or use exact fractions (@sec-srt-p2-b).
+- **Mean instead of median.** $\sum|x_i - t|$ is minimised by the median; only $\sum(x_i - t)^2$ wants the mean (@sec-srt-a5, @sec-srt-p5-a).
+- **Assuming the median is unique.** For even $n$ every point between the two middle values is optimal; CSES 1074 does not promise odd $n$. Code that picks `b[n // 2]` is still right, but a "count the optimal targets" question must measure the flat segment (@sec-srt-a5).
+- **32-bit cost accumulators.** Stick Lengths reaches $\approx 2 \cdot 10^{14}$, LC 2448 promises only "at most $2^{53}-1$", Robot Vacuum Cleaner reaches $2.5 \cdot 10^9$; `int` overflows past $2^{31}-1$. Use `long long` (@sec-arr-cost).
+- **Dropping the tie-break that is load-bearing.** Queue Reconstruction's $k$-ascending secondary key and Maximum Gap's empty-bucket skip are not cosmetic — remove them and the code still *runs*, but on the wrong queue or seam (@sec-srt-p2-a, @sec-srt-p3-b).
+:::
+
+## Exercises
+
+**1. [E] Sort the records `[("Ann","B"), ("Bob","A"), ("Cid","A"), ("Dan","B"), ("Eve","A")]` by grade ascending, then by name ascending, using (a) one tuple key and (b) two separate `sorted` calls. Do the two methods agree, and in what order must the two calls in (b) run?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Both give `[Bob/A, Cid/A, Eve/A, Ann/B, Dan/B]`. For (b) sort by the **secondary** key (name) first and the **primary** key (grade) second: a stable sort keeps the earlier order only inside ties of the later sort, so the last sort is the most significant key. A tuple key `(grade, name)` gets it right in one pass (@sec-srt-a1, @sec-srt-a2).
+:::
+
+**2. [E] In @sec-srt-p1-a the answer is the smallest *adjacent* gap after sorting. Give the one-line proof that no non-adjacent pair can be strictly closer, and say which pairs are returned for `arr = [8, 3, 1, 6]`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+For $i < j$, $b[j] - b[i] = \sum_{k=i}^{j-1}(b[k+1] - b[k])$, a sum of non-negative adjacent gaps, so it is $\ge$ the smallest single adjacent gap. On $[8,3,1,6]$ sorted $[1,3,6,8]$ the gaps are $2,3,2$; the minimum $2$ is attained by $(1,3)$ and $(6,8)$, so those two pairs are returned (@sec-srt-p1-a).
+:::
+
+**3. [M] Explain why Queue Reconstruction inserts the *tallest* people first and why the tie-break among equal heights is $k$ ascending. What goes wrong with $k$ descending on two same-height people?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Inserting tallest first means every already-placed person is taller or equal, so "insert at index $k$" puts exactly $k$ of them in front, and later (shorter) insertions do not change that count. Equal heights *do* count each other, so the one wanting fewer in front must be placed first. With $k$ descending, say $[5,2]$ before $[5,0]$: $[5,0]$ is then inserted at index $0$, in front of $[5,2]$, which now sees one more taller-or-equal person than it asked for — an invalid queue that still runs (@sec-srt-p2-a).
+:::
+
+**4. [M] LC 164 requires $O(n)$. For `nums = [3, 6, 9, 1]` recompute the bucket width, the bucket contents and the seam gaps. Is an empty bucket guaranteed in general?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\min=1, \max=9, n=4$, width $=\max(1, \lfloor 8/3 \rfloor)=2$, buckets $=\lfloor 8/2 \rfloor + 1 = 5$. Value$\to$bucket: $1{\to}0, 3{\to}1, 6{\to}2, 9{\to}4$; bucket $3$ is empty. Seams: $3-1=2$, $6-3=3$, $9-6=3$; max $= 3$. An empty bucket is **not** guaranteed with this width: for $[1,2,3,4]$ the width is $1$ and all four buckets are full. The algorithm does not need one; it needs only that the answer ($\ge$ the average gap $\ge$ width) is larger than any within-bucket difference ($\le$ width $-1$) (@sec-srt-p3-b).
+:::
+
+**5. [M] Write `sorted(set(...))`-based compression for `arr = [100, 20, 20, 5]`, and prove it is order-reflecting: $\mathit{rank}[x] < \mathit{rank}[y] \iff x < y$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`sorted(set) = [5, 20, 100]` gives ranks $\{5{:}1, 20{:}2, 100{:}3\}$, output $[3, 2, 2, 1]$. The rank *is* the position in the increasing distinct list: $x$ precedes $y$ there iff $x < y$, so rank order equals value order, and equal values share one entry of the `set`, hence one rank (@sec-srt-a4, @sec-srt-p4-a).
+:::
+
+**6. [M] Contrast the objective $\sum|x_i - t|$ with $\sum(x_i - t)^2$: which is minimised by the median and which by the mean, and why does the slide argument only apply to the first?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Absolute deviations go to the **median**: one step of $t$ changes each term by exactly $\pm 1$, so the change is (count on one side) $-$ (count on the other), and it flips sign at the middle. Squared deviations go to the **mean**: the derivative $\sum 2(t - x_i)$ is zero at $t = \bar{x}$. The slide argument needs each term's marginal cost to be the constant $\pm 1$, independent of how far away the point is; a square's marginal cost grows with distance (@sec-srt-a5).
+:::
+
+**7. [H] For @sec-srt-p5-b, justify `2 * cum >= total` over `cum >= total / 2`, and discuss whether the target is unique.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`2*cum >= total` is exact integer arithmetic; `total / 2` is a float in Python 3, and `total // 2` is off by one on odd totals (with total $= 5$, `cum >= 2` would stop one weight too early). The target need not be unique: when the cumulative weight at some value is *exactly* half the total, every target between that value and the next one has the same cost (Exercise 15). The walk returns the left end of that flat interval, which is optimal; the stress tests compare it with trying every value (@sec-srt-p5-b).
+:::
+
+**8. [H] Coordinate compression and counting sort both want to "index by value". With `nums[i]` up to $10^9$ but $n \le 10^5$, why does compression succeed where a histogram fails, and how large is the resulting table?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A histogram allocates a cell per *value*, $10^9$ cells here. Compression allocates a cell per *rank*: `sorted(set(nums))` has at most $n = 10^5$ distinct values, so downstream tables are sized $n + 1$. The trade is one $O(n\log n)$ sort; you lose the magnitudes but keep the order and equality the downstream structure needs (@sec-srt-a4, @sec-srt-a3).
+:::
+
+**9. [E] For each task, say whether sorting first is the right tool: (a) the maximum element; (b) does any value repeat; (c) the $k$-th smallest element, asked once; (d) the closest pair of values.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) No: one $O(n)$ scan. (b) Either: sort and look for an equal adjacent pair in $O(n\log n)$, or a hash set in expected $O(n)$; sorting needs no hashing and $O(1)$ extra space if done in place. (c) Sorting works in $O(n\log n)$, but quickselect (or C++ `nth_element`) does it in expected $O(n)$. (d) Yes: the answer is between neighbours, $O(n\log n)$ instead of $O(n^2)$ (@sec-srt-a1).
+:::
+
+**10. [M] Sort intervals `(start, end)` by start ascending and, for equal starts, by end descending. Write the Python key and the C++ comparator, and explain what goes wrong with `return a.start <= b.start;` as the first clause.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Python: `sorted(iv, key=lambda p: (p[0], -p[1]))`. C++:
+
+```cpp
+// fragment
+sort(v.begin(), v.end(), [](const pair<int,int>& a, const pair<int,int>& b) {
+    if (a.first != b.first) return a.first < b.first;
+    return a.second > b.second;
+});
+```
+
+With `a.start <= b.start`, two intervals with the same start are each "less" than the other, and an interval is less than itself: the comparator is not irreflexive, so `std::sort` has undefined behaviour, and the end-descending rule is never consulted (@sec-srt-a2).
+:::
+
+**11. [M] In `counting_sort_stable` (@sec-srt-a3), the placement loop walks the items left to right. Why does that make the sort stable, and how would the loop change if `cnt[v]` held the slot *after* the last item with key $v$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+After the prefix sums, `cnt[v]` is the first free slot of key $v$'s block. Walking left to right, the first item with key $v$ takes the first slot, the next takes the next one, and so on, so equal keys keep their input order. If `cnt[v]` is the slot after the block's end, walk the items **right to left** and decrement before placing: the last item with key $v$ takes the last slot, and the order is again preserved (this is the CLRS formulation).
+:::
+
+**12. [M] Radix-sort $n$ non-negative 32-bit integers with base $256$. How many passes are needed, what does one pass cost, and how would you handle negative numbers?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$32/8 = 4$ passes, one per byte from the lowest, each a stable counting sort with $256$ buckets: $O(n + 256)$ per pass, $O(4(n + 256))$ in total. For signed integers, flip the sign bit (or add $2^{31}$) before sorting so that negative numbers come first in unsigned order, and flip it back afterwards (@sec-srt-a3).
+:::
+
+**13. [M] Prove that the Robot Vacuum Cleaner rule "$a$ before $b$ iff $s(a)h(b) > s(b)h(a)$" is a strict weak ordering.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Give each string the number $r(x) = s(x)/h(x)$, with $r(x) = +\infty$ when $h(x) = 0$ (every string is non-empty, so $s$ and $h$ are not both $0$). For $h(a), h(b) > 0$ the rule is $r(a) > r(b)$ after dividing by $h(a)h(b) > 0$; if $h(a) = 0 < h(b)$ the rule says $a$ first, matching $r(a) = \infty > r(b)$; if both $h$ are $0$ neither is first, matching $\infty = \infty$. So the rule is "larger $r$ first", and comparing numbers is always a strict weak ordering: irreflexive, transitive, and ties ($r$ equal) transitive (@sec-srt-p2-b).
+:::
+
+**14. [M] In Equalize the Array, prove that the best target count $C$ is one of the frequencies.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The kept total is $C \cdot k(C)$, where $k(C)$ is the number of values with count $\ge C$. $k$ only drops when $C$ passes a frequency. If $C$ is not a frequency, let $f$ be the smallest frequency above $C$ (if none exists, $k(C) = 0$ and $C$ keeps nothing): every count $\ge C$ is $\ge f$, so $k(f) = k(C)$ and $f \cdot k(f) > C \cdot k(C)$. So a non-frequency $C$ is never better than the next frequency (@sec-srt-p4-b).
+:::
+
+**15. [H] Give a weighted-median instance where two different values are both optimal targets, and explain what the walk returns.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`nums = [1, 5]`, `cost = [3, 3]`: total $6$. Target $1$ costs $3 \cdot 4 = 12$, target $5$ costs $3 \cdot 4 = 12$, and every $t$ in between costs $3(t-1) + 3(5-t) = 12$ as well: the slope is (weight left) $-$ (weight right) $= 3 - 3 = 0$. The walk stops at the first value with $2 \cdot \mathit{cum} \ge 6$, which is $1$ ($\mathit{cum} = 3$): the left end of the flat interval, an optimal answer (@sec-srt-p5-b).
+:::
+
+**16. [H] Minimise $\sum_i |x_i - t|$ when $t$ must be an integer in a given range $[L, R]$. Give the rule and check it on $x = [1, 2, 10]$, $L = 5$, $R = 8$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The cost $f$ is convex (a sum of V-shapes), so it decreases up to the median $m$ and increases after it. Clamp: $t = \min(\max(m, L), R)$. Here $m = 2 < L$, so $t = 5$ with cost $4 + 3 + 5 = 12$; $t = 6$ costs $5 + 4 + 4 = 13$ and $t = 8$ costs $7 + 6 + 2 = 15$, confirming that the cost only rises to the right of $L$ (@sec-srt-a5).
+:::
+
+**17. [H] How many integers $t$ minimise $\sum_i |x_i - t|$? Give the formula for odd and even $n$ and check it on $[1, 2, 9, 10]$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort into $b$. For odd $n$ the slope changes from negative to positive exactly at $b_{\lfloor n/2 \rfloor}$, so there is $1$ minimiser. For even $n$ the slope is $0$ on $[b_{n/2-1}, b_{n/2}]$, so there are $b_{n/2} - b_{n/2-1} + 1$ integer minimisers. On $[1, 2, 9, 10]$: $9 - 2 + 1 = 8$ targets ($2 \dots 9$), all with cost $16$. CF 1486B multiplies this count over two coordinates (@sec-srt-p5-a).
+:::
+
+## Interview questions
+
+<!-- Copied into the Question Bank (quiz mode) by gen_book.py. Keep the shape exactly: a bold line
+     starting "**N. " with the question, then one collapsed "Answer" callout. -->
+
+**1. Why does sorting find the closest pair of values in $O(n\log n)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort ($O(n\log n)$), then scan adjacent pairs ($O(n)$). For $i<j$, $b[j]-b[i]$ is a sum of adjacent gaps, so the minimum over all pairs equals the minimum over neighbours; no non-adjacent pair can win (@sec-srt-p1).
+:::
+
+**2. When do you need a comparator instead of a key, and what contract must it satisfy in C++?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When "who goes first" seems to depend on the *pair*, not on a score of each element — e.g. Largest Number's $a{+}b$ against $b{+}a$. In C++ the comparator must be a **strict weak ordering**: irreflexive, transitive, with transitive ties. Use `<`, never `<=`; a `<=` comparator is undefined behaviour and can make `std::sort` read out of bounds. Prefer a key when one exists: comparing numbers is always consistent (@sec-srt-a2).
+:::
+
+**3. What does a stable sort buy you, and where does C++ `std::sort` bite?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Stability keeps equal-key items in input order, so you can sort by several fields with several passes (least significant first), and ties come out in a deterministic order. Python's sort is guaranteed stable; `std::sort` is not, so use `std::stable_sort` or put every criterion into one comparator (@sec-srt-a1).
+:::
+
+**4. How does Maximum Gap (LC 164) find the largest successive difference in $O(n)$ without sorting?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The $n-1$ sorted gaps add up to $\max-\min$, so the largest is at least the average. Use buckets of width $\lfloor(\max-\min)/(n-1)\rfloor$ (at least $1$): two values in one bucket are closer than that, so the answer joins the max of one non-empty bucket to the min of the next. Keep only per-bucket min and max; one scatter pass, one seam pass (@sec-srt-p3-b).
+:::
+
+**5. Values reach $10^9$ and you need an array indexed by value. What is the fix and what does it cost?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Coordinate compression: `rank = {v: i+1 for i, v in enumerate(sorted(set(a)))}`, then index by `rank[x]`. Sparse magnitudes become dense indices $1\dots n$; $O(n\log n)$ for the sort, $O(n)$ space, $O(1)$ per lookup. In C++, `sort` + `unique` + `lower_bound` does the same without a hash map (@sec-srt-a4, @sec-srt-p4-a).
+:::
+
+**6. Why does the median minimise the total distance to a set of points?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Slide the target one step right: it gets closer to every point on the right and farther from every point at or on the left, so the cost changes by (count at or left) $-$ (count right). While most points lie to the right, moving right helps; once at least half lie at or left, it does not. That turn is the median; for even $n$ the whole middle interval ties (@sec-srt-a5, @sec-srt-p5-a).
+:::
+
+**7. In Minimum Cost to Make Array Equal, what changes when each value has its own price per unit, and how do you find the target?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Count becomes weight: the slide argument stops where the cumulative weight first reaches half the total, the **weighted median**. Sort the (value, cost) pairs, walk accumulating cost, stop at the first `2*cum >= total`, and sum $c_i|\mathit{nums}_i - t|$ in 64-bit; $O(n\log n)$ (@sec-srt-p5-b).
+:::
+
+**8. When should you sort indices rather than values?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When records live in parallel arrays, when the original positions are part of the answer (write a rank back to position $i$), or when the values must not move. `order = sorted(range(n), key=lambda i: a[i])` is a permutation to read through; `a` and its partner arrays stay untouched. Zipping (value, payload) pairs is the alternative when you do not need the positions (@sec-srt-a2).
+:::
+
+**9. How do you choose between a comparison sort, counting sort, buckets and compression?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Nothing known about the values: comparison sort, $O(n\log n)$, the safe default. A small fixed value range $V$: counting sort, $O(n+V)$. A huge range but a proof that only bucket extremes matter: buckets, $O(n)$. A huge, sparse range where only relative order matters: compression, then index by rank (@sec-srt-a3, @sec-srt-a4).
+:::
+
+**10. Why can't "sort by frequency, ties by value" be done by a comparator that looks only at the two values?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The frequency is not a property of a value's magnitude: it depends on the whole array. You must count first (`Counter`, or a sort and run lengths), then sort with a key that reads that table. It is a derived-key sort; the comparator or key may *use* the table, but the table must be built before sorting (@sec-srt-p4, @sec-lang-p3-frequency).
+:::
+
+**11. How do you turn an exchange argument into a sort order, as in Robot Vacuum Cleaner?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Look at two adjacent items and ask what swapping them changes; everything else is unaffected. In Robot Vacuum Cleaner only the crossing pairs change: $s(a)h(b)$ against $s(b)h(a)$. "Put $a$ first when that is larger" is the comparator. Then check it is a strict weak ordering, ideally by showing it compares one number per item (here the ratio $s/h$), and compare by cross-multiplication to stay exact (@sec-srt-p2-b).
+:::
+
+**12. How can sorting replace a hash map, and when would you prefer it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+After sorting, equal values are contiguous, so counting, grouping and de-duplicating are one pass over runs, and "is $x$ present" is a binary search. It costs $O(n\log n)$ instead of expected $O(n)$, but it needs no hash function, has no worst case on adversarial inputs (a real concern for `unordered_map` on Codeforces, @sec-lang-p7), and gives the values in order for free (@sec-srt-p4-b).
+:::
+
+**13. When is sorting first a waste?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When one pass over the unsorted array answers the question (maximum, sum, a count), when a hash set does the job in expected $O(n)$ and order is never used, when only one order statistic is needed (selection is expected $O(n)$), or when the positions themselves are the answer and sorting would destroy them without an index sort (@sec-srt-a1).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Sort + neighbour scan:** `b = sorted(a)`; the closest pair is some `b[i+1]-b[i]`; $O(n\log n)$ (@sec-srt-p1).
+- **Multi-key order:** tuple key with negated descending fields; a C++ comparator is a strict weak ordering (never `<=`); sort indices when values must not move (@sec-srt-a2, @sec-srt-p2-a).
+- **Exchange comparator:** compare what swapping two neighbours changes ($s(a)h(b)$ vs $s(b)h(a)$); cross-multiply; prove it is "compare $f(a)$ with $f(b)$" (@sec-srt-p2-b).
+- **Counting sort:** `cnt[v] += 1`, emit in the required walk order; prefix sums of `cnt` give a stable version; $O(n+V)$ only while $V$ is small (@sec-srt-a3, @sec-srt-p3-a).
+- **Buckets for the max gap:** width `max(1, (mx-mn)//(n-1))`, keep per-bucket min/max, answer = best seam; $O(n)$ (@sec-srt-p3-b).
+- **Compression:** `rank = {v: i+1 for i, v in enumerate(sorted(set(a)))}`; $10^9$ values become $1\dots n$ (@sec-srt-p4-a).
+- **Sorted counts:** `f = sorted(Counter(a).values())`; values with count $\ge f_i$ are $f_i \dots f_{m-1}$ (@sec-srt-p4-b).
+- **Median / weighted median:** sort, walk to half the (weighted) count, sum deviations in 64-bit (@sec-srt-p5).
+:::
+
+- A sort is a *purchase*, not an algorithm: for $O(n\log n)$ you buy adjacency (P1), a monotone order to sweep or binary-search (@sec-tp, @sec-bst), runs of equal values to count (P3, P4), and the median position (P5), and then you spend it in one linear pass (@sec-srt-why, @sec-srt-a1).
+- Python's sort is stable and takes a key; C++ `std::sort` is unstable and takes a comparator that must be a strict weak ordering. Test a comparator on small samples; prove it by finding the number it secretly compares (@sec-srt-a2).
+- Orders beyond "by value" come from two places: a tuple of fields (Queue Reconstruction) or an exchange argument on neighbours (Robot Vacuum Cleaner). Both are one sort plus a linear pass (@sec-srt-p2).
+- Linear sorts are priced, not free: counting sort needs a small range, buckets need a theorem about what matters, radix needs short fixed-length keys and a stable pass per digit (@sec-srt-a3, @sec-srt-p3).
+- The averaging bound (largest of $n-1$ gaps $\ge$ their mean) is what makes Maximum Gap linear; an empty bucket is common but not required (@sec-srt-p3-b).
+- When the range is huge but only order matters, compress; when only multiplicities matter, count and sort the counts (@sec-srt-p4).
+- The median minimises total absolute distance, the weighted median minimises priced distance, and for even totals a whole interval ties (@sec-srt-a5, @sec-srt-p5).
+- Every distance or pair sum in this chapter can pass $2^{31}$: 64-bit accumulators always (@sec-arr-cost).
+
+## Practice ladder
+
+Ordered by concept, one step beyond the solved problems of each pattern.
+
+::: {.practice}
+- [CF 1399A · Remove Smallest](https://codeforces.com/problemset/problem/1399/A){rating="800"} — P1: sort, then check every adjacent gap.
+- [CF 1607C · Minimum Extraction](https://codeforces.com/problemset/problem/1607/C){rating="1000"} — P1: the answer is the largest adjacent gap of the sorted array (and the first element).
+- [CF 1360C · Similar Pairs](https://codeforces.com/problemset/problem/1360/C){rating="1100"} — P1: parity counts, plus one sorted neighbour pair at distance $1$.
+- [LC 532 · K-diff Pairs in an Array](https://leetcode.com/problems/k-diff-pairs-in-an-array/){difficulty="Medium"} — P1: a fixed difference instead of the smallest.
+- [LC 179 · Largest Number](https://leetcode.com/problems/largest-number/){difficulty="Medium"} — P2: the concatenation comparator, solved in @sec-lang-p3-largest; prove it transitive.
+- [CF 632C · The Smallest String Concatenation](https://codeforces.com/problemset/problem/632/C){rating="1700"} — P2: the same exchange rule, minimised.
+- [LC 1029 · Two City Scheduling](https://leetcode.com/problems/two-city-scheduling/){difficulty="Medium"} — P2: an exchange argument that becomes a key (the cost difference).
+- [LC 1051 · Height Checker](https://leetcode.com/problems/height-checker/){difficulty="Easy"} — P3: counting sort over heights at most $100$.
+- [LC 75 · Sort Colors](https://leetcode.com/problems/sort-colors/){difficulty="Medium"} — P3: counting with $V = 3$, then the one-pass partition.
+- [LC 347 · Top K Frequent Elements](https://leetcode.com/problems/top-k-frequent-elements/){difficulty="Medium"} — P3: buckets indexed by frequency.
+- [LC 220 · Contains Duplicate III](https://leetcode.com/problems/contains-duplicate-iii/){difficulty="Hard"} — P3: buckets of width $t+1$ in a sliding window.
+- [LC 1365 · How Many Numbers Are Smaller Than the Current Number](https://leetcode.com/problems/how-many-numbers-are-smaller-than-the-current-number/){difficulty="Easy"} — P4: rank as "count of smaller", read from a sorted copy.
+- [LC 506 · Relative Ranks](https://leetcode.com/problems/relative-ranks/){difficulty="Easy"} — P4: sort indices, write ranks back.
+- [CF 1335C · Two Teams Composing](https://codeforces.com/problemset/problem/1335/C){rating="1100"} — P4: only counts matter.
+- [LC 1636 · Sort Array by Increasing Frequency](https://leetcode.com/problems/sort-array-by-increasing-frequency/){difficulty="Easy"} — P4: sort elements by a count, solved in @sec-lang-p3-frequency.
+- [LC 462 · Minimum Moves to Equal Array Elements II](https://leetcode.com/problems/minimum-moves-to-equal-array-elements-ii/){difficulty="Medium"} — P5: the plain median.
+- [CF 1520E · Arranging The Sheep](https://codeforces.com/problemset/problem/1520/E){rating="1400"} — P5: the median after shifting positions by their index.
+- [CF 1486B · Eastern Exhibition](https://codeforces.com/problemset/problem/1486/B){rating="1500"} — P5: count all optimal points, in two dimensions.
+- [LC 2033 · Minimum Operations to Make a Uni-Value Grid](https://leetcode.com/problems/minimum-operations-to-make-a-uni-value-grid/){difficulty="Medium"} — P5: a feasibility check, then the median.
+:::
+
+## Further reading
+
+- [Competitive Programmer's Handbook (Laaksonen)](https://cses.fi/book/book.pdf) — chapter 3, "Sorting": sorting theory, the "sort, then sweep" habit, and C++ comparators.
+- [USACO Guide — Custom comparators and coordinate compression](https://usaco.guide/silver/sorting-custom) — sorting by several keys in C++ and Python, with compression as a worked use.
+- [Python Sorting HOWTO](https://docs.python.org/3/howto/sorting.html) — key functions, tuple keys, `cmp_to_key`, and the documented stability guarantee that @sec-srt-a1 relies on.
+- [cppreference — Compare (named requirement)](https://en.cppreference.com/w/cpp/named_req/Compare) — the strict-weak-ordering contract whose violation is @sec-srt-a2's classic bug.
+- [Wikipedia — Counting sort](https://en.wikipedia.org/wiki/Counting_sort) — the histogram sort, the prefix-sum stable version, and its role inside radix sort (@sec-srt-a3).
+- [Wikipedia — Radix sort](https://en.wikipedia.org/wiki/Radix_sort) — LSD and MSD radix sort and why each digit pass must be stable.
+- [Wikipedia — Pigeonhole principle](https://en.wikipedia.org/wiki/Pigeonhole_principle) — the counting fact behind the averaging bound in @sec-srt-p3-b.
+- [Wikipedia — Weighted median](https://en.wikipedia.org/wiki/Weighted_median) — the definition and properties used in @sec-srt-p5-b, including the tie case.

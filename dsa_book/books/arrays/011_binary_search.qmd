@@ -1,0 +1,1045 @@
+# Binary Search as a Tool {#sec-bst}
+
+<!--
+Author-facing provenance (not rendered): Chapter 11 of the arrays volume, per outline.yml
+("Binary Search as a Tool"). Lessons A1-A5 and patterns P1-P4 follow the outline's covers line
+and the array_book ch07 plan (a plan only: lessons A1-A5, two problems per pattern).
+Registry problems under books/problems/, boards under books/traces/arr011_traces.py.
+Cards point to problems homed elsewhere: LC 35 (@sec-pf-p1-insert), CF 706B (@sec-lang-p4-drink),
+CF 1538C (@sec-tp-p5-b). Rotated arrays, peaks, parametric search in depth, ternary search,
+real-valued bisection and interactive problems belong to the Binary Search volume (chapter 38 on,
+not written yet), so they are named in words only.
+-->
+
+::: {.callout-note title="Sources"}
+**CPH** ch. 3 "Sorting" (its binary-search section: the jump formulation, `lower_bound`/`upper_bound`, and finding the smallest solution of a monotone test) · **CP-Algorithms** "Binary search" (the `lo`/`hi` invariant, search on the answer) · **Knuth**, *TAOCP* vol. 3, §6.2.1 (searching an ordered table) · **Bentley**, *Programming Pearls*, column 4 (proving a binary search correct) · **cppreference** on `std::lower_bound`, `std::upper_bound`, `std::equal_range` (the half-open range contract and the partition requirement) · **Python `bisect`** documentation (insertion points, `key=`) · **Problem statements** of the eight problems solved here (LeetCode, Codeforces). Coverage: monotone predicates and the loop invariant, the two library brackets, sort-then-search, search over prefix sums and prefix maxima, and a first search on the answer.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- State a **monotone predicate** for a search problem and write the loop that finds its **first true**, with an invariant you can prove: initialisation, both branches, termination (@sec-bst-a1).
+- Use `bisect_left` / `bisect_right` (C++ `lower_bound` / `upper_bound`) to answer "how many $< x$", "how many $\le x$", "where does the run of $x$ start and end", and "how many in $[L, R]$" with one or two calls (@sec-bst-a2, @sec-bst-p1).
+- Decide when to **sort once and answer many queries** by binary search, and estimate the break-even number of queries (@sec-bst-a3).
+- Build a **derived monotone array**, prefix sums of non-negative values or prefix maxima of anything, and binary search it instead of the data (@sec-bst-a4, @sec-bst-p3).
+- Recognise a **search on the answer**: the unknown is a value in a range with a monotone feasibility test, and you binary search that range, then handle "closest to a target" with a two-candidate seam check (@sec-bst-a5, @sec-bst-p4).
+:::
+
+```{python}
+#| include: false
+import bisect
+import itertools
+import math
+import random
+import sys
+
+import matplotlib.pyplot as plt
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr011_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-bst-why}
+
+::: {.callout-note title="In plain words"}
+Think of looking up a word in a paper dictionary. You never read page by page: you open the middle, see whether your word comes before or after, and throw away half the book. Each look halves what is left, so $n$ pages need only about $\log_2 n$ looks: $20$ looks are enough for a million pages, $30$ for a billion. **Binary search** is that habit made exact. It needs only one thing: a yes/no question whose answers, read from left to right, go *no, no, …, no, yes, yes, …, yes*. The search finds where the first *yes* is.
+:::
+
+The arrays volume has been building structure that later techniques can spend. @sec-srt showed that a sort buys three things: neighbours, a canonical order to count over, and **monotonicity**. This chapter spends the third. Two pointers (@sec-tp-count) already used monotonicity by *walking*: when a boundary only moves one way, one sweep finds it for every position in $O(n)$ total. Binary search uses it by *jumping*: when you need the boundary for one question at a time, halving finds it in $O(\log n)$ without touching most of the array. And prefix sums (@sec-pref-def) build new arrays that are monotone even when the data is not, which turns "how many items fit under a budget?" into a search.
+
+You have met the pieces before. @sec-pf-p1-insert proved a binary search correct with a loop invariant, and @sec-lang-p4 listed the library calls. This chapter turns those into a tool you reach for without thinking, in five lessons:
+
+- **A1. The predicate and the window.** Every binary search is a monotone yes/no question plus a window `[lo, hi]` that always contains the first *yes* and halves at every step.
+- **A2. The two brackets.** `bisect_left` and `bisect_right` (C++ `lower_bound`, `upper_bound`) are A1's loop with the question fixed to "$a[i] \ge x$?" and "$a[i] > x$?". Counts, runs and insertion points are one or two calls.
+- **A3. Sort, then search.** When the data is fixed and the queries are many, pay $O(n\log n)$ once and answer each query in $O(\log n)$.
+- **A4. Search a derived array.** Prefix sums of non-negative values and prefix maxima of any values are monotone arrays *you build*; searching them answers budget and threshold questions.
+- **A5. Search the answer.** When the unknown is a value with a monotone "is this enough?" test, binary search the range of values; no array is searched at all.
+
+Four patterns then spend these lessons on eight problems. Everything sharper (rotated arrays, peak finding, ternary search, binary search over real numbers, interactive judges, and search on the answer as a full technique) is the subject of the Binary Search volume later in the book; this chapter is the everyday tool.
+
+## A1. The monotone predicate and the lo/hi invariant {#sec-bst-a1}
+
+::: {.callout-note title="In plain words"}
+Binary search does not really need "the array is sorted". It needs a question $P(i)$ about positions whose answers go **false, false, …, false, true, true, …, true** as $i$ grows; such a question is called **monotone**. A sorted array gives one for free ("is $b[i] \ge x$?"), but so do prefix sums, prefix maxima, and many problems where $i$ is not even an index (A5). The job is to find the **first true**, the flip point. Keep a window $[\mathit{lo}, \mathit{hi}]$ that always contains it; each look at the middle discards the half that cannot.
+:::
+
+Write the invariant first; the code follows from it.
+
+```text
+P(i) is monotone on 0..n-1: false ... false TRUE ... true     (find the first TRUE)
+convention: P(n) = true   (an imaginary true just past the end, meaning "none")
+lo, hi = 0, n             invariant: the first true lies in [lo, hi]
+while lo < hi:
+    mid = (lo + hi) // 2         # lo <= mid < hi, so mid is a real index
+    if P(mid): hi = mid          # mid could be the first true: keep it
+    else:      lo = mid + 1      # mid is false: the first true is right of it
+answer = lo                      # lo == hi: the first true, or n if there is none
+```
+
+**Why it is correct.** *Initialisation*: the first true is somewhere in $0..n$ (with the convention, $n$ means "none"), so $[0, n]$ contains it. *Maintenance*: if $P(\mathit{mid})$ is true, the first true is at $\mathit{mid}$ or to its left, so $[\mathit{lo}, \mathit{mid}]$ still contains it; if false, monotonicity says everything at or left of $\mathit{mid}$ is false, so the first true is in $[\mathit{mid}+1, \mathit{hi}]$. *Termination*: because `mid` rounds down, $\mathit{lo} \le \mathit{mid} < \mathit{hi}$, so both branches strictly shrink the window; when $\mathit{lo} = \mathit{hi}$ the window holds one candidate and that is the answer. The window size goes $n+1 \to \lceil (n+1)/2 \rceil \to \dots$, so the loop runs at most $\lceil \log_2(n+1) \rceil$ times.
+
+Two classic bugs break exactly one of these steps. Writing `hi = mid - 1` on the true branch can throw away the first true itself (maintenance fails). Writing `lo = mid` on the false branch stops the window from shrinking when $\mathit{hi} = \mathit{lo} + 1$, because then $\mathit{mid} = \mathit{lo}$ and nothing changes: an infinite loop (termination fails). The pair `hi = mid` / `lo = mid + 1` with `while lo < hi` is one consistent contract; the other common one is the closed window `while lo <= hi` with `hi = mid - 1`, shown in the demo below. Pick one and derive every line from its invariant.
+
+::: {#fig-bst-anim-window}
+
+```{python}
+#| echo: false
+b1 = [1, 3, 5, 7, 9, 11]
+x1 = 6
+_lo, _hi = 0, len(b1)
+a1_frames = []                                    # (lo, hi, mid, moved) after each probe
+while _lo < _hi:
+    _mid = (_lo + _hi) // 2
+    _go = "left" if b1[_mid] >= x1 else "right"
+    if b1[_mid] >= x1:
+        _hi = _mid
+    else:
+        _lo = _mid + 1
+    a1_frames.append((_lo, _hi, _mid, _go))
+del _lo, _hi, _mid, _go
+assert a1_frames[-1][0] == a1_frames[-1][1] == bisect.bisect_left(b1, x1) == 3
+assert len(a1_frames) == 3                        # ceil(log2(7)) probes
+
+
+def a1_frame(ax, p, t):
+    lo, hi, mid, moved = a1_frames[t]
+    dim = tuple(j for j in range(len(b1)) if j < lo or j >= hi)
+    cols = {mid: ("indigo" if moved == "left" else "amber")}
+    # the closing frame has lo == hi: one merged label, else the two arrows overlap.
+    top = [(lo, "lo=hi", "green", "top")] if lo == hi else \
+        [(lo, "lo", "green", "top"), (hi, "hi", "violet", "top")]
+    V.array(ax, p, b1, colors=cols, dim=dim,
+            pointers=top + [(mid, "mid", "indigo", "bottom")],
+            note=f"P(mid): {b1[mid]} >= {x1}? {'yes -> hi=mid' if moved == 'left' else 'no -> lo=mid+1'}")
+
+
+a1_caps = [f"probe mid={mid}: b[mid]={b1[mid]} vs {x1} -> window [{lo},{hi}]"
+           for lo, hi, mid, _ in a1_frames]
+a1_caps[-1] += f"; lo == hi == {a1_frames[-1][0]}, the first b[i] >= {x1}"
+V.animate(a1_frame, len(a1_frames), captions=a1_caps, interval=1200)
+```
+
+The window $[\mathit{lo}, \mathit{hi}]$ closing on $[1,3,5,7,9,11]$ in search of the first element $\ge 6$. Grey cells are proven to be on the wrong side of the flip and are never looked at again. Three probes reduce the seven candidate answers ($0$ to $6$) to one: index $3$, the value $7$.
+
+:::
+
+```{python}
+#| label: arr-bst-a1-demo
+def first_true(P, n):
+    lo, hi = 0, n                        # the first true lies in [lo, hi]; n means "none"
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if P(mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo                            # first i with P(i) true, else n
+
+
+def first_true_closed(P, n):             # the other contract: closed window [lo, hi]
+    lo, hi = 0, n - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if P(mid):
+            hi = mid - 1                 # mid is a candidate; remember it lives at hi + 1
+        else:
+            lo = mid + 1
+    return lo                            # lo == hi + 1 == the first true, or n
+
+
+def last_true(P, n):                     # P is true ... true false ... false
+    return first_true(lambda i: not P(i), n) - 1     # -1 means "no true at all"
+
+
+b = [1, 3, 5, 7, 9, 11]
+assert first_true(lambda i: b[i] >= 6, len(b)) == 3
+assert first_true(lambda i: b[i] >= 1, len(b)) == 0          # flip at the very front
+assert first_true(lambda i: b[i] >= 100, len(b)) == len(b)   # no true: returns n
+assert last_true(lambda i: b[i] <= 6, len(b)) == 2           # the last element <= 6 is b[2] = 5
+for _ in range(500):
+    arr = sorted(random.randint(0, 50) for _ in range(random.randint(0, 12)))
+    t = random.randint(-2, 55)
+    P = lambda i: arr[i] >= t
+    assert first_true(P, len(arr)) == first_true_closed(P, len(arr)) == bisect.bisect_left(arr, t)
+    assert last_true(lambda i: arr[i] <= t, len(arr)) == bisect.bisect_right(arr, t) - 1
+probes = 0
+def counting_P(i):
+    global probes
+    probes += 1
+    return i >= 123_457
+assert first_true(counting_P, 10**6) == 123_457 and probes <= math.ceil(math.log2(10**6 + 1))
+print("a1 demo OK, probes on n = 10^6:", probes)
+```
+
+Three things in the demo are worth reading slowly. First, `first_true` never calls `P(n)`: since `mid < hi <= n`, the imaginary true past the end is never evaluated, which is why the convention costs nothing. Second, the closed-window version returns the same index: both are correct, they just keep different invariants (the closed one keeps "the first true is in $[\mathit{lo}, \mathit{hi}+1]$"). Third, "the **last** true of a true…false predicate" needs no new loop: it is one before the first true of the opposite predicate. On a sorted array that is "the last element $\le x$" $=$ `bisect_right(a, x) - 1`, with $-1$ meaning "none".
+
+**The sibling solved in @sec-pf-p1-insert.** Search Insert Position is this loop with $P(i) = [\mathit{nums}[i] \ge \mathit{target}]$, proved correct there step by step as the first example of a loop invariant.
+
+{{< include ../problems/lc-0035-search-insert-position/card.qmd >}}
+
+## A2. `lower_bound` and `upper_bound`: counting is two probes {#sec-bst-a2}
+
+::: {.callout-note title="In plain words"}
+In real code you rarely write A1's loop; you call one of two library functions. **`bisect_left(a, x)`** (C++ `lower_bound`) is the first index with $a[i] \ge x$; **`bisect_right(a, x)`** (C++ `upper_bound`) is the first index with $a[i] > x$. Both assume `a` is sorted. Picture two doors around the block of $x$'s: the left door has everything $< x$ before it, the right door everything $\le x$ before it. Every counting question about a sorted array is read off those two doors.
+:::
+
+The four readings, each one A1's `first_true` with a fixed predicate:
+
+```text
+bisect_left(a, x)    first i with a[i] >= x  = #elements < x   = insertion point before equal values
+bisect_right(a, x)   first i with a[i] >  x  = #elements <= x  = insertion point after equal values
+run of x             [bisect_left, bisect_right)   count(x) = right - left   (0 if x is absent)
+#elements in [L, R]  bisect_right(a, R) - bisect_left(a, L)
+last element <= x    a[bisect_right(a, x) - 1]  if bisect_right(a, x) > 0
+first element >= x   a[bisect_left(a, x)]       if bisect_left(a, x) < n
+```
+
+C++ returns iterators: subtract `begin()` to get the index, and `equal_range(first, last, x)` returns both brackets at once. Both languages also accept an ordering: Python 3.10+ has `bisect_left(a, x, key=f)`, and C++ takes a comparator, which is how you search a descending array (@sec-bst-p2-b). On a `std::set`, call the member `s.lower_bound(x)`; the free function on set iterators is linear (@sec-lang-p4).
+
+::: {#fig-bst-a2-brackets}
+
+```{python}
+#| label: arr-bst-a2-fig
+#| echo: false
+#| renderings: [light, dark]
+a2 = [1, 2, 2, 2, 3, 5]
+L2, R2 = bisect.bisect_left(a2, 2), bisect.bisect_right(a2, 2)   # 1, 4
+assert (L2, R2) == (1, 4)
+def a2_draw(ax, p):
+    V.array(ax, p, a2,
+            regions=[(L2, R2, "green", f"run of 2 (count {R2 - L2})")],
+            pointers=[(L2, "left", "indigo", "top"), (R2, "right", "violet", "top")],
+            note=f"#(<2) = {L2},  #(<=2) = {R2}")
+V.show(a2_draw)
+```
+
+On $[1,2,2,2,3,5]$ with $x = 2$: `bisect_left` stops at the run's left door (index $1$; everything before it is $< 2$), `bisect_right` at its right door (index $4$; everything before it is $\le 2$). The three $2$'s sit between them, so `count(2) = 4 - 1 = 3`, `#(<2) = 1` and `#(<=2) = 4`. Most off-by-one bugs in counting problems are a `_left`/`_right` mix-up; draw the two doors and the right call follows.
+
+:::
+
+```{python}
+#| label: arr-bst-a2-demo
+a = [1, 2, 2, 2, 3, 5]
+assert bisect.bisect_left(a, 2) == 1 and bisect.bisect_right(a, 2) == 4
+assert bisect.bisect_right(a, 2) - bisect.bisect_left(a, 2) == 3        # count of 2
+assert bisect.bisect_left(a, 2) == sum(1 for x in a if x < 2)           # count < 2
+assert bisect.bisect_right(a, 2) == sum(1 for x in a if x <= 2)         # count <= 2
+assert bisect.bisect_right(a, 4) - bisect.bisect_left(a, 2) == sum(1 for x in a if 2 <= x <= 4)
+assert bisect.bisect_left(a, 4) == bisect.bisect_right(a, 4) == 5       # absent: empty run
+assert a[bisect.bisect_right(a, 4) - 1] == 3                            # last element <= 4
+for _ in range(300):                                                    # every reading, at random
+    s = sorted(random.randint(0, 9) for _ in range(random.randint(0, 10)))
+    L, R = sorted(random.randint(-1, 10) for _ in range(2))
+    assert bisect.bisect_right(s, R) - bisect.bisect_left(s, L) == sum(L <= v <= R for v in s)
+    k = bisect.bisect_right(s, R)
+    assert (s[k - 1] if k else None) == max((v for v in s if v <= R), default=None)
+print("a2 demo OK")
+```
+
+The absent-value line is the one people distrust. For $4$, which is not in `a`, both brackets land on index $5$: the run is empty and `right - left = 0`. The count formula needs no special case for "not present", and neither do the problems that use it: @sec-bst-p1-a counts negatives as `bisect_left(nums, 0)` even when there are none, and @sec-bst-p1-b lists the run `range(bisect_left, bisect_right)` even when it is empty.
+
+## A3. Sort, then search: pay once, query many {#sec-bst-a3}
+
+::: {.callout-note title="In plain words"}
+If the data does not change but you must answer **many** "find / count / nearest" questions about it, sort it once. The sort costs $O(n\log n)$; after that each question is a binary search, $O(\log n)$, instead of a scan, $O(n)$. Often the question only becomes monotone *after* sorting: "how many prices are $\le m$?" has no structure in a shuffled list and is one `bisect_right` in a sorted one.
+:::
+
+The three steps:
+
+```text
+1. sort the data (or build a derived monotone array from it)     O(n log n), once
+2. phrase each query as a monotone predicate on the sorted order
+3. answer it with bisect_left / bisect_right                     O(log n) per query
+```
+
+**When it pays.** Answering $q$ queries by scanning costs about $q \cdot n$. Sorting first costs about $n\log_2 n + q\log_2 n$. The sort wins once $q$ is larger than roughly $\log_2 n$ queries (constant factors aside): for $n = 10^5$ that is a few dozen queries, and with $q = 10^5$ queries the difference is $10^{10}$ against a few million operations. For a single query, scanning is cheaper than sorting. When the data **changes** between queries (insertions and deletions), a sorted list costs $O(n)$ per insertion; use an ordered container (C++ `std::set` / `multiset`, @sec-lang-p4) or the tree structures of later volumes. When all the queries are known in advance, a third option is to sort the queries too and sweep both sorted lists with two pointers: two sorts, then a linear walk.
+
+::: {#fig-bst-a3-multi}
+
+```{python}
+#| label: arr-bst-a3-fig
+#| echo: false
+#| renderings: [light, dark]
+a3 = [40, 10, 30, 50, 20]
+s3 = sorted(a3)                                     # [10,20,30,40,50]
+q3 = [15, 30, 45]
+p3res = [bisect.bisect_left(s3, t) for t in q3]     # 1, 2, 4
+assert p3res == [1, 2, 4]
+def a3_draw(ax, p):
+    # one row per step: pay the sort once, then every query is one search.
+    V.array(ax, p, a3, label="before", note="sort once: the only O(n log n) step")
+    V.array(ax, p, s3, y=-3.4, label="after",
+            pointers=[(r, str(t), c, "top") for r, t, c in
+                      zip(p3res, q3, ["indigo", "green", "violet"])],
+            note="each arrow: where bisect_left lands")
+    V.text(ax, p, 0.0, -5.2,
+           "after the sort, each query is a halving, not a scan", size=9, ha="left")
+V.show(a3_draw)
+```
+
+$[40,10,30,50,20]$ sorted to $[10,20,30,40,50]$; the queries $15, 30, 45$ land at insertion points $1, 2, 4$ with one binary search each. The sort is a fixed cost; its value grows with the number of queries.
+
+:::
+
+```{python}
+#| label: arr-bst-a3-demo
+data = [40, 10, 30, 50, 20]
+s = sorted(data)                                    # pay once
+def count_le(x):                                    # many cheap queries
+    return bisect.bisect_right(s, x)
+def first_ge(x):                                    # smallest value >= x, or None
+    i = bisect.bisect_left(s, x)
+    return s[i] if i < len(s) else None
+def nearest(x):                                     # closest value; ties to the smaller
+    i = bisect.bisect_left(s, x)
+    cands = [s[j] for j in (i - 1, i) if 0 <= j < len(s)]
+    return min(cands, key=lambda v: (abs(v - x), v))
+assert count_le(15) == 1 and count_le(30) == 3 and count_le(100) == 5
+assert first_ge(25) == 30 and first_ge(50) == 50 and first_ge(51) is None
+assert nearest(34) == 30 and nearest(35) == 30 and nearest(36) == 40 and nearest(-7) == 10
+for _ in range(300):
+    x = random.randint(0, 60)
+    assert count_le(x) == sum(v <= x for v in data)
+    assert nearest(x) == min(data, key=lambda v: (abs(v - x), v))
+print("a3 demo OK")
+```
+
+`nearest` is the move behind every "closest value" question: in a sorted array, the closest value to $x$ is one of the two neighbours of its insertion point, `s[i - 1]` and `s[i]`, so one search plus two comparisons replaces a scan. @sec-bst-p2 builds on exactly this.
+
+**The sibling solved in @sec-lang-p4-drink.** Interesting Drink is A3 in its purest form: sort the prices once, and each day's budget $m$ is answered by `bisect_right(prices, m)`.
+
+{{< include ../problems/cf-706b-interesting-drink/card.qmd >}}
+
+## A4. Searching a derived array: prefix sums and prefix maxima {#sec-bst-a4}
+
+::: {.callout-note title="In plain words"}
+Binary search needs a monotone *sequence*, and some of the most useful ones are sequences **you build**. If every value is non-negative, the running totals (prefix sums) never go down, so "how many items, taken in order, fit in budget $B$?" is one search on the totals. For *any* values, the running maximum (prefix maxima) never goes down either, because a maximum can only grow as you look at more elements. Neither needs the original array to be sorted.
+:::
+
+Both arrays come from @sec-pref-def and @sec-pref-other; here they are search targets. With `pref[i]` the sum and `pm[i]` the maximum of the first $i + 1$ elements (0-based, inclusive):
+
+```text
+pref = list(accumulate(a))          non-decreasing only if every a[i] >= 0
+    #prefixes with total <= B   ->  bisect_right(pref, B)      (items that fit, in order)
+    #items to reach total >= X  ->  bisect_left(pref, X) + 1   (or "impossible" if == n)
+pm = list(accumulate(a, max))       non-decreasing for ANY a, no sort needed
+    #prefixes whose max <= K    ->  bisect_right(pm, K)        (longest prefix of elements <= K)
+```
+
+::: {#fig-bst-a4-derive}
+
+```{python}
+#| label: arr-bst-a4-fig
+#| echo: false
+#| renderings: [light, dark]
+a4 = [4, 3, 3, 1, 1]
+pref4 = list(itertools.accumulate(a4))           # [4, 7, 10, 11, 12]
+b4 = [1, 4, 2, 5, 3]
+pm4 = list(itertools.accumulate(b4, max))        # [1, 4, 4, 5, 5]
+B4, K4 = 9, 4
+kB, kK = bisect.bisect_right(pref4, B4), bisect.bisect_right(pm4, K4)
+assert (pref4, pm4, kB, kK) == ([4, 7, 10, 11, 12], [1, 4, 4, 5, 5], 2, 3)
+def a4_draw(ax, p):
+    V.trace(ax, p, [
+        dict(values=a4, label="a", note="non-negative values"),
+        dict(values=pref4, label="prefix sum", colors={i: "cyan" for i in range(kB)},
+             pointers=[(kB, f"bisect_right(pref, {B4}) = {kB}", "green", "bottom")],
+             note=f"budget {B4}: the first {kB} items fit"),
+        dict(values=b4, label="b", note="unsorted values"),
+        dict(values=pm4, label="prefix max", colors={i: "violet" for i in range(kK)},
+             pointers=[(kK, f"bisect_right(pm, {K4}) = {kK}", "green", "bottom")],
+             note=f"limit {K4}: the first {kK} elements are all <= {K4}"),
+    ], gap=3.0)
+V.show(a4_draw)
+```
+
+Two derived arrays, both non-decreasing. Top: $[4,3,3,1,1]$ has prefix sums $[4,7,10,11,12]$; with budget $9$, `bisect_right(pref, 9) = 2`, so the first two items fit ($4 + 3 = 7$) and the third busts it ($10$). Bottom: the unsorted $[1,4,2,5,3]$ has prefix maxima $[1,4,4,5,5]$; with limit $4$, `bisect_right(pm, 4) = 3`, so the longest prefix with every element $\le 4$ has length $3$.
+
+:::
+
+```{python}
+#| label: arr-bst-a4-demo
+a = [4, 3, 3, 1, 1]
+pref = list(itertools.accumulate(a))                       # monotone since a[i] >= 0
+assert pref == [4, 7, 10, 11, 12]
+assert bisect.bisect_right(pref, 9) == 2                   # two items fit in budget 9
+assert bisect.bisect_left(pref, 11) + 1 == 4               # four items to reach 11
+
+b = [1, 4, 2, 5, 3]
+pm = list(itertools.accumulate(b, max))                    # monotone for ANY b
+assert pm == [1, 4, 4, 5, 5]
+assert bisect.bisect_right(pm, 4) == 3                     # longest prefix with all <= 4
+
+neg = [3, -2, 4]                                           # a negative value breaks prefix sums
+pneg = list(itertools.accumulate(neg))                     # [3, 1, 5]: not sorted
+assert pneg == [3, 1, 5] and bisect.bisect_right(pneg, 2) == 2   # claims 2 prefixes are <= 2...
+assert sum(1 for v in pneg if v <= 2) == 1                       # ...but only [3, -2] (sum 1) is
+
+for _ in range(300):
+    v = [random.randint(0, 9) for _ in range(random.randint(1, 10))]
+    B = random.randint(0, 50)
+    pv = list(itertools.accumulate(v))
+    assert bisect.bisect_right(pv, B) == sum(1 for t in pv if t <= B)
+    w = [random.randint(-9, 9) for _ in range(random.randint(1, 10))]
+    K = random.randint(-9, 9)
+    longest = next((i for i, x in enumerate(w) if x > K), len(w))
+    assert bisect.bisect_right(list(itertools.accumulate(w, max)), K) == longest
+print("a4 demo OK")
+```
+
+The demo draws the line that matters. `pref` is monotone only *because* the values are non-negative: with $[3, -2, 4]$ the running totals are $[3, 1, 5]$, and `bisect_right` gives a wrong count. (The same negative values break the sliding window in @sec-sw-a5, for the same reason.) Prefix maxima are monotone *unconditionally*, which is why @sec-bst-p3-b searches them on unsorted input.
+
+## A5. A first search on the answer {#sec-bst-a5}
+
+::: {.callout-note title="In plain words"}
+Until now the thing being searched was an array. Now turn the question around: the unknown is a **number** $v$, say a capacity or a limit, in some range $[\mathit{lo}, \mathit{hi}]$, and you can **check** any guess: "is capacity $v$ enough?". If a bigger $v$ is never worse (once enough, always enough), the answers to the check go no, …, no, yes, …, yes as $v$ grows. That is A1's monotone predicate with $v$ in place of an index, so the same loop finds the smallest $v$ that is enough. No array is searched; the *range of possible answers* is.
+:::
+
+The template is A1's loop with `a[mid] >= x` replaced by a feasibility check:
+
+```text
+lo, hi = smallest possible answer, a value known to be feasible
+while lo < hi:
+    mid = (lo + hi) // 2
+    if feasible(mid): hi = mid       # mid is enough: the smallest enough is mid or left
+    else:             lo = mid + 1   # mid is not enough: neither is anything smaller
+answer = lo        # for "closest to a target", also compare lo - 1 (@sec-bst-p4-b)
+```
+
+The work is in two claims you must check for each problem. **Monotone**: if $v$ is feasible, so is $v + 1$. **Bracketed**: `hi` is feasible (or is the sentinel "none"), and nothing below `lo` can be the answer. The running time is $O(\log(\mathit{hi} - \mathit{lo}))$ checks, times the cost of one check.
+
+The standard first example is shipping packages: weights $w_1, \dots, w_n$ must ship **in order** within $D$ days, each day's load at most the ship's capacity $c$; find the smallest $c$ (LC 1011, "Capacity To Ship Packages Within D Days"). The check "can capacity $c$ do it in $D$ days?" is a greedy pass: fill each day until the next package would overflow it, and count days. A larger ship never needs more days, so the check is monotone; $c = \max(w)$ is the smallest capacity that can lift every package, and $c = \sum w$ ships everything in one day, so the answer lies in $[\max(w), \sum w]$.
+
+::: {#fig-bst-anim-answer}
+
+```{python}
+#| echo: false
+w5, D5 = [3, 2, 2, 4, 1, 4], 3
+def days5(c):
+    d, load = 1, 0
+    for w in w5:
+        if load + w > c:
+            d, load = d + 1, 0
+        load += w
+    return d
+caps5 = list(range(max(w5), sum(w5) + 1))         # 4 .. 16
+_lo, _hi = caps5[0], caps5[-1]
+a5_frames = []                                    # (lo, hi, mid, days) after each probe
+while _lo < _hi:
+    _mid = (_lo + _hi) // 2
+    _d = days5(_mid)
+    if _d <= D5:
+        _hi = _mid
+    else:
+        _lo = _mid + 1
+    a5_frames.append((_lo, _hi, _mid, _d))
+del _mid, _d
+assert _lo == _hi == 6 == min(c for c in caps5 if days5(c) <= D5)
+
+
+def a5_frame(ax, p, t):
+    lo, hi, mid, d = a5_frames[t]
+    at = lambda v: v - caps5[0]
+    dim = tuple(j for j, v in enumerate(caps5) if v < lo or v > hi)
+    cols = {at(mid): ("green" if d <= D5 else "amber")}
+    low = ([(at(lo), "lo=hi", "green", "bottom")] if lo == hi else
+           [(at(lo), "lo", "green", "bottom"), (at(hi), "hi", "violet", "bottom")])
+    V.array(ax, p, caps5, colors=cols, dim=dim, index=False,
+            pointers=low + [(at(mid), f"try {mid}", "indigo", "top")],
+            note=f"capacity {mid}: {d} days " + ("<= 3, enough" if d <= D5 else "> 3, too small"))
+
+
+a5_caps = [f"capacity {mid} needs {d} days -> {'hi' if d <= D5 else 'lo'} moves; window [{lo},{hi}]"
+           for lo, hi, mid, d in a5_frames]
+a5_caps[-1] += "; the smallest capacity is 6"
+V.animate(a5_frame, len(a5_frames), captions=a5_caps, interval=1300)
+```
+
+Searching the ship capacity for weights $[3,2,2,4,1,4]$ and $D = 3$ days. The cells are capacities $4..16$, not array positions. Each probe runs the greedy day count once: capacities $10$ and $7$ are enough, $5$ is not, $6$ is. Four checks find the answer instead of trying all thirteen capacities.
+
+:::
+
+```{python}
+#| label: arr-bst-a5-demo
+def first_feasible(lo, hi, feasible):    # hi must be feasible
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if feasible(mid):
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+def ship_days(weights, c):               # greedy: fill each day as far as it goes
+    days, load = 1, 0
+    for w in weights:
+        if load + w > c:
+            days, load = days + 1, 0
+        load += w
+    return days
+
+def ship_capacity(weights, D):
+    return first_feasible(max(weights), sum(weights), lambda c: ship_days(weights, c) <= D)
+
+def ship_capacity_brute(weights, D):
+    return next(c for c in range(max(weights), sum(weights) + 1) if ship_days(weights, c) <= D)
+
+assert ship_capacity(list(range(1, 11)), 5) == 15        # LC 1011 example 1
+assert ship_capacity([3, 2, 2, 4, 1, 4], 3) == 6         # LC 1011 example 2
+assert ship_capacity([1, 2, 3, 1, 1], 4) == 3            # LC 1011 example 3
+for _ in range(300):
+    ws = [random.randint(1, 12) for _ in range(random.randint(1, 9))]
+    D = random.randint(1, len(ws))
+    assert ship_capacity(ws, D) == ship_capacity_brute(ws, D)
+    caps = range(max(ws), sum(ws) + 1)                   # the check really is monotone
+    flags = [ship_days(ws, c) <= D for c in caps]
+    assert flags == sorted(flags)
+print("a5 demo OK")
+```
+
+The demo checks the two claims, not just the answers: the list of check results over the whole range is sorted (all `False` before all `True`), and the search agrees with trying every capacity. That is the habit to keep. A search on the answer is only as good as its monotonicity argument, and a stress test against the "try every value" brute force is the cheapest way to catch a check that is not monotone. Two refinements come in @sec-bst-p4: a **closest-to-target** objective, where the answer is one of the two values around the flip, and answers that are **not values of the array** at all.
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that call for it, a template with its invariant, and its complexity, followed by two fully solved problems. Every problem climbs a ladder of solution forms: a brute-force oracle, an intermediate form, and the form the pattern is named for, each stress-tested against the oracle.
+
+## Pattern 1: Counting with bounds {#sec-bst-p1}
+
+**Where we are.** Part A built one loop and four ways to point it. Part B spends them in four steps, each adding one idea. P1 spends A2 directly: on a sorted array every count is a difference of insertion points. P2 asks for **positions** near a value instead of counts: the closest elements, the farthest valid partner. P3 searches an array that is not the input at all but **built from it**: prefix sums and prefix maxima. P4 drops the array and searches the **answer's own range**.
+
+**Recognise it.** The input is sorted (or may be sorted), and the question is "how many $< x$ / $\le x$ / $= x$ / in $[L,R]$", "which indices hold $x$", or "how big are the blocks on each side of a threshold". The follow-up often says "in $O(\log n)$".
+
+::: {.callout-important title="Template"}
+Bracket the run; the count is the width.
+
+```text
+#(< x)      = bisect_left(a, x)
+#(<= x)     = bisect_right(a, x)
+#(> x)      = n - bisect_right(a, x)
+#(= x)      = bisect_right(a, x) - bisect_left(a, x)
+#(in [L,R]) = bisect_right(a, R) - bisect_left(a, L)
+indices of x = range(bisect_left(a, x), bisect_right(a, x))
+```
+
+**Invariant.** In a sorted array, $\{i : a[i] < x\}$ is a prefix and $\{i : a[i] > x\}$ is a suffix, so $\{i : a[i] = x\}$ is the contiguous block between them; each border is the first true of a monotone predicate (A1).
+:::
+
+**Complexity.** $O(\log n)$ per bracket and $O(1)$ arithmetic after it; listing a run of length $k$ adds $O(k)$. If the array must be sorted first, add $O(n\log n)$ once.
+
+::: {#fig-bst-p1-signs}
+
+```{python}
+#| label: arr-bst-p1-fig
+#| echo: false
+#| renderings: [light, dark]
+p1 = [-4, -3, -1, -1, 0, 2, 3, 5]
+p1_neg, p1_pos = bisect.bisect_left(p1, 0), bisect.bisect_left(p1, 1)
+assert (p1_neg, len(p1) - p1_pos) == (4, 3)
+def p1_draw(ax, p):
+    V.array(ax, p, p1,
+            regions=[(0, p1_neg, "red", f"{p1_neg} negatives"),
+                     (p1_neg, p1_pos, "muted", "zero"),
+                     (p1_pos, len(p1), "amber", f"{len(p1) - p1_pos} positives")],
+            pointers=[(p1_neg, "bisect_left(0)", "indigo", "top"),
+                      (p1_pos, "bisect_left(1)", "violet", "bottom")])
+V.show(p1_draw)
+```
+
+The sorted array $[-4,-3,-1,-1,0,2,3,5]$ splits into three blocks by sign. `bisect_left(nums, 0) = 4` is both the end of the negative block and its size; `bisect_left(nums, 1) = 5` starts the positive block, whose size is $8 - 5 = 3$. The zero block is whatever lies between the two probes.
+
+:::
+
+{{< include ../problems/lc-2529-maximum-count-of-positive-integer-and-negative-integer/problem.qmd >}}
+
+[**From the sizes of two blocks to the contents of one.** Maximum Count reads two block *sizes* off a sorted array around the fence $0$. Find Target Indices puts the same two brackets around the target value and returns the *indices between them*, and then shows the brackets can be computed without sorting at all.]{.flow-bridge}
+
+{{< include ../problems/lc-2089-find-target-indices-after-sorting-array/problem.qmd >}}
+
+**The sibling solved in @sec-tp-p5-b.** Number of Pairs counts pairs with sum in $[l, r]$, which is P1's range count asked once per element: after sorting, the partners of $a_i$ are the $j > i$ with $l - a_i \le a_j \le r - a_i$, that is `bisect_right(a, r - a[i], i + 1) - bisect_left(a, l - a[i], i + 1)`, two brackets per element and $O(n\log n)$ in total. The two-pointer solution there gets the same count in $O(n)$ after the sort, by walking instead of jumping.
+
+{{< include ../problems/cf-1538c-number-of-pairs/card.qmd >}}
+
+## Pattern 2: Nearest values in sorted arrays {#sec-bst-p2}
+
+**From counting to locating.** P1's answer was a count, read straight off two brackets. P2's answer is a **position**: which $k$ elements are closest to $x$, or how far right a valid partner can be. The one idea it adds: the boundary you search is not "first element $\ge x$" but the flip of a **comparison between candidates** (is this window too far left? is this partner still valid?), and you must prove that comparison flips only once. Find K Closest Elements compares the two ends of a window; Maximum Distance compares across two arrays sorted downward.
+
+**Recognise it.** "The $k$ elements closest to $x$", "the nearest value / tower / heater", "for each element, the farthest (or first) partner in another sorted array that satisfies a condition". The tell is a candidate that can only move one way as you move along the array.
+
+::: {.callout-important title="Template"}
+Search the flip of a comparison between neighbouring candidates.
+
+```text
+nearest value to x:  i = bisect_left(a, x); answer is a[i-1] or a[i] (whichever exist)
+k closest to x:      search start l in [0, n-k]:
+                       P(l) = (x - a[l] <= a[l+k] - x)     false ... true
+                       first true l (or n-k), answer a[l : l+k]
+partner in a descending array b:  valid j form a prefix  {j : b[j] >= v}
+                       last valid j = bisect_right(negated b, -v) - 1
+                       (C++: lower_bound with comparator (e, v) -> e >= v, minus one)
+```
+
+**Invariant.** The searched predicate is monotone: for windows, $x - a[l]$ falls and $a[l+k] - x$ rises as $l$ grows, so "the left end is no farther than the challenger" turns true once and stays true; for a descending array, $b[j] \ge v$ holds on a prefix. A one-way boundary is A1's flip point.
+:::
+
+**Complexity.** $O(\log n)$ per search plus the output ($O(k)$ for a window); one search per element for partner problems, $O(n\log m)$. When the elements come in sorted order, the boundary can also be walked with two pointers in $O(n + m)$ total.
+
+::: {#fig-bst-p2-window}
+
+```{python}
+#| label: arr-bst-p2-fig
+#| echo: false
+#| renderings: [light, dark]
+p2arr, p2k, p2x = [1, 2, 3, 4, 5, 6], 3, 3
+_lo, _hi = 0, len(p2arr) - p2k
+while _lo < _hi:                                   # the search of @sec-bst-p2-a, run here
+    _m = (_lo + _hi) // 2
+    if p2x - p2arr[_m] > p2arr[_m + p2k] - p2x:
+        _lo = _m + 1
+    else:
+        _hi = _m
+p2start = _lo
+del _lo, _hi, _m
+assert p2arr[p2start:p2start + p2k] == [2, 3, 4]
+def p2_draw(ax, p):
+    V.array(ax, p, p2arr,
+            regions=[(p2start, p2start + p2k, "green", f"answer window, start {p2start}")],
+            pointers=[(p2start, "a[l]", "indigo", "top"),
+                      (p2start + p2k, "a[l+k]", "violet", "top")],
+            note=f"x = {p2x}: |{p2x} - {p2arr[p2start]}| = {p2x - p2arr[p2start]} <= "
+                 f"{p2arr[p2start + p2k] - p2x} = |{p2arr[p2start + p2k]} - {p2x}|")
+V.show(p2_draw)
+```
+
+For $[1..6]$, $k = 3$, $x = 3$, the answer is the window $[2,3,4]$ starting at $l = 1$. The search compares the window's left end $a[l]$ with the element just past its right end, $a[l+k]$: here $a[1] = 2$ is $1$ away from $x$ and $a[4] = 5$ is $2$ away, so the window should not move right. At $l = 0$ the comparison goes the other way ($a[0] = 1$ is $2$ away, $a[3] = 4$ only $1$), so $l = 1$ is the first start where it holds.
+
+:::
+
+{{< include ../problems/lc-658-find-k-closest-elements/problem.qmd >}}
+
+[**From one sorted array to two descending ones.** Find K Closest searched where a window starts, comparing two candidates inside one ascending array. Maximum Distance searches, for each element of one array, the farthest valid partner in another array that runs *downward*, so the search needs a flipped comparison (or a negated copy) before `bisect` applies.]{.flow-bridge}
+
+{{< include ../problems/lc-1855-maximum-distance-between-a-pair-of-values/problem.qmd >}}
+
+## Pattern 3: Search a prefix-sum or prefix-max array {#sec-bst-p3}
+
+**From the input array to an array you build.** P1 and P2 searched the input (sorted, or sorted by us). P3 adds one step before the search: **build** a monotone array from the input, A4's prefix sums or prefix maxima, and search that. A budget or threshold applied to a running total, or to a running maximum, becomes one search per query. Eating Queries sorts first so that its prefix sums are both monotone and optimal; Scuza needs no sort at all, because prefix maxima are monotone on any input.
+
+**Recognise it.** Many queries against one fixed sequence, each a threshold on a **running aggregate**: "fewest items to reach total $x$", "most items within budget $B$", "how far can you go while every element is $\le k$", "which block does position $p$ fall in".
+
+::: {.callout-important title="Template"}
+Build the monotone aggregate once, search it per query.
+
+```text
+fewest items to reach X:   s = sorted(a, reverse=True); pref = accumulate(s)
+                           i = bisect_left(pref, X); answer i + 1, or -1 if i == n
+longest prefix all <= K:   pm = accumulate(a, max); pref = accumulate(a)    (no sort)
+                           i = bisect_right(pm, K); answer pref[i-1] if i else 0
+```
+
+**Invariant.** Prefix sums of non-negative values and prefix maxima of any values are non-decreasing, so "aggregate $\ge X$" (or "$> K$") is false then true along them, and one search finds the flip. For Eating Queries, sorting descending also makes `pref[i]` the *largest* total any $i + 1$ items can reach, which is why the first prefix that reaches $X$ is optimal.
+:::
+
+**Complexity.** Building costs $O(n)$ (plus $O(n\log n)$ if a sort is needed); each query costs $O(\log n)$. The per-query scans the forms start from cost $O(n)$ each.
+
+::: {#fig-bst-p3-prefix}
+
+```{python}
+#| label: arr-bst-p3-fig
+#| echo: false
+#| renderings: [light, dark]
+q_pref = list(itertools.accumulate(sorted([4, 3, 3, 1, 1, 4, 5, 9], reverse=True)))
+q_xs = [10, 22, 50]
+q_hits = [bisect.bisect_left(q_pref, x) for x in q_xs]
+assert q_pref == [9, 14, 18, 22, 25, 28, 29, 30] and q_hits == [1, 3, 8]
+s_a = [1, 2, 1, 5]
+s_pm = list(itertools.accumulate(s_a, max))
+s_ks = [1, 4]
+s_hits = [bisect.bisect_right(s_pm, k) for k in s_ks]
+assert s_pm == [1, 2, 2, 5] and s_hits == [1, 3]
+def p3_draw(ax, p):
+    V.array(ax, p, q_pref, label="pref",
+            pointers=[(h, f"x={x}", c, "top") for h, x, c in zip(q_hits, q_xs, ["indigo", "green", "red"])],
+            note="bisect_left: candies = index + 1, or -1 off the end")
+    V.array(ax, p, s_pm, y=-3.6, label="pm",
+            pointers=[(h, f"k={k}", c, "top") for h, k, c in zip(s_hits, s_ks, ["indigo", "green"])],
+            note="bisect_right: steps climbed")
+V.show(p3_draw)
+```
+
+Top: Eating Queries' prefix sums of the candies sorted descending. The query $10$ lands at index $1$ (two candies), $22$ at index $3$ (four candies), and $50$ falls off the end (impossible). Bottom: Scuza's prefix maxima for steps $[1,2,1,5]$; leg length $1$ climbs one step and leg length $4$ climbs three. In both rows the searched array was built from the input; neither appears in it.
+
+:::
+
+{{< include ../problems/cf-1676e-eating-queries/problem.qmd >}}
+
+[**From a sorted prefix sum to an unsorted prefix maximum.** Eating Queries had to sort descending to make its prefix sums both monotone and optimal. Scuza must keep the steps in their given order, so it cannot sort; it searches prefix *maxima* instead, which are monotone whatever the order, and reads the height off a prefix *sum* at the index found.]{.flow-bridge}
+
+{{< include ../problems/cf-1742e-scuza/problem.qmd >}}
+
+## Pattern 4: A first search on the answer {#sec-bst-p4}
+
+**From searching an array to searching a range of values.** P3 still searched an array, even if we built it. P4 takes the last step of A5: the unknown is a **number**, the range of possible numbers is the search space, and an array only appears inside the check. Special Array searches $x \in [0, n]$ for the point where "count of elements $\ge x$" meets $x$; Sum of Mutated Array searches a cap in $[0, \max]$ and adds the second refinement: for "closest to a target", the answer is one of the two caps around the flip, and it may be a number that appears nowhere in the array.
+
+**Recognise it.** "Find the smallest (largest) value such that …", "choose a limit / cap / capacity / threshold", "make some sum as close as possible to a target", together with a check that can be evaluated for one guessed value in $O(n)$ or $O(\log n)$ and that is monotone in the guess.
+
+::: {.callout-important title="Template"}
+Search the answer's range; check a guess with a monotone test.
+
+```text
+lo, hi = smallest candidate, a candidate known to satisfy the test
+while lo < hi:
+    mid = (lo + hi) // 2
+    if test(mid): hi = mid           # the first value passing the test is mid or left
+    else:         lo = mid + 1
+exact objective:   verify lo (e.g. c(lo) == lo), else "no answer"
+closest objective: compare lo - 1 and lo, ties to the smaller
+```
+
+**Invariant.** The test is monotone in the guessed value, so its first passing value is a flip point and every probe discards half the range. If the objective is a monotone function crossing a target, every value left of the flip is at least as far below the target as the value just left of the flip, and every value right of it at least as far above, so the optimum is one of the two values around the flip.
+:::
+
+**Complexity.** $O(\log R)$ tests for a range of size $R$, times the cost of one test; a sort or prefix sums built once can make each test $O(\log n)$. The oracles try every value in the range.
+
+::: {#fig-bst-anim-special}
+
+```{python}
+#| echo: false
+sp_nums = [0, 4, 3, 0, 4]
+sp_s = sorted(sp_nums)
+sp_n = len(sp_s)
+def sp_c(x):
+    return sp_n - bisect.bisect_left(sp_s, x)       # number of elements >= x
+_lo, _hi = 0, sp_n
+sp_frames = []                                      # (lo, hi, mid, c(mid)) after each probe
+while _lo < _hi:
+    _mid = (_lo + _hi) // 2
+    _c = sp_c(_mid)
+    if _c <= _mid:
+        _hi = _mid
+    else:
+        _lo = _mid + 1
+    sp_frames.append((_lo, _hi, _mid, _c))
+sp_frames.append((_lo, _hi, _lo, sp_c(_lo)))        # the final check at the flip
+del _mid, _c
+assert _lo == _hi == 3 and sp_c(3) == 3 and len(sp_frames) == 4
+
+
+def sp_frame(ax, p, t):
+    lo, hi, mid, c = sp_frames[t]
+    last = t == len(sp_frames) - 1
+    xs = list(range(sp_n + 1))
+    dim = tuple(x for x in xs if x < lo or x > hi)
+    cols = {mid: ("green" if last else ("indigo" if c <= mid else "amber"))}
+    low = ([(lo, "lo=hi", "green", "bottom")] if lo == hi else
+           [(lo, "lo", "green", "bottom"), (hi, "hi", "violet", "bottom")])
+    V.array(ax, p, xs, colors=cols, dim=dim, index=False,
+            pointers=low + [(mid, f"x={mid}", "indigo", "top")],
+            note=(f"c({mid}) = {c} = x: special" if last else
+                  f"c({mid}) = {c} {'<=' if c <= mid else '>'} {mid}"))
+
+
+sp_caps = [f"x = {mid}: {c} elements are >= {mid}, so c(x) {'<=' if c <= mid else '>'} x; window [{lo},{hi}]"
+           for lo, hi, mid, c in sp_frames[:-1]]
+sp_caps.append(f"the flip is x = {sp_frames[-1][0]}, and c({sp_frames[-1][0]}) = {sp_frames[-1][3]}: the answer")
+V.animate(sp_frame, len(sp_frames), captions=sp_caps, interval=1200)
+```
+
+Special Array's search over $x \in [0, 5]$ for `nums` $= [0,4,3,0,4]$, with $c(x)$ the number of elements $\ge x$. The test "$c(x) \le x$" is false for small $x$ and true from the flip on: $x = 2$ fails ($c = 3$), $x = 4$ passes ($c = 2$), $x = 3$ passes ($c = 3$). The last frame checks the flip itself: $c(3) = 3$, so $3$ is special.
+
+:::
+
+{{< include ../problems/lc-1608-special-array-with-x-elements-greater-than-or-equal-x/problem.qmd >}}
+
+[**From an exact fixed point to the closest value.** Special Array's answer is the flip itself, verified with one equality. Sum of Mutated Array has no exact target to hit: its sum jumps over the target between two caps, so the answer is whichever of the two is closer, and the cap that wins may be a number absent from the array.]{.flow-bridge}
+
+{{< include ../problems/lc-1300-sum-of-mutated-array-closest-to-target/problem.qmd >}}
+
+**Looking back.** One loop ran through every section of this chapter: a window that always contains the first *yes* of a monotone question, halved until one candidate is left. Only the question changed. In P1 it was "is $a[i] \ge x$?" on a sorted array, and two such questions bracket every count. In P2 it compared two candidates (a window's end and its challenger, a partner and a threshold), and the work was proving the comparison flips once. In P3 it was asked of an array we built, prefix sums or prefix maxima, which is monotone even when the input is not. In P4 the positions disappeared and the question was asked of the answer itself. The lesson to carry forward: binary search needs a monotone question over an ordered set of candidates, not a sorted array, and finding that question is most of the work.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Sorted input; "how many $< x$ / $\le x$ / $= x$ / in $[L, R]$" | Two brackets, count = difference | @sec-bst-p1, @sec-bst-a2 |
+| "Positions of a value after sorting", "first and last position" | The run is `[bisect_left, bisect_right)` | @sec-bst-p1-b |
+| Sign split or threshold split of a sorted array | One bracket per threshold | @sec-bst-p1-a |
+| Many queries against fixed data | Sort once, one search per query | @sec-bst-a3 |
+| "Closest value to $x$", "nearest tower" | Neighbours of the insertion point | @sec-bst-a3, @sec-bst-p2 |
+| "The $k$ elements closest to $x$" | Search the window start by comparing its two ends | @sec-bst-p2-a |
+| Two sorted (or descending) arrays, farthest valid partner | One search per element (flipped comparator) or one walk | @sec-bst-p2-b |
+| Budget or target on a running total, many queries | Prefix sums (non-negative values), then search | @sec-bst-p3-a, @sec-bst-a4 |
+| "Longest prefix with every element $\le k$" | Prefix maxima, no sort | @sec-bst-p3-b, @sec-bst-a4 |
+| "Smallest capacity / limit such that it works" | Search on the answer with a monotone check | @sec-bst-a5 |
+| "Find $x$ with exactly $x$ elements $\ge x$" | Search $x \in [0, n]$, verify at the flip | @sec-bst-p4-a |
+| "Choose a cap making a sum closest to a target" | Search on the answer plus the two-candidate seam | @sec-bst-p4-b |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Mixing two loop contracts.** `while lo <= hi` with `hi = mid` loops forever once `lo == hi`; `while lo < hi` with `hi = mid - 1` can skip the answer. Use one contract and derive every line from its invariant: `while lo < hi`, `hi = mid`, `lo = mid + 1`, answer `lo` (@sec-bst-a1).
+- **`lo = mid` without rounding up.** In a "last true" search, `lo = mid` with `mid = (lo + hi) // 2` never moves when `hi = lo + 1`. Either round up, `mid = (lo + hi + 1) // 2`, or turn it into a first-true search on the opposite predicate and subtract one (@sec-bst-a1).
+- **`_left` versus `_right`.** `#(<= x)` is `bisect_right`, `#(< x)` is `bisect_left`. Swapping them is invisible on arrays without duplicates and wrong on arrays with them (@sec-bst-a2, @sec-bst-p3-b).
+- **Searching an array that is not ordered the way `bisect` expects.** `bisect` and `lower_bound` assume ascending order (more precisely: the predicate must be false…true along the array). On a descending array, negate a copy or pass a comparator such as `(e, v) -> e >= v` to `lower_bound` (@sec-bst-p2-b).
+- **Assuming prefix sums are monotone when values can be negative.** With $[3, -2, 4]$ the running totals are $[3, 1, 5]$ and a search on them lies. Prefix maxima are monotone for any input; prefix sums only for non-negative values (@sec-bst-a4).
+- **Testing only the array's own values in a search on the answer.** The best cap can lie strictly between two array values (cap $3$ for `[17, 26, 10, 28, 1, 5]`, target $17$), and the special $x$ need not be in the array (`[3, 5]` has $x = 2$). Search the whole range of candidates (@sec-bst-p4).
+- **Losing the tie-break.** "Closest, ties to the smaller" needs `d1 <= d2` at the seam, favouring the lower cap; a strict `<` there returns the larger cap on ties (@sec-bst-p4-b).
+- **Forgetting the "none" sentinel.** `bisect_left` returns $n$ when nothing qualifies, and `bisect_right(...) - 1` returns $-1$; guard before indexing `a[i]` or `pref[i - 1]` (@sec-bst-p3-a, @sec-bst-p3-b).
+- **Overflow in C++.** `(lo + hi) / 2` overflows `int` when `lo + hi` exceeds about $2.1 \cdot 10^9$; write `lo + (hi - lo) / 2`, and keep prefix sums and checks in `long long` (@sec-arr-cost).
+:::
+
+## Exercises
+
+**1. [E] On `a = [1, 2, 2, 2, 3, 5]`, give `bisect_left(a, 2)`, `bisect_right(a, 2)`, the count of `2`'s, the count of elements `< 2`, and the count `<= 2`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`bisect_left = 1`, `bisect_right = 4`; `count(2) = 4 - 1 = 3`; `#(<2) = bisect_left = 1`; `#(<=2) = bisect_right = 4`. The two brackets trap the run of `2`'s, and every count is a bracket or a difference of two (@sec-bst-a2).
+:::
+
+**2. [E] @sec-bst-p1-a returns `max(#neg, #pos)` for a sorted `nums` that may contain zeros. Write it with exactly two `bisect` calls and explain why zeros are counted in neither.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`neg = bisect_left(nums, 0)` (elements `< 0`) and `pos = len(nums) - bisect_right(nums, 0)` (elements `> 0`); for integers `bisect_left(nums, 1)` gives the same index as `bisect_right(nums, 0)`. The zeros occupy `[bisect_left(nums, 0), bisect_right(nums, 0))`, which lies after the negatives and before the positives, so neither count includes them (@sec-bst-p1-a).
+:::
+
+**3. [E] At most how many times does the loop of `first_true` run for $n = 10^6$? For $n = 10^9$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The window starts with $n + 1$ candidates and each iteration leaves at most $\lceil \text{size}/2 \rceil$, so the loop runs at most $\lceil \log_2(n + 1) \rceil$ times: $20$ for $n = 10^6$ (since $2^{20} = 1\,048\,576 > 10^6 + 1$) and $30$ for $n = 10^9$ ($2^{30} \approx 1.07 \cdot 10^9$). The demo in @sec-bst-a1 counts the probes for $n = 10^6$ and checks the bound.
+:::
+
+**4. [E] Given a sorted list `s` and a value `x`, return the largest element $\le x$ and the smallest element $\ge x$, or `None` when they do not exist.**
+
+::: {.callout-note collapse="true" title="Solution"}
+```text
+i = bisect_right(s, x);  floor = s[i-1] if i > 0 else None
+j = bisect_left(s, x);   ceil  = s[j]   if j < len(s) else None
+```
+`bisect_right(s, x)` counts the elements $\le x$, so the last of them sits at index $i - 1$; `bisect_left(s, x)` is the first index whose element is $\ge x$. If `x` is present, both return `x` itself (@sec-bst-a2).
+:::
+
+**5. [M] For @sec-bst-p3-b (Scuza), explain why `pm = accumulate(a, max)` is non-decreasing although `a` is never sorted, and why the answer uses `bisect_right`, not `bisect_left`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\mathit{pm}[i+1] = \max(\mathit{pm}[i], a[i+1]) \ge \mathit{pm}[i]$: extending a prefix can only keep or raise its maximum, whatever the order of `a`. `bisect_right(pm, k)` is the number of entries $\le k$, the length of the longest prefix whose every step is $\le k$. A step with $a_i = k$ exactly is climbable, and `bisect_left` would stop before it: on `pm = [1, 2, 2, 5]` with $k = 2$, `bisect_left` gives $1$ but the correct length is $3$ (@sec-bst-p3-b, @sec-bst-a4).
+:::
+
+**6. [M] @sec-bst-p2-b has two non-increasing arrays and wants $\max(j - i)$ with `nums1[i] <= nums2[j]`, $i \le j$. Why is `bisect_left(nums2, nums1[i])` wrong, and what are two correct ways to find the farthest valid $j$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+`bisect` assumes ascending order; on a descending array its halving discards the wrong half and the result is meaningless. The valid $j$ (those with `nums2[j] >= v`) form a *prefix* of the descending array. Fix (a): search the negated copy `rev = [-x for x in nums2]`, which is ascending: the farthest valid $j$ is `bisect_right(rev, -v) - 1`. Fix (b): in C++, `lower_bound(b.begin(), b.end(), v, [](int e, int v) { return e >= v; }) - b.begin() - 1`: the comparator is true exactly on the valid prefix, so `lower_bound` returns the first invalid index (@sec-bst-p2-b).
+:::
+
+**7. [M] Packages with weights `w` must ship in order within `D` days. Give `lo`, `hi` and the check for "smallest capacity", and prove the check is monotone.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`lo = max(w)` (a smaller ship cannot carry the heaviest package), `hi = sum(w)` (one day suffices). The check: fill days greedily, starting a new day when the next package would overflow, and test `days(c) <= D`. Monotone: with a larger capacity, the greedy's day $t$ ends at the same package or later, by induction on $t$ (each day starts no later and can hold at least as much), so it never needs more days. Hence "feasible" is false…true over $c$, and the first feasible capacity is A5's `first_feasible` (@sec-bst-a5).
+:::
+
+**8. [M] Write a loop that returns the *last* index $i$ with $P(i)$ true, for a predicate that is true…true false…false on $0..n-1$ ($-1$ if none), without using the complement trick. Why must `mid` round up?**
+
+::: {.callout-note collapse="true" title="Solution"}
+```text
+lo, hi = -1, n - 1          # the last true lies in [lo, hi]; -1 means none
+while lo < hi:
+    mid = (lo + hi + 1) // 2
+    if P(mid): lo = mid      # mid is true: the last true is mid or right of it
+    else:      hi = mid - 1  # mid is false: the last true is left of it
+return lo
+```
+The true branch sets `lo = mid`; with `mid = (lo + hi) // 2` and `hi = lo + 1` we would get `mid = lo`, and the window would never shrink. Rounding up gives $\mathit{lo} < \mathit{mid} \le \mathit{hi}$, so both branches shrink it. Also `mid` $\ge 0$ always, so `P(-1)` is never evaluated (@sec-bst-a1).
+:::
+
+**9. [M] Count pairs $i < j$ with $a_i + a_j \le T$ in $O(n \log n)$ using binary search.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort `a`. For each $i$, the partners are the $j > i$ with $a_j \le T - a_i$; in the sorted array they are the indices from $i + 1$ up to `bisect_right(a, T - a[i]) - 1`, so add `max(0, bisect_right(a, T - a[i]) - (i + 1))`. Sorting does not change the number of pairs, since a pair is a set of two elements. Total $O(n\log n)$. The two-pointer version of @sec-tp-p5-b does the counting in $O(n)$ after the sort (@sec-bst-p1).
+:::
+
+**10. [M] Show the smallest input on which `lo, hi = 0, n; while lo <= hi: mid = (lo + hi) // 2; if P(mid): hi = mid else: lo = mid + 1` misbehaves, and say what happens.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Take $n = 1$ with $P(0)$ true. Start `lo = 0, hi = 1`: `mid = 0`, true, `hi = 0`. Now `lo = hi = 0` and the condition `lo <= hi` still holds: `mid = 0`, true, `hi = 0` again, forever. With $P(0)$ false the loop does end, but it evaluates `P(1)`, one past the end, which is an index error on a real array. The half-open update `hi = mid` belongs with `while lo < hi` (@sec-bst-a1).
+:::
+
+**11. [M] An array may contain negative numbers. For each query $B$ you must find the first prefix whose sum **exceeds** $B$. Why can you not search `pref` directly, and what monotone array can you search instead?**
+
+::: {.callout-note collapse="true" title="Solution"}
+With negatives, `pref` can go down, so "pref[i] > B" is not false…true along it: for $[3, -2, 4]$, `pref = [3, 1, 5]` and with $B = 2$ the predicate is true, false, true. But "the first prefix whose sum exceeds $B$" is the first $i$ with $\max(\mathit{pref}[0..i]) > B$, and the running maximum of `pref` is monotone. So build `pm = accumulate(pref, max)` and answer with `bisect_right(pm, B)` (the index of the first entry $> B$, or $n$ if none). For $[3, 1, 5]$, `pm = [3, 3, 5]` and $B = 2$ gives index $0$ (@sec-bst-a4).
+:::
+
+**12. [M] Change Eating Queries (@sec-bst-p3-a): for each query $x$, print the **largest** number of candies whose total sugar is **at most** $x$. What changes?**
+
+::: {.callout-note collapse="true" title="Solution"}
+To fit the most candies under a budget, eat the *smallest* first, so sort **ascending**. Its prefix sums are non-decreasing, and the answer is the number of prefixes with total $\le x$: `bisect_right(pref, x)`. Both the sort direction and the bracket flip: "fewest to reach" uses descending order and `bisect_left`, "most within" uses ascending order and `bisect_right`. The exchange argument is the mirror image: replacing a chosen candy by a smaller unchosen one never raises the total. This is LC 2389 in the practice ladder.
+:::
+
+**13. [H] @sec-bst-p4-b searches $[0, \max]$ for the first cap $v$ with $S(v) \ge \text{target}$, then compares $v - 1$ and $v$. Prove that the smallest optimal cap is one of these two.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$S$ is non-decreasing. For $c \ge v$: $S(c) \ge S(v) \ge \text{target}$, so $|S(c) - \text{target}| = S(c) - \text{target} \ge S(v) - \text{target}$; no larger cap beats $v$, and a larger cap that ties loses the tie-break to $v$. For $c \le v - 2$: since $v \le \max(\mathit{arr})$, every cap $c < v - 1$ has at least one element above it, so $S(c + 1) - S(c) \ge 1$ and $S(c) < S(v-1) < \text{target}$; thus $|S(c) - \text{target}| > \text{target} - S(v-1)$, and every smaller cap is strictly worse than $v - 1$. So the smallest optimal cap is $v - 1$ or $v$, and comparing them with ties to $v - 1$ returns it. (If even $S(\max) < \text{target}$, the search ends at $v = \max$ and the same argument applies to the left side.) (@sec-bst-p4-b)
+:::
+
+**14. [H] For @sec-bst-p4-b, find a case where the answer is not a value of `arr`, and explain why trying only `sorted(set(arr))` fails.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`arr = [17, 26, 10, 28, 1, 5], target = 17`: $S(3) = 1 + 3 \cdot 5 = 16$ (distance $1$) and $S(4) = 1 + 4 \cdot 5 = 21$ (distance $4$); the answer is $3$, which is not in `arr`. Between two consecutive array values $S$ is linear, rising by the number of elements above the cap per unit, so the closest point to a target can be anywhere inside such a stretch. Trying only the array's values ($1, 5, 10, \dots$) gives $S(1) = 6$ and $S(5) = 1 + 25 = 26$, both worse. Only a search over every integer cap finds $3$ (@sec-bst-p4-b).
+:::
+
+**15. [H] Compute $\lfloor \sqrt{N} \rfloor$ for $0 \le N \le 10^{18}$ by binary search on the answer, in C++ without overflow.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The answer is the last $r$ with $r^2 \le N$; the test "$r^2 \le N$" is true…false over $r \in [0, 10^9]$ ($10^9$ squared is exactly $10^{18}$). Search `lo = 0, hi = 1000000000` with the last-true loop of exercise 8 (`mid = lo + (hi - lo + 1) / 2`). Test without overflow: `mid <= N / mid` for `mid > 0` (integer division: $\mathit{mid} \le \lfloor N/\mathit{mid} \rfloor \iff \mathit{mid}^2 \le N$), or compute `mid * mid` in `unsigned long long` or `__int128`; `mid * mid` in `long long` is safe here only because `mid` $\le 10^9$. Floating-point `sqrt` can be off by one near $10^{18}$, which is why the integer search is the safe answer (@sec-bst-a5).
+:::
+
+**16. [H] Prove that the predicate of @sec-bst-p2-a, $P(l)$: "$x - a[l] \le a[l+k] - x$", is false…true over $l \in [0, n-k-1]$, and that its first true (or $n - k$) is an optimal window start.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $f(l) = (x - a[l]) - (a[l+k] - x)$. As $l$ grows, $a[l]$ and $a[l+k]$ do not decrease, so $f$ does not increase, and $P(l) = [f(l) \le 0]$ is false…true. Window $l + 1$ differs from window $l$ by dropping $a[l]$ and adding $a[l+k]$. If $P(l)$ is false, $a[l+k]$ is strictly closer than $a[l]$ (the midpoint argument of @sec-bst-p2-a), so window $l + 1$ is better than window $l$. If $P(l)$ is true, $a[l]$ is at least as close (and smaller on a tie), so window $l$ is at least as good as window $l + 1$. Hence the window quality improves strictly up to the first true $l^*$ and never improves after it, and $l^*$ is optimal; if $P$ is never true, the last start $n - k$ is (@sec-bst-p2-a).
+:::
+
+**17. [H] Special Array with $n = 10^5$ and values up to $10^9$: give an $O(n \log n)$ algorithm, and explain why the answer, if it exists, is found at the flip of "$c(x) \le x$".**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort once, $c(x) = n - \mathtt{bisect\_left}(s, x)$, and search $x \in [0, n]$ for the first $x$ with $c(x) \le x$; answer it if $c(x) = x$, else $-1$. Total $O(n\log n + \log^2 n)$. The values may be huge but $x$ is a count, so $x \le n$. Correctness: $d(x) = c(x) - x$ strictly decreases (each step raises $x$ by one and $c$ cannot rise), so $d(x) \le 0$ first happens at a single $x^*$; if $d(x) = 0$ anywhere, it is at $x^*$, because before $x^*$ the difference is positive and after it negative (@sec-bst-p4-a).
+:::
+
+## Interview questions
+
+<!-- Copied into the Question Bank (quiz mode) by gen_book.py. Keep the shape exactly: a bold line
+     starting "**N. " with the question, then one collapsed "Answer" callout. -->
+
+**1. How do you find the first position where a sorted array is $\ge x$ in $O(\log n)$, and what is the loop invariant?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`lo, hi = 0, n; while lo < hi: mid = (lo + hi) // 2; if a[mid] >= x: hi = mid else: lo = mid + 1; return lo`. Invariant: the first index with $a[i] \ge x$ (or $n$ if none) lies in $[\mathit{lo}, \mathit{hi}]$. Each branch keeps it and shrinks the window, because $\mathit{lo} \le \mathit{mid} < \mathit{hi}$; at `lo == hi` that index is the answer. This is `bisect_left` / `lower_bound` (@sec-bst-a1).
+:::
+
+**2. How do you count the elements of a sorted array in a closed value range $[L, R]$ with two calls?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`bisect_right(a, R) - bisect_left(a, L)`. The first term counts the elements $\le R$, the second those $< L$; the difference is the number with $L \le x \le R$. Both calls are $O(\log n)$, and an empty range correctly gives $0$ (@sec-bst-a2).
+:::
+
+**3. With $q$ queries on $n$ fixed items, when is sorting and binary searching worth it compared with scanning?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Scanning costs about $qn$; sorting first costs about $n\log n + q\log n$. Sorting wins once $q$ exceeds roughly $\log_2 n$ queries, ignoring constants; for one query, scanning is cheaper. If the data changes between queries, a sorted list costs $O(n)$ per insertion, so use an ordered container such as C++ `std::set`. If all queries are known in advance, you can also sort the queries and sweep (@sec-bst-a3).
+:::
+
+**4. Many queries ask how many items, taken in order, fit in a budget, and you may not reorder them. What do you search?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The prefix-sum array, if the values are non-negative: it is non-decreasing, and the answer is `bisect_right(pref, budget)`. If values can be negative, prefix sums are not monotone and the search is wrong. If the question is about a maximum ("every item $\le k$") rather than a sum, search the prefix maxima, which are monotone for any input (@sec-bst-a4, @sec-bst-p3).
+:::
+
+**5. What is "binary search on the answer", and what two things must you prove before using it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The unknown is a value in a range $[\mathit{lo}, \mathit{hi}]$ with a check "is $v$ good enough?"; you binary search the range of values, running the check at each probe. You must prove the check is **monotone** (if $v$ passes, so does every larger $v$, or every smaller one) and that the range **brackets** the answer (`hi` passes, nothing below `lo` can be the answer). Example: the smallest ship capacity that delivers packages within $D$ days, searched over $[\max w, \sum w]$ with a greedy day count as the check (@sec-bst-a5).
+:::
+
+**6. In a "closest to a target" search on the answer, why is the value returned by the search not enough, and what do you compare?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The search returns the first value whose objective reaches the target. The objective jumps over the target between that value and the one just below it, so the closest value is one of these two; every value further left is further below the target and every value further right further above. Compare both distances and, on a tie, return the smaller value (LC 1300's rule) (@sec-bst-p4-b).
+:::
+
+**7. Your binary search sometimes loops forever or returns the wrong index. What are the two standard contracts, and which mixtures break?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Half-open: `while lo < hi`, `hi = mid`, `lo = mid + 1`, answer `lo`. Closed: `while lo <= hi`, `hi = mid - 1`, `lo = mid + 1`, answer `lo` (the first true is $\mathit{hi} + 1$ at the end). Mixing them breaks: `while lo <= hi` with `hi = mid` never terminates once `lo == hi`; `while lo < hi` with `hi = mid - 1` can discard the answer; `lo = mid` with a rounding-down `mid` stalls when `hi = lo + 1` (@sec-bst-a1).
+:::
+
+**8. How do you binary search a non-increasing array, for example to find the first index with `b[j] < v`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+"`b[j] >= v`" holds on a prefix of a non-increasing array, so the answer is the first index where it fails. Either search a negated copy, `bisect_right([-x for x in b], -v)`, or pass a comparator in C++: `lower_bound(b.begin(), b.end(), v, [](int e, int v) { return e >= v; })`, or `upper_bound(b.begin(), b.end(), v, greater<int>())`. What these functions really require is that the comparator be true on a prefix of the range and false after it (@sec-bst-p2-b).
+:::
+
+**9. Why do C++ binary searches write `lo + (hi - lo) / 2` instead of `(lo + hi) / 2`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`lo + hi` can exceed the largest `int` (about $2.1 \cdot 10^9$) when the search range is large, for example a search on the answer over $[0, 2 \cdot 10^9]$ or indices of a very large array; signed overflow is undefined behaviour. `hi - lo` never overflows when both are in range, so `lo + (hi - lo) / 2` is safe. Joshua Bloch's well-known 2006 note describes exactly this bug in widely used library code. In Python, integers do not overflow (@sec-arr-cost).
+:::
+
+**10. Does binary search require a sorted array?**
+
+::: {.callout-note collapse="true" title="Answer"}
+No. It requires a predicate that is false…false true…true over an ordered set of candidates. A sorted array supplies one ("$a[i] \ge x$"), but so do prefix maxima of an unsorted array (Scuza), prefix sums of non-negative values, and ranges of answers with a monotone check (ship capacity, Special Array). Conversely, a sorted array with the wrong predicate (one that flips twice) cannot be binary searched (@sec-bst-a1, @sec-bst-p3-b).
+:::
+
+**11. How do you find the largest element $\le x$ in a sorted array, and how do you report that none exists?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`i = bisect_right(a, x)` counts the elements $\le x$; if `i == 0` there is none, otherwise the answer is `a[i - 1]`. In C++: `auto it = upper_bound(a.begin(), a.end(), x);` then `it == a.begin()` means none, else the answer is `*prev(it)`. The smallest element $\ge x$ is the mirror: `a[bisect_left(a, x)]` if that index is $< n$ (@sec-bst-a2).
+:::
+
+**12. What is the complexity of `std::lower_bound(s.begin(), s.end(), x)` on a `std::set`, and what should you call instead?**
+
+::: {.callout-note collapse="true" title="Answer"}
+It performs $O(\log n)$ comparisons, but set iterators are not random-access, so each jump to the middle walks the tree step by step and the total is $O(n)$. Call the member function `s.lower_bound(x)`, which descends the tree in $O(\log n)$ (@sec-lang-p4).
+:::
+
+**13. Why can no comparison-based search of a sorted array beat about $\log_2 n$ comparisons in the worst case?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A search must distinguish $n + 1$ possible outcomes (the insertion point can be any of $0..n$). Each comparison has two outcomes, so after $t$ comparisons at most $2^t$ cases can be told apart; we need $2^t \ge n + 1$, so $t \ge \lceil \log_2(n+1) \rceil$. Binary search meets this bound, so it is optimal among comparison-based methods (the decision-tree argument of @sec-pf-lower-bounds).
+:::
+
+**14. Is binary search always faster than a linear scan in practice?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Not always. For very small arrays a linear scan is often as fast or faster, because it reads memory sequentially and its branches are predictable, while binary search jumps around the array. For a single query on unsorted data, scanning ($O(n)$) beats sorting first ($O(n\log n)$). Binary search wins clearly when $n$ is large and the data is already sorted, or when many queries share one sort (@sec-bst-a3).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **First true:** `lo, hi = 0, n; while lo < hi: mid = (lo + hi) // 2; if P(mid): hi = mid else: lo = mid + 1; return lo` ($n$ means none). Last true of the opposite shape: first true of `not P`, minus one (@sec-bst-a1).
+- **Two brackets:** `bisect_left(a, x)` $=$ #(< x), `bisect_right(a, x)` $=$ #(<= x); run of $x$ $=$ `[left, right)`; count in $[L, R]$ $=$ `right(R) - left(L)`; floor $=$ `a[right(x) - 1]` (@sec-bst-a2, @sec-bst-p1).
+- **Sort once, query many:** $O(n\log n) + O(\log n)$ per query; nearest value $=$ one of the two neighbours of the insertion point (@sec-bst-a3, @sec-bst-p2).
+- **Derived monotone array:** prefix sums (values $\ge 0$) or `accumulate(a, max)` (any values); fewest to reach $X$ $=$ `bisect_left(pref, X) + 1`, longest prefix all $\le K$ $=$ `bisect_right(pm, K)` (@sec-bst-a4, @sec-bst-p3).
+- **Search on the answer:** binary search the value range with a monotone check, `hi` feasible; exact objective: verify at the flip; closest objective: compare `lo - 1` and `lo`, ties to the smaller (@sec-bst-a5, @sec-bst-p4).
+:::
+
+- Binary search is one loop over a window that always contains the first *yes* of a monotone question; correctness is initialisation, both branches, and a window that strictly shrinks (@sec-bst-a1).
+- The two library brackets are that loop with the question fixed; every count, run, floor and ceiling on a sorted array is one or two of them, and `_left`/`_right` confusion is the classic off-by-one (@sec-bst-a2, @sec-bst-p1).
+- Sorting pays for itself once the queries outnumber roughly $\log_2 n$; when data changes between queries, use an ordered container instead (@sec-bst-a3).
+- "Closest value" questions reduce to the neighbours of an insertion point; "closest $k$" reduces to searching a window start by comparing its two ends (@sec-bst-p2).
+- On descending data, flip the comparison: negate a copy or pass a comparator that is true on a prefix (@sec-bst-p2-b).
+- You can manufacture the monotone array: prefix sums need non-negative values, prefix maxima need nothing at all (@sec-bst-a4, @sec-bst-p3).
+- Search on the answer replaces positions by candidate values; prove the check monotone and bracket the range, and stress-test against trying every value (@sec-bst-a5, @sec-bst-p4).
+- For "closest to a target", the optimum is one of the two values around the flip, and it may be a value that never appears in the input (@sec-bst-p4-b).
+
+## Practice ladder
+
+Ordered by concept, one step beyond the solved problems of each pattern.
+
+::: {.practice}
+- [CF 600B · Queries about less or equal elements](https://codeforces.com/problemset/problem/600/B){rating="1300"} — P1: sort once, then `bisect_right` per query.
+- [LC 34 · Find First and Last Position of Element in Sorted Array](https://leetcode.com/problems/find-first-and-last-position-of-element-in-sorted-array/){difficulty="Medium"} — P1: both ends of a run, or `[-1, -1]`.
+- [LC 1385 · Find the Distance Value Between Two Arrays](https://leetcode.com/problems/find-the-distance-value-between-two-arrays/){difficulty="Easy"} — P2: only the two neighbours of the insertion point can be within distance $d$.
+- [CF 702C · Cellular Network](https://codeforces.com/problemset/problem/702/C){rating="1500"} — P2: nearest tower for every city, then the largest of those distances.
+- [LC 2300 · Successful Pairs of Spells and Potions](https://leetcode.com/problems/successful-pairs-of-spells-and-potions/){difficulty="Medium"} — P2: one partner boundary per element in a sorted array.
+- [CF 1324D · Pair of Topics](https://codeforces.com/problemset/problem/1324/D){rating="1400"} — P2: transform to $c_i + c_j > 0$, sort, and search each element's partner boundary.
+- [CF 474B · Worms](https://codeforces.com/problemset/problem/474/B){rating="1200"} — P3: prefix sums of pile sizes, one `bisect_left` per label.
+- [LC 2389 · Longest Subsequence With Limited Sum](https://leetcode.com/problems/longest-subsequence-with-limited-sum/){difficulty="Easy"} — P3: sort ascending, prefix sums, `bisect_right` per budget.
+- [LC 2070 · Most Beautiful Item for Each Query](https://leetcode.com/problems/most-beautiful-item-for-each-query/){difficulty="Medium"} — P3: prefix maxima of beauty over items sorted by price.
+- [LC 2055 · Plates Between Candles](https://leetcode.com/problems/plates-between-candles/){difficulty="Medium"} — P3: prefix counts plus a binary search over candle positions.
+- [LC 275 · H-Index II](https://leetcode.com/problems/h-index-ii/){difficulty="Medium"} — P4: Special Array's monotone count on a sorted array, searched in $O(\log n)$.
+- [CF 1873E · Building an Aquarium](https://codeforces.com/problemset/problem/1873/E){rating="1100"} — P4: the largest height whose water $\sum \max(0, h - a_i)$ fits the budget.
+- [LC 1283 · Find the Smallest Divisor Given a Threshold](https://leetcode.com/problems/find-the-smallest-divisor-given-a-threshold/){difficulty="Medium"} — P4: smallest divisor with $\sum \lceil a_i / v \rceil \le$ threshold.
+- [CF 1201C · Maximum Median](https://codeforces.com/problemset/problem/1201/C){rating="1400"} — P4: search the median value; the check sums the increments needed in the upper half.
+:::
+
+## Further reading
+
+- [CP-Algorithms — Binary search](https://cp-algorithms.com/num_methods/binary_search.html) — the monotone-predicate formulation, the `lo`/`hi` invariant, and search on the answer with worked examples (@sec-bst-a1, @sec-bst-a5).
+- [Competitive Programmer's Handbook (Laaksonen)](https://cses.fi/book/book.pdf) — chapter 3 covers sorting and binary search: the jump-based formulation, `lower_bound`/`upper_bound`, and finding the smallest solution of a monotone test.
+- [USACO Guide — Binary Search](https://usaco.guide/silver/binary-search) — binary search on the answer with code in several languages and a graded problem list.
+- [Python `bisect` documentation](https://docs.python.org/3/library/bisect.html) — `bisect_left` / `bisect_right` as insertion points, the `key=` parameter, and recipes for floor and ceiling lookups (@sec-bst-a2).
+- [cppreference — `std::lower_bound`](https://en.cppreference.com/w/cpp/algorithm/lower_bound) — the half-open range contract, the partition requirement that makes comparators on descending ranges legal, and the cost on non-random-access iterators (@sec-bst-p2-b).
+- [cppreference — `std::equal_range`](https://en.cppreference.com/w/cpp/algorithm/equal_range) — both brackets in one call, the C++ form of the run `[bisect_left, bisect_right)` (@sec-bst-p1).
+- [Wikipedia — Binary search](https://en.wikipedia.org/wiki/Binary_search_algorithm) — variants (leftmost, rightmost, approximate matches), the $\lceil\log_2(n+1)\rceil$ bound, and the history of implementation bugs.
+- [Bloch — Nearly All Binary Searches and Mergesorts are Broken](https://research.google/blog/extra-extra-read-all-about-it-nearly-all-binary-searches-and-mergesorts-are-broken/) — the `(lo + hi) / 2` overflow bug found in widely used library code, and its fixes.

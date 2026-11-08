@@ -1,0 +1,1466 @@
+# Linear-Time Sorting {#sec-lts}
+
+<!--
+Author-facing provenance (not rendered): Chapter 13 of the arrays volume, per outline.yml
+("Linear-Time Sorting": counting sort, radix sort, bucket sort; when values beat comparisons).
+No source chapter in the array_book notes covers this topic; written from CLRS 4th ed. ch. 8
+(8.1 lower bound, 8.2 counting sort, 8.3 radix sort, 8.4 bucket sort) and Sedgewick & Wayne,
+Algorithms 4th ed., section 5.1 (key-indexed counting, LSD and MSD string sorts).
+Part A: lessons A1-A6. Part B: six patterns, fourteen solved registry problems (boards for the
+original ten in books/traces/arr013_traces.py) plus cards for LC 1122, LC 164 (homed in @sec-srt)
+and CSES 1621 (homed in @sec-hash). Comparison sorts live in @sec-salgo (chapter 12); the
+application-side "sort as a tool" in @sec-srt (chapter 10). Do not print problem kinds.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** (4th ed.) ch. 8 "Sorting in Linear Time": the decision-tree lower bound (§8.1), counting sort (§8.2), radix sort and the choice of digit size (§8.3), bucket sort and its expected-time analysis (§8.4) · **Sedgewick & Wayne**, *Algorithms* (4th ed.) §5.1 "String Sorts": key-indexed counting, LSD string sort, MSD string sort · **CPH** ch. 3 (sorting theory, counting sort) · **MIT 6.006** (Spring 2020) lecture 5, "Linear Sorting" · the **problem statements** of the fourteen problems solved here (LeetCode, Codeforces).
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- State **exactly** what the $\Omega(n\log n)$ bound assumes ("order is learned only by comparing two keys") and explain how counting, radix and bucket sort step outside that assumption.
+- Implement **stable counting sort** (count, prefix sums, place) for any integer key range, including negative keys, and prove it is stable; price it as $O(n + k)$.
+- Implement **LSD radix sort** with any digit size, prove it correct by induction on the digits, choose the digit width from $n$ and the key size $b$, and sort signed integers and fixed-length strings with it.
+- Implement **MSD radix sort** for strings of any length and say when MSD beats LSD.
+- Prove that **bucket sort** runs in expected $O(n)$ time on uniform input, and name the inputs that break it.
+- Recognise the problem shapes these sorts solve: small value ranges, clamped ranges, value-as-index, frequency buckets, pigeonhole buckets, and wide keys split into digits.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr013_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-lts-why}
+
+::: {.callout-note title="In plain words"}
+@sec-salgo ended on a wall: no **comparison** sort can beat $\Omega(n\log n)$, because a sort that only ever asks "is $a$ less than $b$?" must tell $n!$ orderings apart with yes/no questions. This chapter walks *around* the wall. A key is not only something to compare: it is a **number**, and a number can be an **address**. If the keys lie in a small known range, index an array by the key (counting sort). If a key is a short, fixed-width sequence of small digits, sort it one digit at a time (radix sort). If the keys are spread evenly over an interval, scatter them into buckets (bucket sort). Each trick gives up comparisons and gets $O(n)$, and each one pays for it with an assumption about the keys.
+:::
+
+The arrays volume so far has bought order for $O(n\log n)$: @sec-srt used sorting as a tool, and @sec-salgo opened the comparison sorts themselves. For $n = 10^6$ the $\log n$ factor is about twenty, and sometimes it can be deleted entirely. The tell is always in the **constraints**, where the problem tells you something about the values:
+
+- **Small values** ($1 \le \mathit{nums}[i] \le 100$, lowercase letters, values at most $n$): a histogram is cheap and a value can be an array index. Counting sort (A1, A2), and Patterns 1 to 5.
+- **Wide values with a fixed shape** (32-bit integers, fixed-length strings, dates): split each key into a few small digits and run one stable counting sort per digit. Radix sort (A3), and Pattern 6.
+- **Values spread evenly over an interval**: bucket sort (A4), and the pigeonhole arguments it teaches (Pattern 5).
+- **"Without extra space", values in $[1, n]$**: the array's own slots become the counters (A5, Patterns 2 and 5).
+
+Part A is six lessons: counting sort and the lower bound it escapes (A1), stable counting sort (A2), radix sort, LSD and MSD, on integers, signed integers and strings (A3), bucket sort with its expected-time proof (A4), value-as-index (A5), and the decision guide with the pigeonhole (A6). Part B is six patterns that use them. The next chapter, @sec-int, sorts intervals by their endpoints and then sweeps; its sorts are ordinary comparison sorts, but the habit of reading the constraints first carries over.
+
+## A1. Counting sort: a value becomes an address {#sec-lts-a1}
+
+::: {.callout-note title="In plain words"}
+If every key is an integer in $[0, k)$, you do not need to compare anything. Allocate `cnt[0..k)`, walk the input once doing `cnt[x] += 1`, then read the array out in index order: $k$ buckets, each emitted as many times as it was counted. That is **counting sort**: $O(n + k)$ time, $O(k)$ extra space. It is linear whenever $k = O(n)$. The one assumption it needs: **the keys are small integers that may be used as array indices.**
+:::
+
+### The wall, and the door around it {#sec-lts-a1-wall}
+
+Recall the argument of @sec-salgo. A comparison sort's run on $n$ distinct keys can be drawn as a **decision tree**: every internal node is a question "$a_i \le a_j$?", with two children for the two answers, and every leaf is one output order. All $n!$ orders must appear as leaves, and a binary tree of height $h$ has at most $2^h$ leaves, so
+
+$$
+h \;\ge\; \log_2(n!) \;\ge\; \log_2\!\left((n/2)^{n/2}\right) \;=\; \tfrac{n}{2}\log_2\tfrac{n}{2} \;=\; \Omega(n\log n).
+$$ {#eq-lts-lower}
+
+The bound counts **comparisons**, and it holds only for algorithms whose *only* access to the keys is comparing two of them. Counting sort never compares. Its basic step `cnt[x] += 1` uses the key $x$ itself to pick one of $k$ memory cells: one step with $k$ possible outcomes, not two. Nothing in @eq-lts-lower limits such a step, and that is the whole escape. Every sort in this chapter works in the usual **word-RAM** model, where a key is an integer (or a string of small integers) that fits in a few machine words, and reading a key's bits or using it as an index costs $O(1)$. Take that away (keys that can only be compared, like arbitrary objects with a comparator) and the wall is back.
+
+### The histogram form {#sec-lts-a1-hist}
+
+```text
+counting_sort(a, k):                     # keys in 0..k-1
+    cnt = [0]*k
+    for x in a: cnt[x] += 1              # one pass: tally
+    out = []
+    for v in 0..k-1: out += [v]*cnt[v]   # read out in index order
+    return out
+```
+
+::: {#fig-lts-a1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a1_draw(ax, p):
+    data = [4, 1, 3, 1, 4, 2, 1]
+    cnt = [0] * 5
+    for x in data:
+        cnt[x] += 1
+    out = [v for v in range(5) for _ in range(cnt[v])]
+    assert out == sorted(data)
+    V.trace(ax, p, [
+        dict(values=data, label="input", note="keys are small ints in [0, 5)",
+             colors={i: "muted" for i in range(len(data))}),
+        dict(values=cnt, label="cnt[v]", note="cnt[x] += 1, no comparisons",
+             colors={v: "amber" for v in range(5)}),
+        dict(values=out, label="read out", note="value v emitted cnt[v] times",
+             colors={i: "green" for i in range(len(data))}),
+    ], gap=2.6)
+V.show(a1_draw)
+```
+
+Counting sort on $[4,1,3,1,4,2,1]$: seven increments build the histogram (the index of each cell is a key), and one sweep of five buckets emits the sorted array. No two keys were ever compared.
+
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: arr-lts-a1-demo
+def a1_counting(a, k):                    # keys in 0..k-1; emits by index order
+    cnt = [0] * k
+    for x in a:
+        cnt[x] += 1
+    out = []
+    for v in range(k):
+        out += [v] * cnt[v]
+    return out
+
+for _ in range(400):
+    arr = [random.randint(0, 9) for _ in range(random.randint(0, 40))]
+    assert a1_counting(arr, 10) == sorted(arr)
+assert a1_counting([4, 1, 3, 1, 4, 2, 1], 5) == [1, 1, 1, 2, 3, 4, 4]
+assert a1_counting([], 3) == []
+print("a1 counting OK")
+```
+
+##### C++
+
+```cpp
+// keys in [0, k): histogram, then emit each value cnt[v] times; O(n + k)
+vector<int> countingSort(const vector<int>& a, int k) {
+    vector<int> cnt(k, 0);
+    for (int x : a) ++cnt[x];
+    vector<int> out;
+    out.reserve(a.size());
+    for (int v = 0; v < k; ++v)
+        out.insert(out.end(), cnt[v], v);
+    return out;
+}
+```
+:::
+
+**Cost in $n$ and $k$.** The tally is $n$ increments, the read-out visits all $k$ buckets and writes $n$ values: $\Theta(n + k)$ time and $\Theta(k)$ extra space besides the output. Both terms matter. With $k = 100$ and $n = 10^6$ the cost is essentially $n$; with $n = 10$ and keys up to $10^9$ it is $10^9$, far worse than any comparison sort. "Linear" always means "linear when $k = O(n)$."
+
+The histogram form emits **only the keys**: it rebuilds the numbers from their counts, so it cannot carry anything attached to a key (a name, an index, the rest of a record). That is fine when the keys are the whole data, as in @sec-lts-p1-a, and wrong when records must travel with their keys, which A2 fixes.
+
+## A2. Stable counting sort: count, prefix sums, place {#sec-lts-a2}
+
+::: {.callout-note title="In plain words"}
+To sort **records** by a small integer key, count the keys, then turn the counts into **positions**: after a running sum, $C[v]$ is "how many keys are $\le v$", which is one past the last slot that key $v$ will occupy. Now walk the input **from the back**: put each record at slot $C[\mathit{key}] - 1$ and decrement $C[\mathit{key}]$. Equal keys are placed from the right end of their block leftward, in reverse input order, so they finish **in input order**. That property is called **stability**, and it is the property radix sort (A3) depends on.
+:::
+
+A sort is **stable** if records with equal keys appear in the output in the same relative order as in the input. Stability is invisible when the records are bare numbers and essential when they are not: sort people by age with a stable sort and those of the same age stay in their previous (say, alphabetical) order.
+
+```text
+stable_counting_sort(A, k):               # CLRS 8.2; keys in 0..k-1
+    C = [0]*k
+    for x in A: C[key(x)] += 1            # count
+    for v in 1..k-1: C[v] += C[v-1]       # prefix sums: C[v] = #keys <= v
+    for i = n-1 down to 0:                # place, scanning BACKWARD
+        C[key(A[i])] -= 1
+        B[C[key(A[i])]] = A[i]
+    return B
+```
+
+@fig-lts-anim-count runs this on the example of CLRS §8.2, $A = [2, 5, 3, 0, 2, 3, 0, 3]$ with $k = 6$.
+
+::: {#fig-lts-anim-count}
+
+```{python}
+#| echo: false
+A_cnt = [2, 5, 3, 0, 2, 3, 0, 3]
+K_cnt = 6
+C_cnt = [0] * K_cnt
+frames_cnt = [(None, list(C_cnt), [None] * len(A_cnt), None, "input A, k = 6; C starts at zero")]
+for x in A_cnt:
+    C_cnt[x] += 1
+frames_cnt.append((None, list(C_cnt), [None] * len(A_cnt), None,
+                   "count: C[v] = number of keys equal to v = " + str(C_cnt)))
+for v in range(1, K_cnt):
+    C_cnt[v] += C_cnt[v - 1]
+frames_cnt.append((None, list(C_cnt), [None] * len(A_cnt), None,
+                   "prefix sums: C[v] = number of keys <= v = " + str(C_cnt)))
+B_cnt = [None] * len(A_cnt)
+for i in range(len(A_cnt) - 1, -1, -1):
+    x = A_cnt[i]
+    C_cnt[x] -= 1
+    B_cnt[C_cnt[x]] = x
+    frames_cnt.append((i, list(C_cnt), list(B_cnt), C_cnt[x],
+                       f"i = {i}: key {x}, C[{x}] drops to {C_cnt[x]}, so B[{C_cnt[x]}] = {x}"))
+assert B_cnt == sorted(A_cnt) == [0, 0, 2, 2, 3, 3, 3, 5] and len(frames_cnt) == 11
+
+def cnt_frame(ax, p, t):
+    i, C, B, slot, _ = frames_cnt[t]
+    V.array(ax, p, A_cnt, 0, 0, label="A", colors=({i: "amber"} if i is not None else {}),
+            dim=(list(range(i + 1, len(A_cnt))) if i is not None else []),
+            pointers=([(i, "i", "amber", "top")] if i is not None else []))
+    hot = {A_cnt[i]: "pink"} if i is not None else {v: "indigo" for v in range(K_cnt)}
+    V.array(ax, p, C, 0, -3.2, label="C", colors=hot if t > 0 else {})
+    V.array(ax, p, B, 0, -5.8, label="B",
+            colors={j: ("pink" if j == slot else "green") for j in range(len(B)) if B[j] is not None})
+
+V.animate(cnt_frame, len(frames_cnt), captions=[f[4] for f in frames_cnt], interval=1100)
+```
+
+Stable counting sort: count, prefix sums, then place from the back. Watch the three keys `3` (at indices 2, 5, 7 of $A$): the last one lands in $B[6]$, the next in $B[5]$, the first in $B[4]$, so they keep their input order.
+
+:::
+
+**Why it is correct.** After the prefix pass, $C[v]$ equals the number of keys $\le v$, so the keys equal to $v$ must occupy exactly the slots $C[v-1], \dots, C[v] - 1$ of the output (with $C[-1] = 0$). The placement loop hands out those slots from the top down, one per record with key $v$, and there are exactly as many records as slots. So every record lands inside its key's block, and no slot is used twice.
+
+**Why it is stable.** Within key $v$'s block, the backward scan meets the records with key $v$ last-first and gives them decreasing slots. So the record that came first in the input gets the smallest slot: equal keys keep their input order. (The other common form, used in @sec-srt-a3 and in Sedgewick's key-indexed counting, shifts the prefix sums by one so that $C[v]$ is the *first* slot of key $v$, and then scans **forward** with `B[C[v]++] = x`. It is just as stable. Mixing the two, forward scan with end positions, reverses every group of equal keys.)
+
+::: {#fig-lts-a2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a2_draw(ax, p):
+    recs = [(2, "a"), (1, "b"), (0, "c"), (2, "d"), (1, "e"), (2, "f")]
+    C, acc = [0, 0, 0], 0
+    for v in range(3):
+        acc += sum(1 for k, _ in recs if k == v)
+        C[v] = acc                                    # C[v] = count of keys <= v
+    out = [None] * len(recs)
+    for i in range(len(recs) - 1, -1, -1):            # backward => stable
+        k = recs[i][0]
+        C[k] -= 1
+        out[C[k]] = recs[i]
+    assert [t for _, t in out] == ["c", "b", "e", "a", "d", "f"]
+    lab = lambda r: f"{r[0]}{r[1]}"
+    V.trace(ax, p, [
+        dict(values=[lab(r) for r in recs], label="input", note="key then tag",
+             colors={i: "muted" for i in range(len(recs))}),
+        dict(values=[lab(r) for r in out], label="stable output",
+             note="2a, 2d, 2f keep their input order",
+             colors={i: ("green" if out[i][0] == 2 else "cyan") for i in range(len(recs))}),
+    ], gap=2.6)
+V.show(a2_draw)
+```
+
+Records carry a key (the digit) and a tag (the letter). The three key-2 records `a, d, f` come out in the order they went in.
+
+:::
+
+### Arbitrary integer keys: shift by the minimum {#sec-lts-a2-offset}
+
+Keys in an arbitrary range $[\mathit{lo}, \mathit{hi}]$, negative ones included, need only a shift: use index $x - \mathit{lo}$, so $k = \mathit{hi} - \mathit{lo} + 1$. The range, not the magnitude, is what costs: keys in $[10^9, 10^9 + 100]$ are as cheap as keys in $[0, 100]$.
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: arr-lts-a2-demo
+def a2_stable(items, key):                 # any integer keys; returns a new, stably sorted list
+    if not items:
+        return []
+    lo = min(key(x) for x in items)
+    hi = max(key(x) for x in items)
+    C = [0] * (hi - lo + 1)
+    for x in items:
+        C[key(x) - lo] += 1                # count
+    for v in range(1, len(C)):
+        C[v] += C[v - 1]                   # prefix sums: C[v] = #keys <= lo + v
+    out = [None] * len(items)
+    for x in reversed(items):              # backward => stable
+        C[key(x) - lo] -= 1
+        out[C[key(x) - lo]] = x
+    return out
+
+for _ in range(300):
+    items = [(random.randint(-5, 5), i) for i in range(random.randint(0, 30))]
+    out = a2_stable(items, key=lambda r: r[0])
+    assert out == sorted(items, key=lambda r: r[0])   # Python's sorted is stable: same order
+assert [t for _, t in a2_stable([(2, "a"), (1, "b"), (2, "c")], key=lambda r: r[0])] == ["b", "a", "c"]
+assert a2_stable([10**9 + 3, 10**9, 10**9 + 1], key=lambda x: x) == [10**9, 10**9 + 1, 10**9 + 3]
+print("a2 stable counting OK")
+```
+
+##### C++
+
+```cpp
+// stable counting sort of (key, payload) records by key, keys anywhere in [lo, hi]
+vector<pair<int, int>> stableCountingSort(const vector<pair<int, int>>& a) {
+    if (a.empty()) return a;
+    int lo = a[0].first, hi = a[0].first;
+    for (const auto& r : a) { lo = min(lo, r.first); hi = max(hi, r.first); }
+    vector<int> C(hi - lo + 1, 0);
+    for (const auto& r : a) ++C[r.first - lo];                  // count
+    for (size_t v = 1; v < C.size(); ++v) C[v] += C[v - 1];     // prefix sums: end positions
+    vector<pair<int, int>> out(a.size());
+    for (int i = (int)a.size() - 1; i >= 0; --i)               // backward => stable
+        out[--C[a[i].first - lo]] = a[i];
+    return out;
+}
+```
+:::
+
+The stress test compares with Python's `sorted`, which is guaranteed stable, so equality of the whole record lists checks stability, not only the order of keys. This placement pass is the reusable machine of the chapter, the way the merge was for merge sort: radix sort (A3) runs it once per digit, and several Part B patterns use only its first two phases, "count, then read the counts".
+
+## A3. Radix sort: many small counting sorts {#sec-lts-a3}
+
+::: {.callout-note title="In plain words"}
+A key too wide to histogram directly (a 32-bit integer, a date, a string) can be read as a **short sequence of small digits**. **LSD radix sort** runs a stable counting sort once per digit, from the **least** significant digit to the **most** significant. After the pass on digit $j$, the array is sorted by its lowest $j$ digits; the next pass sorts by one more digit, and stability keeps the order the lower digits already set whenever the new digit ties. With $d$ digits in base $b$ the cost is $\Theta(d(n + b))$.
+:::
+
+```text
+radix_sort(a):                             # non-negative ints, base b
+    exp = 1
+    while exp <= max(a):
+        a = stable_counting_sort(a, key = (x // exp) % b)   # one digit, keys in 0..b-1
+        exp *= b
+    return a
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: arr-lts-a3-demo
+def a3_pass(a, exp, base=10):               # stable counting sort by the digit at place exp
+    n = len(a)
+    out = [0] * n
+    cnt = [0] * base
+    for x in a:
+        cnt[(x // exp) % base] += 1
+    for d in range(1, base):
+        cnt[d] += cnt[d - 1]                # prefix: end positions
+    for i in range(n - 1, -1, -1):          # backward => stable
+        d = (a[i] // exp) % base
+        cnt[d] -= 1
+        out[cnt[d]] = a[i]
+    return out
+
+def a3_radix(a, base=10):
+    a = list(a)
+    if not a:
+        return a
+    exp = 1
+    while exp <= max(a):
+        a = a3_pass(a, exp, base)
+        exp *= base
+    return a
+
+for _ in range(300):
+    arr = [random.randint(0, 99999) for _ in range(random.randint(0, 40))]
+    assert a3_radix(arr) == sorted(arr) == a3_radix(arr, 16) == a3_radix(arr, 2)
+assert a3_radix([329, 457, 657, 839, 436, 720, 355]) == [329, 355, 436, 457, 657, 720, 839]
+assert a3_radix([]) == [] and a3_radix([7]) == [7] and a3_radix([0, 0]) == [0, 0]
+print("a3 radix OK")
+```
+
+##### C++
+
+```cpp
+// LSD radix sort of non-negative ints, base 10; one stable counting sort per digit
+void radixSortBase10(vector<int>& a) {
+    if (a.empty()) return;
+    int mx = *max_element(a.begin(), a.end());
+    vector<int> out(a.size());
+    for (long long exp = 1; exp <= mx; exp *= 10) {
+        int cnt[10] = {0};
+        for (int x : a) ++cnt[(x / exp) % 10];
+        for (int d = 1; d < 10; ++d) cnt[d] += cnt[d - 1];      // end positions
+        for (int i = (int)a.size() - 1; i >= 0; --i)           // backward => stable
+            out[--cnt[(a[i] / exp) % 10]] = a[i];
+        a.swap(out);
+    }
+}
+```
+:::
+
+::: {#fig-lts-anim-radix}
+
+```{python}
+#| echo: false
+rad_in = [329, 457, 657, 839, 436, 720, 355]
+rad_frames = [(list(rad_in), None)]
+_cur = list(rad_in)
+for _k, _exp in enumerate([1, 10, 100]):
+    _cur = a3_pass(_cur, _exp)                     # the chapter's own stable pass
+    rad_frames.append((list(_cur), _k))
+assert rad_frames[-1][0] == sorted(rad_in) == [329, 355, 436, 457, 657, 720, 839]
+_place = ["ones", "tens", "hundreds"]
+_pal = ["indigo", "cyan", "green", "amber", "pink", "violet", "red", "muted", "indigo", "cyan"]
+
+def rad_frame(ax, p, t):
+    vals, k = rad_frames[t]
+    if k is None:
+        V.array(ax, p, vals, cell_w=1.3, note="CLRS 8.3 example")
+        V.array(ax, p, ["" for _ in vals], 0, -2.4, cell_w=1.3, label="digit", index=False)
+        return
+    digs = [(v // 10 ** k) % 10 for v in vals]
+    V.array(ax, p, vals, cell_w=1.3, colors={i: _pal[d] for i, d in enumerate(digs)},
+            note=f"sorted by the {_place[k]} digit")
+    V.array(ax, p, digs, 0, -2.4, cell_w=1.3, label="digit", index=False,
+            colors={i: _pal[d] for i, d in enumerate(digs)})
+
+rad_caps = ["input: 329 457 657 839 436 720 355"] + [
+    f"pass {k + 1}, stable by the {_place[k]} digit: " + " ".join(map(str, vals))
+    for vals, k in rad_frames[1:]]
+V.animate(rad_frame, len(rad_frames), captions=rad_caps, interval=1500)
+```
+
+LSD radix sort, one stable counting-sort pass per digit, computed by `a3_pass`. The lower row shows the digit each pass sorted by. On the hundreds pass, $436$ and $457$ tie (both have $4$) and stay in the order the tens pass gave them, $436$ before $457$, which is exactly right.
+
+:::
+
+### Why least significant first, and why stability {#sec-lts-a3-proof}
+
+**Claim.** After the passes on the lowest $j$ digits, the array is sorted by the number formed by those $j$ digits.
+
+**Proof by induction on $j$.** For $j = 0$ there is nothing to show. Suppose it holds after $j$ passes, and take two keys $x, y$; let $x_j, y_j$ be their digit $j$ (counting from $0$ at the least significant end). The pass on digit $j$ sorts by that digit. If $x_j < y_j$, the pass puts $x$ first, which is right, because digit $j$ now outranks all lower digits. If $x_j = y_j$, the two keys tie in this pass, and a **stable** pass keeps their previous relative order, which by induction is their order by the lower $j$ digits; that is again right, because with digit $j$ equal the lower digits decide. So after $j + 1$ passes the array is sorted by the lowest $j + 1$ digits. After all $d$ passes it is sorted by the whole key. $\square$
+
+The proof uses stability in exactly one place, the tie case, and the order of the passes in exactly one place: the newest pass must be the most significant one so far, because it must be allowed to override everything before it. Run the passes from the most significant digit down with independent passes and the *last* pass, on the lowest digit, would decide the final order: wrong. (Going from the top down is possible, but it is a different algorithm, MSD radix sort, which splits the array into groups and recurses instead of re-sorting the whole array; see @sec-lts-a3-msd.)
+
+### Choosing the digit size {#sec-lts-a3-base}
+
+**Cost in $n$, $d$ and the base.** Each pass is a counting sort with $k = b$ (the base), so it costs $\Theta(n + b)$, and there are $d$ passes: $\Theta(d(n + b))$ time and $\Theta(n + b)$ extra space. The digits are a choice. For keys of $\beta$ bits read as $r$-bit digits, $b = 2^r$ and $d = \lceil \beta / r \rceil$, so the cost is
+
+$$
+\Theta\!\left(\frac{\beta}{r}\,\bigl(n + 2^r\bigr)\right).
+$$ {#eq-lts-radix-r}
+
+Small $r$ means many cheap passes; large $r$ means few passes but a huge count array. The balance point is $2^r \approx n$, that is $r \approx \log_2 n$ (CLRS §8.3 proves this choice is within a constant factor of optimal when $\beta \ge \log_2 n$). Then the cost is $\Theta(\beta n / \log n)$: for keys of $\beta = c\log_2 n$ bits (integers up to $n^c$) that is $\Theta(cn)$, linear for constant $c$. The cell below evaluates @eq-lts-radix-r for $n = 10^6$ and 32-bit keys.
+
+```{python}
+#| label: arr-lts-a3-base
+n_keys, bits = 10**6, 32
+cost = {r: math.ceil(bits / r) * (n_keys + 2 ** r) for r in (1, 4, 8, 11, 16, 20, 32)}
+for r, c in cost.items():
+    print(f"r = {r:2d}: {math.ceil(bits / r):2d} passes, about {c / 1e6:9.2f} million steps")
+assert min(cost, key=cost.get) == 16                     # 2 passes of 65,536 buckets each
+assert cost[8] < 2.1 * cost[16] and cost[32] > 1000 * cost[16]
+```
+
+So for a million 32-bit keys, two passes on 16-bit digits are the cheapest on paper. In practice 8-bit digits (four passes, a 256-entry count array that stays in the fastest cache) are the common default, because each pass then touches little memory besides the data itself; the model above counts steps, not cache misses.
+
+### Negative numbers {#sec-lts-a3-neg}
+
+Digits of a negative number are not well defined in Python (`-7 // 10 % 10` is `3`), and in two's complement the sign bit makes every negative number look *larger* than every positive one. Two standard fixes:
+
+1. **Offset.** Add $-\min$ to every key, sort the non-negative keys, subtract it back. Simple, and fine whenever the range $\max - \min$ is not wider than the type.
+2. **Flip the sign bit.** For 32-bit integers, `x ^ 0x80000000` read as unsigned maps $-2^{31}, \dots, -1, 0, \dots, 2^{31}-1$ to $0, \dots, 2^{32}-1$ **in the same order** (it is the same as adding $2^{31}$). Sort those unsigned keys with byte digits and flip back. (Floating-point numbers need a slightly different flip, inverting all bits of negatives; the idea is the same.)
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: arr-lts-a3-signed
+def a3_radix_bits(a, r=8):                 # non-negative ints, r-bit digits
+    a = list(a)
+    if not a:
+        return a
+    mask, shift, mx = (1 << r) - 1, 0, max(a)
+    while (mx >> shift) > 0:
+        cnt = [0] * (1 << r)
+        for x in a:
+            cnt[(x >> shift) & mask] += 1
+        for d in range(1, 1 << r):
+            cnt[d] += cnt[d - 1]
+        out = [0] * len(a)
+        for x in reversed(a):              # backward => stable
+            d = (x >> shift) & mask
+            cnt[d] -= 1
+            out[cnt[d]] = x
+        a, shift = out, shift + r
+    return a
+
+def a3_radix_signed32(a):
+    keys = [x + (1 << 31) for x in a]      # = flipping the sign bit: order-preserving
+    return [k - (1 << 31) for k in a3_radix_bits(keys, 8)]
+
+for r in (1, 3, 8, 11, 16):
+    for _ in range(40):
+        arr = [random.randint(0, 10**9) for _ in range(random.randint(0, 40))]
+        assert a3_radix_bits(arr, r) == sorted(arr)
+for _ in range(300):
+    arr = [random.randint(-2**31, 2**31 - 1) for _ in range(random.randint(0, 40))]
+    assert a3_radix_signed32(arr) == sorted(arr)
+assert a3_radix_signed32([3, -1, -2**31, 0, 2**31 - 1, -7]) == [-2**31, -7, -1, 0, 3, 2**31 - 1]
+print("a3 signed radix OK")
+```
+
+##### C++
+
+```cpp
+// LSD radix sort of 32-bit signed ints: 4 passes of 8-bit digits, sign bit flipped
+void radixSort32(vector<int>& a) {
+    int n = (int)a.size();
+    vector<uint32_t> k(n), tmp(n);
+    for (int i = 0; i < n; ++i) k[i] = (uint32_t)a[i] ^ 0x80000000u;   // order-preserving
+    for (int shift = 0; shift < 32; shift += 8) {
+        int cnt[257] = {0};
+        for (int i = 0; i < n; ++i) ++cnt[((k[i] >> shift) & 255) + 1];
+        for (int d = 0; d < 256; ++d) cnt[d + 1] += cnt[d];            // start positions
+        for (int i = 0; i < n; ++i) tmp[cnt[(k[i] >> shift) & 255]++] = k[i];  // forward, stable
+        k.swap(tmp);
+    }
+    for (int i = 0; i < n; ++i) a[i] = (int)(k[i] ^ 0x80000000u);
+}
+```
+:::
+
+The C++ always runs four passes, even when the keys are small; the Python stops once the remaining digits are all zero. Both are correct: a pass on an all-zero digit is a stable no-op.
+
+### MSD radix sort and strings {#sec-lts-a3-msd}
+
+**LSD on fixed-length strings.** A string of length $w$ over an alphabet of $R$ symbols is a $w$-digit number in base $R$, with the *first* character as the most significant digit. So LSD radix sort sorts $n$ strings of equal length $w$ in $\Theta(w(n + R))$: one stable counting sort per column, from the last column to the first (Sedgewick & Wayne §5.1 call this LSD string sort). @sec-lts-p6-a uses exactly this, and @sec-lts-p6-b uses the order after *every* pass.
+
+**Strings of different lengths** break LSD: there is no common "last column". Padding every string with a character smaller than all others works but can cost far more than the input (one long string forces every pass over every string). **MSD radix sort** goes the other way, top down:
+
+1. Counting-sort the strings by their **first** character, with one extra bucket, smaller than every character, for strings that have **ended**.
+2. The strings now sit in contiguous groups, one per first character. Each group with more than one string is sorted **recursively** by the second character, and so on. The "ended" group needs no further work: all its strings are equal.
+
+MSD never re-sorts the whole array; each recursive call works only inside one group. It examines only the characters needed to tell the strings apart (the distinguishing prefixes), which can be much less than the total input size. Its weakness is the small groups: every call allocates and scans a count array of $R + 2$ entries, so with $R = 256$ and millions of tiny groups that overhead dominates. Practical versions switch to insertion sort for groups below a small cutoff, or use three-way string quicksort, which partitions on one character at a time (Sedgewick & Wayne §5.1).
+
+::: {#fig-lts-msd}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def msd_tree(words, d, prefix):
+    if len(words) == 1:
+        return V.Node(words[0], color="green")
+    groups = {}
+    for w in words:
+        groups.setdefault(w[d] if d < len(w) else "", []).append(w)
+    kids = []
+    for c in sorted(groups):
+        ws = groups[c]
+        if c == "":
+            kids.append(V.Node(prefix + " (end)", color="cyan"))
+        elif len(ws) == 1:
+            kids.append(V.Node(ws[0], color="green"))
+        else:
+            kids.append(msd_tree(ws, d + 1, prefix + c))
+    return V.Node(f"{prefix or 'all'}: {len(words)}", kids, color="amber")
+
+def msd_draw(ax, p):
+    words = ["she", "sells", "sea", "shells", "by", "the", "shore"]
+    V.tree(ax, p, msd_tree(words, 0, ""), dx=2.3, dy=1.4)
+V.show(msd_draw)
+```
+
+MSD radix sort on seven words: each amber node is one counting sort on the next character, applied only to the group of strings sharing that prefix. Leaves are strings that are alone in their group (green) or that ended there (cyan). Reading the leaves left to right gives the sorted order `by, sea, sells, she, shells, shore, the`.
+
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: arr-lts-a3-msd
+def a3_msd(strs):
+    a = list(strs)
+    def char_at(s, d):                      # 0 = "ended", smaller than every character
+        return ord(s[d]) + 1 if d < len(s) else 0
+    def sort(lo, hi, d):
+        if hi - lo <= 1:
+            return
+        R = 258                             # buckets 0 (ended) .. 256, one spare
+        cnt = [0] * (R + 1)
+        for i in range(lo, hi):
+            cnt[char_at(a[i], d) + 1] += 1
+        for r in range(R):
+            cnt[r + 1] += cnt[r]            # cnt[c] = first slot of bucket c
+        start = cnt[:]
+        aux = [None] * (hi - lo)
+        for i in range(lo, hi):             # forward => stable
+            c = char_at(a[i], d)
+            aux[cnt[c]] = a[i]
+            cnt[c] += 1
+        a[lo:hi] = aux
+        for c in range(1, R):               # bucket 0: ended strings, all equal
+            sort(lo + start[c], lo + start[c + 1], d + 1)
+    sort(0, len(a), 0)
+    return a
+
+def a3_lsd_strings(strs, w):                # all strings of length w
+    a = list(strs)
+    for d in range(w - 1, -1, -1):          # last column first
+        cnt = [0] * 257
+        for s in a:
+            cnt[ord(s[d]) + 1] += 1
+        for r in range(256):
+            cnt[r + 1] += cnt[r]
+        out = [None] * len(a)
+        for s in a:                         # forward with start positions: stable
+            out[cnt[ord(s[d])]] = s
+            cnt[ord(s[d])] += 1
+        a = out
+    return a
+
+for _ in range(300):
+    ss = ["".join(random.choice("abc") for _ in range(random.randint(0, 5)))
+          for _ in range(random.randint(0, 25))]
+    assert a3_msd(ss) == sorted(ss)
+    w = random.randint(1, 4)
+    ff = ["".join(random.choice("abcz") for _ in range(w)) for _ in range(random.randint(0, 25))]
+    assert a3_lsd_strings(ff, w) == sorted(ff)
+assert a3_msd(["she", "sells", "sea", "shells", "by", "the", "shore"]) == \
+    ["by", "sea", "sells", "she", "shells", "shore", "the"]
+assert a3_msd(["", "a", "", "ab"]) == ["", "", "a", "ab"]
+print("a3 MSD and LSD string sorts OK")
+```
+
+##### C++
+
+```cpp
+// MSD radix sort for strings of any length (bucket 0 = "string ended")
+static int charAt(const string& s, int d) { return d < (int)s.size() ? (unsigned char)s[d] + 1 : 0; }
+
+static void msdSort(vector<string>& a, vector<string>& aux, int lo, int hi, int d) {
+    if (hi - lo <= 1) return;
+    const int R = 257;                               // 0 = ended, 1..256 = byte + 1
+    vector<int> cnt(R + 1, 0);
+    for (int i = lo; i < hi; ++i) ++cnt[charAt(a[i], d) + 1];
+    for (int r = 0; r < R; ++r) cnt[r + 1] += cnt[r];  // cnt[c] = first slot of bucket c
+    vector<int> start(cnt);
+    for (int i = lo; i < hi; ++i) aux[cnt[charAt(a[i], d)]++] = a[i];
+    for (int i = lo; i < hi; ++i) a[i] = aux[i - lo];
+    for (int r = 1; r < R; ++r)                      // skip bucket 0: ended strings are equal
+        msdSort(a, aux, lo + start[r], lo + start[r + 1], d + 1);
+}
+
+void msdSort(vector<string>& a) {
+    vector<string> aux(a.size());
+    msdSort(a, aux, 0, (int)a.size(), 0);
+}
+```
+:::
+
+| | LSD radix | MSD radix |
+|---|---|---|
+| Direction | last digit first, whole array every pass | first digit first, recurse inside groups |
+| Needs | fixed-length keys (or padding) | nothing: variable length is natural |
+| Characters read | all $n \cdot w$ | only the distinguishing prefixes |
+| Stability of the passes | essential (the correctness proof) | not needed for correctness; keeps equal strings in order |
+| Weak spot | many passes over long keys | count-array overhead on many tiny groups |
+
+## A4. Bucket sort: spread the range, sort the shards {#sec-lts-a4}
+
+::: {.callout-note title="In plain words"}
+When the keys are real numbers drawn **uniformly** from a known interval, cut the interval into $n$ equal buckets, drop each key into its bucket, sort each bucket with insertion sort, and concatenate the buckets in order. On average each bucket holds about one key, so the inner sorts cost $O(1)$ each and the whole sort is **expected** $O(n)$. The guarantee is about the *input distribution*: if an adversary puts every key in one bucket, the inner insertion sort makes it $\Theta(n^2)$.
+:::
+
+Bucket sort is counting sort with the integer keys relaxed to *interval* keys: instead of one cell per distinct value it has one bucket per slice of the range, and it spends a small sort inside each slice. It is correct for **any** input (concatenating sorted buckets in bucket order is sorted, because every key in bucket $i$ is smaller than every key in bucket $i + 1$); only its running time depends on the distribution.
+
+```text
+bucket_sort(a over [lo, hi)):             # CLRS 8.4 uses [0, 1)
+    n = len(a); B = [[] for _ in range(n)]
+    for x in a: B[floor(n * (x - lo) / (hi - lo))].append(x)
+    for b in B: insertion_sort(b)
+    return concat(B[0], B[1], ..., B[n-1])
+```
+
+::: {#fig-lts-anim-bucket}
+
+```{python}
+#| echo: false
+bk_in = [0.78, 0.17, 0.39, 0.26, 0.72, 0.94, 0.21, 0.12, 0.23, 0.68]
+bk_n = len(bk_in)
+bk_scat = [[] for _ in range(bk_n)]
+for _x in bk_in:
+    bk_scat[int(bk_n * _x)].append(_x)
+bk_sorted = [sorted(b) for b in bk_scat]
+bk_out = [x for b in bk_sorted for x in b]
+assert bk_out == sorted(bk_in)
+bk_frames = [("input", None, None), ("scatter", bk_scat, None), ("sort", bk_sorted, None),
+             ("gather", bk_sorted, bk_out)]
+
+def bk_frame(ax, p, t):
+    name, buckets, out = bk_frames[t]
+    V.array(ax, p, bk_in, 0, 0, cell_w=1.15, label="A",
+            colors=({i: "muted" for i in range(bk_n)} if t else {}))
+    for b in range(bk_n):
+        y = -2.2 - 0.75 * b
+        V.text(ax, p, -0.3, y, f"B[{b}]", ha="right", color="muted", size=12)
+        if buckets is not None:
+            txt = "  ".join(f"{x:.2f}" for x in buckets[b]) or "-"
+            col = "green" if name != "scatter" and len(buckets[b]) > 1 else "text"
+            V.text(ax, p, 0.2, y, txt, ha="left", color=col, size=12)
+    if out is not None:
+        V.array(ax, p, out, 0, -10.6, cell_w=1.15, label="out",
+                colors={i: "green" for i in range(bk_n)})
+    else:
+        V.array(ax, p, [None] * bk_n, 0, -10.6, cell_w=1.15, label="out")
+
+bk_caps = ["input: 10 keys in [0, 1), 10 buckets of width 0.1",
+           "scatter: key x goes to bucket floor(10 x); the biggest bucket holds 3 keys",
+           "sort each bucket with insertion sort (only buckets 1 and 7 had work to do)",
+           "gather: concatenate the buckets in order; the output is sorted"]
+V.animate(bk_frame, len(bk_frames), captions=bk_caps, interval=1600)
+```
+
+Bucket sort on the example of CLRS §8.4. Scatter, sort each bucket, gather. The buckets stay tiny because the keys are spread over the whole interval.
+
+:::
+
+### The expected-time argument {#sec-lts-a4-proof}
+
+Let $n_i$ be the number of keys that land in bucket $i$. Scattering and gathering cost $\Theta(n)$; insertion sort on bucket $i$ costs $O(n_i^2)$. So the running time is
+
+$$
+T(n) = \Theta(n) + \sum_{i=0}^{n-1} O(n_i^2), \qquad
+\mathbb{E}[T(n)] = \Theta(n) + \sum_{i=0}^{n-1} O\!\left(\mathbb{E}[n_i^2]\right).
+$$
+
+Now assume the $n$ keys are independent and uniform on the interval. Each key falls into bucket $i$ with probability $1/n$, independently, so $n_i$ is a binomial random variable with $n$ trials and success probability $p = 1/n$. Its mean is $np = 1$ and its variance is $np(1-p) = 1 - 1/n$, so
+
+$$
+\mathbb{E}[n_i^2] = \operatorname{Var}[n_i] + \mathbb{E}[n_i]^2 = \left(1 - \frac{1}{n}\right) + 1 = 2 - \frac{1}{n}.
+$$ {#eq-lts-bucket}
+
+Every one of the $n$ buckets contributes $O(2 - 1/n) = O(1)$, so $\mathbb{E}[T(n)] = \Theta(n) + n \cdot O(1) = \Theta(n)$ (this is the analysis of CLRS §8.4). The cell below checks @eq-lts-bucket empirically: the average of $\sum_i n_i^2$ over many uniform inputs should be close to $n(2 - 1/n) = 2n - 1$.
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: arr-lts-a4-demo
+def a4_bucket(a, lo=0.0, hi=1.0):           # keys in [lo, hi)
+    n = len(a)
+    if n == 0:
+        return []
+    B = [[] for _ in range(n)]
+    for x in a:
+        B[min(n - 1, int(n * (x - lo) / (hi - lo)))].append(x)
+    out = []
+    for b in B:
+        for i in range(1, len(b)):          # insertion sort, as in CLRS
+            x, j = b[i], i - 1
+            while j >= 0 and b[j] > x:
+                b[j + 1] = b[j]
+                j -= 1
+            b[j + 1] = x
+        out += b
+    return out
+
+for _ in range(200):
+    arr = [random.uniform(-5.0, 7.0) for _ in range(random.randint(0, 60))]
+    assert a4_bucket(arr, -5.0, 7.0) == sorted(arr)
+assert a4_bucket([0.78, 0.17, 0.39, 0.26, 0.72, 0.94, 0.21, 0.12, 0.23, 0.68]) == \
+    sorted([0.78, 0.17, 0.39, 0.26, 0.72, 0.94, 0.21, 0.12, 0.23, 0.68])
+
+n_b, trials, total = 50, 2000, 0             # E[sum n_i^2] should be about 2n - 1 = 99
+for _ in range(trials):
+    sizes = Counter(int(n_b * random.random()) for _ in range(n_b))
+    total += sum(c * c for c in sizes.values())
+avg = total / trials
+print(f"average sum of n_i^2 over {trials} uniform inputs: {avg:.2f} (theory {2 * n_b - 1})")
+assert abs(avg - (2 * n_b - 1)) < 3
+
+skew = [random.random() / 1000 for _ in range(n_b)]          # all keys in [0, 0.001)
+assert max(Counter(int(n_b * x) for x in skew).values()) == n_b   # one bucket gets everything
+print("a4 bucket OK")
+```
+
+##### C++
+
+```cpp
+// bucket sort of doubles in [lo, hi): n buckets, insertion sort inside each
+vector<double> bucketSort(const vector<double>& a, double lo, double hi) {
+    int n = (int)a.size();
+    vector<vector<double>> B(n);
+    for (double x : a) B[min(n - 1, (int)(n * (x - lo) / (hi - lo)))].push_back(x);
+    vector<double> out;
+    out.reserve(n);
+    for (auto& b : B) {
+        for (size_t i = 1; i < b.size(); ++i) {           // insertion sort
+            double x = b[i];
+            int j = (int)i - 1;
+            while (j >= 0 && b[j] > x) { b[j + 1] = b[j]; --j; }
+            b[j + 1] = x;
+        }
+        out.insert(out.end(), b.begin(), b.end());
+    }
+    return out;
+}
+```
+:::
+
+The last lines of the Python cell show the failure mode: squeeze every key into $[0, 0.001)$ and all $n$ land in bucket $0$, so the insertion sort there is $\Theta(n^2)$ in the worst case. Three ways to soften it: sort each bucket with an $O(m\log m)$ sort instead (worst case back to $O(n\log n)$), choose bucket boundaries from a sample of the data, or recognise that the input is not uniform and use another sort. The expectation is over the **input distribution**, not over random choices the algorithm makes; no coin flips inside the algorithm can rescue a bad input, unlike randomized quicksort.
+
+The same picture, $n$ keys in $n$ equal-width buckets, powers arguments that never sort at all. In Maximum Gap (@sec-srt-p3-b) the averaging argument shows the answer is at least the bucket width, so only bucket minima and maxima matter; in @sec-lts-p5-b buckets of width $t + 1$ make "within $t$" a same-or-neighbour bucket question.
+
+## A5. Value-as-index: the array stores its own counts {#sec-lts-a5}
+
+::: {.callout-note title="In plain words"}
+The most frugal use of "values are addresses": when the data is a permutation of $1..n$, or every value lies in $[1, n]$, you can **store information about value $v$ at index $v-1$** of the input array itself, with no separate histogram. Mark a slot by **negating** it to record "I have seen this value," or **swap each value into its home index** (cyclic placement) so the array becomes its own presence table. $O(n)$ time, $O(1)$ extra space. This is what "could you do it without extra space?" is quietly asking for.
+:::
+
+Counting sort with $k = n$ needs an $n$-cell count array. When the input already *is* an $n$-cell array whose values are in $[1, n]$, it can double as that count array, as long as we can store a little extra information in each cell without losing the value that lives there. Sign marking borrows one bit per cell (the sign), which is enough to record "seen / not seen". Cyclic placement instead moves each value to its home, so cell $i$ either holds $i + 1$ or names a gap. Both rely on the value range being $[1, n]$; step outside it and every index must be guarded. @sec-idx develops these index tricks further (permutation cycles, marking in matrices); this chapter uses them only as the zero-space limit of counting.
+
+```text
+sign_mark(a):                               # values in 1..n
+    for x in a:
+        i = abs(x) - 1
+        if a[i] > 0: a[i] = -a[i]           # mark slot i as "seen value i+1"
+    # now a[i] < 0 <=> value i+1 occurred
+
+cyclic_place(a):                            # place v at index v-1
+    for i: while 1<=a[i]<=n and a[a[i]-1] != a[i]: swap a[i] with a[a[i]-1]
+```
+
+::: {#fig-lts-a5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a5_draw(ax, p):
+    data = [4, 3, 2, 7, 8, 2, 3, 1]
+    marked = list(data)                       # sign marking, computed inline for the figure
+    for x in data:
+        i = abs(x) - 1
+        if marked[i] > 0:
+            marked[i] = -marked[i]
+    assert [i + 1 for i, v in enumerate(marked) if v > 0] == [5, 6]
+    V.trace(ax, p, [
+        dict(values=data, label="values in 1..8", note="index i stands for value i+1",
+             colors={i: "muted" for i in range(len(data))}),
+        dict(values=marked, label="after marking", note="slot i negative iff value i+1 seen",
+             colors={i: ("green" if marked[i] < 0 else "amber") for i in range(len(data))}),
+    ], gap=2.6)
+V.show(a5_draw)
+```
+
+$[4,3,2,7,8,2,3,1]$: the values 5 and 6 never occur, so slots 4 and 5 keep their positive sign. Reading "still positive means missing" gives $[5,6]$, which is @sec-lts-p2-a, with no extra array.
+
+:::
+
+```{python}
+#| label: arr-lts-a5-demo
+def a5_sign(a):                             # values in 1..n; returns a marked copy
+    a = list(a)
+    for x in a:
+        i = abs(x) - 1
+        if a[i] > 0:
+            a[i] = -a[i]
+    return a
+
+def a5_cyclic(a):                           # place v at index v-1, return the rearranged copy
+    a = list(a)
+    n = len(a)
+    i = 0
+    while i < n:
+        j = a[i] - 1
+        if 1 <= a[i] <= n and a[j] != a[i]:
+            a[i], a[j] = a[j], a[i]
+        else:
+            i += 1
+    return a
+
+assert [abs(v) for v in a5_sign([4, 3, 2, 7, 8, 2, 3, 1])] == [4, 3, 2, 7, 8, 2, 3, 1]
+assert [i + 1 for i, v in enumerate(a5_sign([4, 3, 2, 7, 8, 2, 3, 1])) if v > 0] == [5, 6]
+for _ in range(300):
+    perm = list(range(1, random.randint(1, 12) + 1))
+    random.shuffle(perm)
+    assert a5_cyclic(perm) == sorted(perm)  # a permutation of 1..n sorts completely, in O(n)
+assert a5_cyclic([1, 1]) == [1, 1]
+print("a5 value-as-index OK")
+```
+
+The first assertion checks that marking keeps every magnitude, so the values are not lost. The stress loop shows that cyclic placement **sorts** a permutation of $1..n$ in $O(n)$ time and $O(1)$ space: it is counting sort for the special case where every count is exactly one. The guard `1 <= a[i] <= n` is the difference between a clean permutation (@sec-lts-p2-a, @sec-lts-p5-a) and an array of arbitrary integers (@sec-lts-p2-b), where only the in-range values get placed.
+
+## A6. When values beat comparisons, and the pigeonhole {#sec-lts-a6}
+
+::: {.callout-note title="In plain words"}
+Three closing ideas. **(1) The decision.** A linear-time sort is a bet on the keys: counting sort needs a small integer range ($k = O(n)$), radix sort needs keys made of a few small digits, bucket sort needs a known interval and a near-uniform spread. If none holds, use a comparison sort from @sec-salgo. **(2) The pigeonhole.** $n$ items in fewer than $n$ boxes force two items into one box; phrased over value ranges instead of array slots, this solves @sec-lts-p5-a and @sec-lts-p5-b. **(3) Histograms as equality tests.** To decide "same multiset?" without sorting, compare counts: @sec-lts-p4-b.
+:::
+
+Read the constraints as a menu. If they *promise* small integer values, a bounded alphabet, or fixed-width keys, you are being invited off the comparison wall; if they only bound $n$ and say "any integers", sort (or select) with the tools of @sec-salgo. Even then, remember **coordinate compression** (@sec-srt-a4): sorting once to replace values by their ranks $0..n-1$ turns any later counting step into a small-range one.
+
+::: {#fig-lts-a6}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a6_draw(ax, p):
+    V.flow(ax, p, {
+        "small": (0.0, 1.6, "integer keys, range k = O(n): counting sort", "amber"),
+        "tuple": (0.0, 0.2, "d small digits in base b: radix sort", "indigo"),
+        "unif":  (0.0, -1.2, "reals, uniform on an interval: bucket sort", "cyan"),
+        "none":  (0.0, -2.6, "no promise about the keys: comparison sort", "green"),
+    }, [("small", "tuple", ""), ("tuple", "unif", ""), ("unif", "none", "")], w=10.5, h=0.7)
+V.show(a6_draw)
+```
+
+Walk down the ladder and take the first rung whose assumption you can *verify from the statement*: counting sort costs $O(n + k)$, radix sort $O(d(n + b))$, bucket sort expected $O(n)$. If you reach the bottom rung, call an $O(n\log n)$ comparison sort.
+
+:::
+
+| | Counting sort | LSD radix sort | Bucket sort | Comparison sorts |
+|---|---|---|---|---|
+| Keys | integers in a range of size $k$ | $d$ digits in base $b$ | reals in a known interval | anything with `<` |
+| Time | $\Theta(n + k)$ | $\Theta(d(n + b))$ | expected $\Theta(n)$ if uniform; worst $\Theta(n^2)$ with insertion sort | $\Theta(n\log n)$ |
+| Extra space | $\Theta(n + k)$ | $\Theta(n + b)$ | $\Theta(n)$ | $O(1)$ to $O(n)$ |
+| Stable | yes (A2 form) | yes | yes, with a stable inner sort | depends (@sec-salgo) |
+| Breaks when | $k \gg n$ | many or wide digits | keys bunch together | never; the safe default |
+
+```{python}
+#| label: arr-lts-a6-demo
+# the pigeonhole: n balls in m boxes force some box to hold at least ceil(n / m)
+def a6_max_box_lower_bound(n, m):
+    return -(-n // m)
+
+for _ in range(300):
+    n, m = random.randint(1, 30), random.randint(1, 10)
+    boxes = Counter(random.randrange(m) for _ in range(n))
+    assert max(boxes.values()) >= a6_max_box_lower_bound(n, m)   # holds for every placement
+assert a6_max_box_lower_bound(10, 3) == 4
+assert a6_max_box_lower_bound(9, 8) == 2     # 9 values from a range of size 8: a repeat is forced
+
+# histogram equality decides "same multiset" without sorting (@sec-lts-p4-b)
+def a6_hist_eq(s, t):
+    if len(s) != len(t):
+        return False
+    cnt = [0] * 26
+    for a, b in zip(s, t):
+        cnt[ord(a) - 97] += 1
+        cnt[ord(b) - 97] -= 1
+    return all(c == 0 for c in cnt)
+
+assert a6_hist_eq("listen", "silent") is True and a6_hist_eq("listen", "silens") is False
+print("a6 pigeonhole + histogram-equality OK")
+```
+
+The first block is the pigeonhole principle in its counting form: every random placement of $n$ balls in $m$ boxes has a box with at least $\lceil n/m \rceil$ balls. With $n = m + 1$ that is "some box holds two", which is the repeat that @sec-lts-p5-a reads off. The second block is @sec-lts-p4-b in a few lines.
+
+## Part B — Patterns
+
+Part B uses the lessons on real problems. Each pattern opens with the signals that say "use me", a boxed template with its invariant, and its complexity, then at least two fully solved problems with a brute force, the refined solution, matching C++, and a stress test against the brute force.
+
+## Pattern 1: Sort when the value range is small {#sec-lts-p1}
+
+**Where we are.** A1 to A6 built the tools; Part B spends them, one idea per pattern. P1 is the plainest case: the statement hands you a small integer key, and a histogram replaces the sort. P2 makes the value an index into the *input array itself*, for $O(1)$ space. P3 makes the *frequency* the index, so "sort by how often" needs no comparisons. P4 uses the key as an address to answer a question (rebuild an order, test equality) without sorting at all. P5 uses value-range boxes so tight that a collision *is* the answer. P6 removes the one condition all of these need, a small range: a wide key is split into small digits and sorted digit by digit with radix sort.
+
+**Recognise it.** The constraint reads $1 \le \mathit{nums}[i] \le 100$, or $\le n$, or the key is a letter or a digit. Also: values may be large, but anything above some bound $B \le n$ behaves the same (clamp it). These say *the value range is the budget*, which is counting sort's ticket.
+
+::: {.callout-important title="Template"}
+Trade the $\log n$ comparison factor for a $k$-wide array.
+
+```text
+histogram:  cnt[v] += 1 over the input (clamp v to a bound if larger values act alike)
+read:       walk v = 0..k-1 (or k-1..0), using cnt[v] or its running sum
+```
+
+**Invariant.** After the tally, `cnt[v]` is the number of items with key $v$, and the running sum $\sum_{u < v} \mathit{cnt}[u]$ is the first position key $v$ would occupy in sorted order. Reading the indices in order reproduces the sorted array, or any count over it, without a single comparison.
+:::
+
+**Complexity.** $O(n + k)$ time, $O(k)$ space, linear whenever $k = O(n)$. The comparison sort being replaced is $O(n\log n)$; the gain is the deleted $\log n$, the price the $k$-wide array.
+
+{{< include ../problems/lc-1051-height-checker/problem.qmd >}}
+
+[**From one upward read to reading back and forth.** Height Checker reads its histogram once, low to high. Increasing Decreasing String reads the same kind of 26-slot histogram up, then down, again and again, taking one item per slot per sweep.]{.flow-bridge}
+
+{{< include ../problems/lc-1370-increasing-decreasing-string/problem.qmd >}}
+
+[**From a small alphabet to a clamped range.** Both problems so far had keys that were small to begin with. H-Index has citation counts up to $1000$, but no count above $n$ can matter, so clamping squeezes the keys into $[0, n]$; the histogram is then read from the top with a running sum.]{.flow-bridge}
+
+{{< include ../problems/lc-0274-h-index/problem.qmd >}}
+
+[**From reading the counts to reading the block boundaries.** H-Index used running sums of the histogram as a count of papers. AquaMoon uses the same running sums as A2 does, as the **positions** where each value's block starts in sorted order, and checks a parity condition on every block without building the sorted array.]{.flow-bridge}
+
+{{< include ../problems/cf-1545a-aquamoon-and-strange-sort/problem.qmd >}}
+
+One more problem of this pattern is solved in full in @sec-srt, where counting sort first appeared as a tool: Relative Sort Array emits a histogram in a custom order (the order of a second array, then the leftovers ascending).
+
+{{< include ../problems/lc-1122-relative-sort-array/card.qmd >}}
+
+## Pattern 2: Turn the value into an index {#sec-lts-p2}
+
+**From an auxiliary histogram to the array's own slots.** Pattern 1 paid $O(k)$ for a separate count array. When the values *are* $1..n$ (a permutation, or "each value in range"), the input array already has one slot per possible value, so store the information there and drop to $O(1)$ extra space. Sign marking borrows a bit; cyclic placement moves each value home. This is A5: counting sort with the histogram folded into the input.
+
+**Recognise it.** "Values are in $[1, n]$" or "a permutation of $1..n$", plus the follow-up *"without extra space"* (or "$O(1)$ auxiliary space").
+
+::: {.callout-important title="Template"}
+Index the array by value $- 1$ and let the slot record "seen" (or hold its owner).
+
+```text
+sign:   i = abs(x)-1; if a[i] > 0: a[i] = -a[i]          # negative slot => value i+1 seen
+cyclic: while 1<=a[i]<=n and a[a[i]-1] != a[i]: swap a[i], a[a[i]-1]   # send a[i] home
+```
+
+**Invariant.** With sign marking, slot $i$ is negative iff value $i+1$ occurred; with cyclic placement, every in-range value ends at its own index, so `a[i] != i+1` marks a missing value.
+:::
+
+**Complexity.** $O(n)$ time, $O(1)$ extra space for both (mutating the input or a copy). The hash-set alternative is $O(n)$ space: the oracle, and exactly what the constraint forbids.
+
+{{< include ../problems/lc-0448-find-all-numbers-disappeared-in-an-array/problem.qmd >}}
+
+[**From "which slots stayed positive" to "send every value home".** LC 448 marks seen values and reads the untouched slots. LC 41 must cope with values outside $[1, n]$ (negatives, zero, huge numbers), so it guards the index and places each in-range value at its home instead.]{.flow-bridge}
+
+{{< include ../problems/lc-0041-first-missing-positive/problem.qmd >}}
+
+## Pattern 3: Let the frequency be the bucket {#sec-lts-p3}
+
+**From value buckets to count buckets.** Patterns 1 and 2 indexed by the *value*. Many problems sort by a *derived* small integer instead: how often something appears. A count is also a valid array index, in $[1, n]$. Drop each item into `buckets[frequency]` and scan down: that is a counting sort whose key is the count, and it compares nothing.
+
+**Recognise it.** "Sort by frequency", "the $k$ most frequent", any tie order accepted, $n$ up to $10^5$, and a follow-up asking for better than $O(n\log n)$.
+
+::: {.callout-important title="Template"}
+Two stages of counting: value → frequency, then frequency → bucket index.
+
+```text
+c = Counter(items)
+buckets = [[] for _ in range(n+1)]
+for x, f in c.items(): buckets[f].append(x)
+scan f = n..1 (collect; optionally stop after k items)
+```
+
+**Invariant.** An item sits only in the bucket equal to its frequency, so a downward scan visits items in non-increasing frequency, exactly the required order, in $O(n + A)$.
+:::
+
+**Complexity.** $O(n + A)$ time, $O(n)$ space ($A$ = number of distinct items). Sorting the distinct items by count is the $O(n + A\log A)$ oracle; the buckets delete the $\log$.
+
+{{< include ../problems/lc-0451-sort-characters-by-frequency/problem.qmd >}}
+
+[**From emitting every bucket to stopping at $k$.** LC 451 walks all frequency buckets to rebuild the whole string. LC 347 uses the same buckets but stops once $k$ values are collected: the same count-as-index structure with an early exit, $O(n)$ where `most_common` is $O(n + A\log A)$.]{.flow-bridge}
+
+{{< include ../problems/lc-0347-top-k-frequent-elements/problem.qmd >}}
+
+## Pattern 4: Positional and histogram equality {#sec-lts-p4}
+
+**From sorting to answering.** Sometimes no order is needed in the output at all. Either the data already carries each item's destination and the only job is to write it there (@sec-lts-p4-a), or the question is just whether two multisets are equal (@sec-lts-p4-b). The first is the placement phase of counting sort with the positions handed over; the second is its counting phase used as an equality test.
+
+**Recognise it.** "Each item carries its own position" → direct placement. "Are these the same multiset / anagrams?" → compare counts, never sort.
+
+::: {.callout-important title="Template"}
+Use the key as an address to write, or as an address to tally.
+
+```text
+place:  out[key - 1] = payload                     # the embedded index IS the slot (A1, A2)
+equal:  one counter, += for A, -= for B; equal iff every slot is 0   (A6)
+```
+
+**Invariant.** If the keys form a permutation of $1..n$, direct placement fills every slot exactly once; a shared histogram nets to zero iff the two multisets are identical.
+:::
+
+**Complexity.** Both $O(n)$ time; placement uses $O(n)$ space for the output, the equality test $O(1)$ (fixed alphabet) or $O(A)$ for a general alphabet. Sorting both is the $O(n\log n)$ fallback.
+
+{{< include ../problems/lc-1859-sorting-the-sentence/problem.qmd >}}
+
+[**From writing at an index to tallying at an index.** LC 1859 uses each word's digit as an address to *place* the word. LC 242 uses each character as an address to *count*, turning "is this an anagram?" into "does the histogram net to zero?".]{.flow-bridge}
+
+{{< include ../problems/lc-0242-valid-anagram/problem.qmd >}}
+
+## Pattern 5: The value-range pigeonhole {#sec-lts-p5}
+
+**From one box per value to a forced collision.** A4 scattered keys into equal-width buckets; A6 named the consequence: more items than boxes, and some box repeats. When the value range is no larger than the number of items, a collision is guaranteed, and the problem is to read *which* box collided (@sec-lts-p5-a), or to choose boxes so tight that "within $t$" becomes "same or adjacent box" (@sec-lts-p5-b). This is the pattern where the counting argument matters more than any sorting.
+
+**Recognise it.** "Values in $[1, n]$ with exactly one repeated and one missing" (a permutation with one defect). Or "two values within $t$ of each other, at indices within $k$": the bucket-of-width-$t{+}1$ signal. Or "maximum gap between neighbours in sorted order, in linear time": buckets plus an averaging argument.
+
+::: {.callout-important title="Template"}
+Choose the boxes so that the promise forces the answer.
+
+```text
+defect:  mark slot abs(x)-1; a second hit = duplicate, an untouched slot = missing   (A5)
+close:   bucket width t+1; a hit in the same bucket, or a close value in a neighbour,
+         among the last k items, is the pair                                          (A4)
+```
+
+**Invariant.** Negated slots record occurrence, so the doubled box and the empty box are readable afterwards. With width-$(t+1)$ buckets, two values within $t$ share a bucket or sit in neighbouring buckets, and two values in one bucket are always within $t$, so three probes per item suffice.
+:::
+
+**Complexity.** The defect read is $O(n)$ time, $O(1)$ extra space. The bucket window is $O(n)$ expected time, $O(\min(n, k))$ space; an ordered-set window is $O(n\log k)$ worst case.
+
+{{< include ../problems/lc-0645-set-mismatch/problem.qmd >}}
+
+[**From a permutation with one defect to a window over a value range.** LC 645 reads the pigeonhole's doubled and empty boxes on a nearly valid $1..n$ set. LC 220 makes the boxes value ranges of width $t+1$ and adds an index window, so the same "boxes force the answer" reasoning becomes a linear-time test for a close pair.]{.flow-bridge}
+
+{{< include ../problems/lc-0220-contains-duplicate-iii/problem.qmd >}}
+
+The third member of this pattern, Maximum Gap, is solved in full in @sec-srt: $n$ keys in $n - 1$ equal buckets, an averaging argument that puts the answer *between* buckets, and only per-bucket minima and maxima kept. It can also be solved by radix-sorting the keys (Pattern 6) and scanning neighbours, since the keys are integers up to $10^9$.
+
+{{< include ../problems/lc-0164-maximum-gap/card.qmd >}}
+
+## Pattern 6: Radix sort: split a wide key into small digits {#sec-lts-p6}
+
+**From a small range to any fixed-width key.** Every pattern so far needed a small range: a histogram of $k$ cells is only cheap when $k$ is about $n$ or smaller. Radix sort (A3) removes that need. A 32-bit integer is four 8-bit digits; a string of length $m$ is $m$ letters. Run one stable counting sort per digit, least significant first, and a wide key costs $d$ cheap passes instead of one impossible histogram. Two twists recur in problems: the digits may each need their own direction, and the order after *some* of the passes may itself be an answer.
+
+**Recognise it.** Keys of a fixed, short width: equal-length strings, digit strings, integers with a known bit count, tuples like (year, month, day). A custom order defined position by position ("compare the first differing character, ascending at odd positions"). Queries that ask about the order of *suffixes* of the keys (the last $t$ digits).
+
+::: {.callout-important title="Template"}
+One stable counting sort per digit, least significant first; map each digit so that the pass is ascending.
+
+```text
+order = [0, 1, ..., n-1]                        # sort indices, not the keys themselves
+for column j = last .. first:
+    digit(i) = key[i][j]   (or  R-1-key[i][j]   if this column sorts descending)
+    order = stable_counting_sort(order, digit)  # O(n + R)
+    # here: order is sorted by columns j..last  (save it if a query needs it)
+```
+
+**Invariant.** After the passes on columns $j..m$, `order` is sorted by those columns, and keys equal on them are in their original (index) order. Each new pass extends this by one column to the left because it is stable (@sec-lts-a3-proof).
+:::
+
+**Complexity.** $O(m(n + R))$ time for $n$ keys of $m$ digits over an alphabet of size $R$, $O(n + R)$ extra space; linear in the input size $nm$ when $R = O(n)$. A comparison sort costs $O(nm\log n)$ in the worst case, since each comparison may read $m$ digits.
+
+{{< include ../problems/cf-1575a-another-sorting-problem/problem.qmd >}}
+
+[**From the final order to every intermediate order.** In Another Sorting Problem only the order after the last pass matters. In Query Kth Smallest Trimmed Number the order after pass $t$ answers every query with trim $t$, and the tie rule "lower index first" comes free from stability.]{.flow-bridge}
+
+{{< include ../problems/lc-2343-query-kth-smallest-trimmed-number/problem.qmd >}}
+
+Radix sort is also a guaranteed-linear way to answer Distinct Numbers, solved with a hash set in @sec-hash: radix-sort the values (up to $10^9$, so two passes of 16-bit digits) and count the positions where a value differs from its left neighbour.
+
+{{< include ../problems/cses-1621-distinct-numbers/card.qmd >}}
+
+**Looking back.** Every pattern traded comparisons for something the constraints said about the keys. Counting sort (A1, A2) spends a $k$-wide array to sort small integer keys (P1), and its counting half alone answers equality and placement questions (P4). Value-as-index (A5) folds that array into the input for $O(1)$ space (P2). Frequency buckets apply counting sort to a derived key, the count (P3). Equal-width buckets (A4) need no order at all when the pigeonhole forces the answer (P5). And radix sort (A3) stretches all of this to wide keys by running the stable counting sort once per digit (P6). The thread is a single licence: the keys told you something, so you indexed with them instead of comparing them.
+
+## Pattern map
+
+<!-- Copied into the Cheat Sheets appendix by gen_book.py: keep it one table, no labels. -->
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Values bounded by a small constant ($\le 100$, a letter); compare with the sorted order | Histogram, read by index | @sec-lts-p1-a |
+| Repeatedly take smallest/largest remaining over a fixed alphabet | Re-read a histogram up and down | @sec-lts-p1-b |
+| Values large, but anything above $n$ acts the same | Clamp to $n$, read from the top with a running sum | @sec-lts-p1-c |
+| A condition on each value's block in sorted order | Prefix sums of the histogram = block starts | @sec-lts-p1-d |
+| "Values are $1..n$", "without extra space", find the vanished values | Sign marking as the counter | @sec-lts-p2-a |
+| Smallest missing positive, arbitrary integers, $O(1)$ space | Cyclic placement at index $v-1$ | @sec-lts-p2-b |
+| "Sort by frequency", whole result emitted | Frequency as bucket index | @sec-lts-p3-a |
+| "Top $k$ frequent", linear time | Frequency buckets with early exit | @sec-lts-p3-b |
+| Each item carries its own destination index | Direct placement (the key is an address) | @sec-lts-p4-a |
+| "Same multiset?" / anagram | One shared histogram nets to zero | @sec-lts-p4-b |
+| A permutation of $1..n$ with one duplicate and one loss | Pigeonhole with sign marking | @sec-lts-p5-a |
+| Two values within $t$ at indices within $k$ | Buckets of width $t+1$, probe neighbours | @sec-lts-p5-b |
+| Equal-length strings, custom per-position order | LSD radix, one stable pass per column | @sec-lts-p6-a |
+| Queries about the order of the last $t$ digits | LSD radix, keep the order after each pass | @sec-lts-p6-b |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Counting sort on a wide range.** $O(n + k)$ is linear only when $k = O(n)$. If values reach $10^9$, the count array has $10^9$ cells: clamp (@sec-lts-p1-c), compress to ranks (@sec-srt-a4), radix-sort (@sec-lts-a3), or use a comparison sort (@sec-lts-a1, @sec-lts-a6).
+- **End positions with a forward scan.** With $C[v]$ = "number of keys $\le v$" you must place from the back; with $C[v]$ = "first slot of $v$" you must place from the front. Mixing them reverses every group of equal keys, and a radix sort built on it gives wrong answers (@sec-lts-a2).
+- **LSD passes in the wrong order, or an unstable pass.** LSD radix must go from the least to the most significant digit with a *stable* inner sort; either mistake lets a later pass destroy the order the earlier ones built (@sec-lts-a3-proof).
+- **Negative keys in radix sort.** `(x // exp) % 10` and `(x >> s) & 255` do not order negative numbers correctly. Offset by the minimum or flip the sign bit first (@sec-lts-a3-neg).
+- **LSD on strings of different lengths.** There is no common last column; padding is expensive. Use MSD radix sort, or bucket by length first (@sec-lts-a3-msd).
+- **Forgetting the "ended" bucket in MSD.** A string that runs out of characters must sort *before* every longer string with the same prefix; it needs its own bucket, smaller than every character (@sec-lts-a3-msd).
+- **Bucket sort on data you have not checked.** Skewed keys pile into one bucket, and the inner insertion sort becomes $\Theta(n^2)$ (@sec-lts-a4-proof).
+- **Indexing by value without guarding the range.** `a[x - 1]` is safe only when $1 \le x \le n$; LC 41's negatives and huge values must be skipped (@sec-lts-a5, @sec-lts-p2-b).
+- **Forgetting the absolute value in sign marking.** Once slots are negated, later reads must use `abs(x) - 1` (@sec-lts-p2-a, @sec-lts-p5-a).
+- **Cyclic placement on duplicates without the home check.** Without `a[a[i]-1] != a[i]`, two equal values swap forever (@sec-lts-p2-b).
+- **Truncating division for bucket ids.** In C++ `-1 / 2 == 0`, the same bucket as `1 / 2`; bucket ids of negative values need a real floor (@sec-lts-p5-b).
+- **Sorting to answer an equality question.** "Are these anagrams?" needs counts, not an order: $O(n)$ time and $O(1)$ space instead of $O(n\log n)$ (@sec-lts-p4-b).
+:::
+
+## Exercises
+
+**1. [E] Trace stable counting sort (count, prefix sums, backward placement) on $A = [6, 0, 2, 0, 1, 3, 4, 6, 1, 3, 2]$ with $k = 7$. Give $C$ after the count pass and after the prefix pass, and the final output.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Counts of $0..6$: $C = [2, 2, 2, 2, 1, 0, 2]$. Prefix sums: $C = [2, 4, 6, 8, 9, 9, 11]$. Placing from the back gives $B = [0, 0, 1, 1, 2, 2, 3, 3, 4, 6, 6]$. For example, the last key $2$ (index 10) goes to slot $C[2] - 1 = 5$, and the earlier $2$ (index 2) later goes to slot $4$, so the two 2s keep their input order (@sec-lts-a2).
+
+```{python}
+#| label: arr-lts-ex1
+ex1 = [6, 0, 2, 0, 1, 3, 4, 6, 1, 3, 2]
+assert [ex1.count(v) for v in range(7)] == [2, 2, 2, 2, 1, 0, 2]
+assert list(np.cumsum([ex1.count(v) for v in range(7)])) == [2, 4, 6, 8, 9, 9, 11]
+assert a2_stable(ex1, key=lambda x: x) == [0, 0, 1, 1, 2, 2, 3, 3, 4, 6, 6]
+```
+:::
+
+**2. [E] Counting sort is said to run in $O(n + k)$. What exactly is $k$, and give an input on which counting sort is asymptotically worse than merge sort.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$k$ is the size of the key **range** (the number of cells in the count array), $\max - \min + 1$ after shifting. With $n = 10$ keys spread up to $10^9$, counting sort allocates and scans $10^9$ cells, while merge sort does about $10 \log_2 10 \approx 33$ comparisons. Counting sort wins only when $k = O(n)$ or smaller (@sec-lts-a1).
+:::
+
+**3. [E] In the A2 placement loop, replace the backward scan by a forward scan but keep $C[v]$ = "number of keys $\le v$" and the decrement. Is the result still sorted? Is it stable? Show it on `(2,a), (1,b), (2,c)`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Still sorted: every record still lands inside its key's block. Not stable: the forward scan meets `(2,a)` first and gives it the **last** slot of the key-2 block, so ties come out reversed. Here $C = [0, 1, 3]$ after the prefix pass; forward placement puts `(2,a)` in slot 2, `(1,b)` in slot 0, `(2,c)` in slot 1, giving `b, c, a` instead of the stable `b, a, c` (@sec-lts-a2).
+:::
+
+**4. [M] Prove that the LSD radix sort of @sec-lts-a3 is wrong if the passes go from the most significant digit to the least significant, each pass being a stable sort of the whole array. Give a two-element counterexample.**
+
+::: {.callout-note collapse="true" title="Solution"}
+With the passes reversed, the **last** pass sorts by the least significant digit, so the final order is by the units digit, with ties broken by the higher digits. For $[19, 21]$: the tens pass gives $[19, 21]$, then the units pass sorts by $9$ and $1$ and gives $[21, 19]$, which is wrong. The proof in @sec-lts-a3-proof needs the newest pass to be the most significant so far (@sec-lts-a3).
+:::
+
+**5. [M] Radix-sort $[329, 457, 657, 839, 436, 720, 355]$ in base 10 by hand. After which pass is the array first fully sorted, and why can it not be earlier in general?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Units pass: $720, 355, 436, 457, 657, 329, 839$. Tens pass: $720, 329, 436, 839, 355, 457, 657$. Hundreds pass: $329, 355, 436, 457, 657, 720, 839$. The array is sorted only after the hundreds pass: after $j$ passes it is sorted by the lowest $j$ digits only, and two keys that differ only in the highest digit can be in any order before the last pass (@fig-lts-anim-radix).
+:::
+
+**6. [M] Show how to sort $n$ integers in the range $[0, n^3 - 1]$ in $O(n)$ time.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Write each integer in base $n$: since it is below $n^3$, it has at most three base-$n$ digits, each in $[0, n-1]$. Run LSD radix sort with $b = n$ and $d = 3$: $\Theta(3(n + n)) = \Theta(n)$. Counting sort directly would cost $\Theta(n + n^3)$ (@sec-lts-a3-base).
+
+```{python}
+#| label: arr-lts-ex6
+for _ in range(100):
+    n6 = random.randint(1, 30)
+    arr6 = [random.randrange(n6 ** 3) for _ in range(n6)]
+    assert a3_radix(arr6, base=max(2, n6)) == sorted(arr6)
+```
+:::
+
+**7. [M] You must sort $10^6$ unsigned 64-bit keys with LSD radix sort. Using @eq-lts-radix-r, compare digits of 8, 16 and 22 bits.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$r = 8$: 8 passes of $n + 256$, about $8.0 \cdot 10^6$ steps. $r = 16$: 4 passes of $n + 65536$, about $4.3 \cdot 10^6$. $r = 22$: 3 passes of $n + 4.2 \cdot 10^6$, about $15.6 \cdot 10^6$. So 16-bit digits minimise the step count; 8-bit digits are often preferred in practice because a 256-entry count array stays in the fastest cache (@sec-lts-a3-base).
+:::
+
+**8. [M] Explain why flipping the sign bit (`x ^ 0x80000000`) makes 32-bit signed integers radix-sortable as unsigned, and why an offset by the minimum is an alternative.**
+
+::: {.callout-note collapse="true" title="Solution"}
+In two's complement, $x$ and $x + 2^{32}$ have the same bit pattern, so reading signed $x$ as unsigned gives $x$ for $x \ge 0$ and $x + 2^{32}$ for $x < 0$: negatives look larger than positives. Flipping the top bit adds $2^{31}$ modulo $2^{32}$, which maps $[-2^{31}, 2^{31})$ onto $[0, 2^{32})$ by $x \mapsto x + 2^{31}$, an increasing map. An offset by $-\min$ is the same idea with the smallest shift that makes every key non-negative (@sec-lts-a3-neg).
+:::
+
+**9. [M] Trace MSD radix sort on `["dab", "cab", "ad", "add", "dad", "a"]`. Which groups are recursed into, and at what depth?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Depth 0 by the first letter: `a` group `[ad, add, a]`, `c` group `[cab]`, `d` group `[dab, dad]`. Recurse into `a` at depth 1: `a` has ended (bucket 0), `ad` and `add` go to bucket `d`, so the order is `a, ad, add` after recursing into `[ad, add]` at depth 2 (`ad` ended, `add` has `d`). Recurse into `d` at depth 1: both have `a`, recurse at depth 2: `dab` (`b`) before `dad` (`d`). Result: `a, ad, add, cab, dab, dad` (@sec-lts-a3-msd).
+
+```{python}
+#| label: arr-lts-ex9
+assert a3_msd(["dab", "cab", "ad", "add", "dad", "a"]) == ["a", "ad", "add", "cab", "dab", "dad"]
+```
+:::
+
+**10. [M] Why does MSD radix sort not need its counting passes to be stable for correctness, while LSD does?**
+
+::: {.callout-note collapse="true" title="Solution"}
+MSD never re-sorts keys that an earlier pass has already separated: after the pass on character $d$, each group shares the first $d + 1$ characters, and later passes work only inside one group. So no later pass can undo an earlier decision, and ties inside the last pass are equal strings. LSD re-sorts the *whole* array every pass, and only stability protects the order fixed by the lower digits (@sec-lts-a3-proof, @sec-lts-a3-msd).
+:::
+
+**11. [M] Bucket sort over $[0, 1)$ is expected $O(n)$ for uniform input. Give an input on which it takes $\Theta(n^2)$, and change one line so the worst case becomes $O(n\log n)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Put all keys in $[0, 1/n)$ in decreasing order: they all land in bucket 0 in reverse order, and insertion sort there does $\Theta(n^2)$ shifts. Sorting each bucket with merge sort (or Python's `sorted`) instead of insertion sort bounds the work by $O(n\log n)$ while keeping the expected $O(n)$ on uniform input (@sec-lts-a4-proof).
+:::
+
+**12. [H] Bucket sort with $m$ buckets instead of $n$: show that the expected time is $\Theta(n + n^2/m + m)$ for uniform input.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Now $n_i$ is binomial with $p = 1/m$: $\mathbb{E}[n_i^2] = np(1-p) + (np)^2 = n/m - n/m^2 + n^2/m^2$. Summing over $m$ buckets: $\sum_i \mathbb{E}[n_i^2] = n - n/m + n^2/m = \Theta(n + n^2/m)$. Add $\Theta(n + m)$ for scattering and scanning the buckets: $\Theta(n + n^2/m + m)$, minimised at $m = \Theta(n)$, where it is $\Theta(n)$ (@eq-lts-bucket).
+:::
+
+**13. [E] For values $1..n$ with some missing, sign marking finds the gaps in $O(1)$ extra space. Why must every value be in $[1, n]$, and how does @sec-lts-p2-b work around negatives and huge values?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The mark is written at index `abs(x) - 1`, so $x$ must name one of the $n$ slots; anything else indexes out of bounds. LC 41 skips every $x \notin [1, n]$ (guard `1 <= a[i] <= n`): the answer is always in $[1, n+1]$, so only in-range values can affect it (@sec-lts-a5, @sec-lts-p2-b).
+:::
+
+**14. [M] In @sec-lts-p2-b the inner loop is a `while` (not an `if`) and tests `a[a[i]-1] != a[i]`. Explain each choice, and bound the total number of swaps.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`while`: the value swapped *into* slot $i$ may itself belong elsewhere, so slot $i$ is processed until it holds its own value or a value that cannot be placed. The test: if the home slot already holds an equal value (a duplicate), a swap would change nothing and loop forever. Every successful swap puts one value into its home for good, so there are at most $n$ swaps in total and the whole loop is $O(n)$ (@sec-lts-p2-b).
+:::
+
+**15. [M] @sec-lts-p3-a sorts characters by frequency with buckets. Why are $n + 1$ buckets enough, and why does the stress test sort inside each bucket?**
+
+::: {.callout-note collapse="true" title="Solution"}
+No character occurs more than $n$ times, so every frequency is an index in $[1, n]$. Characters with equal frequency share a bucket and may come out in any order; the problem accepts that, but the stress test compares two programs' strings exactly, so sorting inside a bucket makes the output deterministic and the comparison meaningful (@sec-lts-p3-a).
+:::
+
+**16. [E] Give the $O(n)$-time, $O(1)$-space anagram test and explain why the length check comes first.**
+
+::: {.callout-note collapse="true" title="Solution"}
+One 26-slot array: `+= 1` for each character of `s`, `-= 1` for each of `t`, anagrams iff all slots are zero. The single loop walks `zip(s, t)`, which stops at the shorter string; without the length check, `s = "ab"`, `t = "abc"` would net to zero over the common prefix and wrongly pass (@sec-lts-p4-b).
+:::
+
+**17. [M] In @sec-lts-p5-a, why must the missing value be found by scanning the *slots* after the marking pass, while the duplicate is found during the pass?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The duplicate appears in the array twice, so the walk steps on its slot twice and sees the mark the second time. The missing value never appears, so nothing in the walk points to its slot; only a separate scan of all $n$ slots finds the one still unmarked (the pigeonhole's empty box) (@sec-lts-p5-a).
+:::
+
+**18. [H] In @sec-lts-p5-b, with bucket width $w = t + 1$, prove that two values within $t$ lie in the same or adjacent buckets, and that two values in the same bucket are within $t$. Why does that let the map hold one value per bucket?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Bucket $b$ holds exactly the integers in $[bw, bw + w - 1]$. Two values in it differ by at most $w - 1 = t$. If $|x - y| \le t < w$, then $\lfloor x/w \rfloor$ and $\lfloor y/w \rfloor$ differ by at most one. So among live elements, a second value in an occupied bucket would already be a valid pair and the scan would have stopped; while it runs, every bucket holds at most one live value, and the map can store that value directly (@sec-lts-p5-b).
+:::
+
+**19. [M] Sort $n$ student records by `(grade, score)` where grade $\in \{1..5\}$ and score $\in \{0..100\}$, grade first. Which passes do you run, in which order, and what does it cost? What changes if the score is an arbitrary real number?**
+
+::: {.callout-note collapse="true" title="Solution"}
+LSD order: first a stable counting sort by the **minor** key, score ($k = 101$), then a stable counting sort by the **major** key, grade ($k = 5$). Total $O(n + 101 + n + 5) = O(n)$. If the score is an arbitrary real, it cannot index an array; sort by score with a stable comparison sort ($O(n\log n)$), then the grade pass can still be a stable counting sort, or simply sort by the tuple key with a comparison sort (@sec-lts-a2, @sec-lts-a3).
+:::
+
+**20. [H] Explain, in terms of the decision-tree argument, why counting sort is not bound by $\Omega(n\log n)$, and name the resource it spends instead.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The bound models an algorithm as a binary tree whose internal nodes are comparisons; with $n!$ reachable leaves its height is at least $\log_2(n!)$ (@eq-lts-lower). Counting sort's basic step `cnt[x] += 1` uses the key as an address, which picks one of $k$ cells: a $k$-way branch on the key's value, not a two-way comparison, so the algorithm is not such a tree. It spends **memory proportional to the key range** and relies on the word-RAM ability to index by a key in $O(1)$; with $k = O(n)$ that buys $O(n)$ time (@sec-lts-a1-wall).
+:::
+
+**21. [M] Strings of total length $N$ over an alphabet of size $R$, of varying lengths. Compare: a comparison sort, LSD with padding to the longest length $w$, and MSD.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A comparison sort does $O(n\log n)$ comparisons, each of which may read many characters (up to the common prefix length). LSD with padding costs $\Theta(w(n + R))$, which can be far more than $N$: one string of length $10^5$ among $10^5$ short ones makes $w n = 10^{10}$. MSD reads only the distinguishing prefixes, at most $N$ characters, plus an $O(R)$ count array per recursive call, which is why practical MSD switches to insertion sort for small groups (@sec-lts-a3-msd).
+:::
+
+## Interview questions
+
+<!-- Copied into the Question Bank (quiz mode) by gen_book.py. Keep the shape exactly: a bold line
+     starting "**N. " with the question, then one collapsed "Answer" callout. Answers may cite @sec-… -->
+
+**1. What does the $\Omega(n\log n)$ sorting lower bound assume, and how does counting sort get around it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+It assumes the algorithm learns about the order **only by comparing pairs of keys**; then a decision tree with $n!$ leaves has height at least $\log_2(n!) = \Theta(n\log n)$. Counting sort never compares: it uses each key as an array index, a step with $k$ outcomes, so the argument does not apply. It runs in $O(n + k)$, linear when the key range $k$ is $O(n)$ (@sec-lts-a1-wall).
+:::
+
+**2. When is counting sort a bad idea even though it is "linear"?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When the key range $k$ is much larger than $n$: keys up to $10^9$ need a $10^9$-cell array, worse than $O(n\log n)$ in time and memory. Also when the keys are not integers (or cannot be mapped to small integers). Check the value range in the constraints first; consider clamping, coordinate compression or radix sort (@sec-lts-a1, @sec-lts-a6).
+:::
+
+**3. What does "stable" mean, and how does counting sort achieve it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A stable sort keeps records with equal keys in their input order. Counting sort turns counts into end positions with a prefix sum and then places records scanning **backward**, decrementing the position; equal keys fill their block from the right in reverse input order, so they end up in input order. (Equivalently: start positions with a forward scan.) (@sec-lts-a2).
+:::
+
+**4. Walk through LSD radix sort and explain why the per-digit sort must be stable.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort by the units digit, then the tens, then the hundreds, each time with a stable counting sort. After $j$ passes the array is sorted by the lowest $j$ digits. When the next pass meets two keys with the same digit, only stability keeps them in the order the lower digits established; an unstable pass could swap them and break the result (@sec-lts-a3-proof).
+:::
+
+**5. Counting sort or radix sort for $n$ integers in $[0, n^2)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Radix sort. Counting sort would be $\Theta(n + n^2)$. Each key has two base-$n$ digits, so two stable counting-sort passes with $b = n$ cost $\Theta(2(n + n)) = \Theta(n)$ (@sec-lts-a3-base).
+:::
+
+**6. How do you pick the digit size for radix sort?**
+
+::: {.callout-note collapse="true" title="Answer"}
+For $\beta$-bit keys and $r$-bit digits the cost is $\Theta((\beta/r)(n + 2^r))$. Choosing $2^r \approx n$ balances the two terms and gives $\Theta(\beta n/\log n)$. For a million 32-bit keys that is $r = 16$ (two passes); in practice 8-bit digits are common because the 256-entry count array is cache friendly (@sec-lts-a3-base).
+:::
+
+**7. How does radix sort handle negative integers?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Either add $-\min$ to every key and subtract it afterwards, or (for fixed-width integers) flip the sign bit, which maps the signed range onto the unsigned range in the same order; sort as unsigned, then flip back. Plain digit extraction on negatives gives the wrong order (@sec-lts-a3-neg).
+:::
+
+**8. LSD or MSD radix sort for strings?**
+
+::: {.callout-note collapse="true" title="Answer"}
+LSD for fixed-length strings (IDs, codes, equal-length keys): simple, stable, $\Theta(w(n + R))$. MSD for variable-length strings: it recurses into groups sharing a prefix, needs an "ended" bucket below every character, and reads only the distinguishing prefixes; it needs a cutoff to insertion sort because each call pays for an $R$-entry count array (@sec-lts-a3-msd).
+:::
+
+**9. Give the expected-time argument for bucket sort and an input that defeats it.**
+
+::: {.callout-note collapse="true" title="Answer"}
+With $n$ uniform keys in $n$ buckets, each bucket size $n_i$ is binomial with $p = 1/n$, so $\mathbb{E}[n_i^2] = 2 - 1/n$. Insertion sort on bucket $i$ costs $O(n_i^2)$, so the expected total is $\Theta(n) + n \cdot O(1) = \Theta(n)$. If all keys fall into one bucket (say all in $[0, 1/n)$), the insertion sort there costs $\Theta(n^2)$ (@sec-lts-a4-proof).
+:::
+
+**10. Find all missing numbers in an array with $1 \le \mathit{nums}[i] \le n$, in $O(1)$ extra space.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sign marking: for each value $x$, negate slot `abs(x) - 1` if it is positive; afterwards every still-positive slot $i$ means value $i + 1$ never appeared. $O(n)$ time, $O(1)$ extra space. Use `abs` because a slot may already have been negated when you read it (@sec-lts-a5, @sec-lts-p2-a).
+:::
+
+**11. "First missing positive" in $O(n)$ time and $O(1)$ space?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The answer is in $[1, n+1]$, so only values in $[1, n]$ matter. Cyclic placement: while `a[i]` is in range and its home slot does not already hold it, swap it home. Then the first $i$ with `a[i] != i + 1` gives $i + 1$, else $n + 1$. At most $n$ swaps in total (@sec-lts-p2-b).
+:::
+
+**12. Top $k$ frequent elements in linear time?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Count with a hash map, then bucket the values by frequency (`buckets[f]`, $f \in [1, n]$) and scan from $f = n$ down, stopping after $k$ values. $O(n)$ time and space. A size-$k$ heap gives $O(n + A\log k)$, quickselect expected $O(n + A)$ (@sec-lts-p3-b).
+:::
+
+**13. "Two indices within $k$ whose values are within $t$": a linear-time solution?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Buckets of width $t + 1$ keyed by $\lfloor x/(t+1) \rfloor$, holding only the last $k$ elements. A value already in the same bucket is a match; a value in a neighbouring bucket is a match if within $t$; otherwise insert and evict the element that left the window. $O(n)$ expected time, $O(k)$ space. Use a real floor for negative values (@sec-lts-p5-b).
+:::
+
+**14. For each, choose counting, radix, bucket or comparison sort: (a) $10^7$ ages in $[0, 120]$; (b) $10^6$ floats uniform in $[0, 1)$; (c) $10^6$ arbitrary 64-bit integers; (d) dates as (year, month, day).**
+
+::: {.callout-note collapse="true" title="Answer"}
+(a) Counting sort: $k = 121$, $O(n)$. (b) Bucket sort: expected $O(n)$. (c) Either a comparison sort or LSD radix with 8- or 16-bit digits; radix is linear but with 4 to 8 passes over the data, and a good library sort is often competitive, so measure. (d) LSD radix: stable counting sort by day ($k = 31$), then month ($k = 12$), then year (offset by the earliest year) (@sec-lts-a3, @sec-lts-a4, @sec-lts-a6).
+:::
+
+**15. Is counting sort in place? Can it be made in place?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The stable version is not: it writes into a separate output array of size $n$, plus the $k$-cell count array. An in-place version exists (the "American flag sort" style of cycling each element to its bucket's next free slot), but it is not stable, so it cannot serve as the inner sort of LSD radix. When the keys are bare numbers, the histogram form can overwrite the input in place from the counts, using only the $O(k)$ count array (@sec-lts-a1, @sec-lts-a2).
+:::
+
+**16. Why do standard libraries use comparison sorts if radix sort is linear?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A library sort must work for any type with a comparator, where radix sort does not apply. Radix sort also needs $O(n + b)$ extra memory, several passes over the data, and per-type digit extraction (signs, floats, strings), and its advantage appears mainly for large arrays of short fixed-width keys. A comparison sort like introsort or Timsort is general, in place or nearly so, and adaptive to presorted input (@sec-lts-a6).
+:::
+
+## Summary
+
+<!-- The callout-important below is copied into the Cheat Sheets appendix: make it stand alone. -->
+
+::: {.callout-important title="Templates to remember"}
+- **Counting sort** keys in $[0, k)$: count, prefix sums ($C[v]$ = #keys $\le v$), place scanning backward with `B[--C[key]] = x`. $\Theta(n + k)$ time and space, stable (@sec-lts-a2).
+- **LSD radix sort** one stable counting sort per digit, least significant first; $\Theta(d(n + b))$; for $\beta$-bit keys pick $r$-bit digits with $2^r \approx n$ (@sec-lts-a3).
+- **Signed keys** offset by the minimum, or flip the sign bit, before radix sorting (@sec-lts-a3-neg).
+- **MSD radix sort** for variable-length strings: counting sort on character $d$ with an "ended" bucket first, recurse into each group (@sec-lts-a3-msd).
+- **Bucket sort** $n$ buckets over a known interval, insertion sort each, concatenate; expected $\Theta(n)$ for uniform keys because $\mathbb{E}[n_i^2] = 2 - 1/n$ (@sec-lts-a4).
+- **Value-as-index** values in $[1, n]$: sign marking or cyclic placement, $O(1)$ extra space; guard the range (@sec-lts-a5).
+- **Frequency as bucket** `buckets[count].append(item)`, scan from $n$ down (@sec-lts-p3).
+- **Pigeonhole buckets** width $t + 1$: same bucket means within $t$; within $t$ means same or neighbouring bucket (@sec-lts-p5-b).
+- **Decision** verify the key promise in the constraints; if there is none, use a comparison sort (@sec-lts-a6).
+:::
+
+- The $\Omega(n\log n)$ bound binds only comparison sorts; using a key as an address escapes it, at the price of memory proportional to the key range (A1).
+- Stable counting sort is the workhorse: count, prefix sums, place. The direction of the placement scan must match the kind of positions (end or start) or stability is lost (A2).
+- LSD radix sort is $d$ stable counting sorts, least significant first; the induction proof uses stability in the tie case and the pass order to let the newest digit dominate (A3).
+- The digit size is a tuning knob: $\Theta((\beta/r)(n + 2^r))$, balanced near $2^r \approx n$.
+- MSD radix sort handles strings of any length by recursing inside groups; LSD needs fixed-width keys (A3).
+- Bucket sort's linearity is an *expected* bound over uniform inputs, proved with $\mathbb{E}[n_i^2] = 2 - 1/n$; skewed inputs break it (A4).
+- With values in $[1, n]$ the input array can be its own histogram (A5, P2, P5).
+- Counts, embedded positions and digits are all small integers, so they can all be indices: frequency buckets (P3), direct placement (P4), radix passes (P6).
+- Read the constraints first: they decide between counting, radix, bucket and comparison sorts (A6).
+
+## Practice ladder
+
+Ordered by concept, following the patterns. None of these is solved in this chapter; each one is a step beyond a solved problem.
+
+::: {.practice}
+- [LC 2037 · Minimum Number of Moves to Seat Everyone](https://leetcode.com/problems/minimum-number-of-moves-to-seat-everyone/){difficulty="Easy"} — P1: values at most $100$; counting-sort both lists and pair them in order.
+- [CF 651B · Beautiful Paintings](https://codeforces.com/problemset/problem/651/B){rating="1200"} — P1: values at most $1000$; one histogram, answer $n$ minus the largest count.
+- [LC 561 · Array Partition](https://leetcode.com/problems/array-partition/){difficulty="Easy"} — P1 and A2: values in $[-10^4, 10^4]$, counting sort with an offset for the negatives.
+- [CF 1335C · Two Teams Composing](https://codeforces.com/problemset/problem/1335/C){rating="1100"} — P1: one histogram over values at most $n$ gives the distinct count and the largest frequency.
+- [CF 1490B · Balanced Remainders](https://codeforces.com/problemset/problem/1490/B){rating="1000"} — P1: a three-slot histogram of remainders is the whole state.
+- [LC 1608 · Special Array With X Elements Greater Than or Equal X](https://leetcode.com/problems/special-array-with-x-elements-greater-than-or-equal-x/){difficulty="Easy"} — P1: the H-Index clamp, with "exactly" instead of "at least".
+- [LC 442 · Find All Duplicates in an Array](https://leetcode.com/problems/find-all-duplicates-in-an-array/){difficulty="Medium"} — P2: sign marking, reporting the slots hit twice.
+- [LC 268 · Missing Number](https://leetcode.com/problems/missing-number/){difficulty="Easy"} — P2: values $0..n$ with one gap.
+- [LC 692 · Top K Frequent Words](https://leetcode.com/problems/top-k-frequent-words/){difficulty="Medium"} — P3: frequency buckets with alphabetical tie-breaking.
+- [LC 1481 · Least Number of Unique Integers after K Removals](https://leetcode.com/problems/least-number-of-unique-integers-after-k-removals/){difficulty="Medium"} — P3: frequency buckets scanned from the smallest count.
+- [LC 1528 · Shuffle String](https://leetcode.com/problems/shuffle-string/){difficulty="Easy"} — P4: every character carries its destination.
+- [LC 438 · Find All Anagrams in a String](https://leetcode.com/problems/find-all-anagrams-in-a-string/){difficulty="Medium"} — P4: the anagram histogram slid along a window.
+- [LC 2965 · Find Missing and Repeated Values](https://leetcode.com/problems/find-missing-and-repeated-values/){difficulty="Easy"} — P5: Set Mismatch in a grid.
+- [LC 219 · Contains Duplicate II](https://leetcode.com/problems/contains-duplicate-ii/){difficulty="Easy"} — P5: the bucket window with $t = 0$.
+- [LC 2418 · Sort the People](https://leetcode.com/problems/sort-the-people/){difficulty="Easy"} — P6: records sorted by a bounded integer key, by counting or by two radix passes.
+- [LC 1985 · Find the Kth Largest Integer in the Array](https://leetcode.com/problems/find-the-kth-largest-integer-in-the-array/){difficulty="Medium"} — P6: digit strings of different lengths; bucket by length (an MSD step), then radix within a length.
+:::
+
+## Further reading
+
+- [Sedgewick & Wayne, *Algorithms* 4th ed., §5.1 String Sorts](https://algs4.cs.princeton.edu/51radix/) — key-indexed counting, LSD and MSD string sorts and three-way string quicksort, with code and the cutoff discussion (@sec-lts-a3-msd).
+- [MIT 6.006 (Spring 2020), Lecture 5: Linear Sorting](https://ocw.mit.edu/courses/6-006-introduction-to-algorithms-spring-2020/resources/lecture-5-linear-sorting/) — direct-access sorts, tuple sorts, counting sort and radix sort from first principles, with lecture notes and video.
+- [Wikipedia — Counting sort](https://en.wikipedia.org/wiki/Counting_sort) — the prefix-sum formulation and its variants (@sec-lts-a2).
+- [Wikipedia — Radix sort](https://en.wikipedia.org/wiki/Radix_sort) — LSD and MSD, in-place variants, history (@sec-lts-a3).
+- [Wikipedia — Bucket sort](https://en.wikipedia.org/wiki/Bucket_sort) — the average-case analysis with $k$ buckets and the worst case (@sec-lts-a4).
+- [Competitive Programmer's Handbook (Laaksonen)](https://cses.fi/book/book.pdf) — chapter 3: sorting theory, the lower bound and counting sort, from the contest point of view.

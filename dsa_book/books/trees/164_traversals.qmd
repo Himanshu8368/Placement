@@ -1,0 +1,1228 @@
+# Tree Traversals {#sec-tv}
+
+::: {.callout-note title="Sources"}
+**`tree_book` ch. 2** (five lessons, five patterns) · **CLRS** §12.1 (tree walks) · **CPH** ch. 14 · **CP-Algorithms** *Tree traversals*, *Binary lifting* is later.
+
+**Coverage:** preorder, inorder, postorder and level order · the iterative stack for each depth-first order · a queue round per level · Morris inorder in $O(1)$ extra memory · a subtree as an interval of the entry times · a sequence is a DFS order when each next parent lies on the current root path · level aggregates, zigzag, and cousin sums · flattening to a preorder list and repairing a BST from inorder descents · a preorder string with null markers, and identical subtrees as ids.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Produce the four orders recursively, with a stack or a queue, and inorder with no extra memory.
+- Treat a subtree as a contiguous block of the preorder, and test ancestry from two timestamps.
+- Process one level at a time: an average, a zigzag, a cousin sum.
+- Flatten a tree into a right spine, and swap back the two values that broke a BST.
+- Turn a tree into a string and back, and report each duplicated subtree once.
+:::
+
+This chapter builds directly on @sec-tr. There you learned the words (root, leaf, subtree), the ways to store a tree, and the recursion that solves a problem on the children and combines the answers. Here we keep that recursion and look at the **order** in which it meets the nodes, because the order turns out to be the algorithm.
+
+```{python}
+#| include: false
+import random
+import sys
+from collections import deque
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import tr164_traces as Traces
+
+random.seed(0)
+
+
+class Node:
+    def __init__(self, val=0, left=None, right=None):
+        self.val = val
+        self.left = left
+        self.right = right
+
+
+def from_level(vals):
+    if not vals or vals[0] is None:
+        return None
+    root = Node(vals[0])
+    q = deque([root])
+    i = 1
+    while q and i < len(vals):
+        u = q.popleft()
+        if i < len(vals) and vals[i] is not None:
+            u.left = Node(vals[i])
+            q.append(u.left)
+        i += 1
+        if i < len(vals) and vals[i] is not None:
+            u.right = Node(vals[i])
+            q.append(u.right)
+        i += 1
+    return root
+
+
+def to_level(root):
+    if root is None:
+        return []
+    q = deque([root])
+    out = []
+    while q:
+        u = q.popleft()
+        if u is None:
+            out.append(None)
+            continue
+        out.append(u.val)
+        q.append(u.left)
+        q.append(u.right)
+    while out and out[-1] is None:
+        out.pop()
+    return out
+
+
+def tree_b():
+    """Binary picture of the running example: values 0,1,4,7,8,5,2,6,9."""
+    return from_level([0, 1, 2, 4, 5, None, 6, 7, 8, None, None, 9])
+```
+
+## Why this matters
+
+A traversal is the order in which you agree to meet the nodes. The order is the algorithm. Postorder is how a subtree answer becomes available. Inorder is how a binary search tree becomes a sorted list. Level order is how a whole row is visible at once. Once you can produce those orders, you can also *recognise* them: a permutation is a DFS order only when each step stays on the current root path, and a subtree is exactly one interval of the entry times.
+
+@sec-tr built the vocabulary and the recursive walk. This chapter is what you do with the walk: four orders, the stack and the queue that replace the call stack, the $O(1)$-memory thread, and the string that stores the tree.
+
+The running binary tree $B$ is the one from @sec-tr with the leaf $3$ removed. Its four orders are the checksum for every listing below.
+
+| Order | Sequence |
+|---|---|
+| Preorder | $0, 1, 4, 7, 8, 5, 2, 6, 9$ |
+| Inorder | $7, 4, 8, 1, 5, 0, 2, 9, 6$ |
+| Postorder | $7, 8, 4, 5, 1, 9, 6, 2, 0$ |
+| Level order | $0, 1, 2, 4, 5, 6, 7, 8, 9$ |
+
+::: {#fig-tv-b}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    root = V.Node("0", [
+        V.Node("1", [V.Node("4", [V.Node("7"), V.Node("8")]), V.Node("5")]),
+        V.Node("2", [V.Node("6", [V.Node("9", color="green")])]),
+    ])
+    V.tree(ax, p, root, dx=1.05, dy=1.2, size=9,
+           level_notes=["pre: first", "in: between children", "post: last", "a leaf"])
+V.show(draw)
+```
+
+$B$. Preorder meets a node before its children, inorder between them, postorder after them. Level order meets a whole row before the next.
+
+:::
+
+## Lesson 1: the three depth-first orders {#sec-tv-dfs}
+
+```{python}
+def preorder(u, out):
+    if u is None:
+        return
+    out.append(u.val)
+    preorder(u.left, out)
+    preorder(u.right, out)
+
+
+def inorder(u, out):
+    if u is None:
+        return
+    inorder(u.left, out)
+    out.append(u.val)
+    inorder(u.right, out)
+
+
+def postorder(u, out):
+    if u is None:
+        return
+    postorder(u.left, out)
+    postorder(u.right, out)
+    out.append(u.val)
+
+
+b = tree_b()
+assert [x for x in (lambda o: (preorder(b, o), o)[1])([])] == [0, 1, 4, 7, 8, 5, 2, 6, 9]
+got = []
+inorder(b, got)
+assert got == [7, 4, 8, 1, 5, 0, 2, 9, 6]
+got = []
+postorder(b, got)
+assert got == [7, 8, 4, 5, 1, 9, 6, 2, 0]
+```
+
+The root is first in preorder and last in postorder. The inorder of a binary search tree is sorted. On a general tree, preorder and postorder still follow a fixed order of the children. Inorder needs a left child and a right child, so it belongs to binary trees. A subtree occupies one contiguous block of the preorder and one contiguous block of the postorder; the nodes in between are a subtree when they are exactly that block. The subtree of node $1$ in $B$ is the preorder block of length $\mathrm{sz}(1) = 5$ starting at index $1$.
+
+Empty input appends nothing. One node is a sequence of length $1$ in every order.
+
+## Lesson 2: the same orders with a stack {#sec-tv-iter}
+
+The call stack hides the path. An explicit stack shows it, and it survives a path of $10^5$ nodes.
+
+Preorder pushes the **right** child, then the **left**, so the left is popped next. Pushing left first mirrors the order.
+
+Inorder walks left as far as it can, emits, then steps right. The stack is the path of unfinished left spines.
+
+Postorder keeps a node on the stack while its right subtree runs. It is emitted when it has no right child, or when that right child is the node just emitted (`last`). This is one stack plus one pointer, not two stacks.
+
+```{python}
+def preorder_stack(root):
+    if root is None:
+        return []
+    st, out = [root], []
+    while st:
+        u = st.pop()
+        out.append(u.val)
+        if u.right:
+            st.append(u.right)
+        if u.left:
+            st.append(u.left)
+    return out
+
+
+def inorder_stack(root):
+    st, cur, out = [], root, []
+    while cur is not None or st:
+        while cur is not None:
+            st.append(cur)
+            cur = cur.left
+        cur = st.pop()
+        out.append(cur.val)
+        cur = cur.right
+    return out
+
+
+def postorder_stack(root):
+    st, cur, last, out = [], root, None, []
+    while cur is not None or st:
+        while cur is not None:
+            st.append(cur)
+            cur = cur.left
+        top = st[-1]
+        if top.right is not None and top.right is not last:
+            cur = top.right
+        else:
+            out.append(top.val)
+            last = top
+            st.pop()
+    return out
+
+
+b = tree_b()
+assert preorder_stack(b) == [0, 1, 4, 7, 8, 5, 2, 6, 9]
+assert inorder_stack(b) == [7, 4, 8, 1, 5, 0, 2, 9, 6]
+assert postorder_stack(b) == [7, 8, 4, 5, 1, 9, 6, 2, 0]
+assert preorder_stack(None) == inorder_stack(None) == postorder_stack(None) == []
+```
+
+`last` is compared by identity, not by value. Two nodes can share a value. After a node is emitted, clear the cursor: the next loop must look at the stack, not walk into a child that was already finished.
+
+::: {#fig-tv-anim-inorder}
+
+```{python}
+#| echo: false
+io_root = tree_b()
+io_snaps = []                        # (stack after the pop, output so far, right child stepped to)
+st, cur, out = [], io_root, []
+while cur is not None or st:
+    while cur is not None:
+        st.append(cur)
+        cur = cur.left
+    cur = st.pop()
+    out.append(cur.val)
+    io_snaps.append(([x.val for x in st], out[:], cur.right.val if cur.right else None))
+    cur = cur.right
+assert out == inorder_stack(tree_b()) == [7, 4, 8, 1, 5, 0, 2, 9, 6]
+
+
+def io_frame(ax, p, k):
+    stack, done, right = io_snaps[k]
+
+    def build(u):
+        kids = [build(c) for c in (u.left, u.right) if c is not None]
+        if u.val == done[-1]:
+            color = "amber"
+        elif u.val in done:
+            color = "green"
+        elif u.val in stack:
+            color = "indigo"
+        else:
+            color = "muted"
+        return V.Node(u.val, kids, color=color, filled=u.val in done or u.val in stack)
+
+    V.tree(ax, p, build(io_root), dx=1.3, dy=1.4, size=10)
+    V.stack(ax, p, stack, x=7.2, y=-4.6, title="stack", color="indigo", w=1.2)
+    V.array(ax, p, done + [""] * (len(io_snaps) - len(done)), y=-7.6, label="emitted",
+            colors={len(done) - 1: "amber"}, index=False)
+
+
+io_caps = []
+for stack, done, right in io_snaps:
+    v = done[-1]
+    nxt = (f"step right to {right} and push its left spine" if right is not None
+           else (f"no right child, so the next pop is {stack[-1]}" if stack else "no right child and an empty stack: done"))
+    io_caps.append(f"pop {v} and emit it; {nxt}")
+V.animate(io_frame, len(io_snaps), captions=io_caps, interval=1000)
+```
+
+Iterative inorder on $B$, one emitted node per frame. The stack (indigo) is the path of unfinished left spines; the amber node has just been popped and emitted, and green nodes are finished. A node waits on the stack exactly as long as its left subtree is being walked.
+
+:::
+
+## Lesson 3: one queue round is one level {#sec-tv-level}
+
+Capture `len(q)` once, then pop that many nodes. Children pushed during the round belong to the next round. Re-reading the length as the queue grows consumes later levels in the same round.
+
+```{python}
+def level_order(root):
+    if root is None:
+        return []
+    q, out = deque([root]), []
+    while q:
+        width = len(q)
+        for _ in range(width):
+            u = q.popleft()
+            out.append(u.val)
+            if u.left:
+                q.append(u.left)
+            if u.right:
+                q.append(u.right)
+    return out
+
+
+assert level_order(tree_b()) == [0, 1, 2, 4, 5, 6, 7, 8, 9]
+assert level_order(None) == []
+```
+
+::: {#fig-tv-queue}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    root = Node(3, Node(9), Node(20, Node(15), Node(7)))
+    q = deque([root])
+    shots = []
+    while q:
+        shots.append([x.val for x in q])
+        for _ in range(len(q)):
+            u = q.popleft()
+            if u.left:
+                q.append(u.left)
+            if u.right:
+                q.append(u.right)
+    assert shots == [[3], [9, 20], [15, 7]]
+    V.trace(ax, p, [
+        {"values": row, "label": f"step {i + 1}", "colors": {0: "green"}}
+        for i, row in enumerate(shots)
+    ])
+V.show(draw)
+```
+
+The queue at the start of each round, on $3$ with children $9$ and $20$, and $20$'s children $15$ and $7$. Each step is one level. The front of the queue is green.
+
+:::
+
+The widest level of $B$ has three nodes. Which buffer is large depends on the shape. A path uses $O(n)$ stack frames and a queue of length $1$. A star uses a stack of length $1$ and a queue of length $n - 1$. A perfect binary tree uses $O(\log n)$ stack and a queue of about $n / 2$.
+
+## Lesson 4: Morris inorder, then put the tree back {#sec-tv-morris}
+
+The inorder predecessor of a node is the rightmost node of its left subtree. That predecessor's right child is null. Point it at the current node, walk the left subtree, and when you return along that thread, **remove it**, then emit. The tree is unchanged when the walk finishes. Extra memory is a handful of pointers.
+
+```{python}
+def morris_inorder(root):
+    cur, out = root, []
+    while cur is not None:
+        if cur.left is None:
+            out.append(cur.val)
+            cur = cur.right
+            continue
+        pred = cur.left
+        while pred.right is not None and pred.right is not cur:
+            pred = pred.right
+        if pred.right is None:
+            pred.right = cur
+            cur = cur.left
+        else:
+            pred.right = None
+            out.append(cur.val)
+            cur = cur.right
+    return out
+
+
+b = tree_b()
+before = to_level(b)
+assert morris_inorder(b) == [7, 4, 8, 1, 5, 0, 2, 9, 6]
+assert to_level(b) == before
+```
+
+Leaving the thread in place makes a cycle. The next walk never finishes, and `to_level` would loop. Visit only at the two points above: no left child, or the thread just removed. Creating the thread is not a visit. The walk is linear: each right spine of a left subtree is searched twice, once to create the thread and once to remove it, and each edge lies on at most two such spines.
+
+::: {#fig-tv-anim-morris}
+
+```{python}
+#| echo: false
+mo_root = from_level([1, 2, 4, None, 3])
+mo_snaps = [(1, None, [], "start at the root 1; nothing is threaded yet")]
+cur, out, thread = mo_root, [], None
+while cur is not None:
+    if cur.left is None:
+        out.append(cur.val)
+        nxt = cur.right
+        how = " along the thread" if thread and nxt is not None and thread == (cur.val, nxt.val) else ""
+        cap = f"{cur.val} has no left child: emit {cur.val}, then step right to " + (f"{nxt.val}{how}" if nxt else "nothing; done")
+        cur = nxt
+    else:
+        pred = cur.left
+        while pred.right is not None and pred.right is not cur:
+            pred = pred.right
+        if pred.right is None:
+            pred.right, thread = cur, (pred.val, cur.val)
+            cap = f"at {cur.val}: the rightmost node of its left subtree is {pred.val}; thread {pred.val} → {cur.val}, go left"
+            cur = cur.left
+        else:
+            pred.right, thread = None, None
+            out.append(cur.val)
+            cap = f"back at {cur.val} through the thread: remove it, emit {cur.val}, go right"
+            cur = cur.right
+    mo_snaps.append((cur.val if cur else None, thread, out[:], cap))
+assert out == morris_inorder(from_level([1, 2, 4, None, 3])) == [2, 3, 1, 4]
+assert to_level(mo_root) == [1, 2, 4, None, 3]       # every thread was removed
+
+
+def mo_frame(ax, p, k):
+    at, thread, done, _ = mo_snaps[k]
+
+    def node(v, kids=()):
+        color = "amber" if v == at else ("green" if v in done else "indigo")
+        return V.Node(v, kids, color=color, filled=v == at or v in done)
+
+    hole = V.Node("·", dashed=True, filled=False, color="muted")
+    root = node(1, [node(2, [hole, node(3)]), node(4)])
+    by = {v.label: v for v in V.tree(ax, p, root, dx=2.0, dy=1.4, size=10)}
+    if thread:
+        a, b = by[str(thread[0])], by[str(thread[1])]
+        V.arrow(ax, p, a.px + 0.25, a.py + 0.4, b.px + 0.1, b.py - 0.4, color="violet", rad=0.15)
+    V.array(ax, p, done + [""] * (4 - len(done)), x=0.0, y=-4.9, label="emitted", index=False,
+            colors={len(done) - 1: "green"} if done else None)
+
+
+V.animate(mo_frame, len(mo_snaps), captions=[c for *_, c in mo_snaps], interval=1300)
+```
+
+Morris inorder on a four-node tree; the hollow box is the missing left child of $2$, drawn so that $3$ sits on the right. The violet arrow is the temporary thread $3 \to 1$: it is created when the walk first meets $1$, followed when $3$ has nothing else to do, and removed — and only then is $1$ emitted. The last frame is the original tree again.
+
+:::
+
+## Lesson 5: a tree is a string if the nulls are written {#sec-tv-ser}
+
+Preorder without nulls does not determine the shape: `[1,2]` and `[1,null,2]` both emit `1, 2`. A `#` for every empty child does. $B$'s marked preorder begins `0,1,4,7,#,#,8,#,#,5,#,#,2,#,6,9,#,#,#`. Decode consumes one token and lets the left call eat exactly the left subtree; the right call starts where that call stopped. Passing the index by value makes both children restart on the same token.
+
+The empty tree is the string `#`, not the empty string.
+
+::: {#fig-tv-anim-decode}
+
+```{python}
+#| echo: false
+dc_tokens = "1,2,#,#,3,4,#,#,5,#,#".split(",")
+dc_pos = [0]
+dc_null = set()                      # (parent value, side) slots decoded as empty
+dc_snaps = []                        # (token index, picture of the partial tree, caption)
+
+
+def dc_shape(u):
+    if u is None:
+        return None
+    side = lambda c, s: dc_shape(c) if c else ("#" if (u.val, s) in dc_null else None)
+    return (u.val, side(u.left, "left"), side(u.right, "right"))
+
+
+def dc_decode(parent, side, holder):
+    i = dc_pos[0]
+    dc_pos[0] += 1
+    t = dc_tokens[i]
+    where = f"the {side} child of {parent.val}" if parent else "the root"
+    if t == "#":
+        dc_null.add((parent.val, side))
+        dc_snaps.append((i, dc_shape(holder[0]), f"token #: {where} is empty"))
+        return None
+    u = Node(int(t))
+    if parent is None:
+        holder[0] = u
+    else:
+        setattr(parent, side, u)
+    dc_snaps.append((i, dc_shape(holder[0]), f"token {t}: make {where}, then decode its left subtree"))
+    dc_decode(u, "left", holder)
+    dc_decode(u, "right", holder)
+    return u
+
+
+dc_holder = [None]
+dc_decode(None, "root", dc_holder)
+assert dc_pos[0] == len(dc_tokens) == len(dc_snaps)
+assert to_level(dc_holder[0]) == [1, 2, 3, None, None, 4, 5]
+
+
+def dc_frame(ax, p, k):
+    i, shape, _ = dc_snaps[k]
+    cur = dc_tokens[i]
+
+    def draw_node(s):
+        if s == "#":
+            return V.Node("#", dashed=True, filled=False, color="muted")
+        v, l, r = s
+        kids = [draw_node(c) for c in (l, r) if c is not None]
+        return V.Node(v, kids, color="amber" if str(v) == cur else "indigo")
+
+    V.tree(ax, p, draw_node(shape), dx=1.3, dy=1.4, size=10)
+    V.array(ax, p, dc_tokens, x=-3.0, y=-7.0, label="tokens",
+            colors={j: ("amber" if j == i else "green") for j in range(i + 1)},
+            pointers=[(i, "read", "amber")])
+
+
+V.animate(dc_frame, len(dc_snaps), captions=[c for *_, c in dc_snaps], interval=1000)
+```
+
+Decoding `1,2,#,#,3,4,#,#,5,#,#`, one token per frame. Each call reads exactly one token. A number makes a node and starts two more calls; a `#` (hollow) closes one empty slot. Because the left call stops exactly where the left subtree's tokens end, the right call starts on the right token without any search.
+
+:::
+
+## Pattern 1: depth-first orders as data {#sec-tv-p1}
+
+**Where we are.** The lessons produced the four orders and three ways to run them. The patterns treat the order as **data**, one idea at a time: a depth-first order written, tested, or read as intervals (this pattern); a level as one round of the queue (Pattern 2); a level held whole so each node can see its row (Pattern 3); the order written back into the pointers (Pattern 4); and the order written out as a string that can be read back (Pattern 5).
+
+**Recognise it.** The output is an order, or a question about whether a sequence *could be* an order, or a subtree described as an interval.
+
+::: {.callout-important title="Template"}
+Emit on entry (preorder), between the children (inorder), or on exit (postorder). Number the entry times `tin`. The subtree of $v$ is the half-open interval $[\mathrm{tin}(v),\, \mathrm{tin}(v) + \mathrm{sz}(v))$. A sequence that starts at the root is a DFS order when the parent of each next vertex is an ancestor of the current vertex, or the current vertex itself.
+:::
+
+::: {#fig-tv-p1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    b = tree_b()
+
+    def seq(walk):
+        out = []
+        walk(b, out)
+        return out
+
+    pre, mid, post = seq(preorder), seq(inorder), seq(postorder)
+    assert pre[0] == mid[5] == post[-1] == 0
+    V.trace(ax, p, [
+        dict(values=pre, label="pre", colors={0: "indigo"}),
+        dict(values=mid, label="in", colors={5: "amber"}),
+        dict(values=post, label="post", colors={len(post) - 1: "green"}),
+    ], gap=2.5)
+V.show(draw)
+```
+
+The three depth-first orders of $B$. The root $0$ is shaded: first in preorder, between the two subtrees in inorder, last in postorder. The subtree of $1$ is the shaded idea made into an interval: preorder index $1$ through $5$, the block $[\mathrm{tin}(1), \mathrm{tin}(1) + \mathrm{sz}(1))$.
+
+:::
+
+{{< include ../problems/lc-0145-binary-tree-postorder-traversal/problem.qmd >}}
+
+[**From writing an order to testing one.** Postorder produces an order. DFS Checker is handed a permutation and must decide whether some DFS could have produced it, with one local test per adjacent pair.]{.flow-bridge}
+
+{{< include ../problems/cf-2002d1-dfs-checker-easy-version/problem.qmd >}}
+
+[**From a test to intervals.** The checker used ancestry one step at a time. Ranges on Tree turns every subtree into an interval of a DFS numbering, and numbers only the leaves so that the largest number is as small as possible.]{.flow-bridge}
+
+{{< include ../problems/ac-abc240_e-ranges-on-tree/problem.qmd >}}
+
+## Pattern 2: a level is one round of the queue {#sec-tv-p2}
+
+**From depth to breadth.** Every order in Pattern 1 follows one root path at a time. Some answers need a whole row at once. The queue gives it, provided the round length is frozen before any child is pushed.
+
+**Recognise it.** The answer depends on a whole row: the average, the maximum, the $k$-th largest row sum. Or the input *is* a BFS order, and the children of one parent are one increasing run.
+
+::: {.callout-important title="Template"}
+Push the root. While the queue is not empty, let $s$ be its length **before** any child is pushed, and handle exactly those $s$ nodes. Their children are the next round.
+:::
+
+::: {#fig-tv-p2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    root = from_level([3, 9, 20, None, None, 15, 7])
+    q, rows = deque([root]), []
+    while q:
+        s, row = len(q), []
+        for _ in range(s):
+            u = q.popleft()
+            row.append(u.val)
+            if u.left:
+                q.append(u.left)
+            if u.right:
+                q.append(u.right)
+        rows.append(row)
+    avgs = [sum(row) / len(row) for row in rows]
+    assert avgs == [3.0, 14.5, 11.0]
+    V.trace(ax, p, [
+        dict(values=row, label=f"round {i}", note=f"avg {avg:g}")
+        for i, (row, avg) in enumerate(zip(rows, avgs))
+    ], gap=2.5)
+V.show(draw)
+```
+
+One frozen queue length is one row. $9 + 20$ is $29$, and $29 / 2$ is $14.5$, so the sum is divided as a real number.
+
+:::
+
+{{< include ../problems/lc-0637-average-of-levels-in-binary-tree/problem.qmd >}}
+
+[**From reading levels to building them.** Average of Levels walks a given tree round by round. Minimal Height Tree is handed the BFS order itself and must choose the rounds, giving each parent the longest increasing run it can take.]{.flow-bridge}
+
+{{< include ../problems/cf-1437d-minimal-height-tree/problem.qmd >}}
+
+## Pattern 3: the whole level, then the node {#sec-tv-p3}
+
+**From one number per row to one answer per node.** Pattern 2 reduced a row to a single number. Here each node's answer depends on the rest of its row, so the row is kept as a list and visited twice: once to total, once to write.
+
+**Recognise it.** The answer at a node needs its siblings, or the rest of the level, or the level read in the other direction. A parent can see the sibling group. A child cannot.
+
+::: {.callout-important title="Template"}
+One round collects the level. A second pass over that round writes the answer, using totals computed before any value on the next level is overwritten. Odd levels of a zigzag are the same round, stored from the right.
+:::
+
+::: {#fig-tv-p3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    root = from_level([3, 9, 20, None, None, 15, 7])
+    q, rows = deque([root]), []
+    while q:
+        s, row = len(q), []
+        for _ in range(s):
+            u = q.popleft()
+            row.append(u.val)
+            if u.left:
+                q.append(u.left)
+            if u.right:
+                q.append(u.right)
+        rows.append(row)
+    zig = [row[::-1] if i % 2 else row[:] for i, row in enumerate(rows)]
+    assert zig == [[3], [20, 9], [15, 7]]
+    V.trace(ax, p, [
+        dict(values=row, label=f"level {i}", colors={j: "amber" for j in range(len(row))} if i % 2 else {})
+        for i, row in enumerate(zig)
+    ], gap=2.5)
+V.show(draw)
+```
+
+The same three rounds, stored for zigzag. Level $0$ stays left to right. The shaded odd level is the same nodes written from the right: $20$ then $9$.
+
+:::
+
+{{< include ../problems/lc-0103-binary-tree-zigzag-level-order-traversal/problem.qmd >}}
+
+[**From reordering a level to rewriting it.** Zigzag only changes the order in which a level is stored. Cousins writes new values, so the level sum and every sibling-group sum must be read before any value on that level is overwritten.]{.flow-bridge}
+
+{{< include ../problems/lc-2641-cousins-in-binary-tree-ii/problem.qmd >}}
+
+## Pattern 4: rewire in place {#sec-tv-p4}
+
+**From reading the tree to changing it.** Patterns 1–3 only read. Now the order is written back into the pointers: a splice that stays (flatten), or a thread that lives only during the walk (Morris, @fig-tv-anim-morris).
+
+**Recognise it.** The follow-up asks for $O(1)$ extra memory, or the tree must become a list, or exactly two values of a BST were swapped and the shape must stay.
+
+::: {.callout-important title="Template"}
+The inorder predecessor's null right pointer can hold a temporary thread. Remove it before the walk ends. A permanent splice is a different tool: the rightmost node of the left subtree is where the old right subtree belongs in preorder.
+:::
+
+::: {#fig-tv-p4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    src = from_level([1, 2, 5, 3, 4, None, 6])
+    order = []
+    preorder(src, order)
+    assert order == [1, 2, 3, 4, 5, 6]
+    hole = V.Node("·", dashed=True, filled=False, color="muted")
+    root = V.Node("1", [
+        V.Node("2", [V.Node("3"), V.Node("4", color="amber")]),
+        V.Node("5", [hole, V.Node("6", color="green")], color="green"),
+    ])
+    V.tree(ax, p, root, dx=1.15, dy=1.35, size=9)
+    V.array(ax, p, order, y=-4.6, label="preorder", colors={3: "amber", 4: "green", 5: "green"})
+V.show(draw)
+```
+
+Flatten's splice on $[1,2,5,3,4,\mathrm{null},6]$. The hollow node is the missing left child of $5$, drawn so $6$ stays on the right. $4$, the rightmost node of the left subtree, is where $5$ and $6$ belong in the preorder spine.
+
+:::
+
+{{< include ../problems/lc-0114-flatten-binary-tree-to-linked-list/problem.qmd >}}
+
+[**From a permanent splice to a temporary thread.** Flatten changes the shape for good. Recover BST must keep the shape and fix two values; it finds them with an inorder walk, and its $O(1)$-memory form is the Morris thread, created and removed.]{.flow-bridge}
+
+{{< include ../problems/lc-0099-recover-binary-search-tree/problem.qmd >}}
+
+## Pattern 5: a tree as a string, a subtree as an id {#sec-tv-p5}
+
+**From pointers to text.** Pattern 4 rearranged pointers in memory. A string has no pointers, so the shape must be written down explicitly: one marker per empty child (@fig-tv-anim-decode), and, for many subtrees at once, one integer id per distinct subtree.
+
+**Recognise it.** Store the tree, rebuild it, or ask whether two subtrees are the same shape with the same values. Preorder plus one marker per empty child determines the tree. Preorder together with postorder does not.
+
+::: {.callout-important title="Template"}
+`encode(u) = value, encode(left), encode(right)`, and `encode(null) = #`. Decode reads one token and advances a shared index. A subtree id is the pair of child ids plus the value. Report a subtree when its count goes from $1$ to $2$, not on every later copy.
+:::
+
+::: {#fig-tv-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    def enc(vals):
+        out = []
+
+        def walk(u):
+            if u is None:
+                out.append("#")
+                return
+            out.append(str(u.val))
+            walk(u.left)
+            walk(u.right)
+
+        walk(from_level(vals))
+        return out
+
+    left, right = enc([1, 2]), enc([1, None, 2])
+    assert left == ["1", "2", "#", "#", "#"]
+    assert right == ["1", "#", "2", "#", "#"]
+    assert left != right
+    marks = lambda row: {i: "amber" for i, t in enumerate(row) if t == "#"}
+    V.trace(ax, p, [
+        dict(values=left, label="[1,2]", colors=marks(left)),
+        dict(values=right, label="[1,null,2]", colors=marks(right)),
+    ], gap=2.5)
+V.show(draw)
+```
+
+The same two values, two shapes. A `#` for every missing child makes `[1,2]` and `[1,null,2]` different strings. Without the markers both preorders are `1, 2`.
+
+:::
+
+{{< include ../problems/lc-0297-serialize-and-deserialize-binary-tree/problem.qmd >}}
+
+[**From one tree to every subtree.** Serialize writes a single tree as a string. Duplicate subtrees needs a name for every subtree; writing each one out costs $\Theta(n^2)$ characters on a path, so equal subtrees get equal integer ids instead.]{.flow-bridge}
+
+{{< include ../problems/lc-0652-find-duplicate-subtrees/problem.qmd >}}
+
+**Looking back.** Every pattern in this chapter is the same walk with the visit placed somewhere else: before the children, between them, after them, or once per queue round. Choosing the order decides which facts are ready when a node is visited — the children's answers in postorder, the sorted neighbours in inorder, the whole row in level order — and writing the order down (as intervals, a thread, or a string with markers) is what lets a later step use it without walking again.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Return the preorder, inorder or postorder, including iteratively | Stack, or the visit point in the recursion | @sec-tv-p1 |
+| Is this sequence a DFS order? | The next parent lies on the current root path | @sec-tv-p1 |
+| Nested intervals, or "is $u$ an ancestor of $v$?" | Entry times; number only the vertices that must be distinct | @sec-tv-p1 |
+| Average, maximum, or sum of each level | One queue round | @sec-tv-p2 |
+| The input is a BFS order | Children of one parent are one increasing run | @sec-tv-p2 |
+| Zigzag, odd levels, cousins, same depth and a different parent | The level as a list; two passes | @sec-tv-p3 |
+| In place, $O(1)$ extra memory, flatten, two swapped BST values | A splice, or Morris | @sec-tv-p4 |
+| Serialize, or identical subtrees | An order plus null markers, or a subtree id | @sec-tv-p5 |
+
+A "level" is sometimes only a depth argument a DFS can carry. Check what the answer actually needs: a finished subtree (postorder), a whole row (a queue), or the order of positions (the DFS test).
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- Pushing the left child before the right in a preorder stack. The left must be popped first, so it is pushed last.
+- Re-reading `q.size()` inside the level loop. Children of this round are counted as this round.
+- Comparing the postorder `last` pointer by value. Two nodes may share a value; the test is identity.
+- Leaving a Morris thread in place. The walk created a cycle.
+- Using entry times of every vertex when the objective is the number of leaves. The maximum becomes $N$.
+- Integer division of a level sum. $29 / 2$ is $14.5$.
+- Alternating the push order of a queue and expecting zigzag. A queue does not reverse.
+- Writing a child's new cousin sum before the sibling group's old sum has been read.
+- Moving `left` onto `right` before saving the old `right`. The right subtree is gone.
+- Reporting a duplicate subtree on every copy after the second. The count test is "becomes $2$".
+- Dropping null markers from a serialisation. `[1,2]` and `[1,null,2]` become the same string.
+:::
+
+## Exercises
+
+::: {.callout-note collapse="true" title="[E] Iterative preorder"}
+[LC 144 · Binary Tree Preorder Traversal](https://leetcode.com/problems/binary-tree-preorder-traversal/){difficulty="Easy"}. Pop, emit, push the right child, then the left, so the left is popped next.
+
+```{python}
+def preorder_iter_ex(root):
+    st = [root] if root else []
+    out = []
+    while st:
+        u = st.pop()
+        out.append(u.val)
+        if u.right:
+            st.append(u.right)
+        if u.left:
+            st.append(u.left)
+    return out
+
+assert preorder_iter_ex(None) == []
+assert preorder_iter_ex(from_level([1, 2, 3, 4, 5, None, 8, None, None, 6, 7, 9])) == [1, 2, 4, 5, 6, 7, 3, 8, 9]
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Numbers in lexicographic order"}
+[LC 386 · Lexicographical Numbers](https://leetcode.com/problems/lexicographical-numbers/){difficulty="Medium"}. The integers $1..n$ are a 10-ary tree and lexicographic order is its preorder, so for $n = 13$ the list opens $1, 10, 11, 12, 13, 2$.
+
+```{python}
+def lexical_order(n):
+    out, x = [], 1
+    for _ in range(n):
+        out.append(x)
+        if x * 10 <= n:
+            x *= 10
+        else:
+            while x % 10 == 9 or x + 1 > n:
+                x //= 10
+            x += 1
+    return out
+
+assert lexical_order(13)[:6] == [1, 10, 11, 12, 13, 2]
+assert lexical_order(13) == sorted(range(1, 14), key=str)
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Largest value on each row"}
+[LC 515 · Find Largest Value in Each Tree Row](https://leetcode.com/problems/find-largest-value-in-each-tree-row/){difficulty="Medium"}. Seed each round with its first value, because the row $[-1,-2,-3]$ has maximum $-1$.
+
+```{python}
+def largest_values(root):
+    if root is None:
+        return []
+    q = deque([root])
+    out = []
+    while q:
+        s = len(q)
+        best = None
+        for _ in range(s):
+            u = q.popleft()
+            best = u.val if best is None else max(best, u.val)
+            if u.left:
+                q.append(u.left)
+            if u.right:
+                q.append(u.right)
+        out.append(best)
+    return out
+
+assert max([-1, -2, -3]) == -1
+assert largest_values(from_level([-1, -2, -3])) == [-1, -2]
+assert largest_values(from_level([1, 3, 2, 5, 3, None, 9])) == [1, 3, 9]
+assert largest_values(None) == []
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Even-odd tree"}
+[LC 1609 · Even Odd Tree](https://leetcode.com/problems/even-odd-tree/){difficulty="Medium"}. Even levels are strictly increasing odd values and odd levels are strictly decreasing even values, each compared with the previous node of that round.
+
+```{python}
+def is_even_odd(root):
+    q = deque([root])
+    level = 0
+    while q:
+        s, prev = len(q), None
+        for _ in range(s):
+            u = q.popleft()
+            v = u.val
+            if level % 2 == 0 and (v % 2 == 0 or (prev is not None and v <= prev)):
+                return False
+            if level % 2 == 1 and (v % 2 == 1 or (prev is not None and v >= prev)):
+                return False
+            prev = v
+            if u.left:
+                q.append(u.left)
+            if u.right:
+                q.append(u.right)
+        level += 1
+    return True
+
+assert is_even_odd(from_level([1, 10, 4, 3, None, 7, 9, 12, 8, 6, None, None, 2]))
+assert not is_even_odd(from_level([5, 4, 2, 3, 3, 7]))
+assert not is_even_odd(from_level([5, 9, 1, 3, 5, 7]))
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Right side view"}
+[LC 199 · Binary Tree Right Side View](https://leetcode.com/problems/binary-tree-right-side-view/){difficulty="Medium"}. The view is the last node of each frozen round, so a left spine `[1,2,null,3]` contributes `[1,2,3]`.
+
+```{python}
+def right_side(root):
+    if root is None:
+        return []
+    q, out = deque([root]), []
+    while q:
+        s = len(q)
+        for i in range(s):
+            u = q.popleft()
+            if i == s - 1:
+                out.append(u.val)
+            if u.left:
+                q.append(u.left)
+            if u.right:
+                q.append(u.right)
+    return out
+
+assert right_side(from_level([1, 2, None, 3])) == [1, 2, 3]
+assert right_side(from_level([1, 2, 3, None, 5, None, 4])) == [1, 3, 4]
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Are two nodes cousins?"}
+[LC 993 · Cousins in Binary Tree](https://leetcode.com/problems/cousins-in-binary-tree/){difficulty="Easy"}. Same depth and different parents means $5$ and $4$ in `[1,2,3,null,4,null,5]` are cousins and $2$ and $3$ in `[1,2,3]` are not, which is the boolean beside the rewrite in @sec-tv-p3-cousins.
+
+```{python}
+def is_cousins(root, x, y):
+    parent, depth = {}, {}
+    q = deque([(root, None, 0)])
+    while q:
+        u, p, d = q.popleft()
+        parent[u.val] = None if p is None else p.val
+        depth[u.val] = d
+        if u.left:
+            q.append((u.left, u, d + 1))
+        if u.right:
+            q.append((u.right, u, d + 1))
+    return depth[x] == depth[y] and parent[x] != parent[y]
+
+assert is_cousins(from_level([1, 2, 3, None, 4, None, 5]), 5, 4)
+assert not is_cousins(from_level([1, 2, 3]), 2, 3)
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Increasing order search tree"}
+[LC 897 · Increasing Order Search Tree](https://leetcode.com/problems/increasing-order-search-tree/){difficulty="Easy"}. Rewire during inorder so each node points right at its successor, and on `[2,1,3]` the head is the leftmost node $1$.
+
+```{python}
+def increasing_bst(root):
+    dummy = Node(0)
+    prev, st, cur = dummy, [], root
+    while cur is not None or st:
+        while cur is not None:
+            st.append(cur)
+            cur = cur.left
+        cur = st.pop()
+        cur.left = None
+        prev.right = cur
+        prev = cur
+        cur = cur.right
+    return dummy.right
+
+assert to_level(increasing_bst(from_level([2, 1, 3]))) == [1, None, 2, None, 3]
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Validate a BST"}
+[LC 98 · Validate Binary Search Tree](https://leetcode.com/problems/validate-binary-search-tree/){difficulty="Medium"}. Inorder neighbours have to increase, so `[10,5,15,null,12]` fails even though every node sits between its own two children.
+
+```{python}
+def is_bst(root):
+    prev = None
+    st, cur = [], root
+    while cur is not None or st:
+        while cur is not None:
+            st.append(cur)
+            cur = cur.left
+        cur = st.pop()
+        if prev is not None and prev.val >= cur.val:
+            return False
+        prev = cur
+        cur = cur.right
+    return True
+
+assert is_bst(from_level([2, 1, 3]))
+assert not is_bst(from_level([10, 5, 15, None, 12]))
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Minimum absolute difference in a BST"}
+[LC 530 · Minimum Absolute Difference in BST](https://leetcode.com/problems/minimum-absolute-difference-in-bst/){difficulty="Easy"}. The closest values are adjacent in the inorder, so on `[4,2,6,1,3]` the minimum gap is $1$.
+
+```{python}
+def min_diff_bst(root):
+    prev, best = None, 10**18
+    st, cur = [], root
+    while cur is not None or st:
+        while cur is not None:
+            st.append(cur)
+            cur = cur.left
+        cur = st.pop()
+        if prev is not None:
+            best = min(best, cur.val - prev.val)
+        prev = cur
+        cur = cur.right
+    return best
+
+assert min_diff_bst(from_level([4, 2, 6, 1, 3])) == 1
+assert min_diff_bst(from_level([1, 0, 48, None, None, 12, 49])) == 1
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] String from a binary tree"}
+[LC 606 · Construct String from Binary Tree](https://leetcode.com/problems/construct-string-from-binary-tree/){difficulty="Medium"}. Write `()` for an empty left child when a right child exists, so `[1,2,3,null,4]` is `1(2()(4))(3)`.
+
+```{python}
+def tree2str(root):
+    def go(u):
+        if u.left is None and u.right is None:
+            return str(u.val)
+        s = str(u.val) + "(" + (go(u.left) if u.left else "") + ")"
+        if u.right:
+            s += "(" + go(u.right) + ")"
+        return s
+    return go(root)
+
+assert tree2str(from_level([1, 2, 3, 4])) == "1(2(4))(3)"
+assert tree2str(from_level([1, 2, 3, None, 4])) == "1(2()(4))(3)"
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Subtree of another tree"}
+[LC 572 · Subtree of Another Tree](https://leetcode.com/problems/subtree-of-another-tree/){difficulty="Easy"}. Comparing node by node, `[4,1,2]` occurs in `[3,4,5,1,2]` and fails once that copy grows a leaf `0`, which is the direct form of the id in @sec-tv-p5-dup.
+
+```{python}
+def is_subtree(s, t):
+    def same(a, b):
+        if a is None or b is None:
+            return a is b
+        return a.val == b.val and same(a.left, b.left) and same(a.right, b.right)
+
+    def walk(u):
+        if u is None:
+            return False
+        return same(u, t) or walk(u.left) or walk(u.right)
+
+    return walk(s)
+
+assert is_subtree(from_level([3, 4, 5, 1, 2]), from_level([4, 1, 2]))
+assert not is_subtree(from_level([3, 4, 5, 1, 2, None, None, None, None, 0]), from_level([4, 1, 2]))
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Most frequent subtree sum"}
+[LC 508 · Most Frequent Subtree Sum](https://leetcode.com/problems/most-frequent-subtree-sum/){difficulty="Medium"}. Postorder counts subtree sums, and on `[5,2,-5]` the sum $2$ is the unique mode while `[5,2,-3]` has three sums of count one.
+
+```{python}
+def frequent_sums(root):
+    cnt = {}
+
+    def go(u):
+        if u is None:
+            return 0
+        s = u.val + go(u.left) + go(u.right)
+        cnt[s] = cnt.get(s, 0) + 1
+        return s
+
+    go(root)
+    best = max(cnt.values())
+    return sorted(k for k, v in cnt.items() if v == best)
+
+assert frequent_sums(from_level([5, 2, -3])) == [-3, 2, 4]
+assert frequent_sums(from_level([5, 2, -5])) == [2]
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Maximum product of a split"}
+[LC 1339 · Maximum Product of Splitted Binary Tree](https://leetcode.com/problems/maximum-product-of-splitted-binary-tree/){difficulty="Medium"}. Cut the edge above a subtree of sum $s$ and maximise $s(T-s)$ before the modulus, which on `[1,2,3,4,5,6]` is $110$.
+
+```{python}
+def max_product(root):
+    mod = 10**9 + 7
+    sums = []
+
+    def go(u):
+        if u is None:
+            return 0
+        s = u.val + go(u.left) + go(u.right)
+        sums.append(s)
+        return s
+
+    total = go(root)
+    best = max(s * (total - s) for s in sums if s != total)
+    return best % mod
+
+assert max_product(from_level([1, 2, 3, 4, 5, 6])) == 110
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Colour a rooted tree when the colour changes"}
+[CF 902B · Coloring a Tree](https://codeforces.com/problemset/problem/902/B){rating="1200"}. A step is required at the root and wherever the colour differs from the parent, and the two samples take $3$ and $5$ steps.
+
+```{python}
+def coloring_steps(parents, colors):
+    c = [0] + list(colors)
+    p = [0, 0] + list(parents)
+    return sum(c[v] != c[p[v]] for v in range(1, len(colors) + 1))
+
+assert coloring_steps([1, 2, 2, 1, 5], [2, 1, 1, 1, 1, 1]) == 3
+assert coloring_steps([1, 1, 2, 3, 1, 4], [3, 3, 1, 1, 1, 2, 3]) == 5
+```
+:::
+
+::: {.callout-note collapse="true" title="[H] Paths in a complete binary tree"}
+[CF 792D · Paths in a Complete Binary Tree](https://codeforces.com/problemset/problem/792/D){rating="1900"}. The lowest set bit is the height in the inorder numbering, so on $15$ vertices `UURL` from $4$ ends at $10$ and `LRLLLLLLLL` from $8$ ends at $5$.
+
+```{python}
+def complete_walk(n, u, s):
+    for ch in s:
+        bit = u & -u
+        if ch == "U":
+            if u == (n + 1) // 2:
+                continue
+            up = bit << 1
+            for nxt in (u + bit, u - bit):
+                if 1 <= nxt <= n and (nxt & -nxt) == up:
+                    u = nxt
+                    break
+        elif bit > 1:
+            u += bit // 2 if ch == "R" else -(bit // 2)
+    return u
+
+assert complete_walk(15, 4, "UURL") == 10
+assert complete_walk(15, 8, "LRLLLLLLLL") == 5
+```
+:::
+
+::: {.callout-note collapse="true" title="[H] Two swapped values, adjacent or not"}
+On a BST of inorder $1, 2, 3, 4$, swapping $1$ with $2$ leaves one descent and swapping $1$ with $4$ leaves two, and the repair in @sec-tv-p4-recover restores both.
+
+```{python}
+def _descents(root):
+    vals = inorder_vals(root)
+    return sum(vals[i] > vals[i + 1] for i in range(len(vals) - 1))
+
+adj = Node(2, Node(1), Node(3, None, Node(4)))
+adj.val, adj.left.val = adj.left.val, adj.val
+assert _descents(adj) == 1
+recover_stack(adj)
+assert inorder_vals(adj) == [1, 2, 3, 4]
+
+far = Node(2, Node(1), Node(3, None, Node(4)))
+far.left.val, far.right.right.val = far.right.right.val, far.left.val
+assert _descents(far) == 2
+recover_stack(far)
+assert inorder_vals(far) == [1, 2, 3, 4]
+```
+:::
+
+## Interview questions
+
+::: {.callout-note collapse="true" title="Where does the root sit in each order?"}
+First in preorder, last in postorder, and between its two subtrees in inorder. Level order meets it in round $0$, alone.
+:::
+
+::: {.callout-note collapse="true" title="Why push the right child first in iterative preorder?"}
+A stack pops the most recently pushed child. The left child must be visited next, so it is pushed last.
+:::
+
+::: {.callout-note collapse="true" title="What does the postorder pointer last mean?"}
+It is the node just emitted. A node still on the stack is emitted when its right child is missing or is exactly `last`. Comparing values instead of pointers fires early when two nodes share a value.
+:::
+
+::: {.callout-note collapse="true" title="Why capture the queue length?"}
+Children pushed during a round belong to the next level. If the loop condition re-reads the live size, those children are popped in the same round and the level average mixes two rows.
+:::
+
+::: {.callout-note collapse="true" title="What does Morris change, and what must it undo?"}
+It points the inorder predecessor's null right child at the current node, walks the left subtree, then clears that pointer and emits. Leaving the pointer in place is a cycle. The tree's shape at the end matches the tree's shape at the start.
+:::
+
+::: {.callout-note collapse="true" title="When is a permutation a DFS order of the heap?"}
+It starts at $1$, and for every adjacent pair the parent of the next vertex is an ancestor of the current vertex or the current vertex itself. On this perfect heap that ancestor test is a bit shift. The BFS order $1, 2, 3, \ldots$ fails it.
+:::
+
+::: {.callout-note collapse="true" title="Why is the optimal interval maximum the number of leaves?"}
+Two leaves are disjoint non-empty subtrees, so they need two different positive numbers. Numbering the leaves in DFS finish order, and giving each vertex the block of leaves in its subtree, uses nothing larger.
+:::
+
+::: {.callout-note collapse="true" title="Why does zigzag not alternate a queue's push order?"}
+A queue preserves order. Pushing right then left still pops the earlier child first after the previous level's own reversal has been lost. Reverse the stored row, or use a stack, whose pop reverses.
+:::
+
+::: {.callout-note collapse="true" title="What is a cousin sum, and what does the root become?"}
+The sum of the nodes at the same depth with a different parent. That is the level sum minus the sibling group. The root has no cousins, so it becomes $0$. Read the old group sum before writing either child.
+:::
+
+::: {.callout-note collapse="true" title="Why is the flatten splice three assignments in that order?"}
+The rightmost node of the left subtree is the last preorder node before the right subtree. Point it at the old right subtree first. Then move the left subtree onto `right` and clear `left`. Swapping the first two assignments drops the right subtree.
+:::
+
+::: {.callout-note collapse="true" title="How do two swapped BST values show up in the inorder?"}
+As one descent if they were adjacent in the inorder, and as two descents otherwise. The larger node of the first descent and the smaller node of the last descent are the swapped pair.
+:::
+
+::: {.callout-note collapse="true" title="Why does a serialisation need null markers?"}
+Preorder `1, 2` is both a left child and a right child. A `#` for every missing child makes the left subtree a well-defined prefix of the remaining tokens, so decode can be a single left-to-right scan.
+:::
+
+## Summary
+
+::: {.callout-important title="The five templates"}
+1. **Depth-first.** Emit before the children, between them, or after them. A subtree is $[\mathrm{tin}(v), \mathrm{tin}(v) + \mathrm{sz}(v))$.
+2. **Level.** Snapshot the queue length. One round, one row.
+3. **Level-aware.** Aggregate the row, then write. A parent sees the sibling group.
+4. **Thread or splice.** Morris borrows a null pointer and gives it back. Flatten's splice is permanent and builds the preorder spine.
+5. **Identity.** Preorder plus `#`, or the id of `(left id, value, right id)`. Report a duplicate when the count becomes $2$.
+:::
+
+- The root is first in preorder and last in postorder. The inorder of a BST is sorted.
+- Push right, then left, for iterative preorder. Capture the queue length for a level. Remove every Morris thread.
+- A DFS order starts at the root, and each next parent lies on the current root path.
+- The shortest nested positive intervals use one number per leaf, not one number per vertex.
+- A BFS order splits into strictly increasing runs, one run of children per parent.
+- Cousin sums and zigzag both need the level as a whole. They are not a yes/no cousin test and not a reversed queue.
+- Two swapped BST values are the first descent's larger node and the last descent's smaller node.
+- Null markers are part of the tree. Without them, a left child and a right child share a string.
+
+## Practice ladder
+
+By the moment the node has to be handled.
+
+**Before the children, or the order itself.**
+
+- [LC 144 · Binary Tree Preorder Traversal](https://leetcode.com/problems/binary-tree-preorder-traversal/){difficulty="Easy"}
+- [LC 94 · Binary Tree Inorder Traversal](https://leetcode.com/problems/binary-tree-inorder-traversal/){difficulty="Easy"}
+- [LC 653 · Two Sum IV - Input is a BST](https://leetcode.com/problems/two-sum-iv-input-is-a-bst/){difficulty="Easy"}
+- [LC 1305 · All Elements in Two Binary Search Trees](https://leetcode.com/problems/all-elements-in-two-binary-search-trees/){difficulty="Medium"}
+- [CF 902B · Coloring a Tree](https://codeforces.com/problemset/problem/902/B){rating="1200"}
+
+**After the children.**
+
+- [LC 2265 · Count Nodes Equal to Average of Subtree](https://leetcode.com/problems/count-nodes-equal-to-average-of-subtree/){difficulty="Medium"}
+- [LC 508 · Most Frequent Subtree Sum](https://leetcode.com/problems/most-frequent-subtree-sum/){difficulty="Medium"}
+- [LC 1339 · Maximum Product of Splitted Binary Tree](https://leetcode.com/problems/maximum-product-of-splitted-binary-tree/){difficulty="Medium"}
+- [LC 865 · Smallest Subtree with all the Deepest Nodes](https://leetcode.com/problems/smallest-subtree-with-all-the-deepest-nodes/){difficulty="Medium"}
+- [LC 1530 · Number of Good Leaf Nodes Pairs](https://leetcode.com/problems/number-of-good-leaf-nodes-pairs/){difficulty="Medium"}
+- [CF 1056D · Decorate Apple Tree](https://codeforces.com/problemset/problem/1056/D){rating="1600"}
+
+**The whole level.**
+
+- [LC 1161 · Maximum Level Sum of a Binary Tree](https://leetcode.com/problems/maximum-level-sum-of-a-binary-tree/){difficulty="Medium"}
+- [LC 2583 · Kth Largest Sum in a Binary Tree](https://leetcode.com/problems/kth-largest-sum-in-a-binary-tree/){difficulty="Medium"}
+- [LC 199 · Binary Tree Right Side View](https://leetcode.com/problems/binary-tree-right-side-view/){difficulty="Medium"}
+- [CF 2183D1 · Tree Coloring (Easy Version)](https://codeforces.com/problemset/problem/2183/D1){rating="1500"}
+
+**A root path or a second clock.**
+
+- [LC 2467 · Most Profitable Path in a Tree](https://leetcode.com/problems/most-profitable-path-in-a-tree/){difficulty="Medium"}
+- [CF 1675F · Vlad and Unfinished Business](https://codeforces.com/problemset/problem/1675/F){rating="1800"}
+- [CF 1286B · Numbers on Tree](https://codeforces.com/problemset/problem/1286/B){rating="1800"}
+
+## Further reading
+
+- [Tree traversal](https://en.wikipedia.org/wiki/Tree_traversal) on Wikipedia: preorder, inorder, postorder and level order, recursive and iterative.
+- [J. M. Morris, *Traversing binary trees simply and cheaply*](https://doi.org/10.1016/0020-0190(79)90068-1) (Information Processing Letters, 1979): the original threaded inorder walk of Lesson 4.
+- [Threaded binary tree](https://en.wikipedia.org/wiki/Threaded_binary_tree) on Wikipedia: permanent threads, the idea Morris makes temporary.
+- [Competitive Programmer's Handbook](https://cses.fi/book/book.pdf) (Laaksonen), ch. 14 and 18: tree traversal arrays and subtree queries as intervals.
+- [USACO Guide: Euler Tour Technique](https://usaco.guide/gold/tree-euler): entry and exit times turning subtrees into ranges, with practice problems.

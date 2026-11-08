@@ -1,0 +1,839 @@
+% =====================================================================
+%  Chapter 17 review -- the 14-station revision contract.
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\defref/\exref/\figref/\propref.  No derivations.
+%  Summit: CF 1009F Dominant Indices -- DSU-on-tree (sack) over absolute
+%  DEPTH buckets, dominant index per subtree, tie broken toward the
+%  smallest distance.  Samples verified against the live CF statement:
+%    (1) chain n=4  1-2 2-3 3-4      -> 0 0 0 0
+%    (2) star  n=4  1-2 1-3 1-4      -> 1 0 0 0
+%    (3) Y     n=4  1-2 2-3 2-4      -> 2 1 0 0
+%  T overlay (dominant index on the 10-node running tree) = (2,1,1,0,0,0,0,0,0,0).
+%  Exports prob:c28-summit, lst:c28-summit, lst:c28-kit.
+% =====================================================================
+
+\chaptersection{Chapter 17 Summary}
+
+One sentence: \emph{a disjoint-set forest answers ``which group owns \(v\)?''
+and ``glue these two'' in near-constant time; three upgrades -- a potential
+carried to each root (weighted), an undo stack with compression disabled
+(rollback), and a recursion flag that refuses to throw the heavy child's
+aggregate away (sack) -- turn that one object into subtree frequencies,
+subtree dominants, and connectivity that survives a divide-and-conquer over
+time.} Chapter~16 made the \emph{pair} queryable; Chapter~17 makes the
+\emph{component} and the \emph{whole-subtree aggregate} queryable. Every row
+below is a pointer, not a re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.22\linewidth} p{0.50\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement} & \textbf{Where} \\
+\midrule
+DSU forest & A partition is a forest of parent pointers; \code{find} names the
+root, \code{union} glues two roots. & \defref{c28-dsu} \\
+Inverse-Ackermann & Path compression + union by size gives \(\alpha(n)\)
+amortised per op -- \emph{only} when compression is allowed. & \propref{c28-alpha} \\
+Parity \(=\) bipartite & A weighted DSU with \(\pm1\) potentials stays
+consistent iff each component is bipartite. & \propref{c28-parity} \\
+Rollback & Union by size with \textbf{no} compression + a stack undoes the last
+\(k\) merges; find is \(\bigO{\log n}\). & \defref{c28-rollback}, \propref{c28-rb-cost} \\
+Small-to-large & Merging the smaller container into the larger moves each
+element \(\le\lceil\log_2 n\rceil\) times: \(\bigO{n\log n}\). & \thmref{c28-s2l} \\
+Sack & Keep the heavy child's bag, clear the light ones; every subtree
+aggregate falls out of one \(\bigO{n\log n}\) DFS. & \thmref{c28-sack} \\
+Ch.\,16 handoff & The sack is the depth-bucket idea made per-node: the bag
+replaces bucket arrays, recursion replaces the \(\tin/\tout\) binary search. & \propref{c28-sack-handoff} \\
+PBS & Binary-search all queries in lockstep over one shared rollback DSU:
+\(\bigO{(N+Q)\log R}\). & \propref{c28-pbs-cost} \\
+Offline dynamic connectivity & Segment tree over TIME + rollback DSU answers
+edge insert/delete questions in \(\bigO{E\log T\log n}\). & \thmref{c28-dync} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter.}}
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.27\linewidth} l l >{\raggedright\arraybackslash}p{0.26\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Prep} & \textbf{Per op} & \textbf{Code} \\
+\midrule
+Find + union by size & \(O(n)\) init & \(\alpha(n)\) & \coderef{c28-find}, \coderef{c28-union} \\
+CSES 1666 (Building Roads) & \(O(n{+}m\alpha)\) & -- & \coderef{c28-core-soln} \\
+Weighted (parity) DSU & \(O(n)\) init & \(\alpha(n)\) & \coderef{c28-weighted} \\
+CF 1594D (Imposters) & \(O(n{+}k)\) & -- & \coderef{c28-impostors-soln} \\
+Rollback DSU + snapshot & \(O(n)\) init & \(\log n\) & \coderef{c28-rollback}, \coderef{c28-rb-driver} \\
+Small-to-large set merge & one DFS & \(\log n\) moves/elem & \coderef{c28-s2l} \\
+CSES 1139 (Distinct Colors) & \(O(n\log n)\) & -- & \coderef{c28-dcolors-soln} \\
+Sack (DSU on tree) & sizes DFS & \(\bigO{n\log n}\) all & \coderef{c28-sack} \\
+CF 600E (Lomsat gelral) & \(O(n\log n)\) & -- & \coderef{c28-600e-soln} \\
+Overall binary search & \(O(\log R)\) sweeps & \(\alpha\) & \coderef{c28-pbs} \\
+Seg-tree over time + rollback & \(O(E\log T)\) store & \(\log n\) & \coderef{c28-segtree-time}, \coderef{c28-dync-soln} \\
+CF 1009F (Summit) & \(O(n\log n)\) sack & -- & \coderef{c28-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches.
+It decides \emph{which DSU flavour} the problem wants and hands off what this
+chapter does \emph{not} own: the is-it-a-tree pre-look (Ch.~6), tree knapsack
+(Ch.~14), Mo's-on-tree (Ch.~27), Kruskal/Prim internals (Ch.~31).
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You keep merging groups and asking "same set? / how many groups?".  Which tool?
+  |
+  |-- one direction only: unions, never undo, never delete?
+  |     +-- plain DSU + path compression (17.1, lst:c28-find + lst:c28-union);
+  |        component count = nodes - (real merges). Cycle check: unite on
+  |        an already-connected pair (prop:c28-cycle).
+  |
+  |-- a constraint BETWEEN two members (same/opposite, +delta offset)?
+  |     +-- weighted DSU (17.2, lst:c28-weighted): carry potential[v] to root.
+  |        parity (xor 1) is the special case -> bipartiteness (prop:c28-parity).
+  |
+  |-- you must UNDO recent unions (divide & conquer, DFS with rollbacks)?
+  |     +-- rollback DSU (17.2, lst:c28-rollback): union by size, NO compression,
+  |        stack of (attached, survivor, old size). snapshot/rollback driver
+  |        (lst:c28-rb-driver).  Compression here is a CORRECTNESS bug.
+  |
+  |-- per-subtree query, answer is "how MANY distinct / which container"?
+  |     +-- small-to-large set/map merge (17.3, lst:c28-s2l): O(n log n) moves.
+  |        NOT Ch.14 tree-knapsack -- this is the merge MECHANICS, not a DP.
+  |
+  |-- per-subtree query for EVERY node, needs a frequency profile (mode, max)?
+  |     +-- sack / DSU-on-tree (17.4, lst:c28-sack): one global bag, keep the
+  |        heavy child, clear the light ones. O(n log n) answers all at once.
+  |
+  |-- answer = the least x with a monotone DSU-testable predicate?
+  |     +-- parallel / overall binary search (17.5, lst:c28-pbs): bucket by mid,
+  |        one rollback-DSU sweep per level.
+  |
+  |-- edges appear AND vanish over time; connectivity at given times?
+  |     +-- offline dynamic connectivity (17.5, lst:c28-segtree-time): segment
+  |        tree over TIME, each edge on O(log T) nodes, rollback DFS answers leaves.
+  |
+  |-- "is it a tree? / redundant edge / provinces"?
+  |     +-- NOT this chapter -- Ch.6 (c25) owns the pre-look DSU.
+  |
+  |-- MST cost / Kruskal mechanics?
+        +-- NOT this chapter -- Ch.31 (c17) uses DSU as a black box (back-cite here).
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Path compression combined with rollback.} Compression rewrites
+        \code{parent} pointers you never pushed onto the undo stack; a
+        \code{rollback} then cannot restore them. Rollback DSU must use union by
+        size/rank \emph{only} (\defref{c28-rollback}).
+  \item \textbf{Union by \emph{rank} when rolling back.} Rank is monotone and
+        never restored; undo must reverse a \emph{size} change (push the
+        survivor's old size). Mixing the two corrupts the tree balance
+        (\coderef{c28-rollback}).
+  \item \textbf{Small-to-large merging the big into the small.} That is exactly
+        the quadratic direction; always pour the smaller container into the
+        largest (\thmref{c28-s2l}, the counterexample \(\coderef{c28-naive}\)).
+  \item \textbf{Sack \code{keep} flag mis-set.} It is \code{false} for every
+        light child (so their contribution is cleared) and \code{true} only on
+        the final big-child pass; getting it backwards leaves stale data in the
+        bag or destroys the reuse (\defref{c28-sack}).
+  \item \textbf{Overloading \code{big[]}.} \code{big[u]} is the heavy-child id,
+        \emph{not} a boolean; the "child currently exempt from a sweep" marker
+        is a separate \code{vis[]} -- conflating them breaks every
+        light-subtree sweep (\coderef{c28-sack}).
+  \item \textbf{Weighted-DSU sign flip.} Attaching the wrong root reverses the
+        \(\pm\) potential; the offset update \(w[b] \leftarrow \text{pot}[u]\oplus
+        d\oplus\text{pot}[v]\) must respect which root moves (\defref{c28-weighted}).
+  \item \textbf{Component-count convention drift.} ``components \(=n-\)real
+        merges'' counts sets; mixing it with an edge count silently answers
+        a different question (\(\coderef{c28-comp}\)).
+  \item \textbf{Half-open lifetime off-by-one.} The segment-tree cover is on
+        \([l,r)\); a closed \([l,r]\) double-counts an edge at an endpoint and
+        makes the leaf answer wrong (\defref{c28-dync}).
+  \item \textbf{PBS shrinks both ends to \code{mid}.} It must be \(r\leftarrow
+        \mathit{mid}\) (left) and \(\ell\leftarrow\mathit{mid}+1\) (right);
+        two-sided \(\mathit{mid}\) loops forever on a two-element window
+        (\(\coderef{c28-pbs}\)).
+  \item \textbf{Recursive DFS on \(n=10^6\).} The size pass and the sack are
+        recursive; a chain overflows the stack. The iterative two-phase rewrite
+        from Ch.~12 (\(\coderef{c09-iter}\)) is production-necessary for the
+        Summit.
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled.
+Diagnose top-down -- every leaf names a listing.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=56mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 4mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=8mm and 4mm of verdict] (tle) {\textbf{TLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {rollback DSU built \emph{with} path compression; sack \code{keep} left true
+     so light subtrees are never cleared (\coderef{c28-rollback}, \coderef{c28-sack})};
+  \node[l, below left=1mm and 2mm of wa.south] (wa2)
+    {weighted-DSU potential attached to the wrong root (sign flip); half-open
+     lifetime closed at one end (\coderef{c28-weighted}, \defref{c28-dync})};
+  \node[l, below=1mm of tle.south] (tle1)
+    {small-to-large pouring big into small (quadratic); recursive sack on a
+     \(10^6\) chain (stack) (\coderef{c28-naive}, \coderef{c28-summit})};
+  \node[l, below left=5mm and 30mm of tle1.north] (tle2)
+    {rebuilding the DSU per PBS probe instead of rolling one back between
+     buckets (\coderef{c28-pbs})};
+  \draw[flow] (verdict) -- (wa);
+  \draw[flow] (verdict) -- (tle);
+  \draw[flow] (wa) -- (wa1);
+  \draw[flow] (wa) -- (wa2);
+  \draw[flow] (tle) -- (tle1);
+  \draw[flow] (tle) -- (tle2);
+\end{tikzpicture}
+\caption*{WA: the undo stack was poisoned by compression, or the bag keeps stale
+counts. TLE: the merge went the wrong way, or a \(10^6\) chain recursed. RE:
+\code{big[]}/\code{vis[]} index past \(n\) on an unrooted forest.}
+\end{figure}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 17 at a glance]
+\textbf{Plain DSU.} \code{find(v)}: \(O(\alpha)\) with
+\(\code{parent}[v]{=}\code{find}(\code{parent}[v])\); \code{union} attaches the
+shorter root under the taller (by size/rank). Components \(=n-\)count of
+\emph{real} merges. Cycle test: \code{union} returns \code{false} when the two
+already share a root (\(\propref{c28-cycle}\)).
+
+\medskip
+\textbf{Weighted DSU.} Store \code{pot[v]} = signed offset from \(v\) to its
+root. \code{find} accumulates it; \code{union} with constraint
+\(\text{pot}[u]\oplus d = \text{pot}[v]\) sets the bridging offset. Parity
+(\(d\in\{0,1\}\)) \(=\) bipartiteness (\(\propref{c28-parity}\),
+\(\coderef{c28-weighted}\)).
+
+\medskip
+\textbf{Rollback DSU.} Union by size, \textbf{no compression}; each union pushes
+\((\text{attached},\text{survivor},\text{old size})\); \code{snapshot} \(=\)
+stack height, \code{rollback(to)} pops to it. \code{find} is
+\(\bigO{\log n}\) (\(\propref{c28-rb-cost}\), \(\coderef{c28-rollback}\)).
+
+\medskip
+\textbf{Small-to-large.} Merge every child container into the largest; each
+element moves \(\le\lceil\log_2 n\rceil\) times \(\Rightarrow\bigO{n\log n}\).
+Returns a container per node; answers distinct-count in \(\bigO{1}\) per merge
+(\(\thmref{c28-s2l}\), \(\coderef{c28-s2l}\)).
+
+\medskip
+\textbf{Sack (DSU on tree).} Sizes + heavy child first; process light children
+with \code{keep=false} (clear), the big child with \code{keep=true} (retain),
+then add \(u\) and its light descendants, read \(u\)'s answer from the one
+global bag, clear the whole subtree only if \code{keep=false}. All subtree
+aggregates in \(\bigO{n\log n}\) (\(\defref{c28-sack}\), \(\coderef{c28-sack}\)).
+
+\medskip
+\textbf{Offline.} PBS: bucket queries by \(\mathit{mid}\), one rollback sweep
+per level (\(\coderef{c28-pbs}\)). Dynamic connectivity: segment tree over
+\emph{time}, edge on \(\bigO{\log T}\) nodes, DFS with rollback, answer at
+leaves (\(\thmref{c28-dync}\), \(\coderef{c28-segtree-time}\)).
+
+\medskip
+\textbf{Translation.} ``groups after unions / how many teams'' \(\to\) plain DSU.
+``same role / opposite'' \(\to\) weighted (parity) DSU. ``try then undo''
+\(\to\) rollback. ``distinct values under each node'' \(\to\) small-to-large.
+``mode / dominant per subtree, all nodes'' \(\to\) sack. ``after which step are
+\(u,v\) connected?'' \(\to\) PBS. ``edge lives over \([l,r)\), connected at time
+\(t\)?'' \(\to\) segment-tree-over-time.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 17 kit: DSU, rollback, and the sack, complete and production-shaped}, label={lst:c28-kit}]
+struct DSU {                      // plain: union by size + path compression
+    vector<int> p, sz; DSU(int n):p(n+1),sz(n+1,1){iota(p.begin(),p.end(),0);}
+    int find(int v){return p[v]==v?v:p[v]=find(p[v]);}
+    bool unite(int a,int b){a=find(a);b=find(b);if(a==b)return false;
+        if(sz[a]<sz[b])swap(a,b); p[b]=a; sz[a]+=sz[b]; return true;}
+    int sizeOf(int v){return sz[find(v)];}
+};
+struct Rollback {                 // undoable: NO compression, stack of changes
+    vector<int> p, sz; vector<tuple<int,int,int>> st; int comps;
+    Rollback(int n):p(n+1),sz(n+1,1),comps(n){iota(p.begin(),p.end(),0);}
+    int find(int v){while(p[v]!=v)v=p[v];return v;}
+    void unite(int a,int b){a=find(a);b=find(b);
+        if(a==b){st.emplace_back(-1,-1,-1);return;}      // record the no-op too
+        if(sz[a]<sz[b])swap(a,b); st.emplace_back(b,a,sz[a]);
+        p[b]=a; sz[a]+=sz[b]; comps--;}
+    int snap(){return (int)st.size();}
+    void rollback(int to){while((int)st.size()>to){
+        auto[b,a,sa]=st.back(); st.pop_back();
+        if(b==-1)continue; p[b]=b; sz[a]=sa; comps++;}}
+};
+// sack: one global bag, keep the heavy child, clear the light ones
+int sz_[MN], big[MN], col[MN]; bool vis[MN]; Bag B;
+int getsz(int u,int pr){sz_[u]=1;big[u]=0;int best=-1;
+    for(int v:adj[u])if(v!=pr){int s=getsz(v,u);sz_[u]+=s;
+        if(s>best){best=s;big[u]=v;}} return sz_[u];}
+void add(int u,int pr,int d){B.update(col[u],d);
+    for(int v:adj[u])if(v!=pr&&!vis[v])add(v,u,d);}
+void dfs(int u,int pr,int keep){
+    for(int v:adj[u])if(v!=pr&&v!=big[u])dfs(v,u,0);
+    if(big[u]){dfs(big[u],u,1);vis[big[u]]=true;}
+    add(u,pr,+1); ans[u]=B.query();
+    if(big[u])vis[big[u]]=false;
+    if(!keep)add(u,pr,-1);}
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter.
+Cover the marked line, reproduce from memory, then check the answer one line
+below.
+
+\begin{lstlisting}[caption={Drill 1 -- find + union by size (from lst:c28-find / lst:c28-union)}]
+int find(int v) { return parent_[v] == v ? v : parent_[v] = find(parent_[v]); }
+bool unite(int a, int b) {
+    a = find(a); b = find(b);
+    if (a == b) return false;                 // already same set -> cycle
+    if (sz_[a] < sz_[b]) swap(a, b);
+    parent_[b] = a; sz_[a] += sz_[b];
+    return true;                              // a real merge: comps--
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the \code{return false} is the cycle test; the
+\code{return true} is where you decrement the component counter.  Both
+\code{find} calls must be on \emph{roots} before comparing sizes.}
+
+\begin{lstlisting}[caption={Drill 2 -- rollback DSU core (from lst:c28-rollback)}]
+int find(int v) { while (parent_[v] != v) v = parent_[v]; return v; }  // NO compression
+void unite(int a, int b) {
+    a = find(a); b = find(b);
+    if (a == b) { stack.emplace_back(-1,-1,-1); return; }      // still push!
+    if (sz_[a] < sz_[b]) swap(a, b);
+    stack.emplace_back(b, a, sz_[a]);                          // survivor's old size
+    parent_[b] = a; sz_[a] += sz_[b]; comps--;
+}
+void rollback(int to) { while (stack.size() > to) {
+    auto [b,a,sa] = stack.back(); stack.pop_back();
+    if (b == -1) continue; parent_[b] = b; sz_[a] = sa; comps++; } }
+\end{lstlisting}
+\noindent{\scriptsize Key: \code{find} has no path assignment -- compression and
+rollback are mutually exclusive (\(\defref{c28-rollback}\)). Pushing the no-op
+keeps the stack height aligned with the number of calls, so \code{snapshot}
+counts calls, not merges.}
+
+\begin{lstlisting}[caption={Drill 3 -- small-to-large merge (from lst:c28-s2l)}]
+set<int>* dfs(int u, int p) {
+    set<int>* big = nullptr;
+    for (int v : adj[u]) if (v != p) {
+        set<int>* s = dfs(v, u);
+        if (!big || s->size() > big->size()) swap(big, s);   // keep the largest
+        big->insert(s->begin(), s->end());                   // pour small into big
+        delete s;
+    }
+    big->insert(colour[u]);
+    ans[u] = (int)big->size();
+    return big;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the swap picks the largest child container so every
+element is copied \(O(\log n)\) times (\(\thmref{c28-s2l}\)).  If you always
+merge into \code{u}'s own singleton you get the quadratic
+\(\coderef{c28-naive}\) direction.}
+
+\begin{lstlisting}[caption={Drill 4 -- the sack schedule (from lst:c28-sack)}]
+void dfs(int u, int p, int keep) {
+    for (int v : adj[u]) if (v != p && v != big[u]) dfs(v, u, 0);  // light: clear
+    if (big[u]) { dfs(big[u], u, 1); vis[big[u]] = true; }         // big: keep
+    add(u, p, +1);                                                 // u + light subtrees
+    ans[u] = B.query();
+    if (big[u]) vis[big[u]] = false;
+    if (!keep) add(u, p, -1);                                      // tear down
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: three flags, in order -- light children \code{keep=0},
+the heavy child \code{keep=1} then \code{vis=true}, and a symmetric
+\code{keep=0} teardown at the very end (\(\defref{c28-sack}\)).  Setting the
+last \code{if(!keep)} to \code{if(keep)} inverts everything.}
+
+\begin{lstlisting}[caption={Drill 5 -- segment-tree-over-time cover (from lst:c28-segtree-time)}]
+void add(int node, int nl, int nr, int l, int r, Edge e) {   // half-open [l,r)
+    if (l >= nr || r <= nl) return;                          // disjoint
+    if (l <= nl && nr <= r) { tree[node].push_back(e); return; }   // fully covered
+    int m = (nl + nr) / 2;
+    add(2*node, nl, m, l, r, e); add(2*node+1, m, nr, l, r, e);
+}
+void solve(int node, int nl, int nr) {
+    int snap = dsu.snap();
+    int moved = 0; for (Edge e : tree[node]) if (dsu.unite(e.a, e.b)) moved++;
+    if (nr - nl == 1) answer_queries_at(nl);                 // leaf = one time point
+    else { int m=(nl+nr)/2; solve(2*node,nl,m); solve(2*node+1,m,nr); }
+    dsu.rollback(snap);
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the cover is \([l,r)\) so each edge lands on
+\(\bigO{\log T}\) nodes and appears exactly once on any live leaf's path
+(\(\thmref{c28-dync}\)); snapshot-before, rollback-after keeps siblings
+independent.}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, one worked
+offline pair, practice entries, and one Summit. Tick \emph{only} after an
+unaided solve; a hinted attempt counts as half.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.24\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 17.1 -- DSU core}} \\
+W17.1 & Building Roads & CSES 1666 & \lv{3} component count, one rep per root & \(k=c-1\) new roads; chain the representatives & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 17.2 -- weighted + rollback}} \\
+W17.2 & The Number of Imposters & CF 1594D & \lv{4} parity weighted DSU, bipartite comps & max(knaves, knights) per component; contradiction check & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 17.3 -- small-to-large}} \\
+W17.3 & Distinct Colors & CSES 1139 & \lv{4} child-set merge into the largest & every element moves \(O(\log n)\); \code{size} is the answer & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 17.4 -- DSU on tree}} \\
+W17.4 & Lomsat gelral & CF 600E & \lv{5} sack + freq-of-freq buckets & sum of colours at maximum frequency; \code{keep} discipline & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 17.5 -- offline (worked)}} \\
+W17.5a & Overall binary search & worked & \lv{5} bucket queries by mid, one rollback sweep & shrink \(\ell/r\) correctly; no compression & \(\square\) \\
+W17.5b & Dynamic connectivity & worked & \lv{5} seg-tree over time + rollback & half-open \([l,r)\); answer at leaves & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+W17 & Dominant Indices & CF 1009F & \lv{5} sack over depth buckets & bag indexed by \emph{depth}; tie \(\to\) smallest distance & \(\square\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day~1 internalises the plain DSU and the alpha guarantee;
+day~2 the two DSU upgrades (weighted, rollback); day~3 small-to-large merges;
+day~4 the sack and the Ch.~16 handoff; day~5 the offline pair and the Summit.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 17.1 & re-trace \exref{c28-merge} (union order on \(T\)) by hand; write \coderef{c28-find}/\coderef{c28-union} cold; CSES~1666 end to end \\
+2 & Read + do 17.2 & potentials on \(T\)'s ``opposite'' edges (\exref{c28-pottrace}); CF~1594D; then \coderef{c28-rollback}'s snapshot/undo on a 3-union stack \\
+3 & Read + do 17.3 & small-to-large colour buckets on \(T\) (\exref{c28-buckets}); CSES~1139; explain why \coderef{c28-naive} is quadratic \\
+4 & Read + do 17.4 & sack \code{keep}/\code{big} schedule on \(T\) (\exref{c28-sacktrace}); CF~600E; restate \propref{c28-sack-handoff} in your words \\
+5 & Do 17.5 + Summit & seg-tree-over-time add/undo on \(T\)'s lifetimes (\exref{c28-dync}); CF~1009F; walk the decision flowchart; first 3 mixed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.34\linewidth}p{0.38\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+\lv{3}--\lv{4} \ \(\bigstar\bigstar\bigstar\bigstar\)
+  & CSES~1666, CF~1594D, CSES~1139
+  & you can build a DSU cold, carry a payload (size, parity) to the root, and merge child containers without dropping to quadratic \\
+\lv{5} \ \(\bigstar\bigstar\bigstar\bigstar\bigstar\)
+  & CF~600E, offline pair
+  & you drive one global bag with the keep/big schedule; you reason about undo stacks and a segment tree over time \\
+\lv{5}{+}\ \(\bigstar\bigstar\bigstar\bigstar\bigstar\)
+  & CF~1009F (Summit), CF~1681F, CF~891C
+  & you adapt the sack to a depth-indexed bag, respect the tie rule, and harden for \(n=10^6\) (iterative, tight memory) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+Every entry is ``one DSU flavour + one twist.'' Each line collapses a problem
+family onto a listing already in the chapter.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``minimum roads to connect / how many groups'' (CSES~1666)
+        \(\to\) count real merges, print \(n-1-\)merges
+        (\(\coderef{c28-comp}\), \(\probref{c28-core}\)).
+  \item ``friend/enemy / same role'' (CF~1594D, LC~952)
+        \(\to\) parity weighted DSU, take the larger side per component
+        (\(\coderef{c28-weighted}\), \(\probref{c28-impostors}\)).
+  \item ``distinct values in each subtree'' (CSES~1139)
+        \(\to\) small-to-large set merge; \code{size} is the answer
+        (\(\thmref{c28-s2l}\), \(\probref{c28-dcolors}\)).
+  \item ``dominant / mode colour per subtree, all nodes'' (CF~600E, CF~1681F)
+        \(\to\) sack with a frequency-of-frequency bag
+        (\(\coderef{c28-sack}\), \(\probref{c28-600e}\)).
+  \item ``per-node deepest-dominant level'' (CF~1009F, the Summit)
+        \(\to\) the same sack, bag indexed by \emph{absolute depth}
+        (\(\probref{c28-summit}\)).
+  \item ``connected from which operation onwards?'' (CF~891C)
+        \(\to\) parallel binary search over one rollback DSU
+        (\(\coderef{c28-pbs}\)).
+  \item ``edge lives over \([l,r)\), connected at time \(t\)?'' (worked)
+        \(\to\) segment tree over time + rollback
+        (\(\coderef{c28-segtree-time}\), \(\thmref{c28-dync}\)).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+Ten entries from CF~1800 to CF~2400, all verified against the live problem set
+and absent from the rest of the book. None says ``use a DSU'' -- recognise the
+flavour from what the problem needs undone, merged, or swept.
+
+\begin{mixedset}
+  \practice{Road Reform}{CF 1468J}
+    {https://codeforces.com/problemset/problem/1468/J}{CF 1800 L3}
+    {Add one edge to a tree so exactly one cycle forms, minimising the number
+     of bridges left. DSU counts the components that keep growing; the bridges
+     are the edges outside the merged blocks (\(\coderef{c28-union}\)).}
+  \practice{Restructuring Company}{CF 566D}
+    {https://codeforces.com/problemset/problem/566/D}{CF 1900 L4}
+    {Three operations: union two, union a whole range, ask if two share a set.
+     Range-union is amortised with a ``next alive'' pointer chained through the
+     DSU --- plain union plus a skip list (\(\defref{c28-dsu}\)).}
+  \practice{The Child and Zoo}{CF 437D}
+    {https://codeforces.com/problemset/problem/437/D}{CF 1900 L4}
+    {Sum over pairs living in the same component as vertices activate in
+     decreasing weight order. An offline DSU sweep: add a vertex, union its
+     active neighbours, fold the new pair count (\(\coderef{c28-comp}\)).}
+  \practice{Shark}{CF 982D}
+    {https://codeforces.com/problemset/problem/982/D}{CF 1900 L4}
+    {Find the threshold \(x\) so that keeping edges of weight \(\le x\) makes
+     every component satisfy a size rule. Binary search the cut, DSU checks it
+     --- a one-off PBS (\(\defref{c28-pbs}\)).}
+  \practice{Mike and Feet}{CF 547B}
+    {https://codeforces.com/problemset/problem/547/B}{CF 1900 L4}
+    {Maximum of the minimums over all window sizes. Union positions left to
+     right by value; the answer for group size \(s\) is the last union that
+     reached \(s\) (\(\thmref{c28-s2l}\)'s ``payload at the root'').}
+  \practice{0-1 MST}{CF 1242B}
+    {https://codeforces.com/problemset/problem/1242/B}{CF 1900 L4}
+    {Complete graph with 0/1 weights; MST cost is \(n-\)(\# 0-weight unions).
+     Walk the sparse complement with a DSU instead of \(O(n^2)\) edges
+     (\(\defref{c28-dsu}\), Ch.~31 uses this DSU as a black box).}
+  \practice{Robots on a Grid}{CF 1335F}
+    {https://codeforces.com/problemset/problem/1335/F}{CF 2200 L5}
+    {A functional graph (each cell points right or down); batch queries on the
+     walk. Compress each maximal same-value run with a DSU ``next pointer'' so
+     the robot jumps in \(\bigO{\log}\) (the \(566\)D range-union trick).}
+  \practice{Envy}{CF 891C}
+    {https://codeforces.com/problemset/problem/891/C}{CF 2300 L5}
+    {``Using only edges of cost \(\le q_j\), are \(u_j,v_j\) connected?'' Offline
+     DSU: sort edges and queries by weight, sweep unions, answer in place ---
+     the PBS warm-up with no search (\(\defref{c28-pbs}\)).}
+  \practice{DFS Trees}{CF 1707C}
+    {https://codeforces.com/problemset/problem/1707/C}{CF 2400 L5}
+    {After each edge addition, does a DFS tree of the graph still have the given
+     parity of depths? Maintain two colour classes with a parity DSU and detect
+     the first violation (\(\propref{c28-parity}\)).}
+  \practice{Mr. Kitayuta's Colorful Graph}{CF 506D}
+    {https://codeforces.com/problemset/problem/506/D}{CF 2400 L5}
+    {Multi-coloured edges; query ``in how many colours are \(u,v\) connected?''.
+     Group small-colour edges per DSU, roll between colours, cache frequent
+     pairs -- a rollback-flavoured batch (\(\coderef{c28-rollback}\)).}
+\end{mixedset}
+
+\chaptersection{The Summit -- CF 1009F Dominant Indices}
+
+\begin{notebox}[Why this is the chapter top rope]
+Sections 17.3 and 17.4 both keep a container per subtree. The Summit is the
+sack (\secref{c28-sack}) turned \(90^\circ\): the bag is not indexed by
+\emph{colour} but by \emph{absolute depth}, and each node's answer is the
+distance at which its subtree is widest. It forces the two hard habits of the
+whole chapter at once -- the \code{keep}/\code{big} schedule (retain the deep
+heavy chain for free) and the \(n\le 10^6\) reality (iterative sizes, one
+global array, no per-node allocation).
+\end{notebox}
+
+\solvedproblem{c28-summit}{Dominant Indices}{Codeforces 1009F}
+  {https://codeforces.com/problemset/problem/1009/F}{CF 2300 L5}
+  {DSU on tree (sack) over depth buckets, heavy-child keep schedule, iterative DFS for n=1e6}
+
+\begin{problemstatement}[CF 1009F Dominant Indices]
+A rooted tree on \(n\) vertices, root \(1\). For a vertex \(x\), its
+\emph{depth array} \(d_{x,0},d_{x,1},d_{x,2},\dots\) records, for each
+distance \(i\), the number of descendants \(y\) of \(x\) whose path from \(x\)
+uses exactly \(i\) edges. The \emph{dominant index} of \(x\) is the index \(j\)
+that is a strict maximum over all earlier indices and at least every later one:
+\(d_{x,k}<d_{x,j}\) for all \(k<j\), and \(d_{x,k}\le d_{x,j}\) for all
+\(k>j\). Equivalently: the \emph{smallest} distance whose count attains the
+subtree maximum. Compute it for every vertex.
+
+\textbf{Input.} \(n\) (\(1\le n\le 10^6\)); then \(n-1\) lines, each an edge
+\(x\ y\).
+
+\textbf{Output.} \(n\) integers --- the dominant index of vertices \(1..n\).
+
+\textbf{Sample 1.} \(n=4\), edges \((1,2)(2,3)(3,4)\) (a chain)
+\(\to\) \texttt{0 0 0 0}. \quad
+\textbf{Sample 2.} \(n=4\), edges \((1,2)(1,3)(1,4)\) (a star)
+\(\to\) \texttt{1 0 0 0}. \quad
+\textbf{Sample 3.} \(n=4\), edges \((1,2)(2,3)(2,4)\) (a `Y')
+\(\to\) \texttt{2 1 0 0}.
+\end{problemstatement}
+
+\solstep{Key Observations}
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \(d_{x,i}\) counts nodes in the subtree of \(x\) at \emph{absolute}
+        depth \(\depth(x)+i\). So if the sack's bag holds
+        \(\mathit{cnt}[\text{abs depth}]\) for the current subtree, then
+        \(d_{x,i}=\mathit{cnt}[\depth(x)+i]\), and the answer is
+        \((\text{best abs depth}-\depth(x))\).
+  \item ``Smallest distance attaining the maximum'' means: over the depths of
+        \(x\)'s subtree with maximal \(\mathit{cnt}\), pick the \emph{minimum}
+        absolute depth. That is exactly the tie rule Drill~4's bag must respect.
+  \item Reading one answer per node from a global depth bag, keeping the heavy
+        child and clearing light ones, is the sack verbatim (\(\defref{c28-sack}\))
+        -- only \(\mathcal{B}\) changes from colour-counts to depth-counts.
+\end{enumerate}
+
+\solstep{Reduction to the Sack}
+The bag \(\mathcal{B}\) is \(\mathit{cnt}[\cdot]\) over absolute depth plus two
+running scalars \((\mathit{mx},\mathit{best})\): the largest count seen and the
+smallest depth achieving it. \(\mathcal{B}.\mathrm{update}(\mathit{dep},+1)\)
+increments \(\mathit{cnt}[\mathit{dep}]\) and refreshes \((\mathit{mx},
+\mathit{best})\); \(\mathcal{B}.\mathrm{query}()=\mathit{best}-\depth(u)\).
+The clear pass decrements symmetrically. Because we only ever \emph{increase}
+counts before a read, a single comparison per update maintains the tie rule.
+
+\solstep{Trace on \(T\)}
+\begin{tracebox}[Dominant index on the running tree \(T\) (root \(1\))]
+Subtree depth histograms (relative distance \(\to\) count) and the winner:
+\[
+{\small
+\begin{array}{c|c|c|c}
+v & \text{subtree} & \text{histogram } d_{v,0},d_{v,1},\dots & \text{dominant} \\
+\hline
+1 & \text{all} & 1,2,\mathbf{4},2,1 & 2 \\
+2 & \{2,4,5,8\} & 1,\mathbf{2},1 & 1 \\
+3 & \{3,6,7,9,10\} & 1,\mathbf{2},1,1 & 1 \\
+4 & \text{leaf} & 1 & 0 \\
+5 & \{5,8\} & 1,1\ (\text{tie}) & 0 \\
+6 & \text{leaf} & 1 & 0 \\
+7 & \{7,9,10\} & 1,1,1\ (\text{tie}) & 0 \\
+8 & \text{leaf} & 1 & 0 \\
+9 & \{9,10\} & 1,1\ (\text{tie}) & 0 \\
+10 & \text{leaf} & 1 & 0 \\
+\hline
+\multicolumn{3}{r}{\text{answer vector}} & (2,1,1,0,0,0,0,0,0,0)
+\end{array}}
+\]
+The bolded entry is the unique maximum; where the maximum \(1\) is tied
+(vertices \(5,7,9\)), the rule takes the \emph{smallest} distance, hence \(0\).
+Read the whole row of \(T\) against \(\figref{c28-tree}\): \(\depth\) is
+\((0,1,1,2,2,2,2,3,3,4)\), so e.g.\ \(v2\)'s children \(4,5\) sit at absolute
+depth \(2\) (relative distance \(1\)), two nodes, the widest level.
+\end{tracebox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1009F: sack over absolute-depth buckets, tie -> smallest distance}, label={lst:c28-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MN = 1000005;
+vector<int> adj[MN];
+int dep[MN], sz_[MN], big_[MN], ans[MN];
+int cnt[MN], bestDepth, bestCnt;      // bag over absolute depth
+
+int getsz(int u, int p) {             // sizes + heavy child (iterative in prod.)
+    sz_[u] = 1; big_[u] = 0; int bsz = 0;
+    for (int v : adj[u]) if (v != p) {
+        dep[v] = dep[u] + 1; int s = getsz(v, u); sz_[u] += s;
+        if (s > bsz) { bsz = s; big_[u] = v; }
+    }
+    return sz_[u];
+}
+bool blocked[MN];
+void addsub(int u, int p, int d) {    // add (+1) / clear (-1) u's subtree into cnt[]
+    int dd = dep[u]; cnt[dd] += d;
+    if (d > 0 && (cnt[dd] > bestCnt || (cnt[dd] == bestCnt && dd < bestDepth))) {
+        if (cnt[dd] > bestCnt) bestCnt = cnt[dd];
+        bestDepth = dd;               // smallest depth among the maximum count
+    }
+    for (int v : adj[u]) if (v != p && !blocked[v]) addsub(v, u, d);
+}
+void dfs(int u, int p, int keep) {
+    for (int v : adj[u]) if (v != p && v != big_[u]) dfs(v, u, 0);
+    if (big_[u]) { dfs(big_[u], u, 1); blocked[big_[u]] = true; }
+    addsub(u, p, +1);
+    ans[u] = bestDepth - dep[u];
+    if (big_[u]) blocked[big_[u]] = false;
+    if (!keep) { addsub(u, p, -1); bestCnt = 0; bestDepth = 0; }
+}
+int main(){
+    int n; scanf("%d", &n);
+    for (int i = 0; i < n-1; i++){int x,y;scanf("%d%d",&x,&y);adj[x].push_back(y);adj[y].push_back(x);}
+    dep[1] = 0; getsz(1, 0); dfs(1, 0, 0);
+    for (int i = 1; i <= n; i++) printf("%d ", ans[i]);
+}
+// tie rule: keep the SMALLEST depth among the maximum count (d_{x,k}<d_{x,j}).
+// n=1e6: getsz/dfs must be rewritten iteratively (Ch.12 lst:c09-iter) or the
+// stack blows; the bag is one global cnt[], so memory stays O(n).
+\end{lstlisting}
+
+\begin{hardeningbox}[AC \(\longrightarrow\) red: hardening the Summit]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Stack depth.} \(n\le 10^6\) on a chain: the recursive
+        \code{getsz}/\code{dfs} overflow. Use the iterative two-phase DFS
+        (\(\coderef{c09-iter}\)) or raise the stack; the algorithm is unchanged.
+  \item \textbf{Exempt marker, not the heavy id.} \code{big\_[u]} stores the
+        heavy-child id; the ``do not sweep me'' flag is the separate
+        \code{blocked[]} array -- conflating them (the classic
+        \code{!big[v]} test) clears the wrong nodes (\(\coderef{c28-sack}\)).
+  \item \textbf{Tie direction.} Choosing the \emph{deepest} tied level is a
+        tempting one-line error; the statement's strict-before / at-or-after
+        clause forces the \emph{shallowest} (Sample~1: a chain answers all
+        \(0\)). Verify on the \(5,7,9\) rows of the trace above.
+  \item \textbf{Bag reset on clear.} When \code{keep=false} you must reset
+        \code{bestCnt}/\code{bestDepth} as well as decrementing \code{cnt[]};
+        forgetting it leaks a stale maximum into the next sibling.
+  \item \textbf{I/O.} \(10^6\) lines: use \code{scanf}/fast I/O; \code{cin}
+        without \code{sync\_with\_stdio(false)} is the usual TLE, not the
+        \(\bigO{n\log n}\).
+  \item \textbf{Alternatives.} Long-chain decomposition merges the heavy child's
+        depth array \emph{by reference} and runs \(\bigO{n}\); the sack here is
+        \(\bigO{n\log n}\) and passes, but on the tightest limits the
+        \(\bigO{n}\) pointer-merge (Ch.~13's \(\thmref{c10-subtree-template}\)
+        made O(1) per level) is the safe upgrade.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[Chapter 17 in ten seconds]
+A DSU is a forest of parent pointers; \code{find}/\code{union} with compression
+and union-by-size are near-\(\alpha\) (\(\defref{c28-dsu}\),
+\(\propref{c28-alpha}\)). Add a potential to each root for constraints
+(\(\defref{c28-weighted}\)); remove compression and add a stack for undo
+(\(\defref{c28-rollback}\)). To answer per-subtree questions, either merge child
+containers small-to-large (\(\thmref{c28-s2l}\)) or keep one global bag with the
+heavy child retained (\(\defref{c28-sack}\)) -- the latter is what Ch.~16
+promised (\(\propref{c28-sack-handoff}\)). Offline: sweep a rollback DSU through
+a binary search (\(\defref{c28-pbs}\)) or a segment tree over time
+(\(\thmref{c28-dync}\)).
+\selftest{
+  \item Why is path compression fatal to a rollback DSU? \hfill\lv{4}
+  \item Which container do you merge into, and why is that \(\bigO{n\log n}\)? \hfill\lv{4}
+  \item State the three \code{keep}/\code{vis} settings in one sack step. \hfill\lv{5}
+  \item What single change turns the CF~600E sack into the Summit? \hfill\lv{5}
+}
+\end{recallbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled through Chapter~17. Earlier chapters' rows are carried
+forward; this chapter's are appended. Pointers only.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.21\linewidth} l c p{0.25\linewidth} p{0.17\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Lv} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Carried forward} \\
+Iterative two-phase DFS & 12 & \lv{3} & ``chain may be deep'' & \coderef{c09-iter} \\
+Subtree fold template & 13 & \lv{3} & ``one answer per node, bottom-up'' & \thmref{c10-subtree-template} \\
+Depth + \(\tin/\tout\) buckets & 16 & \lv{4} & ``count at a depth in a subtree'' & \propref{c11-interval} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 17 -- new this chapter} \\
+Plain DSU (compress + size) & 17.1 & \lv{2} & ``merge groups, count components'' & \coderef{c28-find}, \coderef{c28-union} \\
+Weighted / parity DSU & 17.2 & \lv{4} & ``same role / opposite'' constraints & \coderef{c28-weighted} \\
+Rollback DSU & 17.2 & \lv{4} & ``try then undo; DFS with rollbacks'' & \coderef{c28-rollback}, \coderef{c28-rb-driver} \\
+Small-to-large merge & 17.3 & \lv{4} & ``distinct per subtree, a container'' & \coderef{c28-s2l} \\
+Sack (DSU on tree) & 17.4 & \lv{5} & ``every node's mode / dominant'' & \coderef{c28-sack} \\
+Parallel binary search & 17.5 & \lv{5} & ``least \(x\) with a DSU predicate'' & \coderef{c28-pbs} \\
+Seg-tree over time + rollback & 17.5 & \lv{5} & ``edge lives over \([l,r)\)'' & \coderef{c28-segtree-time} \\
+Depth-bucket sack & Summit & \lv{5} & ``widest depth level per node'' & \coderef{c28-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c25} (Ch.~6, Constructing Trees) --- backward: owns the
+        ``is it a tree?'' DSU \emph{pre-look} (LC~547 Provinces, LC~684/685
+        Redundant Connection). This chapter supplies the compression/union
+        internals those chapters only gestured at; their URLs are not re-linked.
+  \item \chref{c10} (Ch.~13, Tree DP I) --- backward: the subtree-fold template
+        \thmref{c10-subtree-template} is the ``answer at every node'' posture the
+        sack shares; the Summit's bag is that fold with a depth index.
+  \item \chref{c27} (Ch.~14, Tree DP II) --- backward: \secref{c28-s2l} is the
+        \emph{set/map merge mechanics}, deliberately \emph{not} Ch.~14's
+        tree-knapsack DP; the boundary is drawn in \thmref{c28-s2l}'s remark.
+  \item \chref{c11} (Ch.~16, Ancestor Queries) --- backward: \propref{c11-interval}'s
+        \(\tin/\tout\) and the CF~208E depth bucket are \emph{upgraded} here by
+        \propref{c28-sack-handoff} -- this section discharges Ch.~16's promise.
+  \item \chref{c09} (Ch.~12, Metrics) --- backward: \coderef{c09-iter}'s
+        iterative DFS is what makes the sack survive \(n=10^6\).
+  \item \chref{c21} (Ch.~27, Offline Tree Queries) --- forward: Mo's-on-tree
+        reorders queries along a 1-D walk; this chapter's offline DSU fixes the
+        order via a segment tree or binary search. The line is drawn in 17.5.
+  \item \chref{c17} (Ch.~31, MST and Variants) --- forward: Kruskal uses DSU as a
+        \emph{black box} and back-cites \chref{c28} for the internals; the
+        Kruskal-reconstruction tree stays decided there.
+\end{itemize}
+
+\begin{lastword}[Last Word --- Chapter 17]
+\emph{``Chapter~16 made the pair answerable; Chapter~17 makes the group
+answerable. One parent-pointer forest, bent three ways -- carry a potential,
+remember how to undo, refuse to discard the heavy child -- turns connectivity
+into subtree statistics and time-varying graphs.''}
+
+\medskip
+The whole chapter is one object (a partition) served by a few machines. The
+plain DSU is honest and near-free (\(\coderef{c28-find}\)). Weighted DSU hangs a
+number off each root and buys consistency checks (\(\propref{c28-parity}\)).
+Rollback DSU \emph{removes} a feature -- compression -- and in exchange the union
+becomes undoable (\(\defref{c28-rollback}\)), which is precisely what a
+divide-and-conquer or a segment-tree-over-time DFS needs
+(\(\thmref{c28-dync}\)). On the subtree side, small-to-large merges containers
+(\(\thmref{c28-s2l}\)) while the sack keeps a single bag alive
+(\(\defref{c28-sack}\)) -- and the sack is exactly what Chapter~16 said would
+make per-node subtree aggregates cheap (\(\propref{c28-sack-handoff}\)). The
+Summit wears both hats at once: a sack whose bag counts depths, at \(n=10^6\).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Undo and compression are enemies.} The moment a problem wants
+        ``roll it back,'' disable compression and pay \(\bigO{\log n}\) per find.
+  \item \emph{Always merge small into big.} Whether child containers
+        (\(\thmref{c28-s2l}\)) or subtree bags (\(\defref{c28-sack}\)), the
+        doubling argument is the same and the reverse is quadratic.
+  \item \emph{One bag beats \(n\) containers.} If every node needs a summary of
+        its subtree, keep the heavy child's data and read off -- do not allocate
+        and merge per node.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: before coding, name which DSU flavour the
+operations ask for (never-undo \(\to\) plain; constraints \(\to\) weighted; undo
+\(\to\) rollback; per-subtree \(\to\) merge-or-sack; time \(\to\) segment tree);
+keep the exempt/heavy arrays separate; and re-check the tie/endpoint conventions
+(the Summit's shallowest-max, the segment tree's half-open \([l,r)\)) against the
+smallest sample that could expose them.
+
+\medskip
+\textbf{Next:} \chref{c14} (Fenwick / indexed trees) takes the ``sweep a batch
+of queries offline in sorted order'' reflex from 17.5 and gives it a live
+prefix-sum structure, answering questions the static DSU cannot -- how many
+active items below a key, updated between queries. Ch.~27 (\chref{c21}) then
+reorders subtree and path queries on a walk, the sibling of this chapter's
+fixed-order offline tricks.
+\end{lastword}

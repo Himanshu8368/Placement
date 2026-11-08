@@ -1,0 +1,426 @@
+% =====================================================================
+%  25.1  The Splay Engine -- rotations, the potential, top-down splaying,
+%  and size-maintained splay trees as an order-statistics set.
+%  Exports: sec:c23-splay  def:c23-splay  thm:c23-splay-amort
+%           fig:c23-splaycases  lst:c23-splay-rot  lst:c23-topdown
+%           prob:c23-orderset  lst:c23-orderset
+%  Solved SPOJ ORDERSET (Order statistic set), live-verified via the SPOJ
+%  problem page (tags #tree #binary-search; dynamic set, Q <= 200000,
+%  |x| <= 1e9). Official sample read live:
+%    8 ops: I -1, I -1, I 2, C 0, K 2, D -1, K 1, K 2  ->  1, 2, 2, invalid.
+%  Hand-replayed here: S={-1,2}; C 0 -> 1; K 2 -> 2; D -1 -> S={2}; K 1 -> 2;
+%  K 2 -> invalid (only one element). Matches the official output exactly.
+%  DISCHARGES the Ch.8 sec:c06-splay forward-cite ("full analysis, top-down
+%  splaying ... Chapter 25"); the single rotation is NOT re-drawn.
+% =====================================================================
+\section{The Splay Engine: Balance by Locality}\label{sec:c23-splay}
+
+\begin{previouslybox}[Ch.~8 built the splay tree and left the analysis running]
+Chapter~8 (\(\secref{c06-splay}\)) introduced the \term{splay tree}: a binary
+search tree that, every time you touch a node, rotates it all the way to the root
+(\(\figref{c06-splayfig}\)). It gave the three rotation names -- zig, zig-zig,
+zig-zag -- and promised that a long run of operations costs \(O(\log n)\) each
+\emph{on average}, then explicitly deferred \emph{"the full analysis, top-down
+splaying, and link-cut dynamic trees"} to this chapter. That IOU is cashed here:
+\(\thmref{c23-splay-amort}\) proves the amortised bound with a potential function,
+the top-down variant replaces the recursive splay with a single downward pass, and
+subtree sizes turn the engine into an order-statistics set -- the exact tool
+SPOJ~ORDERSET wants. Only then, in \(\secref{c23-prefer}\), do we hand this engine
+to the link-cut tree.
+\end{previouslybox}
+
+\begin{topicintro}
+A splay tree is a plain BST plus one habit: \code{access(x)} does the ordinary
+search for \(x\), then \emph{splays} \(x\) to the root -- repeatedly rotating \(x\)
+up two levels at a time using zig / zig-zig / zig-zag until it sits at the top.
+Three things fall out of that habit. (1) Recently- and frequently-accessed keys
+cluster near the root, so hot data is fast. (2) Even though one access can cost
+\(\Theta(n)\) (a chain of cold nodes), the \emph{amortised} cost per operation is
+\(O(\log n)\) -- proved with the potential \(\Phi=\sum_v \log \size(v)\)
+(\(\thmref{c23-splay-amort}\)). (3) Because splaying only needs rotations, any
+aggregate you can push up a tree (subtree \(\size\), sum, min) rides along for
+free, giving an implicit, order-statistics set with no rotations-of-aggregates
+surprise.
+
+\textbf{Prerequisites.} Chapter~8 (\(\secref{c06-splay}\)) -- the BST shape, the
+single rotation, and the names zig / zig-zig / zig-zag. This section reuses that
+vocabulary and adds only the analysis and the two new payload features (top-down
+splaying, subtree sizes); the mechanics of one rotation are never re-drawn.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item splay a node to the root by hand, naming each zig / zig-zig / zig-zag; \hfill\lv{3}
+  \item prove the amortised \(O(\log n)\) bound from \(\Phi=\sum\log\size\); \hfill\lv{4}
+  \item write top-down splaying -- one downward pass, no parent pointers, no recursion; \hfill\lv{4}
+  \item maintain subtree sizes in a splay and solve SPOJ~ORDERSET (k-th, count-\(<x\))
+        on keys up to \(10^9\). \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- "a dynamic ordered set with rank/select"]
+\reckey{statements that keep a \emph{set of numbers} under \code{INSERT}/\code{DELETE}
+and ask \code{K-TH} (the \(k\)-th smallest) or \code{COUNT} (how many are \(<x\)),
+with \emph{huge keys} (\(|x|\le 10^9\)) so an array-indexed BIT is impossible and
+coordinate-compression is awkward because inserts and deletes arrive online. The
+tell is order-statistics on a live set -- rank and select -- where the operations
+themselves, not the key range, set the budget.}
+\recuse{
+  \item dynamic set, k-th smallest / count-less-than interleaved with insert-delete -- size-maintained splay (\(\secref{c23-splay}\));
+  \item as the auxiliary tree of a preferred path -- the same engine, no sizes, in the LCT (\(\secref{c23-prefer}\));
+  \item implicit sequence (split/merge by position) -- splay with subtree sizes as an index (\(\secref{c23-splay}\)).
+}
+\recnotuse{
+  \item keys are small and fixed, only prefix counts -- a Fenwick tree (\chref{c14}) is simpler;
+  \item the set never shrinks and you only need membership -- \code{std::set} / hashing;
+  \item you need the \(k\)-th but the set is \emph{static} -- sort once, binary search.
+}
+One-line test: \emph{rank or select on a set that grows and shrinks online, with
+keys you cannot index into an array -- then a size-maintained splay tree.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Splaying, and why its average is logarithmic}
+% ---------------------------------------------------------------
+
+\begin{definition}{Splaying a node to the root}{c23-splay}
+Let \(x\) be a node with parent \(p\) and grandparent \(g\) (either may be absent).
+\term{Splaying} \(x\) repeats, until \(x\) is the root:
+\begin{itemize}[nosep]
+  \item \textbf{zig} (\(p\) is the root): one rotation at \(x\)'s parent; \(x\) becomes root.
+  \item \textbf{zig-zig} (\(x,p\) on the \emph{same} side of \(g\)): rotate at \(g\),
+        then at \(p\) -- both rotations same direction, \(x\) climbs two levels and
+        \(p\) stays below \(x\).
+  \item \textbf{zig-zag} (\(x,p\) on \emph{opposite} sides of \(g\)): rotate at \(p\),
+        then again at \(p\)'s new child -- \(x\) climbs two levels and takes \(p\)'s old spot.
+\end{itemize}
+The BST order is preserved throughout; only shape changes.
+\end{definition}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.72, transform shape,
+   snode/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.7pt,
+                 minimum size=6mm, font=\scriptsize\bfseries, inner sep=1pt},
+   hl/.style={circle, draw=difforange, fill=difforange!16, line width=1pt,
+              minimum size=6.4mm, font=\scriptsize\bfseries, inner sep=1pt}]
+  % zig: g absent, p root, x child  -> x root
+  \node[snode] (zp) at (0,0) {p}; \node[hl] (zx) at (1.1,-1.2) {x};
+  \draw (zp)--(zx);
+  \node[annot, font=\scriptsize, anchor=south] at (0.5,0.5) {zig};
+  % zig-zig: g-p-x same side
+  \node[snode] (gz) at (-6.4,0) {g}; \node[snode] (pz) at (-5.3,-1.2) {p}; \node[hl] (xz) at (-4.2,-2.4) {x};
+  \draw (gz)--(pz)--(xz);
+  \node[annot, font=\scriptsize, anchor=south] at (-5.3,0.5) {zig-zig (x,p same side: rot g, rot p)};
+  % zig-zag: g, p, x opposite sides
+  \node[snode] (ga) at (5.0,0) {g}; \node[snode] (pa) at (3.9,-1.2) {p}; \node[hl] (xa) at (5.0,-2.4) {x};
+  \draw (ga)--(pa) (pa)--(xa);
+  \node[annot, font=\scriptsize, anchor=south] at (4.5,0.5) {zig-zag (rot p twice)};
+\end{tikzpicture}
+\caption{The three splay cases around a grandparent \(g\), parent \(p\), target
+\(x\) (\(x\) in orange). \emph{zig} ends the splay (no grandparent). \emph{zig-zig}
+and \emph{zig-zag} each lift \(x\) two levels; the choice -- same side versus
+opposite side -- is exactly what keeps the tree self-correcting and makes the
+amortised bound work (\(\thmref{c23-splay-amort}\)). Names and mechanics are
+Ch.~8's (\(\figref{c06-splayfig}\)); here they are only relabelled for reference.}
+\label{fig:c23-splaycases}
+\end{figure}
+
+\begin{theorem}{Splaying is \(O(\log n)\) amortised per operation}{c23-splay-amort}
+Over any sequence of \(m\) insertions, deletions and searches in a splay tree on
+\(n\) keys, the total time is \(O(m\log n)\); the amortised cost of one operation
+is \(O(\log n)\). A single operation may still cost \(\Theta(n)\).
+\end{theorem}
+\begin{proofbox}
+Define the \emph{rank} \(\rho(v)=\log \size(v)\) (size = nodes in \(v\)'s subtree)
+and the potential \(\Phi=\sum_{v}\rho(v)\). Charge a step's \emph{amortised} cost as
+\(\text{actual} + \Delta\Phi\). A single rotation at a node \(t\) (reparenting a
+subtree of size \(S\) between two configurations of sizes \(A,B\)) changes only the
+ranks of \(t\) and its child; bounding that change by \(\Delta\Phi_{\text{rot}}\le
+2(\rho_{\text{new}}(t)-\rho_{\text{old}}(t))\) and summing the telescoping terms
+along the splay path \(x=v_0,v_1,\dots,v_k=\text{root}\) gives the access of \(x\) a
+total amortised cost at most
+\[
+  3\sum_{i}\bigl(\rho(v_{i,\text{new}})-\rho(v_{i,\text{old}})\bigr) + O(1)
+  \;\le\; 3\bigl(\rho(\text{root})-\rho(x)\bigr) + O(\log n) \;=\; O(\log n),
+\]
+because \(\rho(\text{root})=\log n\) after the splay and the series telescopes. The
+zig-zig / zig-zag pairing is what forces the factor \(3\) (a plain single-step
+rotation gives only \(O(\log^2 n)\)); this is the standard Sleator--Tarjan
+potential argument. Insert and delete are a search-and-splay plus one splice, so
+they inherit the same bound; summing \(m\) operations telescopes \(\Phi\) to
+\(O(m\log n)\) total. \(\Box\)
+\end{proofbox}
+
+\begin{complexitybox}[The engine]
+\textbf{Per operation} \(\bigO{\log n}\) amortised (\(\thmref{c23-splay-amort}\)),
+\(\Theta(n)\) worst case. \textbf{Space} \(\bigO{n}\). Maintaining a subtree
+aggregate such as \(\size\) adds \(O(1)\) work per rotation (recompute the two
+affected nodes), so it costs nothing asymptotically -- this is why sizes, sums and
+lazy tags ride a splay for free.
+\end{complexitybox}
+
+\begin{lstlisting}[caption={Bottom-up splay: rotate x up two levels at a time. grand(x) is x's grandparent; the zig-zig vs zig-zag split is the whole art. Assumes parent pointers. ASCII only}, label={lst:c23-splay-rot}]
+// ch(x,0)=left, ch(x,1)=right ; p(x)=parent ; rot(x) rotates x with its parent
+void rot(Node* x){
+    Node* p = par[x]; Node* g = par[p];
+    int d = (ch[p][1] == x);            // x is p's right child?
+    ch[p][d] = ch[x][!d]; if (ch[x][!d]) par[ch[x][!d]] = p;
+    ch[x][!d] = p; par[p] = x; par[x] = g;
+    if (g) ch[g][ (ch[g][1] == p) ? 1 : 0 ] = x;
+    pull(p); pull(x);                    // refresh sizes/sums bottom-up
+}
+void splay(Node* x){
+    while (par[x]) {
+        Node* p = par[x]; Node* g = par[p];
+        if (!g) rot(x);                          // zig
+        else if ((ch[g][0]==p) == (ch[p][0]==x)) { rot(p); rot(x); }  // zig-zig
+        else { rot(x); rot(x); }                 // zig-zag
+    }
+    root = x;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Top-down splaying: one downward pass, no recursion, no parent pointers. Keys smaller than the walked-down spine accumulate on tree L, larger on tree R; x is re-attached at the end as the new root. ASCII only}, label={lst:c23-topdown}]
+// Splay key `key` to the root in one pass. l/r are dummy roots of the two chains.
+Node* topdown_splay(Node* t, int key){
+    Node L, R; L.right = &L; R.left = &R;        // local sentinels
+    Node *l = &L, *r = &R;
+    while (t) {
+        if (key < t->key) {                       // go left: t and its right subtree >= key
+            Node* tmp = t->right; t->right = r->left; r->left = t; r = t; t = tmp;
+        } else if (key > t->key) {                // go right: t and its left subtree <= key
+            Node* tmp = t->left; t->left = l->right; l->right = t; l = t; t = tmp;
+        } else break;                             // found t; assemble below
+    }
+    if (!t) { root = &L, root = &R; return; }     // key absent
+    // assemble: t's left  gets L's right-chain, t's right gets R's left-chain
+    l->right = t->left; t->left = L.right;
+    r->left  = t->right; t->right = R.left;
+    pull_down(t);                                  // recompute sizes along the two chains
+    root = t;
+}
+\end{lstlisting}
+
+\begin{insightbox}[Top-down beats bottom-up where recursion is the enemy]
+Bottom-up splaying (\(\coderef{c23-splay-rot}\)) recurses up through parent
+pointers and then back down to fix sizes -- two passes and \(O(\log n)\) stack
+(amortised) that can degenerate to \(O(n)\) stack on a cold chain, risking a
+recursion-overflow on a strict judge. Top-down splaying (\(\coderef{c23-topdown}\))
+walks \emph{down} once, peeling the searched path into two side chains \(L\) and
+\(R\), and re-attaches them under \(x\). Same \(O(\log n)\) amortised bound, no
+parent array, no recursion -- the variant you actually ship. Ch.~8 flagged it as
+deferred; here it is written out.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: SPOJ ORDERSET -- rank and select on a live set}
+% ---------------------------------------------------------------
+
+\solvedproblem{c23-orderset}{Order Statistic Set}{SPOJ ORDERSET}
+  {https://www.spoj.com/problems/ORDERSET/}{SPOJ classic L4}
+  {size-maintained splay; k-th = select by size; count-<x = BST walk with sizes}
+
+\begin{problemstatement}[Order statistic set (statement and sample verified against the live SPOJ page)]
+Maintain a set \(S\) of integers (duplicates ignored) under four operations.
+\(\texttt{I }x\): insert \(x\) if absent. \(\texttt{D }x\): delete \(x\) if present.
+\(\texttt{K}\): return the \(k\)-th smallest element of \(S\), or the word
+\texttt{invalid} if \(|S|<k\). \(\texttt{C }x\): return the number of elements
+strictly less than \(x\). \(Q\le 2\cdot 10^5\) operations, \(|x|\le 10^9\).
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:              Output:
+8                   1
+I -1                2
+I -1                2
+I 2                 invalid
+C 0
+K 2
+D -1
+K 1
+K 2
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+Ignore the \(10^9\) keys and the delete for one moment: how would a BST answer
+\code{K}? \peek{to print the \(k\)-th smallest you must know, at each node, how many
+keys sit in its left subtree.}
+\nudge{if every node stores \(\size(\text{left})+1\) = its own 1-based rank among its
+subtree, selecting the \(k\)-th is a single descent: go left if \(k\le\) left-size,
+else skip them and recurse right for rank \(k-\text{leftsize}-1\).}
+\fullhint{Store a subtree size in each splay node. \code{K}: descend by size as above
+(this is why you splay -- you can pick any element as root since the descent only
+uses sizes). \code{C x}: BST-search \(x\), accumulating \(\size(\text{left})+1\) each
+time you branch right; splay the last node seen and return the count.
+\(\texttt{I}\): standard splay insert (splay the inserted node up). \(\texttt{D }x\):
+splay \(x\) to the root, then splice its left and right subtrees together (max of
+left as new root, or simply detach) -- set semantics, so duplicates never appear.
+Keys up to \(10^9\) are stored as-is; no coordinate compression needed.}
+\end{attemptgate}
+
+\solstep{Understanding}
+ORDERSET is the splay engine with \emph{one} aggregate -- a subtree size -- doing all
+four jobs. There is no tree topology to track (it is a plain ordered set), so the
+entire problem is "keep \(\size\) correct through every rotation and use it to select
+and rank." That makes it the honest warm-up before the LCT: you meet top-down
+splaying, size bookkeeping, and duplicate-aware insert/delete in a setting where a
+bug shows up as a wrong number, not a silent pointer corruption.
+
+\solstep{Key Observations}
+\begin{observation}
+With \(\size(v)=1+\size(\text{left})+\size(\text{right})\) maintained through
+rotations, the \code{K} (select) and \code{C} (rank) queries are pure descents:
+select compares \(k\) against \(\size(\text{left})+1\); rank adds
+\(\size(\text{left})+1\) whenever it turns right. Both are \(O(\log n)\) amortised
+because each ends in a splay.
+\end{observation}
+\begin{observation}
+Set semantics kill duplicates: on \(\texttt{I }x\) with \(x\) already present, do
+nothing. The cleanest way to test presence is to splay toward \(x\); if the node
+you reach already holds \(x\), it is a duplicate. This keeps \(|S|\) honest, which
+\(\thmref{c23-splay-amort}\)'s size-based potential counts on.
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.26\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ sorted vector & keep array sorted, binary search each op & \(O(n)\) insert & \tle \\
+2 & \lv{3}\ Fenwick on compressed keys & coordinate-compress all \(x\) offline & \(O(\log n)\) & \textcolor{warningred}{\ding{55}\ \textbf{MLE/awkward}} \\
+3 & \lv{4}\ \textbf{size-maintained splay} & select/rank by \(\size\) (\(\coderef{c23-topdown}\)) & \(\bigO{\log n}\) amort & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 works only because you can read all queries first; it is fragile if you must
+answer online and is the wrong instinct to bring to an LCT. Rung~3 stores the huge
+keys directly and answers rank/select with the size field alone.
+
+\solstep{Solution}
+Build a top-down splay keyed on the value, each node carrying
+\(\size=1+\size_L+\size_R\). Map the four commands: \texttt{I} = splay-insert,
+\texttt{D} = splay-then-splice, \texttt{K} = select-by-size then splay, \texttt{C} =
+rank-then-splay. Print \texttt{invalid} when \(k>|S|\).
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={SPOJ ORDERSET with a bottom-up size-maintained splay (swap in lst:c23-topdown if recursion depth is a worry). Node 0 is the null sentinel with size 0. ASCII only}, label={lst:c23-orderset}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MAXN = 200005;
+int ch[MAXN][2], par[MAXN], sz[MAXN], key[MAXN], root=0, tot=0;
+int isNew(int k){ int id=++tot; key[id]=k; sz[id]=1; ch[id][0]=ch[id][1]=par[id]=0; return id; }
+void pull(int x){ if(x) sz[x]=1+sz[ch[x][0]]+sz[ch[x][1]]; }
+bool isRoot(int x){ int p=par[x]; return p==0 || (ch[p][0]!=x && ch[p][1]!=x); }
+void rot(int x){
+    int p=par[x], g=par[p], d=(ch[p][1]==x);
+    if(!isRoot(p)) ch[g][ch[g][1]==p]=x;
+    par[x]=g;
+    ch[p][d]=ch[x][!d]; if(ch[x][!d]) par[ch[x][!d]]=p;
+    ch[x][!d]=p; par[p]=x; pull(p); pull(x);
+}
+void splay(int x){
+    while(!isRoot(x)){ int p=par[x], g=par[p];
+        if(isRoot(p)) rot(x);
+        else if((ch[g][0]==p)==(ch[p][0]==x)){ rot(p); rot(x); }
+        else { rot(x); rot(x); } }
+    root=x;
+}
+int findNode(int k){ int u=root;
+    while(u && key[u]!=k) u = (k<key[u])?ch[u][0]:ch[u][1]; return u; }
+void insert(int k){
+    if(!root){ root=isNew(k); return; }
+    int u=root, p=0;
+    while(u){ p=u; u = (k==key[u]) ? 0 : (k<key[u]?ch[u][0]:ch[u][1]); }
+    if(k==key[p]){ splay(p); return; }          // duplicate: set ignores it
+    int nd=isNew(k); ch[p][k>key[p]]=nd; par[nd]=p;
+    for(int a=nd;a;a=par[a]) pull(a); splay(nd);
+}
+int kth(int k){                                // k-th smallest, 1-based
+    if(sz[root]<k) return -1;                  // -> "invalid"
+    int u=root;
+    while(true){ int L=ch[u][0];
+        if(k<=sz[L]) u=L;
+        else if(k==sz[L]+1) break;
+        else { k-=sz[L]+1; u=ch[u][1]; } }
+    splay(u); return key[u];
+}
+int countLess(int k){                          // #elements strictly < k
+    int u=root, ans=0;
+    while(u){ if(key[u]>=k) u=ch[u][0];
+        else { ans += sz[ch[u][0]]+1; u=ch[u][1]; } }
+    if(u==0){ /* not found, ans already complete */ }
+    return ans;
+}
+void erase(int k){ int u=findNode(k); if(!u) return; splay(u);
+    int l=ch[u][0], r=ch[u][1]; ch[u][0]=ch[u][1]=0;
+    if(l){ par[l]=0; if(r){ int m=l; while(ch[m][1]) m=ch[m][1];
+        ch[m][1]=r; par[r]=m; pull(m);} root=l; }
+    else root=r; if(root) par[root]=0; }
+int main(){
+    int Q; scanf("%d",&Q);
+    while(Q--){ char c; int x; scanf(" %c",&c);
+        if(c=='I'){ scanf("%d",&x); insert(x); }
+        else if(c=='D'){ scanf("%d",&x); erase(x); }
+        else if(c=='C'){ scanf("%d",&x); printf("%d\n", countLess(x)); }
+        else if(c=='K'){ scanf("%d",&x); int v=kth(x);
+            if(v==-1) printf("invalid\n"); else printf("%d\n", v); } }
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample: sizes drive every answer]
+Ops on \(S\) (shown sorted, with the size a node reports):\\
+\(\texttt{I }-1\): \(S=\{-1\}\). \(\texttt{I }-1\): duplicate, ignored, \(S=\{-1\}\).
+\(\texttt{I }2\): \(S=\{-1,2\}\), \(\size(\text{root})=2\).\\
+\(\texttt{C }0\): walk for \(<0\): \(-1<0\) so add \(\size(\text{left of }{-1})+1=1\),
+go right; \(2\not<0\) go left, hit null \(\Rightarrow\) answer \(\boxed{1}\).\\
+\(\texttt{K }2\): \(\size(\text{root})=2\ge2\); descend, skip \(\{-1\}\) taking right,
+\(k=1\) at node \(2\) \(\Rightarrow\) answer \(\boxed{2}\).\\
+\(\texttt{D }-1\): splay \(-1\) to root, splice its right subtree up \(\Rightarrow\)
+\(S=\{2\}\).\\
+\(\texttt{K }1\): \(1\)-th smallest of \(\{2\}\) \(\Rightarrow\) answer \(\boxed{2}\).\\
+\(\texttt{K }2\): \(|S|=1<2\) \(\Rightarrow\) print \(\boxed{\texttt{invalid}}\).\\
+Outputs \(1,2,2,\texttt{invalid}\) -- matching the official sample exactly.
+\end{tracebox}
+
+\begin{warningbox}[The size field is the whole data structure]
+Every ORDERSET bug is a \(\size\) bug. (1) Forgetting \code{pull} on \emph{both}
+nodes touched by a rotation (parent \emph{and} grandparent chain) makes
+\code{K}/\code{C} return stale ranks -- wrong answer that looks random. (2) On
+\texttt{D}, splicing without first splaying \(x\) to the root leaves the children
+pointers inconsistent. (3) In \code{countLess}, adding \(\size_L+1\) when you go
+\emph{left} instead of right double-counts -- the count comes out too large. Verify
+each with the tiny sample: the trace above is the reference oracle.
+\end{warningbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Duplicates.} ORDERSET is a \emph{set}. Guard \texttt{I} by the
+        search result (\(\text{key}[p]==x \Rightarrow\) splay and return); a stray
+        duplicate inflates \(\size\) and breaks \code{K}.
+  \item \textbf{Null sentinel.} Let node \(0\) be the shared null with
+        \(\text{sz}[0]=0\); then \code{pull} needs no null checks and
+        \(\text{sz}[L]+1\) is always defined.
+  \item \textbf{Recursion depth.} The bottom-up \code{splay}/\code{pull} loop is
+        iterative; if you recurse to fix sizes, switch to \(\coderef{c23-topdown}\)
+        or an explicit stack -- a cold chain is \(\Theta(n)\) deep.
+  \item \textbf{\code{invalid} is lowercase.} Print exactly \texttt{invalid} when
+        \(k>|S|\), not \texttt{Invalid} or \texttt{-1}.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[25.1 in one breath]
+\emph{Splay = search, then rotate the touched node to the root by zig / zig-zig /
+zig-zag. The potential \(\Phi=\sum\log\size\) makes a run \(O(\log n)\) amortised
+(\(\thmref{c23-splay-amort}\)); top-down splaying (\(\coderef{c23-topdown}\)) does it in
+one downward pass. Add one aggregate -- subtree \(\size\) -- and the same engine
+answers k-th and count-\(<x\) on a live set of \(10^9\)-keys (SPOJ~ORDERSET): select
+by size, rank by accumulating left-sizes. This size-carrying splay is exactly the
+auxiliary tree the link-cut tree will drive in \(\secref{c23-prefer}\).}
+\selftest{
+  \item Which three rotations, and what decides zig-zig vs zig-zag? \emph{(whether \(x\) and \(p\) are on the same or opposite sides of \(g\), Def.~\defref{c23-splay}.)}
+  \item Give the potential that yields the \(O(\log n)\) amortised bound. \emph{(\(\Phi=\sum_v \log\size(v)\), \(\thmref{c23-splay-amort}\).)}
+  \item In ORDERSET, how does \code{K} locate the \(k\)-th smallest using only sizes? \emph{(compare \(k\) with \(\size_L+1\); recurse left/right. Observation~1.)}
+}
+\end{recallbox}

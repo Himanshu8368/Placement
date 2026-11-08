@@ -1,0 +1,1767 @@
+# Multidimensional & Higher-Order Prefix Sums {#sec-nd}
+
+<!--
+Author-facing provenance (not rendered): Chapter 25 of the arrays volume, the third chapter of Part V,
+per outline.yml ("Multidimensional & Higher-Order Prefix Sums"). Lesson labels follow the outline
+"covers" order with the foundational build added first: sec-nd-a1 (the 2D prefix sum: build once, answer a
+sub-rectangle in O(1) by inclusion-exclusion), a2 (the 2D difference array: rectangle add in O(1), one
+prefix to recover — the exact inverse of a1), a3 (higher dimensions: a 3D prefix and the general 2^d
+inclusion-exclusion), a4 (arithmetic progressions on ranges: a second-order / two-array difference that
+adds a linear function to a range in O(1)), a5 (diagonal prefix sums: precompute along i-j and i+j), a6
+(weighted prefix sums and the triage: per-element multiplicity, and when to reach for a prefix vs a
+difference vs a BIT vs Mo). Patterns sec-nd-p1..p4 with two solved problems each: p1 CF 932B +
+(self-authored, 2D sub-rectangle sum queries), p2 (self-authored, rectangle-add) + (self-authored, 3D box
+queries), p3 (self-authored, AP on a range) + (self-authored, linear-function range add), p4 CF 1195D2 +
+(self-authored, diagonal-segment sums). Roster note (recorded shortfall): the CF tag taxonomy has no
+"prefix sums" tag and a live cache sweep showed data-structures + 2d-grids problems are essentially absent
+in the target band, so only TWO of the eight solved slots are genuine, cache-verified Codeforces problems
+(CF 932B "Recursive Queries", a prefix-sum table over the value domain; CF 1195D2 "Submarine in the
+Rybinsk Sea (hard edition)", a digit-position weighted/contribution sum). The other six are fully-stressed
+self-authored problems carrying a brute force and a random stress rather than judge links (the Ch. 23/24
+precedent authorises swapping a slot that has no clean judge problem for its named technique). CF 1598E
+"Staircases" was checked against the judge page and turned out to be a per-cell DP/contribution count with
+free/locked cell FLIPS as updates — not a static 2D-prefix technique — so it is cited as a cautionary
+practice link, never solved as prefixing here. The look-alikes CF 1648A "Weird Sum" (the separable-axis
+contribution problem, already solved in another chapter), CF 718C "Sasha and Array" and CF 1252K "Addition
+Robot" (both tagged matrices but solved by segment tree + matrix exponentiation), and CF 844B "Rectangles"
+(probability) are cited as practice only — none is a multidimensional/higher-order prefix problem. Dynamic
+2D structures (2D Fenwick / 2D segment tree) are named and deferred to their own chapters, never solved.
+Storyboards use inline V.grid/V.array/V.bars/V.flow/V.iso_grid draws; every sample output quoted is produced
+by a cell in this file or its registry problems and asserted against a brute force; where a CF statement is
+paraphrased the constraints come from the judge page.
+-->
+
+::: {.callout-note title="Sources"}
+**CP-Algorithms**: "Prefix sums" (the 1D table this chapter generalises) and the range-update / point-query difference trick · **CLRS** § 2.3 & the inclusion–exclusion count (the $2^d$ corner signs) · **CPH** ch. 10 (2D prefix sums as the static cousin of the 2D Fenwick tree, which is deferred) · the **CSES Problem Set** "Dynamic Range Queries" family (the difference-array problems this chapter extends to two dimensions) · Sibling chapters: @sec-pref (the 1D prefix sum and its difference-array inverse — read this first), @sec-ds (designing a small structure around a prefix), @sec-coord (compressing a big value domain so a prefix table fits in memory), and @sec-mo (offline reordering when the prefix idea stops being $O(1)$-per-query). Coverage: building a 2D prefix table for $O(1)$ sub-rectangle sums; the 2D difference array that inverts it; the same inclusion–exclusion in three (and $d$) dimensions; adding an arithmetic progression to a range with a second-order difference; prefix sums taken along the two diagonal families of a grid; and weighted sums where each element contributes $\text{count}\times\text{value}$.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Answer the sum of any axis-aligned sub-rectangle of a static grid in $O(1)$ after one $O(nm)$ build, using the four-corner inclusion–exclusion (@sec-nd-a1, @sec-nd-p1-rectsum).
+- Apply many **rectangle adds** in $O(1)$ each by writing to four corners of a **2D difference array** and running a single prefix to recover the values (@sec-nd-a2, @sec-nd-p2-rectadd).
+- Generalise the prefix to 3D and to $d$ dimensions, knowing the query touches $2^d$ corners with alternating signs (@sec-nd-a3, @sec-nd-p2-3dbox).
+- Add an **arithmetic progression** (a linear function of the index) to a range in $O(1)$ with a second-order difference array, and materialise the result with two scans (@sec-nd-a4, @sec-nd-p3-aprange).
+- Sum any contiguous run along a grid diagonal in $O(1)$ by precomputing prefixes along the $i-j$ and $i+j$ families (@sec-nd-a5, @sec-nd-p4-diag).
+- Recognise a **weighted / contribution** sum — "each element is counted a known number of times" — and turn it into one prefix-style pass, as in counting $g(x)=k$ over a range or a digit-position weight (@sec-nd-a6, @sec-nd-p1-rq, @sec-nd-p4-rybinsk).
+- Triage a statement into 1D prefix, 2D / $d$-dim prefix, difference array, Fenwick/2D-BIT (dynamic), or Mo/sqrt (offline) — and spot the matrix-tagged problems that are really DP or segment trees (@sec-nd-a6).
+:::
+
+```{python}
+#| include: false
+import bisect
+import heapq
+import math
+import random
+import sys
+from collections import Counter, defaultdict, deque
+from itertools import combinations
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-nd-why}
+
+::: {.callout-note title="In plain words"}
+A **prefix sum** turns "add up this slice" into "subtract two precomputed numbers." Chapter @sec-pref did it on a line: build $P[i] = a_0 + \dots + a_{i-1}$ once, then $\sum_{i=l}^{r} a_i = P[r+1] - P[l]$ in $O(1)$. This chapter asks what happens when the data is not a line. Paint the values on a grid and the same idea survives with one more term: build a table $P$ of running sums and read any **sub-rectangle** off its four corners. Run the trick in reverse and you get the **difference array** — instead of answering sums you *make* changes, and a whole batch of rectangle-adds collapses to four corner writes each. The machinery stretches cleanly to three dimensions and beyond ($2^d$ corners), and it bends to cover subtler shapes — diagonals of a grid, or an arithmetic progression sprinkled onto a range.
+:::
+
+Chapter @sec-pref gave you the 1D prefix sum and its inverse, the difference array. Those two tools answer an enormous fraction of "sum over a range" questions, but they assume the array is a **line** and the updates are **constant additions**. Real problems break both assumptions: images, game boards, spreadsheet ranges, and "sum over this box of the cube" all live in two or three dimensions, and "add $1,2,3,\dots$ to this range" or "add $5$ to every cell of this rectangle" are linear *changes*, not point updates. Every one of those is still a prefix sum — you just need the right shape of table and the right number of corners.
+
+The unifying move across the whole chapter is **inclusion–exclusion over precomputed partial sums**. Once you see that a 2D prefix query is "big block, minus two edges, plus the corner you subtracted twice," the 3D version (eight corners), the diagonal version, and the weighted/multiplicity version all fall out of the same picture. The decision of *which* table to build is the skill this chapter trains:
+
+| Statement hint | What it really is | Which section solves it |
+|---|---|---|
+| "static grid, many *sum of this rectangle* questions" | 2D prefix table, $O(1)$ per query | @sec-nd-a1, @sec-nd-p1 |
+| "apply many *add $v$ to this whole rectangle*, then read the grid" | 2D difference array (inverse of the prefix) | @sec-nd-a2, @sec-nd-p2 |
+| "3D array / cube, sum over a box" | $d$-dimensional prefix, $2^d$ corners | @sec-nd-a3, @sec-nd-p2 |
+| "add an arithmetic progression (or $a\cdot i+b$) to $[\ell,r]$, many times" | second-order difference; two final scans | @sec-nd-a4, @sec-nd-p3 |
+| "sum a run of cells along a diagonal; or count $x\in[\ell,r]$ with property $p$" | diagonal prefix families / value-domain prefix | @sec-nd-a5, @sec-nd-p1, @sec-nd-p4 |
+| "each element is counted a known number of times, or weighted by its position" | weighted / contribution sum | @sec-nd-a6, @sec-nd-p4 |
+
+::: {#fig-nd-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "q": (-4.9, 0.0, "a range / box /\ndiagonal to add up", "muted"),
+        "t": (-1.1, 0.0, "precompute a\npartial-sum table", "green"),
+        "c": (2.7, 0.7, "read $O(1)$ corners\n(+ / $-$ inclusion)", "indigo"),
+        "d": (2.7, -1.3, "difference array:\nwrite corners, scan once", "pink"),
+    }, [("q", "t", ""), ("t", "c", "queries"),
+        ("t", "d", "updates")], w=3.0, h=1.2)
+V.show(draw)
+```
+
+One table, two directions. Read it forward (cumulate the cells into a table of partial sums) to *answer* many range/box/diagonal sums in $O(1)$; read it backward (record changes in a difference array) to *apply* many range/rectangle changes in $O(1)$ each, then recover the values with a single scan.
+
+:::
+
+The lessons build the toolkit in six steps, then Part B turns each into a solved pattern:
+
+- **A1 — The 2D prefix sum.** Build $P$ once; any sub-rectangle is four corners (@sec-nd-a1).
+- **A2 — The 2D difference array.** Rectangle adds in $O(1)$; the exact inverse of A1 (@sec-nd-a2).
+- **A3 — Higher dimensions.** 3D prefix and the $2^d$-corner rule (@sec-nd-a3).
+- **A4 — Progressions on ranges.** A second-order difference adds a linear function to a range in $O(1)$ (@sec-nd-a4).
+- **A5 — Diagonal prefix sums.** Precompute along $i-j$ and $i+j$ for $O(1)$ diagonal runs (@sec-nd-a5).
+- **A6 — Weighted sums & triage.** Multiplicity/contribution sums, and choosing prefix vs difference vs BIT vs Mo (@sec-nd-a6).
+
+Part B runs four patterns: prefix sums in one and two dimensions (@sec-nd-p1), the 2D difference array and higher dimensions (@sec-nd-p2), higher-order differences for progressions on ranges (@sec-nd-p3), and diagonal & weighted prefix sums (@sec-nd-p4).
+
+## Part A — Lessons
+
+## A1. The 2D prefix sum {#sec-nd-a1}
+
+::: {.callout-note title="In plain words"}
+Lay the numbers out in an $n\times m$ grid. Build a table $P$ of size $(n{+}1)\times(m{+}1)$ where $P[i][j]$ is the sum of the rectangle from the top-left corner down to (but not including) row $i$, column $j$ — that is, all cells $(r,c)$ with $r < i$ and $c < j$. You fill it one cell at a time with $P[i{+}1][j{+}1] = P[i][j{+}1] + P[i{+}1][j] - P[i][j] + a[i][j]$: add the row above, add the column to the left, subtract the top-left overlap you counted twice, then drop in the current cell. Now the sum of *any* sub-rectangle with corners $(r_0,c_0)$ (inclusive) and $(r_1,c_1)$ (exclusive) is $P[r_1][c_1] - P[r_0][c_1] - P[r_1][c_0] + P[r_0][c_0]$. Take the big top-left block, remove the strip above and the strip to the left, and put back the corner you removed twice. Build in $O(nm)$, answer in $O(1)$.
+:::
+
+Here is the whole engine. Read the `rowsum` line as "everything to the left in this row, plus the block above" — that is $P[i][j{+}1] + \text{rowsum}$, the same recurrence in a form that avoids a temporary:
+
+```{python}
+def build_prefix2d(a):
+    """a: n rows of m ints. Return P of size (n+1)x(m+1) with P[i][j] the sum of the
+    rectangle of cells (r, c), r < i and c < j. Row 0 and column 0 are all zero."""
+    n = len(a)
+    m = len(a[0]) if n else 0
+    P = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n):
+        rowsum = 0
+        for j in range(m):
+            rowsum += a[i][j]                 # a[i][0] + ... + a[i][j]
+            P[i + 1][j + 1] = P[i][j + 1] + rowsum
+    return P
+
+
+def rect_sum(P, r0, c0, r1, c1):
+    """Sum of cells (r, c) with r0 <= r < r1 and c0 <= c < c1. 0-indexed, half-open."""
+    return P[r1][c1] - P[r0][c1] - P[r1][c0] + P[r0][c0]
+
+
+def rect_sum_brute(a, r0, c0, r1, c1):
+    return sum(a[i][j] for i in range(r0, r1) for j in range(c0, c1))
+
+
+a = [[1, 2, 3],
+     [4, 5, 6],
+     [7, 8, 9]]
+P = build_prefix2d(a)
+assert P[3][3] == 45                              # whole grid
+assert rect_sum(P, 1, 1, 3, 3) == 5 + 6 + 8 + 9   # bottom-right 2x2
+assert rect_sum(P, 0, 0, 1, 3) == 1 + 2 + 3       # top row
+```
+
+The recurrence is the whole idea; here it is checked against the $O(\text{area})$ brute force on hundreds of random grids and rectangles, exactly as Chapter @sec-pref stress-checked the 1D version:
+
+```{python}
+for _ in range(400):
+    n = random.randint(1, 8)
+    m = random.randint(1, 8)
+    a = [[random.randint(-9, 9) for _ in range(m)] for _ in range(n)]
+    P = build_prefix2d(a)
+    r0 = random.randrange(n); r1 = random.randrange(r0 + 1, n + 1)
+    c0 = random.randrange(m); c1 = random.randrange(c0 + 1, m + 1)
+    assert rect_sum(P, r0, c0, r1, c1) == rect_sum_brute(a, r0, c0, r1, c1)
+```
+
+::: {#fig-nd-a1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ga = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+gp = build_prefix2d(ga)
+cells = [[str(gp[i][j]) for j in range(4)] for i in range(4)]
+# colour the four query corners of rect_sum(P, 1, 1, 3, 3): +P[3][3], -P[1][3], -P[3][1], +P[1][1]
+colors = {(3, 3): "green", (1, 3): "pink", (3, 1): "pink", (1, 1): "indigo"}
+def draw(ax, p):
+    V.grid(ax, p, cells, x=0.0, y=0.0,
+           row_labels=["P[0]", "P[1]", "P[2]", "P[3]"],
+           col_labels=["0", "1", "2", "3"], colors=colors)
+V.show(draw)
+```
+
+The prefix table $P$ of $[[1,2,3],[4,5,6],[7,8,9]]$. To sum the bottom-right $2\times2$ block, read the green corner $P[3][3]=45$, subtract the two pink corners, and add back the indigo overlap: $45 - 6 - 12 + 1 = 28$.
+
+:::
+
+**Overflow, now.** A grid of $n\cdot m$ cells each up to $10^{9}$ has a total sum up to $10^{15}$ — comfortably past 32-bit. Keep $P$ and every corner expression in a 64-bit integer (`long long`). This is the first place a 1D habit of using `int` bites, and it recurs harder in @sec-nd-a6.
+
+## A2. The 2D difference array {#sec-nd-a2}
+
+::: {.callout-note title="In plain words"}
+The prefix sum *answers* range questions; the **difference array** *makes* range changes, and it is the prefix run backwards. On a line (@sec-pref) you add $v$ to every cell of $[\ell, r)$ by writing $D[\ell] \mathrel{+}= v$, $D[r] \mathrel{-}= v$ and taking one prefix sum at the end. On a grid the same idea opens a rectangle with **four** corner writes: to add $v$ to all cells $r_0 \le r < r_1$, $c_0 \le c < c_1$, set $D[r_0][c_0] \mathrel{+}= v$, $D[r_1][c_0] \mathrel{-}= v$, $D[r_0][c_1] \mathrel{-}= v$, $D[r_1][c_1] \mathrel{+}= v$. Do all your rectangle adds in $O(1)$ each, then run a single 2D prefix over $D$ and the actual grid values appear. Because a prefix undoes a difference, you already own both directions of the tool.
+:::
+
+Allocate $D$ one row and one column larger than the grid so the $r_1$ and $c_1$ boundary writes always land in range. Recovering the values is literally `build_prefix2d` from A1 applied to $D$:
+
+```{python}
+def apply_rect_diff(D, r0, c0, r1, c1, v):
+    """Add v to every cell (r, c) with r0 <= r < r1 and c0 <= c < c1.
+    D must be at least (r1+1) x (c1+1); O(1) per call."""
+    D[r0][c0] += v
+    D[r1][c0] -= v
+    D[r0][c1] -= v
+    D[r1][c1] += v
+
+
+def recover2d(D, n, m):
+    """The n x m value grid after all rectangle adds: a 2D prefix of the difference array."""
+    P = build_prefix2d(D)                 # D is (n+1) x (m+1); P is (n+2) x (m+2)
+    return [[P[i + 1][j + 1] for j in range(m)] for i in range(n)]
+
+
+def rectadd_brute(n, m, ops):
+    a = [[0] * m for _ in range(n)]
+    for (r0, c0, r1, c1, v) in ops:
+        for i in range(r0, r1):
+            for j in range(c0, c1):
+                a[i][j] += v
+    return a
+
+
+# one add of 5 to the middle 2x2 of a 4x4 grid
+D = [[0] * 5 for _ in range(5)]
+apply_rect_diff(D, 1, 1, 3, 3, 5)
+got = recover2d(D, 4, 4)
+assert got == rectadd_brute(4, 4, [(1, 1, 3, 3, 5)])
+assert got[0][0] == 0 and got[1][1] == 5 and got[2][2] == 5 and got[3][3] == 0
+```
+
+```{python}
+for _ in range(300):
+    n = random.randint(1, 7); m = random.randint(1, 7)
+    ops = []
+    for _ in range(random.randint(0, 8)):
+        r0 = random.randrange(n); r1 = random.randrange(r0 + 1, n + 1)
+        c0 = random.randrange(m); c1 = random.randrange(c0 + 1, m + 1)
+        ops.append((r0, c0, r1, c1, random.randint(-5, 5)))
+    D = [[0] * (m + 1) for _ in range(n + 1)]
+    for op in ops:
+        apply_rect_diff(D, *op)
+    assert recover2d(D, n, m) == rectadd_brute(n, m, ops)
+```
+
+::: {#fig-nd-a2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+dcells = [["5", "0", "-5", "0"],
+          ["0", "0", "0", "0"],
+          ["-5", "0", "5", "0"],
+          ["0", "0", "0", "0"]]
+dcolors = {(0, 0): "green", (0, 2): "pink", (2, 0): "pink", (2, 2): "green"}
+def draw(ax, p):
+    V.grid(ax, p, dcells, x=0.0, y=0.0,
+           row_labels=["r0", "", "r1", ""], col_labels=["c0", "", "c1", ""],
+           colors=dcolors)
+V.show(draw)
+```
+
+The difference array $D$ after one rectangle add $v=5$ to $[r_0, r_1)\times[c_0, c_1)$: only four cells change (the two $+$ corners green, the two $-$ corners pink). A single 2D prefix turns these four marks into a solid block of $5$s — that is A1 running in reverse.
+
+:::
+
+A2 and A1 are the same object seen twice: a grid *is* the difference array of its prefix, and a difference array *is* the prefix-inverse of a grid. Whenever a statement says "several range updates first, then read everything" the difference form wins on speed; whenever it says "read a range sum, many times" the prefix form wins. The next problem pair (@sec-nd-p2) makes that choice concrete.
+
+## A3. Higher dimensions {#sec-nd-a3}
+
+::: {.callout-note title="In plain words"}
+Nothing about the 2D trick is special to two axes. Fill a $d$-dimensional table so that each entry $P[\text{idx}]$ sums every cell weakly inside the box from the origin to idx; a query over that box is one signed term per corner, with sign $(-1)^{\text{number of lowered coordinates}}$. In 2D there are $2^2 = 4$ corners; in 3D there are $2^3 = 8$; generally a query or a cell update touches $2^d$ partial sums. The 3D build $P[i][j][k]$ follows the same "add the three faces, subtract the three edges, add the corner" inclusion–exclusion, and a box sum peels off the same eight terms. Grow $d$ and the bookkeeping doubles each dimension — so the technique is stated for 3D and the general rule, not pushed to exotic $d$.
+:::
+
+The eight-term 3D recurrence below is the 2D rowsum trick applied along the third axis. `box_sum` reuses the *same* inclusion–exclusion signs you just learned, one index lower on each coordinate:
+
+```{python}
+def build_prefix3d(a):
+    """a: n x m x k. P[i+1][j+1][t+1] = sum over r<=i, c<=j, s<=t. 8-term inclusion-exclusion."""
+    n = len(a); m = len(a[0]); k = len(a[0][0])
+    P = [[[0] * (k + 1) for _ in range(m + 1)] for _ in range(n + 1)]
+    for i in range(n):
+        for j in range(m):
+            for t in range(k):
+                P[i + 1][j + 1][t + 1] = (a[i][j][t]
+                    + P[i][j + 1][t + 1] + P[i + 1][j][t + 1] + P[i + 1][j + 1][t]
+                    - P[i][j][t + 1] - P[i][j + 1][t] - P[i + 1][j][t]
+                    + P[i][j][t])
+    return P
+
+
+def box_sum(P, i0, j0, k0, i1, j1, k1):
+    """Sum over [i0,i1) x [j0,j1) x [k0,k1). Eight corners, signs by parity of index lowered."""
+    return (P[i1][j1][k1] - P[i0][j1][k1] - P[i1][j0][k1] - P[i1][j1][k0]
+            + P[i0][j0][k1] + P[i0][j1][k0] + P[i1][j0][k0] - P[i0][j0][k0])
+
+
+def box_sum_brute(a, i0, j0, k0, i1, j1, k1):
+    return sum(a[i][j][t] for i in range(i0, i1) for j in range(j0, j1) for t in range(k0, k1))
+
+
+for _ in range(200):
+    n = random.randint(1, 4); m = random.randint(1, 4); k = random.randint(1, 4)
+    a = [[[random.randint(-5, 5) for _ in range(k)] for _ in range(m)] for _ in range(n)]
+    P = build_prefix3d(a)
+    i0 = random.randrange(n); i1 = random.randrange(i0 + 1, n + 1)
+    j0 = random.randrange(m); j1 = random.randrange(j0 + 1, m + 1)
+    k0 = random.randrange(k); k1 = random.randrange(k0 + 1, k + 1)
+    assert box_sum(P, i0, j0, k0, i1, j1, k1) == box_sum_brute(a, i0, j0, k0, i1, j1, k1)
+```
+
+::: {#fig-nd-a3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    vals = {(0, 0, 0): "1", (1, 0, 0): "2", (0, 1, 0): "3", (1, 1, 0): "4",
+            (0, 0, 1): "5", (1, 0, 1): "6", (0, 1, 1): "7", (1, 1, 1): "8"}
+    cols = {(1, 1, 1): "green", (0, 1, 1): "pink", (1, 0, 1): "pink", (1, 1, 0): "pink",
+            (0, 0, 1): "indigo", (0, 1, 0): "indigo", (1, 0, 0): "indigo", (0, 0, 0): "violet"}
+    V.iso_grid(ax, p, (2, 2, 2), x=0.0, y=0.0, values=vals, colors=cols,
+               layer_names=["k=0", "k=1"])
+V.show(draw)
+```
+
+A $2\times2\times2$ block: the far green corner is the full box, the three pink faces subtract the parts beyond each lower bound, the three indigo edges add back pairs, and the near violet corner subtracts the one counted thrice. Eight corners, alternating signs — the $2^3$ instance of the same picture as A1's four corners.
+
+:::
+
+The general rule to carry forward: a $d$-dimensional prefix query is a signed sum of $2^d$ stored partial sums, and a point update in the *difference* view writes $2^d$ corners. Everything else in this chapter is choosing the right axes (rows and columns in A1–A2, the index in A4, a diagonal coordinate in A5) to pour into that framework.
+
+## A4. Arithmetic progressions on ranges {#sec-nd-a4}
+
+::: {.callout-note title="In plain words"}
+A difference array handles adding a *constant* to a range in $O(1)$. What if the thing you add grows — an **arithmetic progression** $t, t+d, t+2d, \dots$ poured onto $[\ell, r]$? Look at the added value as a function of the position $i$: on the range it is $d\cdot i + (t - d\cdot \ell)$, a *linear function of the index*. A linear function becomes constant after **one** differencing, so keep two running difference arrays — one accumulating the coefficient of $i$, one the constant term — patch four boundary points per update in $O(1)$, and rebuild the array with two prefix scans at the end. Stated the other way, a second-order difference array (take the difference twice) turns "add a progression" into "add a constant." This is the $k$-th-order trick with $k=1$; a degree-$k$ polynomial range-add needs order $k{+}1$ and binomial weights, but the two-array linear form is what almost every contest problem actually asks for.
+:::
+
+Each update $(\ell, r, t, d)$ (0-indexed, inclusive) adds $t + (i-\ell)\,d$ to cell $i$; rewrite that as $(d)\cdot i + (t-\ell d)$ and split the coefficient and constant across two first-difference arrays:
+
+```{python}
+def ap_range_add_brute(n, ops):
+    a = [0] * n
+    for (l, r, t, d) in ops:
+        cur = t
+        for i in range(l, r + 1):
+            a[i] += cur
+            cur += d
+    return a
+
+
+def ap_range_add_fast(n, ops):
+    """ops: (l, r, t, d) 0-indexed inclusive; add t, t+d, t+2d, ... to a[l], a[l+1], ...
+    Each add(i) = d*i + (t - l*d): one diff array for the slope, one for the intercept."""
+    B = [0] * (n + 1)   # coefficient of i
+    C = [0] * (n + 1)   # constant term
+    for (l, r, t, d) in ops:
+        alpha = d
+        beta = t - l * d
+        B[l] += alpha; B[r + 1] -= alpha
+        C[l] += beta;  C[r + 1] -= beta
+    a = [0] * n
+    cb = cc = 0
+    for i in range(n):
+        cb += B[i]; cc += C[i]
+        a[i] = cb * i + cc
+    return a
+
+
+# add 3,5,7 to cells 1..3 of a length-6 array
+assert ap_range_add_fast(6, [(1, 3, 3, 2)]) == [0, 3, 5, 7, 0, 0]
+assert ap_range_add_fast(6, [(1, 3, 3, 2)]) == ap_range_add_brute(6, [(1, 3, 3, 2)])
+
+for _ in range(300):
+    n = random.randint(1, 12)
+    ops = []
+    for _ in range(random.randint(0, 6)):
+        l = random.randrange(n); r = random.randrange(l, n)
+        ops.append((l, r, random.randint(-4, 4), random.randint(-3, 3)))
+    assert ap_range_add_fast(n, ops) == ap_range_add_brute(n, ops)
+```
+
+::: {#fig-nd-a4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+prog = ap_range_add_fast(8, [(1, 5, 2, 3)])   # adds 2,5,8,11,14 to indices 1..5
+def draw(ax, p):
+    V.bars(ax, p, prog, x=0.0, y=0.0,
+           colors={i: "indigo" for i in range(1, 6)})
+    V.array(ax, p, prog, x=0.0, y=-4.6,
+            regions=[(1, 6, "indigo", "AP added on $[1,5]$")])
+V.show(draw)
+```
+
+The result of pouring one progression onto $[1,5]$: a straight ramp rises across exactly the updated cells. Two boundary writes to the slope array and two to the intercept array built the whole ramp; the two prefix scans on the right turned those four marks back into values.
+
+:::
+
+The cost is $O(1)$ per update and $O(n)$ to materialise once at the end — versus $O(\text{length})$ per update for the brute force. If the queries interleave *reads* of the running array with the AP adds, you no longer have the "all updates, then read" luxury; that dynamic mix is a Fenwick-tree question (@sec-ds), noted in the triage of A6.
+
+## A5. Diagonal prefix sums {#sec-nd-a5}
+
+::: {.callout-note title="In plain words"}
+Sometimes the "range" you must sum is not an axis-aligned rectangle but a **run of cells along a diagonal**. A grid has two diagonal families: the `\`-diagonals where $i - j$ is constant, and the `/`-diagonals where $i + j$ is constant. Number the cells of each diagonal in order and lay a plain 1D prefix sum along it — one list per diagonal, indexed by the family key ($i-j$, shifted non-negative, or $i+j$). Then any contiguous segment *within* one diagonal is a difference of two stored prefix entries, exactly the 1D trick of @sec-pref, just applied to a slanted slice of the array.
+:::
+
+Walk cells top-to-bottom so the order along each diagonal is well defined, bucket by the diagonal key, and run a 1D prefix inside every bucket:
+
+```{python}
+def build_diag_prefixes(a):
+    """Return (main, anti, Pmain, Panti). main[d] lists cells with i-j=d in increasing i;
+    anti[s] lists cells with i+j=s in increasing i. Pmain[d] / Panti[s] are the 1D prefix
+    sums (with a leading 0) of the values along that diagonal."""
+    n = len(a); m = len(a[0])
+    main = defaultdict(list); anti = defaultdict(list)
+    for i in range(n):
+        for j in range(m):
+            main[i - j].append((i, j, a[i][j]))
+            anti[i + j].append((i, j, a[i][j]))
+    Pmain = {}; Panti = {}
+    for d, cells in main.items():
+        ps = [0]
+        for _, _, v in cells:
+            ps.append(ps[-1] + v)
+        Pmain[d] = ps
+    for s, cells in anti.items():
+        ps = [0]
+        for _, _, v in cells:
+            ps.append(ps[-1] + v)
+        Panti[s] = ps
+    return main, anti, Pmain, Panti
+
+
+def diag_segment_sum(P, key, lo, hi):
+    """Sum positions lo..hi (inclusive, in bucket order) along one diagonal."""
+    return P[key][hi + 1] - P[key][lo]
+
+
+ga = [[1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9]]
+main, anti, Pmain, Panti = build_diag_prefixes(ga)
+# the main diagonal i-j=0 is [1,5,9]; the whole thing sums to 15
+assert diag_segment_sum(Pmain, 0, 0, 2) == 15
+assert diag_segment_sum(Pmain, 0, 1, 2) == 5 + 9      # a contiguous sub-run
+
+for _ in range(300):
+    n = random.randint(1, 6); m = random.randint(1, 6)
+    a = [[random.randint(-6, 6) for _ in range(m)] for _ in range(n)]
+    main, anti, Pmain, Panti = build_diag_prefixes(a)
+    d = random.choice(list(main.keys()))
+    cells = main[d]
+    lo = random.randrange(len(cells)); hi = random.randrange(lo, len(cells))
+    assert diag_segment_sum(Pmain, d, lo, hi) == sum(cells[t][2] for t in range(lo, hi + 1))
+```
+
+::: {#fig-nd-a5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+diag = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+cells = [[str(diag[i][j]) for j in range(3)] for i in range(3)]
+col = {(0, 0): "green", (1, 1): "green", (2, 2): "green",     # i-j=0
+       (0, 2): "indigo", (2, 0): "indigo"}                     # i+j=2 corner cells
+def draw(ax, p):
+    V.grid(ax, p, cells, x=0.0, y=0.0,
+           row_labels=["i=0", "i=1", "i=2"], col_labels=["j=0", "j=1", "j=2"],
+           colors=col)
+V.show(draw)
+```
+
+The `\`-diagonal $i-j=0$ (green, values $1,5,9$) and two cells of a `/`-diagonal $i+j$ (indigo) of the same grid. Prefix-sum each family once and a whole diagonal run — here $5+9$ — is a difference of two stored numbers, no loop over the run.
+
+:::
+
+Because every cell falls on exactly one diagonal of each family, the buckets together hold just the $O(nm)$ original cells, and filling them takes a single pass. Diagonal sums show up in grid-path and "bishop-like" counting problems; the real lesson is that "prefix" means "cumulative along whatever 1D line you are slicing," not only along rows.
+
+## A6. Weighted prefix sums & triage {#sec-nd-a6}
+
+::: {.callout-note title="In plain words"}
+The last shape is a **weighted** sum: instead of "what is in this range," you are asked to add up every element a known number of times, or scaled by a factor that depends on its position. Two tools cover most of it. First, **per-element multiplicity**: the sum of all contiguous sub-array totals equals $\sum_i a_i \cdot (i+1)(n-i)$, because element $i$ sits inside $(i+1)$ choices of left end and $(n-i)$ choices of right end — count how many times each cell is used, then one weighted pass. Second, **value-domain prefixing**: precompute a property for every candidate value and lay a prefix count along the value axis, so "how many $x\in[\ell,r]$ have $g(x)=k$" is one table lookup. Both are the prefix idea with a *weight* folded into the stored partial sum.
+:::
+
+The multiplicity identity in code, checked against the double-loop sum of every subarray:
+
+```{python}
+def sum_all_subarrays(a):
+    """Sum of sum(a[l..r]) over all 0-indexed l<=r: each a[i] counted (i+1)*(n-i) times."""
+    n = len(a)
+    return sum(a[i] * (i + 1) * (n - i) for i in range(n))
+
+
+def sum_all_subarrays_brute(a):
+    n = len(a)
+    s = 0
+    for i in range(n):
+        for j in range(i, n):
+            s += sum(a[i:j + 1])
+    return s
+
+
+assert sum_all_subarrays([1, 2, 3]) == 20     # [1]+[2]+[3]+[1,2]+[2,3]+[1,2,3]
+for _ in range(300):
+    a = [random.randint(-8, 8) for _ in range(random.randint(1, 10))]
+    assert sum_all_subarrays(a) == sum_all_subarrays_brute(a)
+```
+
+The multiplicity weight $(i+1)(n-i)$ grows like $n^2$, so with $a_i$ up to $10^{9}$ and $n$ up to $10^{5}$ the total can reach $\sim 10^{19}$ — past even $2^{63}$. This is the @sec-nd-pit overflow trap in its sharpest form: use 64-bit, and if the bound truly exceeds $9.2\times 10^{18}$, take the answer modulo a given number *inside* the accumulation.
+
+Now the triage that closes the chapter. When you read a statement, ask two questions: **are the values fixed or changing, and is the slice an axis-aligned box or a custom shape?**
+
+::: {#fig-nd-a6}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "root": (0.0, 2.6, "sum over ranges\nof a flat array/grid?", "muted"),
+        "static": (-4.2, 0.2, "fixed values,\nmany reads", "green"),
+        "updates": (0.0, 0.2, "many ADDS, read\nat the end", "indigo"),
+        "dynamic": (4.2, 0.2, "interleaved\nupdate + query", "violet"),
+        "pref": (-4.2, -2.4, "prefix table\n1D/2D/3D, diagonals\n(this ch.)", "green"),
+        "diff": (0.0, -2.4, "difference array\n1st / 2nd order\n(this ch.)", "indigo"),
+        "bit": (4.2, -2.4, "Fenwick / 2D BIT\n(online; @sec-ds)", "pink"),
+    }, [("root", "static", ""), ("root", "updates", ""), ("root", "dynamic", ""),
+        ("static", "pref", "O(1)/query"), ("updates", "diff", "O(1)/update"),
+        ("dynamic", "bit", "O(log^d n)")], w=3.1, h=1.3)
+V.show(draw)
+```
+
+The decision tree. Fixed values read many ways (line, box, diagonal, weighted) all want a **prefix** table; a batch of adds that you only read after wants a **difference** array; updates and queries *interleaved* online push you to a Fenwick/2D-BIT (@sec-ds), and a large offline batch whose answer needs a moving value-structure pushes to Mo (@sec-mo). Everything before that line is this chapter.
+
+:::
+
+- **Static, arbitrary-shape slice** (box, diagonal): precompute the right prefix table — A1, A3, A5.
+- **Batched constant/linear updates, one final read**: the difference array, first-order (A2) or second-order (A4).
+- **Count over a value domain**: precompute per value, then prefix along it — @sec-nd-p1-rq (CF 932B).
+- **Every subarray / every pair, weighted**: multiplicity counting, one weighted pass — @sec-nd-p4-rybinsk (CF 1195D2).
+- **Interleaved online updates**: not here — a Fenwick / 2D-BIT in @sec-ds.
+- **Offline batch, hard-to-decompose answer**: reorder and slide a window, @sec-mo.
+
+A caution for Part B: several famous "matrix" and "sum" problems are *not* prefix-sum problems. CF 718C "Sasha and Array" and CF 1252K "Addition Robot" carry a `matrices` tag but are solved by a segment tree with matrix exponentiation; CF 844B "Rectangles" is a probability expectation; CF 1648A "Weird Sum" is a separable-axis *contribution* count already solved in another chapter. They look at home in this family and are cited as practice, never as worked examples.
+
+
+## Part B — Patterns
+
+Part B turns the six lessons into four worked patterns. Each opens with the signal that calls it up and a template box, then solves two problems — a judge problem where one exists, and a self-authored task that isolates the move. Every solution is checked against a brute force and a random stress.
+
+## P1. Prefix sums, one and two dimensions {#sec-nd-p1}
+
+**Where we are.** The 1D prefix sum is the seed of the whole chapter: one table, $O(1)$ per range question. The first problem keeps the *shape* of a 1D array but moves the axis to the **value domain** — you prefix-sum over "which $x$ have this property" rather than over positions. The second lifts the table into a genuine grid.
+
+**Recognise it.** A fixed data set, many "add up this range/box" questions, and $n\cdot m$ small enough to precompute once but the query count large enough that $O(\text{area})$ per query is too slow.
+
+::: {.callout-important title="Template"}
+Build `P` once with `P[i+1][j+1] = P[i][j+1] + rowsum` (@sec-nd-a1); answer a half-open rectangle $[r_0,r_1)\times[c_0,c_1)$ with `rect_sum = P[r1][c1] - P[r0][c1] - P[r1][c0] + P[r0][c0]`. On a value domain, sort/bucket by the property and prefix the counts, then a range count is two table reads (@sec-nd-a6). Build $O(nm)$, query $O(1)$; keep the table in 64-bit.
+:::
+
+{{< include ../problems/cf-932b-recursive-queries/problem.qmd >}}
+
+[**From counting values on a line to summing a grid.** *Recursive Queries* prefixes along a single (value) axis and reads a range with one subtraction. Put the data on two axes and the identical move needs the four-corner inclusion–exclusion instead of two table reads — that is the sub-rectangle problem below.]{.flow-bridge}
+
+### Problem: Static Sub-Rectangle Sums {#sec-nd-p1-rectsum}
+
+::: {.p-statement}
+A grid of $n$ rows and $m$ columns of integers ($1 \le n, m \le 10^{3}$, $|a_{ij}| \le 10^{9}$) is given once, then $q$ questions ($1 \le q \le 2\cdot 10^{5}$). Each question names two opposite corners of an axis-aligned sub-rectangle and asks for the sum of the cells inside it. Answer every question.
+
+Source: *self-authored* — designed to exercise @sec-nd-a1 in isolation; validated against an $O(\text{area})$ brute force and a random stress (no judge link).
+
+Example — on $[[1,2,3],[4,5,6],[7,8,9]]$ the whole grid sums to $45$, the bottom-right $2\times2$ to $28$, and the top row to $6$.
+:::
+
+::: {.p-intuition}
+Everything is fixed, so pay one $O(nm)$ cost up front to build the 2D prefix table $P$, then every rectangle is the four-corner inclusion–exclusion of @sec-nd-a1 — $O(1)$, independent of how big the rectangle is. A million-area query costs the same as a single cell.
+:::
+
+::: {.p-approach}
+1. **Per query, walk the cells.** Sum the rectangle directly. $O(q\cdot nm)$ up to $2\cdot 10^{11}$ — reference only.
+2. **Prefix once, query in four reads.** Build `P = build_prefix2d(a)`, answer each question with `rect_sum`. $O(nm + q)$.
+
+**Invariant.** `rect_sum(P, r0, c0, r1, c1)` equals $\sum_{r_0 \le r < r_1 \atop c_0 \le c < c_1} a[r][c]$ by the inclusion–exclusion proved in @sec-nd-a1.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Sum the cells of each rectangle
+
+::: {.form-next}
+Loop over the rectangle for every query. $O(\text{area})$ per question; the oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def rectsum_brute(a, queries):
+    return [sum(a[i][j] for i in range(r0, r1) for j in range(c0, c1))
+            for (r0, c0, r1, c1) in queries]
+
+
+assert rectsum_brute([[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+                     [(0, 0, 3, 3), (1, 1, 3, 3), (0, 0, 1, 3)]) == [45, 28, 6]
+```
+
+##### C++
+
+```cpp
+// brute force: for each query sum the cells of [r0,r1) x [c0,c1) (fragment, needs <bits/stdc++.h>)
+long long rectsum_brute(const vector<vector<long long> >& a,
+                        const vector<array<int, 4> >& qs) {
+    long long total = 0;
+    for (size_t qi = 0; qi < qs.size(); ++qi) {
+        int r0 = qs[qi][0], c0 = qs[qi][1], r1 = qs[qi][2], c1 = qs[qi][3];
+        for (int i = r0; i < r1; ++i)
+            for (int j = c0; j < c1; ++j)
+                total += a[i][j];
+    }
+    return total;
+}
+```
+:::
+
+#### Build the 2D prefix table once
+
+::: {.form-next}
+One $O(nm)$ build, then each query is four table reads. Reuses `build_prefix2d` / `rect_sum` from @sec-nd-a1.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    _a = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+    _P = build_prefix2d(_a)
+    V.grid(ax, p, [[str(_P[i][j]) for j in range(4)] for i in range(4)], x=0.0, y=0.0,
+           row_labels=["P0", "P1", "P2", "P3"], col_labels=["0", "1", "2", "3"],
+           colors={(2, 2): "green", (0, 2): "pink", (2, 0): "pink", (0, 0): "indigo"})
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-nd-p1-rectsum-sol
+def rectsum_solve(a, queries):
+    P = build_prefix2d(a)
+    return [rect_sum(P, r0, c0, r1, c1) for (r0, c0, r1, c1) in queries]
+
+
+assert rectsum_solve([[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+                     [(0, 0, 3, 3), (1, 1, 3, 3), (0, 0, 1, 3)]) == [45, 28, 6]
+for _ in range(300):
+    n = random.randint(1, 8); m = random.randint(1, 8)
+    a = [[random.randint(-9, 9) for _ in range(m)] for _ in range(n)]
+    qs = []
+    for _ in range(5):
+        r0 = random.randrange(n); r1 = random.randrange(r0 + 1, n + 1)
+        c0 = random.randrange(m); c1 = random.randrange(c0 + 1, m + 1)
+        qs.append((r0, c0, r1, c1))
+    assert rectsum_solve(a, qs) == rectsum_brute(a, qs)
+```
+
+##### C++
+
+```cpp
+// 2D prefix sums for static sub-rectangle sum queries, full program (reads stdin)
+// input: n m; grid; q; then q lines "r1 c1 r2 c2" (1-indexed, inclusive) -> one sum per line
+int main() {
+    ios::sync_with_stdio(false);
+    int n, m;
+    if (!(cin >> n >> m)) return 0;
+    vector<vector<long long> > P(n + 1, vector<long long>(m + 1, 0));
+    for (int i = 1; i <= n; ++i) {
+        long long rowsum = 0;
+        for (int j = 1; j <= m; ++j) {
+            long long x; cin >> x;
+            rowsum += x;
+            P[i][j] = P[i - 1][j] + rowsum;
+        }
+    }
+    int q; cin >> q;
+    while (q--) {
+        int r1, c1, r2, c2;
+        cin >> r1 >> c1 >> r2 >> c2;
+        long long ans = P[r2][c2] - P[r1 - 1][c2] - P[r2][c1 - 1] + P[r1 - 1][c1 - 1];
+        cout << ans << "\n";
+    }
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** `P[i][j]` in the C++ is 1-indexed, so the input corners $r_1 \le r_2$, $c_1 \le c_2$ feed the four reads directly with $r_1{-}1$ and $c_1{-}1$ as the upper/left cut-offs — the exact half-open form `rect_sum` uses in Python. Building row-by-row with a running `rowsum` keeps the recurrence to one previous row read plus a scalar.
+:::
+
+::: {.p-complexity}
+**Walk-the-cells:** $O(q\cdot nm)$ up to $2\cdot 10^{11}$ — reference. **Prefix table:** $O(nm)$ build ($10^{6}$) plus $O(1)$ per query, $O(nm + q)$ total; space $O(nm)$. Values reach $nm\cdot10^{9}\approx10^{15}$: 64-bit throughout.
+:::
+
+::: {.p-edge}
+- A query naming the corner $(1,1)$: $r_1{-}1 = 0$ reads $P[0][\cdot] = 0$ — allocate the extra row/column and the inclusion–exclusion never goes out of bounds.
+- Single-cell query: the four reads collapse to $a[r][c]$.
+- Negative values: harmless, the sum is linear; only the *overflow* bound matters.
+- $n$ or $m$ up to $10^{3}$: the $O(nm)$ table is $10^{6}$ cells — fine; a $10^{4}\times10^{4}$ grid would not be, and you would want @sec-coord or a different formulation.
+:::
+
+::: {.practice}
+- [CF 1598E · Staircases](https://codeforces.com/problemset/problem/1598/E){rating="2100"} — counting shapes on a grid; a per-cell precompute cousin (its own solve is a DP with flips)
+- [CF 1648A · Weird Sum](https://codeforces.com/problemset/problem/1648/A){rating="1400"} — sum over a grid by separable axis; solved in another chapter
+:::
+
+## P2. The 2D difference array and higher dimensions {#sec-nd-p2}
+
+**From *reading* ranges to *writing* them.** P1 assumed the grid never changes. The moment the workload is "make a pile of rectangle edits, *then* look at the result," the prefix turns inside out into a **difference array** — four corner writes per edit instead of touching every cell. Push the same duality into three dimensions and a box query is eight corners.
+
+**Recognise it.** Many range/rectangle **adds** with reads deferred to the end (difference form), or a genuinely 3D array summed over boxes ($2^3$ prefix corners).
+
+::: {.callout-important title="Template"}
+Rectangle add $v$ to $[r_0,r_1)\times[c_0,c_1)$: `D[r0][c0]+=v; D[r1][c0]-=v; D[r0][c1]-=v; D[r1][c1]+=v`, allocate `D` padded by one, and run one 2D prefix (`recover2d`) to read values (@sec-nd-a2). In $d$ dimensions a point/corner touches $2^d$ entries; a $d$-dim box query is the $2^d$ signed sum of a $d$-dim prefix table (@sec-nd-a3).
+:::
+
+### Problem: Many Rectangle Paints {#sec-nd-p2-rectadd}
+
+::: {.p-statement}
+Start with an $n\times m$ grid of zeros ($1 \le n, m \le 10^{3}$). Apply $k$ operations ($1 \le k \le 2\cdot 10^{5}$), each adding an integer $v$ ($|v| \le 10^{6}$) to every cell of a named axis-aligned rectangle. After all operations, output the whole grid.
+
+Source: *self-authored* — designed to exercise @sec-nd-a2; validated against a per-cell brute force and a random stress (no judge link).
+
+Example — add $5$ to the middle $2\times2$ of a $4\times4$ grid: cells $(1,1),(1,2),(2,1),(2,2)$ (0-indexed) become $5$, everything else stays $0$.
+:::
+
+::: {.p-intuition}
+Touching every cell of every rectangle is $O(\text{area})$ and too slow ($2\cdot10^{5}\cdot10^{6}$). But the *result* grid is a 2D prefix of a **difference** grid, so each rectangle add is four corner writes in $O(1)$, and one final $O(nm)$ prefix materialises everything. It is the prefix of @sec-nd-a1 run in reverse.
+:::
+
+::: {.p-approach}
+1. **Per operation, paint the cells.** Apply each add directly. $O(\sum \text{area})$ — reference.
+2. **Corner writes, one scan.** For each op do `apply_rect_diff`, then `recover2d` once. $O(k + nm)$.
+
+**Invariant.** After processing the operations, the 2D prefix of `D` at cell $(i,j)$ equals the sum of $v$ over every operation whose rectangle covers $(i,j)$ — by the four-corner cancellation of @sec-nd-a2.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Paint every covered cell
+
+::: {.form-next}
+For each operation loop over its rectangle and add $v$. $O(\text{area})$ per op; the oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def rectpaint_brute(n, m, ops):
+    a = [[0] * m for _ in range(n)]
+    for (r0, c0, r1, c1, v) in ops:
+        for i in range(r0, r1):
+            for j in range(c0, c1):
+                a[i][j] += v
+    return a
+
+
+assert rectpaint_brute(4, 4, [(1, 1, 3, 3, 5)])[2][2] == 5
+assert rectpaint_brute(4, 4, [(1, 1, 3, 3, 5)])[3][3] == 0
+```
+
+##### C++
+
+```cpp
+// brute force: apply each rectangle add cell by cell (fragment, needs <bits/stdc++.h>)
+void rectpaint_brute(int n, int m, const vector<array<long long, 5> >& ops,
+                     vector<vector<long long> >& a) {
+    for (size_t t = 0; t < ops.size(); ++t) {
+        int r0 = ops[t][0], c0 = ops[t][1], r1 = ops[t][2], c1 = ops[t][3];
+        long long v = ops[t][4];
+        for (int i = r0; i < r1; ++i)
+            for (int j = c0; j < c1; ++j)
+                a[i][j] += v;
+    }
+}
+```
+:::
+
+#### Write four corners, scan once
+
+::: {.form-next}
+Each add becomes four writes into a padded difference array `D`; one 2D prefix (`recover2d`, reusing @sec-nd-a1's builder) produces the grid. $O(k + nm)$.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-nd-p2-rectadd-sol
+def rectpaint(n, m, ops):
+    D = [[0] * (m + 1) for _ in range(n + 1)]
+    for op in ops:
+        apply_rect_diff(D, *op)
+    return recover2d(D, n, m)
+
+
+assert rectpaint(4, 4, [(1, 1, 3, 3, 5)]) == rectpaint_brute(4, 4, [(1, 1, 3, 3, 5)])
+for _ in range(300):
+    n = random.randint(1, 7); m = random.randint(1, 7)
+    ops = []
+    for _ in range(random.randint(0, 8)):
+        r0 = random.randrange(n); r1 = random.randrange(r0 + 1, n + 1)
+        c0 = random.randrange(m); c1 = random.randrange(c0 + 1, m + 1)
+        ops.append((r0, c0, r1, c1, random.randint(-5, 5)))
+    assert rectpaint(n, m, ops) == rectpaint_brute(n, m, ops)
+```
+
+##### C++
+
+```cpp
+// 2D difference array for batched rectangle adds, full program (reads stdin)
+// input: n m k; then k lines "r1 c1 r2 c2 v" (1-indexed, inclusive); prints the n x m grid
+int main() {
+    ios::sync_with_stdio(false);
+    int n, m, k;
+    if (!(cin >> n >> m >> k)) return 0;
+    vector<vector<long long> > D(n + 1, vector<long long>(m + 1, 0));
+    while (k--) {
+        int r1, c1, r2, c2; long long v;
+        cin >> r1 >> c1 >> r2 >> c2 >> v;
+        D[r1 - 1][c1 - 1] += v;
+        D[r2][c1 - 1]     -= v;
+        D[r1 - 1][c2]     -= v;
+        D[r2][c2]         += v;
+    }
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < m; ++j) {
+            long long up = i ? D[i - 1][j] : 0;
+            long long lf = j ? D[i][j - 1] : 0;
+            long long dg = (i && j) ? D[i - 1][j - 1] : 0;
+            D[i][j] = D[i][j] + up + lf - dg;      // in-place 2D prefix
+        }
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < m; ++j) { if (j) cout << ' '; cout << D[i][j]; }
+        cout << "\n";
+    }
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** The four writes use the *exclusive* far corner $r_2, c_2$ (already past the rectangle), which is why `D` is padded to $n{+}1 \times m{+}1$: a rectangle reaching the last row still has a valid $r_2 = n$ slot. The in-place prefix then turns those four marks into a solid block. Note the C++ reuses `D` to hold both the difference and, after the scan, the values — the difference form and the value form never coexist, so one array suffices.
+:::
+
+::: {.p-complexity}
+**Paint cells:** $O(\sum \text{area})$ up to $2\cdot 10^{11}$ — reference. **Difference array:** $O(k)$ writes + $O(nm)$ to recover $= O(k + nm)$; space $O(nm)$.
+:::
+
+::: {.p-edge}
+- Rectangle touching the last row/column: the $r_2$/$c_2$ boundary writes need the padded $(n{+}1)\times(m{+}1)$ array, or you index out of range (the @sec-nd-pit "forgot to pad" trap).
+- Overlapping adds: they superpose, since differencing is linear — order is irrelevant.
+- $v$ negative / zero: fine, the prefix is a plain sum.
+:::
+
+::: {.practice}
+- [CF 1598E · Staircases](https://codeforces.com/problemset/problem/1598/E){rating="2100"} — grid cells toggled by updates; contrast the online flips with this offline "all writes, then read"
+- [SPOJ MATSUM · Matrix Summation](https://www.spoj.com/problems/MATSUM/) — the *dynamic* version (interleaved point updates and rectangle sums): a 2D Fenwick tree, the @sec-nd-a6 deferral
+:::
+
+[**From two axes to three.** Rectangle paints live on a plane; the same inclusion–exclusion stacks a third axis, where a corner touches $2^3 = 8$ partial sums instead of four — the box-query problem below is @sec-nd-a3 turned into a program.]{.flow-bridge}
+
+### Problem: Cube Box Sums {#sec-nd-p2-3dbox}
+
+::: {.p-statement}
+An $n\times m\times k$ array of integers ($1 \le n, m, k \le 40$, $|a|\le 10^{6}$) is fixed, then $q$ questions ($1\le q\le 10^{5}$) each name a sub-box by two opposite corners and ask for the sum of its cells. Answer every question.
+
+Source: *self-authored* — designed to exercise @sec-nd-a3; validated against a triple-loop brute force and a random stress (no judge link).
+
+Example — in a $2\times2\times2$ cube of $1..8$, the whole box sums to $36$.
+:::
+
+::: {.p-intuition}
+Nothing new is needed — the 2D prefix generalises verbatim. Build the 3D table $P$ so $P[i{+}1][j{+}1][t{+}1]$ is the running box from the origin; a query peels off $2^3 = 8$ corners with alternating signs. Small dimensions keep the $O(nmk)$ build and the 8 reads trivially fast.
+:::
+
+::: {.p-approach}
+1. **Per query, triple loop.** $O(q\cdot nmk)$ — reference.
+2. **3D prefix, eight reads.** `build_prefix3d` once, then `box_sum` per query. $O(nmk + q)$.
+
+**Invariant.** `box_sum` is the inclusion–exclusion over $2^3$ partial sums established in @sec-nd-a3.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Add the box cell by cell
+
+::: {.form-next}
+Triple-nested loop over the box for each query. The oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def boxsum_brute(a, i0, j0, k0, i1, j1, k1):
+    return sum(a[i][j][t] for i in range(i0, i1) for j in range(j0, j1) for t in range(k0, k1))
+
+
+cube = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]     # a[0..1][0..1][0..1]
+assert boxsum_brute(cube, 0, 0, 0, 2, 2, 2) == 36
+```
+
+##### C++
+
+```cpp
+// brute force: one box = triple loop (fragment, needs <bits/stdc++.h>)
+long long boxsum_brute(const vector<vector<vector<long long> > >& a,
+                       int i0, int j0, int k0, int i1, int j1, int k1) {
+    long long s = 0;
+    for (int i = i0; i < i1; ++i)
+        for (int j = j0; j < j1; ++j)
+            for (int t = k0; t < k1; ++t) s += a[i][j][t];
+    return s;
+}
+```
+:::
+
+#### 3D prefix, eight corner reads
+
+::: {.form-next}
+Build `P = build_prefix3d(a)`, answer each box with `box_sum` — the $2^3$ signed reads of @sec-nd-a3.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-nd-p2-3dbox-sol
+def boxsum_solve(a, queries):
+    P = build_prefix3d(a)
+    return [box_sum(P, *qr) for qr in queries]
+
+
+cube = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+assert boxsum_solve(cube, [(0, 0, 0, 2, 2, 2)]) == [36]
+for _ in range(120):
+    n = random.randint(1, 4); m = random.randint(1, 4); k = random.randint(1, 4)
+    a = [[[random.randint(-5, 5) for _ in range(k)] for _ in range(m)] for _ in range(n)]
+    qs = []
+    for _ in range(4):
+        i0 = random.randrange(n); i1 = random.randrange(i0 + 1, n + 1)
+        j0 = random.randrange(m); j1 = random.randrange(j0 + 1, m + 1)
+        k0 = random.randrange(k); k1 = random.randrange(k0 + 1, k + 1)
+        qs.append((i0, j0, k0, i1, j1, k1))
+    assert boxsum_solve(a, qs) == [boxsum_brute(a, *qr) for qr in qs]
+```
+
+##### C++
+
+```cpp
+// 3D prefix sums for box queries, full program (reads stdin)
+// input: n m k; the n*m*k values in i,j,t order; q; then q lines "i1 j1 k1 i2 j2 k2"
+// (1-indexed inclusive corners) -> one box sum per line
+long long P3[41][41][41];
+int main() {
+    ios::sync_with_stdio(false);
+    int n, m, k;
+    if (!(cin >> n >> m >> k)) return 0;
+    for (int i = 0; i <= n; ++i)
+        for (int j = 0; j <= m; ++j)
+            for (int t = 0; t <= k; ++t) P3[i][j][t] = 0;
+    for (int i = 1; i <= n; ++i)
+        for (int j = 1; j <= m; ++j)
+            for (int t = 1; t <= k; ++t) {
+                long long x; cin >> x;
+                P3[i][j][t] = x + P3[i - 1][j][t] + P3[i][j - 1][t] + P3[i][j][t - 1]
+                            - P3[i - 1][j - 1][t] - P3[i - 1][j][t - 1] - P3[i][j - 1][t - 1]
+                            + P3[i - 1][j - 1][t - 1];
+            }
+    int q; cin >> q;
+    while (q--) {
+        int i1, j1, k1, i2, j2, k2;
+        cin >> i1 >> j1 >> k1 >> i2 >> j2 >> k2;
+        long long ans = P3[i2][j2][k2] - P3[i1 - 1][j2][k2] - P3[i2][j1 - 1][k2] - P3[i2][j2][k1 - 1]
+                      + P3[i1 - 1][j1 - 1][k2] + P3[i1 - 1][j2][k1 - 1] + P3[i2][j1 - 1][k1 - 1]
+                      - P3[i1 - 1][j1 - 1][k1 - 1];
+        cout << ans << "\n";
+    }
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** The recurrence fills $P[i][j][t]$ from the three faces that meet one step back on each axis, minus the three edges (double-counted), plus the single origin corner (triple-removed). The query line is the identical eight-term pattern evaluated at the two opposite corners — the "lower" index replaced by $i_1{-}1$, etc. The sign of each term is $(-1)^{\text{how many indices are lowered}}$, the $2^3$ instance of @sec-nd-a3.
+:::
+
+::: {.p-complexity}
+**Triple loop:** $O(q\cdot nmk)$ — reference. **3D prefix:** $O(nmk)$ build ($40^3 = 6.4\cdot10^{4}$) + $O(1)$ (eight reads) per query $= O(nmk + q)$; space $O(nmk)$.
+:::
+
+::: {.p-edge}
+- Getting a corner's sign backwards: a term with an odd number of lowered indices is subtracted, an even number added — mirror the recurrence, don't memorise the string of signs.
+- A box flush with index $1$: lowered to $0$ reads the zero shell $P[0][\cdot][\cdot]$, which the build leaves at $0$.
+- Dimensions up to $40$: fine; the build's innermost arithmetic stays in 64-bit since a box sum reaches $40^3\cdot10^{6}\approx6\cdot10^{7}$ per cell but partial sums stay well inside `long long`.
+:::
+
+::: {.practice}
+- [CF 1648A · Weird Sum](https://codeforces.com/problemset/problem/1648/A){rating="1400"} — separable-axis grid sums (solved in another chapter): a different route to "big grid, many sum questions"
+- [CF 844B · Rectangles](https://codeforces.com/problemset/problem/844/B){rating="1300"} — per-element contribution on a matrix (probability, not a prefix) — @sec-nd-a6 caution
+:::
+
+## P3. Higher-order differences: progressions and affine range adds {#sec-nd-p3}
+
+**From constants to slopes.** A2 added a *constant* to a range with one difference array; A4 showed that when the value poured onto the range *grows linearly* a second difference array absorbs the slope. P3 works that idea twice over. The first problem adds an **arithmetic progression** to a range in $O(1)$ and materialises once. The second composes the chapter's two dual views: many **affine range adds** (the difference form) followed by many **range-sum reads** (the prefix form), resolved in a single linear pass.
+
+**Recognise it.** Operations of the shape "add $t, t+d, t+2d, \dots$ to $[\ell,r]$" (a progression), or "add $\alpha i + \beta$ to $[\ell,r]$" (a line in the index), with every read deferred to the end — or range adds that are linear in the index combined with a batch of range-sum queries.
+
+::: {.callout-important title="Template"}
+Rewrite the per-cell add as $\text{val}(i) = \alpha i + \beta$. Keep two first-difference arrays, $B$ for the coefficient of $i$ and $C$ for the constant term, make four $O(1)$ boundary writes per update ($+\,$ at $\ell$, $-\,$ at $r{+}1$ on each), and rebuild with one scan that carries two running sums: `cb`, `cc`, then `a[i] = cb*i + cc` (@sec-nd-a4). To answer range sums afterwards, lay one more 1D prefix over `a` (@sec-nd-a1's one-dimensional ancestor). $O(1)$ per update, $O(n)$ per full materialisation; keep everything in 64-bit.
+:::
+
+### Problem: Progression Range Adds {#sec-nd-p3-aprange}
+
+::: {.p-statement}
+An array of $n$ zeros ($1 \le n \le 2\cdot 10^{5}$) receives $k$ operations ($1 \le k \le 2\cdot 10^{5}$). Operation $(\ell, r, t, d)$ with $0 \le \ell \le r < n$ and $|t|, |d| \le 10^{6}$ adds the arithmetic progression $t, t+d, t+2d, \dots$ to cells $\ell, \ell+1, \dots, r$ — cell $i$ gains $t + (i-\ell)\,d$. Output the final array.
+
+Source: *self-authored* — designed to exercise @sec-nd-a4; validated against a per-cell brute force and a random stress (no judge link).
+
+Example — length $6$ with one operation $(1,3,3,2)$ adds $3,5,7$ to cells $1,2,3$ and yields $[0,3,5,7,0,0]$.
+:::
+
+::: {.p-intuition}
+Pouring each progression cell by cell is $O(\text{length})$ per operation and too slow ($4\cdot 10^{10}$). But what cell $i$ receives, $t + (i-\ell)d = d\cdot i + (t - \ell d)$, is *linear in $i$*. A linear function becomes constant after a single differencing, so two running difference arrays — one accumulating the slope $d$, one the intercept $t - \ell d$ — turn every progression add into four $O(1)$ writes, recovered by one paired scan.
+:::
+
+::: {.p-approach}
+1. **Pour each progression cell by cell.** $O(\sum \text{length})$ up to $4\cdot 10^{10}$ — reference.
+2. **Two difference arrays, one scan.** Per op write $B[\ell]{+}{=}d$, $B[r{+}1]{-}{=}d$, $C[\ell]{+}{=}t{-}\ell d$, $C[r{+}1]{-}{=}t{-}\ell d$; rebuild with running `cb, cc`. Reuses `ap_range_add_fast` from @sec-nd-a4. $O(n + k)$.
+
+**Invariant.** After the scan, `cb` $= \sum_{\text{ops covering } i} d$ and `cc` $= \sum_{\text{ops covering } i} (t - \ell d)$, so `cb*i + cc` equals the total the progressions add to cell $i$ (@sec-nd-a4).
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Pour the progression cell by cell
+
+::: {.form-next}
+Apply every operation across its range, stepping a running value by $d$. $O(\text{length})$ per op; the oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+# oracle reference: ap_range_add_brute (from @sec-nd-a4) pours each progression cell by cell
+assert ap_range_add_brute(6, [(1, 3, 3, 2)]) == [0, 3, 5, 7, 0, 0]
+```
+
+##### C++
+
+```cpp
+// brute force: pour each arithmetic progression cell by cell (fragment, needs <bits/stdc++.h>)
+vector<long long> aprange_brute(int n, const vector<array<long long, 4> >& ops) {
+    vector<long long> a(n, 0);
+    for (size_t t = 0; t < ops.size(); ++t) {
+        int l = ops[t][0], r = ops[t][1];
+        long long cur = ops[t][2], d = ops[t][3];
+        for (int i = l; i <= r; ++i) { a[i] += cur; cur += d; }
+    }
+    return a;
+}
+```
+:::
+
+#### Two difference arrays, one scan
+
+::: {.form-next}
+Split each add into slope $d$ and intercept $t-\ell d$, write four $O(1)$ boundary marks, rebuild in one paired scan. $O(n+k)$; `ap_range_add_fast` from @sec-nd-a4 is exactly this solve.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-nd-p3-aprange-sol
+def aprange_solve(n, ops):
+    return ap_range_add_fast(n, ops)          # the two-array difference of @sec-nd-a4
+
+
+assert aprange_solve(6, [(1, 3, 3, 2)]) == [0, 3, 5, 7, 0, 0]
+for _ in range(300):
+    n = random.randint(1, 12)
+    ops = []
+    for _ in range(random.randint(0, 6)):
+        l = random.randrange(n); r = random.randrange(l, n)
+        ops.append((l, r, random.randint(-4, 4), random.randint(-3, 3)))
+    assert aprange_solve(n, ops) == ap_range_add_brute(n, ops)
+```
+
+##### C++
+
+```cpp
+// two-array (second-order) difference for AP range adds, full program (reads stdin)
+// input: n k; then k lines "l r t d" (1-indexed inclusive) -> prints the final array
+int main() {
+    ios::sync_with_stdio(false);
+    int n, k;
+    if (!(cin >> n >> k)) return 0;
+    vector<long long> B(n + 2, 0), C(n + 2, 0);
+    while (k--) {
+        long long l, r, t, d;
+        cin >> l >> r >> t >> d;
+        --l; --r;                              // to 0-indexed
+        long long alpha = d, beta = t - l * d;
+        B[l] += alpha; B[r + 1] -= alpha;
+        C[l] += beta;  C[r + 1] -= beta;
+    }
+    long long cb = 0, cc = 0;
+    for (int i = 0; i < n; ++i) {
+        cb += B[i]; cc += C[i];
+        if (i) cout << ' ';
+        cout << cb * i + cc;
+    }
+    cout << "\n";
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** The Python and C++ both turn the progression $(\ell,r,t,d)$ into the *absolute* line $\text{val}(i)=d\cdot i + (t-\ell d)$: the slope $d$ goes into $B$ and the intercept $t-\ell d$ into $C$, each patched at $\ell$ and $r{+}1$. The single rebuild scan advances `cb` and `cc` together and evaluates `cb*i + cc` — one pass over four arrays' worth of marks, which is why the update itself stayed $O(1)$. Note $B,C$ are sized $n{+}2$ so the $r{+}1$ write when $r=n-1$ still lands in bounds.
+:::
+
+::: {.p-complexity}
+**Pour cells:** $O(\sum \text{length})$ up to $4\cdot 10^{10}$ — reference. **Difference arrays:** $O(k)$ writes + $O(n)$ scan $= O(n+k)$; space $O(n)$. A cell can accumulate $k$ progressions each up to $|t| + n|d| \le 10^{6} + 2\cdot10^{5}\cdot10^{6} \approx 2\cdot10^{11}$, so $2\cdot10^{5}$ of them reach $4\cdot10^{16}$ — inside 64-bit, never 32-bit.
+:::
+
+::: {.p-edge}
+- $\ell = r$: a single-cell "progression" of one term $t$; the four writes collapse to $B$ and $C$ net-zero patches, correct by construction.
+- $d = 0$: degenerates to a constant range add — exactly A2's first-order difference, the shared skeleton.
+- $r = n-1$: the $r{+}1 = n$ write must be in range, hence arrays sized $n{+}1$/$n{+}2$ — the @sec-nd-pit off-by-one trap in 1D.
+- Many operations fully overlap: contributions superpose because the map is linear, so order of updates is irrelevant.
+:::
+
+::: {.practice}
+- [CF 718C · Sasha and Array](https://codeforces.com/problemset/problem/718/C){rating="2300"} — interleaved range updates and queries where the update applies a Fibonacci map: a segment tree with matrix exponentiation, *not* a difference array (the roster-honesty look-alike)
+- The *online* sibling — reads interleaved with the AP writes — cannot be served by a batch-difference and needs a Fenwick tree; see @sec-ds.
+:::
+
+[**From a progression to a general line.** *Progression Range Adds* materialises the array once at the end. Answer the *same* affine adds but then face a stream of range-sum questions, and you must stack the chapter's other half on top — a 1D prefix over the rebuilt values, giving difference writes below and $O(1)$ reads above.]{.flow-bridge}
+
+### Problem: Affine Range Adds Then Range Sums {#sec-nd-p3-linear}
+
+::: {.p-statement}
+An array of $n$ zeros ($1 \le n \le 10^{5}$) receives $k$ updates ($1 \le k \le 10^{5}$): update $(\ell, r, \alpha, \beta)$ with $0 \le \ell \le r < n$ and $|\alpha|, |\beta| \le 10^{3}$ adds the linear function $\alpha i + \beta$ to every cell $i \in [\ell, r]$. After all updates, answer $q$ questions ($1 \le q \le 10^{5}$), each naming an inclusive range $[\ell, r]$ and asking for the sum of the cells inside it.
+
+Source: *self-authored* — designed to combine @sec-nd-a4 (affine range add) with @sec-nd-a1 (prefix read); validated against a per-cell brute force and a random stress (no judge link).
+
+Example — length $5$, one update $(0,4,1,0)$ adds $0,1,2,3,4$; the range-sum question $[0,4]$ is $10$ and $[1,3]$ is $6$.
+:::
+
+::: {.p-intuition}
+Two layers, each from an earlier lesson. First rebuild the array from the affine updates with the two-array difference (A4) — $O(n+k)$. Then, because the questions are arbitrary ranges over a now-fixed array, build one 1D prefix $P$ over the result (A1) so every range sum is a single subtraction. The whole workload is $O(n + k + q)$: difference writes below, prefix reads above.
+:::
+
+::: {.p-approach}
+1. **Apply, then walk each query.** Rebuild cell by cell ($O(\sum \text{length})$) and sum each query cell by cell ($O(q\cdot n)$) — reference.
+2. **Difference, then prefix.** `affine_adds` rebuilds in $O(n+k)$; `prefix1d` + two reads answer each query in $O(1)$. Total $O(n + k + q)$.
+
+**Invariant.** `affine_adds` yields the array of @sec-nd-a4; `range_sum(P, l, r) = P[r+1]-P[l]` then equals $\sum_{l \le i \le r} a[i]$ by the 1D prefix of @sec-nd-a1.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Apply each add, then sum each query directly
+
+::: {.form-next}
+Rebuild the array cell by cell and answer each range sum with its own loop. The oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def linear_brute(n, updates, queries):
+    a = [0] * n
+    for (l, r, alpha, beta) in updates:
+        for i in range(l, r + 1):
+            a[i] += alpha * i + beta
+    return [sum(a[l:r + 1]) for (l, r) in queries]
+
+
+assert linear_brute(5, [(0, 4, 1, 0)], [(0, 4), (1, 3)]) == [10, 6]
+```
+
+##### C++
+
+```cpp
+// brute force: affine add cell by cell, then per-query cell walk (fragment, needs <bits/stdc++.h>)
+vector<long long> linear_brute(int n, const vector<array<int, 4> >& ups,
+                               const vector<pair<int, int> >& qs) {
+    vector<long long> a(n, 0);
+    for (size_t t = 0; t < ups.size(); ++t) {
+        int l = ups[t][0], r = ups[t][1];
+        long long alpha = ups[t][2], beta = ups[t][3];
+        for (int i = l; i <= r; ++i) a[i] += alpha * i + beta;
+    }
+    vector<long long> out;
+    for (size_t qi = 0; qi < qs.size(); ++qi) {
+        long long s = 0;
+        for (int i = qs[qi].first; i <= qs[qi].second; ++i) s += a[i];
+        out.push_back(s);
+    }
+    return out;
+}
+```
+:::
+
+#### Difference to rebuild, prefix to read
+
+::: {.form-next}
+Rebuild with the two-array difference (`affine_adds`), then one `prefix1d` turns every range sum into two reads. $O(n+k+q)$.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-nd-p3-linear-sol
+def prefix1d(a):
+    P = [0]
+    for v in a:
+        P.append(P[-1] + v)
+    return P
+
+
+def range_sum(P, l, r):            # inclusive
+    return P[r + 1] - P[l]
+
+
+def affine_adds(n, updates):
+    B = [0] * (n + 1); C = [0] * (n + 1)
+    for (l, r, alpha, beta) in updates:
+        B[l] += alpha; B[r + 1] -= alpha
+        C[l] += beta;  C[r + 1] -= beta
+    a = [0] * n; cb = cc = 0
+    for i in range(n):
+        cb += B[i]; cc += C[i]
+        a[i] = cb * i + cc
+    return a
+
+
+def linear_solve(n, updates, queries):
+    P = prefix1d(affine_adds(n, updates))
+    return [range_sum(P, l, r) for (l, r) in queries]
+
+
+assert linear_solve(5, [(0, 4, 1, 0)], [(0, 4), (1, 3)]) == [10, 6]
+for _ in range(300):
+    n = random.randint(1, 12)
+    ups = []
+    for _ in range(random.randint(0, 6)):
+        l = random.randrange(n); r = random.randrange(l, n)
+        ups.append((l, r, random.randint(-3, 3), random.randint(-4, 4)))
+    qs = []
+    for _ in range(5):
+        l = random.randrange(n); r = random.randrange(l, n)
+        qs.append((l, r))
+    assert linear_solve(n, ups, qs) == linear_brute(n, ups, qs)
+```
+
+##### C++
+
+```cpp
+// affine difference rebuild + 1D prefix reads, full program (reads stdin)
+// input: n k q; k lines "l r alpha beta" (0-indexed inclusive); q lines "l r" (inclusive)
+int main() {
+    ios::sync_with_stdio(false);
+    int n; long long k, q;
+    if (!(cin >> n >> k >> q)) return 0;
+    vector<long long> B(n + 2, 0), C(n + 2, 0);
+    for (long long t = 0; t < k; ++t) {
+        long long l, r, alpha, beta;
+        cin >> l >> r >> alpha >> beta;
+        B[l] += alpha; B[r + 1] -= alpha;
+        C[l] += beta;  C[r + 1] -= beta;
+    }
+    vector<long long> P(n + 1, 0);
+    long long cb = 0, cc = 0;
+    for (int i = 0; i < n; ++i) {
+        cb += B[i]; cc += C[i];
+        long long a = cb * i + cc;
+        P[i + 1] = P[i] + a;                    // prefix over the rebuilt values
+    }
+    while (q--) {
+        long long l, r; cin >> l >> r;
+        cout << P[r + 1] - P[l] << "\n";
+    }
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** The refinement is literally two loops stacked: the first (difference) scan turns the affine updates into concrete cell values `a = cb*i + cc`, and the very next statement builds `P[i+1] = P[i] + a` — the prefix of @sec-nd-a1 — so the two arrays `a` and `P` never both need to exist; the running `P[i]` folds the value in as it is produced. A query then reads only `P`, never the cells. The Python keeps them separate for clarity; the C++ fuses them into one pass.
+:::
+
+::: {.p-complexity}
+**Brute:** $O(\sum \text{length} + q\cdot n)$ up to $\sim 10^{10}$ — reference. **Difference + prefix:** $O(n + k + q)$; space $O(n)$. A cell value is at most $k(\alpha n + \beta) \le 10^{5}(10^{3}\cdot10^{5} + 10^{3}) \approx 10^{13}$ and a full range sums $10^{5}$ of them, $\approx 10^{18}$ — within signed 64-bit ($\sim 9.2\cdot 10^{18}$) but *not* within 32-bit by many orders; the @sec-nd-pit overflow trap applies to both the values and the prefix.
+:::
+
+::: {.p-edge}
+- A query with $\ell = 0$: `range_sum` reads `P[0] = 0`, so the extra leading zero makes the half-open subtraction work without a special case.
+- No updates: `affine_adds` returns all zeros and every range sum is $0$ — the difference arrays stay untouched and the prefix is flat.
+- $r = n-1$: the $r{+}1 = n$ boundary write needs $B,C$ sized at least $n{+}1$ (the same padding lesson as the 2D array, in one dimension).
+- Overflow: `P` and `a` must be `long long`; accumulating into an `int` corrupts silently well before $n = 10^{5}$.
+:::
+
+::: {.practice}
+- [CF 1252K · Addition Robot](https://codeforces.com/problemset/problem/1252/K){rating="2100"} — range updates plus range queries where the update is a matrix map: a segment tree with lazy propagation, not an affine difference (roster-honesty caution)
+- [SPOJ MATSUM · Matrix Summation](https://www.spoj.com/problems/MATSUM/) — the dynamic 2D analogue (point updates interleaved with rectangle sums): a 2D Fenwick tree, the @sec-nd-a6 deferral
+:::
+
+## P4. Diagonal and weighted prefix sums {#sec-nd-p4}
+
+**Choosing the right axis.** Every pattern so far summed along rows-and-columns or the index. The last two problems make the *shape of the slice* the interesting part. *Submarine in the Rybinsk Sea* keeps a 1D array but sums a **weighted contribution** — each digit's place value, accumulated over all $n^2$ pairs — which is A6's multiplicity idea with a power-of-ten weight. The closing self-authored problem tilts the axis: it sums along a **diagonal**, where the natural coordinate is $i-j$ rather than row-then-column.
+
+**Recognise it.** A quantity decomposed as "value $\times$ how-many-places-it-counts" over a double loop (contribution/multiplicity), or a contiguous run of cells that lies on one diagonal of a grid (a band, a slanted prefix, an XOR along `\`-lines).
+
+::: {.callout-important title="Template"}
+Contribution: replace "iterate the pairs" by "for each element, ask how many pairs it appears in and at what weight," then a single weighted pass $\sum_i a[i]\cdot(\text{multiplicity})$ — the 1D form is $\sum_i a[i](i+1)(n-i)$ (@sec-nd-a6). Diagonals: bucket cells by $d = i - j$ (the `\`-family) or $s = i + j$ (the `/`-family) in increasing $i$, run an ordinary 1D prefix inside each bucket, and a segment of one diagonal is two reads (@sec-nd-a5). Both are A1's "precompute a prefix, read a slice in $O(1)$" with a relabelled axis.
+:::
+
+{{< include ../problems/cf-1195d2-submarine-in-the-rybinsk-sea-hard-edition/problem.qmd >}}
+
+[**From a weighted digit to a tilted slice.** *Rybinsk Sea* relabelled the axis to *digit position* and prefixed there. Relabel it once more to a *diagonal* — bucket cells by $i-j$ instead of by row — and the same "prefix along the natural coordinate, read a run in two table lookups" finishes the chapter.]{.flow-bridge}
+
+### Problem: Diagonal Segment Sums {#sec-nd-p4-diag}
+
+::: {.p-statement}
+An $n \times m$ grid of integers ($1 \le n, m \le 30$, $|a_{ij}| \le 10^{6}$) is fixed, then $q$ questions ($1 \le q \le 2\cdot 10^{5}$). Each question names two cells on the same `\`-diagonal — that is, corners $(r_1, c_1)$ and $(r_2, c_2)$ with $r_1 - c_1 = r_2 - c_2$ and $r_1 \le r_2$ — and asks for the sum of the cells from the first to the second inclusive, walking down and to the right. Answer every question.
+
+Source: *self-authored* — designed to exercise @sec-nd-a5; validated against a step-along-the-diagonal brute force and a random stress (no judge link).
+
+Example — on $[[1,2,3],[4,5,6],[7,8,9]]$ the main diagonal $(0,0)\to(2,2)$ sums to $15$, and the run $(1,0)\to(2,1)$ (cells $4,8$) sums to $12$.
+:::
+
+::: {.p-intuition}
+Within a single `\`-diagonal the cells are already a line; the trick is to treat them as one. Bucket every cell by the key $d = i - j$ in increasing $i$ — that fixes an order along each diagonal — and lay a plain 1D prefix inside each bucket (@sec-nd-a5). A question then names two positions in one bucket and is answered by the same two-read subtraction as @sec-pref, no matter how long the diagonal is.
+:::
+
+::: {.p-approach}
+1. **Step the diagonal per query.** Walk $(r_1,c_1)\to(r_2,c_2)$ adding cells. $O(q\cdot \min(n,m))$ — reference.
+2. **Prefix per diagonal, two reads.** Build the buckets and their 1D prefixes once with `build_diag_prefixes`, map each cell to its position, then `diag_segment_sum` answers a query in $O(1)$. $O(nm + q)$.
+
+**Invariant.** In bucket $d$ the cells are stored in increasing $i$, so `diag_segment_sum(Pmain, d, lo, hi) = Pmain[d][hi+1] - Pmain[d][lo]` equals the sum of the diagonal run from position $lo$ to $hi$ (@sec-nd-a5).
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Walk the diagonal cell by cell
+
+::: {.form-next}
+From the near corner, step $i{+}1, j{+}1$ until the far corner, summing as you go. $O(\text{length})$ per query; the oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def diagsum_brute(a, i1, j1, i2, j2):
+    s = 0; i, j = i1, j1
+    while True:
+        s += a[i][j]
+        if (i, j) == (i2, j2):
+            break
+        i += 1; j += 1
+    return s
+
+
+assert diagsum_brute([[1, 2, 3], [4, 5, 6], [7, 8, 9]], 0, 0, 2, 2) == 15
+assert diagsum_brute([[1, 2, 3], [4, 5, 6], [7, 8, 9]], 1, 0, 2, 1) == 12
+```
+
+##### C++
+
+```cpp
+// brute force: step down the '\' diagonal summing cells (fragment, needs <bits/stdc++.h>)
+long long diagsum_brute(const vector<vector<long long> >& g,
+                        int i1, int j1, int i2, int j2) {
+    long long s = 0;
+    for (int i = i1, j = j1; ; ++i, ++j) {
+        s += g[i][j];
+        if (i == i2 && j == j2) break;
+    }
+    return s;
+}
+```
+:::
+
+#### One 1D prefix per diagonal
+
+::: {.form-next}
+Bucket cells by $d = i - j$ in increasing $i$, prefix each bucket (`build_diag_prefixes`), map a cell to its position, and read a run with two lookups. $O(nm + q)$.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-nd-p4-diag-sol
+def diagsum_prepare(a):
+    mn, anti, Pmain, Panti = build_diag_prefixes(a)
+    pos = {}
+    for d, cells in mn.items():
+        for t, (i, j, v) in enumerate(cells):
+            pos[(i, j)] = t
+    return Pmain, pos
+
+
+def diagsum_solve(a, queries):
+    Pmain, pos = diagsum_prepare(a)
+    out = []
+    for (i1, j1, i2, j2) in queries:
+        d = i1 - j1
+        out.append(diag_segment_sum(Pmain, d, pos[(i1, j1)], pos[(i2, j2)]))
+    return out
+
+
+assert diagsum_solve([[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+                     [(0, 0, 2, 2), (1, 0, 2, 1)]) == [15, 12]
+for _ in range(300):
+    n = random.randint(1, 8); m = random.randint(1, 8)
+    a = [[random.randint(-9, 9) for _ in range(m)] for _ in range(n)]
+    qs = []
+    for _ in range(6):
+        i1 = random.randrange(n); j1 = random.randrange(m)
+        L = random.randint(0, min(n - i1, m - j1) - 1)
+        qs.append((i1, j1, i1 + L, j1 + L))
+    assert diagsum_solve(a, qs) == [diagsum_brute(a, *qr) for qr in qs]
+```
+
+##### C++
+
+```cpp
+// diagonal (i-j family) prefix sums for segment queries, full program (reads stdin)
+// input: n m; grid; q; then q lines "r1 c1 r2 c2" (1-indexed, same '\' diagonal, r1<=r2)
+long long gd[35][35];
+long long Pm[80][40];                 // Pm[d+40][t]: 1D prefix along main diagonal d (leading 0)
+int main() {
+    ios::sync_with_stdio(false);
+    int n, m;
+    if (!(cin >> n >> m)) return 0;
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < m; ++j) cin >> gd[i][j];
+    for (int d = -(m - 1); d <= n - 1; ++d) {
+        int lo = (d > 0 ? d : 0);
+        int hi = std::min(n - 1, m - 1 + d);
+        int idx = d + 40;
+        Pm[idx][0] = 0;
+        int t = 0;
+        for (int i = lo; i <= hi; ++i) {           // cells (i, i-d) in increasing i
+            ++t;
+            Pm[idx][t] = Pm[idx][t - 1] + gd[i][i - d];
+        }
+    }
+    int q; cin >> q;
+    while (q--) {
+        int r1, c1, r2, c2;
+        cin >> r1 >> c1 >> r2 >> c2;
+        int i1 = r1 - 1, j1 = c1 - 1, i2 = r2 - 1, j2 = c2 - 1;
+        int d = i1 - j1;
+        int lo = (d > 0 ? d : 0);
+        int idx = d + 40;
+        long long ans = Pm[idx][i2 - lo + 1] - Pm[idx][i1 - lo];
+        cout << ans << "\n";
+    }
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** The two C++ arrays `lo` and `i - lo` are the crux: on diagonal $d = i - j$ the first cell sits at $i = \max(0, d)$, so a cell $(i, i-d)$ is at *position* $i - \max(0,d)$ along its bucket — exactly the `pos` map the Python builds from `build_diag_prefixes`. The prefix array `Pm[idx]` mirrors `Pmain[d]` (both carry a leading $0$), and the query is the identical `P[hi+1] - P[lo]` subtraction @sec-nd-a5 asserts against the stepping brute force.
+
+The `/`-family is not needed for this problem's statement, but `build_diag_prefixes` returns it (`anti`, `Panti`) for free: switch the key to $i + j$ and the same reads answer the other diagonal direction.
+:::
+
+::: {.p-complexity}
+**Step-the-diagonal:** $O(q\cdot \min(n,m))$ up to $6\cdot 10^{6}$ — reference. **Diagonal prefixes:** $O(nm)$ build ($900$) + $O(1)$ per query $= O(nm + q)$; space $O(nm)$. A full diagonal is at most $\min(n,m) \le 30$ cells of $|a|\le 10^{6}$, so $3\cdot 10^{7}$ per run — 32-bit is safe here, but the habit from @sec-nd-pit says keep grid sums in 64-bit.
+:::
+
+::: {.p-edge}
+- A single-cell run ($r_1 = r_2$): `diag_segment_sum` reads `P[key][lo+1]-P[key][lo]`, returning that one cell.
+- Two cells that are *not* on the same diagonal: the statement guarantees $r_1-c_1 = r_2-c_2$; drop that and the two positions live in different buckets — validate the invariant rather than assume it.
+- The `/`-family key $i+j$: `build_diag_prefixes` already returns `anti`/`Panti` ordered by increasing $i$; a bug here is using the `\`-prefix on a `/`-query (they share no cells except by coincidence).
+- Negative values: harmless; only overflow discipline matters, as in A1.
+:::
+
+::: {.practice}
+- [CF 844B · Rectangles](https://codeforces.com/problemset/problem/844/B){rating="1300"} — the per-element *multiplicity* sum $\sum a_{ij}\cdot(\text{weight})$ on a matrix (its own solve is probability), the contribution twin of @sec-nd-p4-rybinsk
+- [CF 1598E · Staircases](https://codeforces.com/problemset/problem/1598/E){rating="2100"} — counting shapes over a grid; a per-cell precompute cousin (its solve is a DP with flips), cited as a caution, not a prefixing task
+:::
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Fixed grid, many "sum of this sub-rectangle" questions, no updates | 2D prefix table, $O(1)$ four-corner read | @sec-nd-a1, @sec-nd-p1, @sec-nd-p1-rectsum |
+| Count $x \in [\ell,r]$ with a value property, many queries | Value-domain prefix (bucket by property, prefix the counts) | @sec-nd-a6, @sec-nd-p1-rq |
+| A pile of "add $v$ to this whole rectangle", read once at the end | 2D difference array (the prefix run in reverse) | @sec-nd-a2, @sec-nd-p2-rectadd |
+| 3D array / cube, "sum over this box" | $d$-dimensional prefix, $2^d$ signed corners | @sec-nd-a3, @sec-nd-p2-3dbox |
+| "Add $t, t+d, t+2d,\dots$ (a line in the index) to $[\ell,r]$", batched | Second-order difference: slope array + intercept array | @sec-nd-a4, @sec-nd-p3-aprange |
+| Affine range adds *then* range-sum queries | Difference rebuild + 1D prefix read, one pass | @sec-nd-a4, @sec-nd-p3-linear |
+| Sum a contiguous run along a diagonal (a band, `\` or `/`) | Diagonal prefix families keyed by $i-j$ / $i+j$ | @sec-nd-a5, @sec-nd-p4-diag |
+| "Every pair / every subarray, each element weighted" — a digit or multiplicity sum | Contribution: $\sum_i (\text{weight}_i)\cdot(\text{value}_i)$ | @sec-nd-a6, @sec-nd-p4-rybinsk |
+| Point/rectangle updates **interleaved** with queries, needed online | *Not this chapter* — a Fenwick / 2D BIT | @sec-ds, @sec-nd-a6 |
+| A `matrices` tag but the solve is DP or a segment tree (718C, 1252K, 1598E) | *Not prefixing* — check the operation before the shape | @sec-nd-pit, @sec-nd-p1 |
+
+## Pitfalls {#sec-nd-pit}
+
+::: {.callout-warning title="Common mistakes"}
+- **A wrong sign in the inclusion–exclusion.** In 2D the rectangle is `P[r1][c1] - P[r0][c1] - P[r1][c0] + P[r0][c0]` — two subtractions, one addition; in 3D the sign is $(-1)^{\text{lowered indices}}$, so one lowered is subtracted, two added, three subtracted. Don't memorise the string of $+/-$; rebuild it from "subtract the parts past each lower bound, add back what you double-subtracted" (@sec-nd-a1, @sec-nd-a3, @sec-nd-p2-3dbox).
+- **Off-by-one on the difference corners.** A rectangle-add writes $+v$ at $(r_0,c_0)$ and the closing $-v$ at the *exclusive* far corner $r_1, c_1$. If the rectangle reaches the last row/column then $r_1 = n$, so the difference array must be **padded** to $(n{+}1)\times(m{+}1)$ or the write lands out of range (@sec-nd-a2, @sec-nd-p2-rectadd).
+- **Mixing 0- and 1-indexing.** The recurrence `P[i+1][j+1] = P[i][j+1] + rowsum` and the query `P[r1][c1]-P[r0][c1]-...` must agree on where the zero shell lives. The idioms here keep a leading zero row/column so a corner at index $0$ reads $0$ and never branches (@sec-nd-a1, @sec-nd-p1-rectsum).
+- **32-bit overflow.** A 2D sum is $nm\cdot|A| \approx 10^{3}\cdot10^{3}\cdot10^{9} = 10^{15}$, which fits `long long` but not `int`. Worse, a weighted/contribution sum like $\sum_i a[i](i{+}1)(n-i)$ is $10^{9}\cdot(10^{5})^{2} \approx 10^{19}$ — **past** the $9.2\cdot10^{18}$ ceiling of a signed 64-bit int; reduce intermediate products, take moduli early, or use `__int128` (@sec-nd-a6, @sec-nd-p4-rybinsk, @sec-nd-p3-linear).
+- **Forgetting a scan when materialising a higher-order difference.** The AP trick keeps *two* difference arrays (slope and intercept) and needs *both* prefix scans fused into one pass; running only the slope scan produces values missing the constant term. The final `a[i] = cb*i + cc` is the point where the two accumulated scans meet (@sec-nd-a4, @sec-nd-p3-aprange).
+- **Recomputing the diagonal prefix per query.** The whole win is building `Pmain`/`Panti` **once** and answering each run with two reads. Re-bucketing or re-summing inside the query loop silently reverts to $O(\text{length})$ per query (@sec-nd-a5, @sec-nd-p4-diag).
+- **Reading from the wrong diagonal family.** A `\`-segment uses $i-j$; a `/`-segment uses $i+j$. Feeding an $i+j$ query into the $i-j$ prefix returns a sum over an unrelated set of cells that happen to share an index (@sec-nd-a5, @sec-nd-p4-diag).
+- **Treating a matrix-tagged DP or segment-tree problem as prefixing.** CF 718C / CF 1252K apply a *matrix* to a range and query sums online — a lazy segment tree with matrix exponentiation. CF 1598E toggles free/locked cells and needs per-cell DP with flips. The grid shape is a red herring; verify the operations are static-additive before reaching for a prefix (@sec-nd-a6, @sec-nd-p1).
+:::
+
+## Exercises
+
+**1. [E] Derive the $O(1)$ rectangle read from the $O(nm)$ build. Why does `rect_sum = P[r1][c1] - P[r0][c1] - P[r1][c0] + P[r0][c0]` have exactly those three signs?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$P[i][j]$ is the sum of the whole prefix box $[0,i)\times[0,j)$. The target $[r_0,r_1)\times[c_0,c_1)$ is the big box $P[r_1][c_1]$ minus the strip above it $P[r_0][c_1]$ and minus the strip left of it $P[r_1][c_0]$. Those two strips overlap in $P[r_0][c_0]$, which has now been subtracted twice, so add it back once — the standard two-subtract-one-add inclusion–exclusion (@sec-nd-a1).
+:::
+
+**2. [E] State the general rule: in $d$ dimensions, how many stored partial sums does one box query touch, and how are their signs set? Verify it against the 1D (2 terms), 2D (4) and 3D (8) cases in this chapter.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$2^d$ terms, one per choice of "lower or upper" bound on each axis; the sign is $(-1)^{\#\text{lowered}}$. 1D: $2^1$ (upper minus lower). 2D: $4$ (`+ - - +`, two lowered added back). 3D: $8$ as written in @sec-nd-p2-3dbox. A $d$-dim point update in the *difference* view likewise writes $2^d$ corners (@sec-nd-a3).
+:::
+
+**3. [E] Why is the 2D difference array the exact inverse of the 2D prefix, and what single pass converts one into the other?**
+
+::: {.callout-note collapse="true" title="Solution"}
+If `P` is the 2D prefix of `a` then `a` is obtained from `P` by differencing along both axes; conversely the values are the 2D prefix of the difference marks. You *build* `D` by writing four corners per rectangle-add (@sec-nd-a2), then run **one 2D prefix** (`recover2d` / `build_prefix2d`) to read the grid back — the same scan that built the prefix in @sec-nd-a1, now applied to the difference instead of the values (@sec-nd-a2, @sec-nd-p2-rectadd).
+:::
+
+**4. [E] A rectangle-add reaches the last row. Which array size prevents an out-of-bounds write, and why one extra?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Size $D$ as $(n{+}1)\times(m{+}1)$. The closing writes sit at the *exclusive* far corner $r_1, c_1$; when the rectangle ends at the last row $r_1 = n$, so index $n$ must exist — that is the extra padding row/column (@sec-nd-a2, @sec-nd-pit, @sec-nd-p2-rectadd).
+:::
+
+**5. [M] Prove the multiplicity formula $\sum_{\text{subarrays}} \sum_i a[i] = \sum_i a[i]\,(i+1)(n-i)$. Why is element $i$ counted exactly $(i+1)(n-i)$ times?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A subarray is $[\ell, r]$ with $0 \le \ell \le r < n$. Element $i$ lies inside it iff $\ell \le i \le r$. There are $(i+1)$ choices for $\ell \in [0, i]$ and $(n-i)$ choices for $r \in [i, n-1]$, independently, so $i$ contributes to $(i+1)(n-i)$ subarrays. Summing $a[i]$ once per containing subarray swaps the order to $\sum_i a[i](i+1)(n-i)$ (@sec-nd-a6).
+:::
+
+**6. [M] Turn the 1D multiplicity of the previous exercise into a 2D one: a fixed grid, sum over all sub-rectangles of the sum of cells inside. Give the closed form.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The axes separate. Cell $(i,j)$ sits in $\{(\text{row range containing }i)\}\times\{(\text{col range containing }j)\}$ rectangles, i.e. $(i+1)(n-i)$ row choices times $(j+1)(m-j)$ column choices. Total $= \sum_{i,j} a[i][j]\,(i+1)(n-i)(j+1)(m-j)$ — the separable product @sec-nd-p4-rybinsk and CF 1648A lean on (@sec-nd-a6).
+:::
+
+**7. [M] A degree-$k$ polynomial $p(i)$ is added to $[\ell,r]$ for many operations. What order difference array makes each update $O(1)$, and why?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Order $k{+}1$. Differencing a degree-$d$ polynomial lowers its degree by one ($\Delta\, i^{\underline d} = d\, i^{\underline{d-1}}$ in falling-factorial form), so a degree-$k$ add becomes constant after $k{+}1$ differences, i.e. it touches only the boundary of a $k{+}1$-th order difference array. Updates write $O(k)$ positions; one set of $k{+}1$ prefix scans rebuilds. The chapter's AP case is $k=1$, needing two first-order arrays (slope + intercept), equivalently a second-order difference (@sec-nd-a4, @sec-nd-p3-aprange).
+:::
+
+**8. [M] Re-derive @sec-nd-p3-aprange's split. The operation adds $t,(t{+}d),(t{+}2d),\dots$ starting at $\ell$. Write the per-cell value as $\alpha i + \beta$ and identify $\alpha,\beta$ and the four boundary writes.**
+
+::: {.callout-note collapse="true" title="Solution"}
+At cell $i$ (0-indexed) the added term is $t + (i-\ell)d = d\cdot i + (t - \ell d)$, so $\alpha = d$, $\beta = t - \ell d$. Write `B[l]+=α; B[r+1]-=α; C[l]+=β; C[r+1]-=β`. One scan keeping running `cb,cc` then emits `a[i] = cb*i + cc` (@sec-nd-a4, @sec-nd-p3-aprange).
+:::
+
+**9. [M] Combine the two views of @sec-nd-p3-linear: many affine adds, then many range-sum queries. Give the end-to-end complexity and explain why neither a difference nor a prefix alone suffices.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$O(n + k + q)$. A difference array alone can materialise the array from the adds but answers no sum; a prefix alone answers sums but cannot absorb a *linear* update. Stack them: two-array difference rebuilds `a` in $O(n+k)$, then `prefix1d` over `a` answers each query in $O(1)$ — $O(q)$ reads. The dual pair (difference writes below, prefix reads above) is the chapter's core composition (@sec-nd-p3-linear).
+:::
+
+**10. [M] For the diagonal problem, give the position of cell $(i,j)$ along its `\`-bucket in terms of $i$ and $d=i-j$ alone, and use it to answer a run without an explicit position map.**
+
+::: {.callout-note collapse="true" title="Solution"}
+In bucket $d$ the cells are $(i, i-d)$ with $i$ ranging from $\max(0, d)$ to $\min(n-1, m-1+d)$, in increasing $i$. So cell $(i,j)$ is at position $i - \max(0,d)$, and a run $(i_1,j_1)\!\to\!(i_2,j_2)$ is `P[d][i2-lo+1] - P[d][i1-lo]` with `lo = max(0,d)` — the closed form the C++ full main uses instead of the Python `pos` dictionary (@sec-nd-a5, @sec-nd-p4-diag).
+:::
+
+**11. [M] In @sec-nd-p1-rq (CF 932B), why is the prefix table built over the *value* domain rather than positions, and what makes a query $O(1)$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The question asks "how many $x \in [\ell,r]$ have $g(x)=k$". Bucket $x$ by its $g$-value: `pref[k][i]` = count of $x \le i$ with $g(x)=k$. Then a query is a 1D prefix read on the $k$-th row: `pref[k][r] - pref[k][l-1]` — two table reads, $O(1)$. The array axis is the *number* $x$, not an index into stored data (@sec-nd-p1-rq, @sec-nd-a6).
+:::
+
+**12. [M] State precisely what changes between a static 2D prefix and a 2D Fenwick tree. Which problem in this chapter's practice links forces the latter, and why?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A 2D prefix answers rectangle sums in $O(1)$ but cannot absorb a point update cheaply (rebuild is $O(nm)$). A 2D Fenwick supports a point update and a rectangle sum, each $O(\log^2 n)$, so the two can *interleave*. SPOJ MATSUM and CF 1252K issue updates and queries in one stream, so the static table is illegal — you need the online structure (@sec-ds, @sec-nd-a6).
+:::
+
+**13. [H] Prove the 3D recurrence and query have the same sign pattern $(-1)^{\#\text{lowered}}$. Expand $P[i][j][t]$ into its 8 terms and the box query into its 8 reads, and check the count of signs matches.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$P[i][j][t] = a[i][j][t] + P[i{-}1][j][t] + P[i][j{-}1][t] + P[i][j][t{-}1] - P[i{-}1][j{-}1][t] - P[i{-}1][j][t{-}1] - P[i][j{-}1][t{-}1] + P[i{-}1][j{-}1][t{-}1]$: three single-lower terms added ($(-1)^1$ after moving the lone $a$), three double-lower subtracted, the triple-lower added — $1{+}3{+}3{+}1 = 8 = 2^3$. The box read mirrors the identical eight-corner pattern at the two opposite corners (@sec-nd-a3, @sec-nd-p2-3dbox).
+:::
+
+**14. [H] Convert the rectangle-add workload of @sec-nd-p2-rectadd into the *online* setting (a query may come between two adds). Explain what breaks in the difference method and bound the cheapest correct fix.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The difference array's answer requires the *final* prefix scan, so an interleaved read would force a rebuild — $O(nm)$ per query — worse than just painting cells. The fix is to abandon the offline difference for a structure with $O(\log^2 n)$ point-update and rectangle-sum: a 2D Fenwick / 2D segment tree (@sec-ds, @sec-nd-a6). Offline reordering with a moving window is the other route when updates dominate (Mo, @sec-mo).
+:::
+
+**15. [H] A weighted/contribution sum can silently exceed 64 bits. Compare @sec-nd-p3-linear (up to $\sim 10^{18}$) and the raw multiplicity $\sum a[i](i{+}1)(n{-}i)$ (up to $\sim 10^{19}$) with $n\le 10^{5}, a[i]\le 10^{9}$. Where is the ceiling and what are two ways to stay under it?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Signed 64-bit tops out at $9.22\cdot10^{18}$. The multiplicity $10^{9}\cdot(10^{5})^2 \approx 10^{19}$ overflows; @sec-nd-p3-linear at $\sim10^{18}$ fits. Remedies: (1) reduce modulo a given $M$ after every multiply/add so intermediates stay $< M\cdot\text{small}$; (2) reorder so $\alpha i$ and the running `cb*i` are taken mod $M$; (3) use `__int128` for the accumulation when no modulus is given (@sec-nd-p4-rybinsk uses mod $998244353$ precisely for this, @sec-nd-p3-linear, @sec-nd-pit).
+:::
+
+**16. [H] Classify these as *prefixing* or *not* and justify each in one line: (a) CF 1648A Weird Sum, (b) CF 718C Sasha and Array, (c) CF 1598E Staircases, (d) many static rectangle sums.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) *Contribution*, which is the separable weighted-prefix family (@sec-nd-a6) — prefixing-adjacent, solved as $\sum a_{ij}\cdot(\text{row mult})(\text{col mult})$. (b) *Not* — a segment tree with matrix exponentiation (the update applies a matrix, online) (@sec-nd-pit). (c) *Not* — a per-cell DP with free/locked flips, not a static additive query (@sec-nd-p1). (d) *Yes* — the textbook 2D prefix (@sec-nd-a1, @sec-nd-p1-rectsum).
+:::
+
+## Interview questions
+
+**1. Build a 2D prefix sum in one pass and answer a sub-rectangle. Give both recurrences and the query, and the cost of each.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Build $P[i{+}1][j{+}1] = P[i][j{+}1] + \text{rowsum}$ (or $P[i{+}1][j{+}1] = a[i][j] + P[i][j{+}1] + P[i{+}1][j] - P[i][j]$), $O(nm)$. Query $[r_0,r_1)\times[c_0,c_1)$ as $P[r_1][c_1]-P[r_0][c_1]-P[r_1][c_0]+P[r_0][c_0]$, $O(1)$. Space $O(nm)$; keep it 64-bit (@sec-nd-a1, @sec-nd-p1-rectsum).
+:::
+
+**2. Explain the prefix↔difference duality. You have many rectangle-adds and read the grid once at the end — what do you do and why is it fast?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A difference array is the prefix run backwards: to *add* rather than *read*. Each rectangle-add writes $+v/-v$ at the four corners of a padded $(n{+}1)\times(m{+}1)$ grid in $O(1)$; one 2D prefix at the end materialises every cell. Total $O(k + nm)$, versus $O(\sum\text{area})$ to paint cells (@sec-nd-a2, @sec-nd-p2-rectadd).
+:::
+
+**3. Generalise a rectangle sum to a box in a 3D array. How many terms, and how do you not screw up the signs?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$2^3 = 8$ terms; a query takes the two opposite corners and the sign of each partial sum is $(-1)^{\text{# of lowered indices}}$ — one lowered subtracted, two added, three subtracted. Build $P[i][j][t]$ with the same 8-term recurrence. $O(nmk)$ build, $O(1)$ per box (@sec-nd-a3, @sec-nd-p2-3dbox).
+:::
+
+**4. The update is "add $1,2,3,\dots$ to a range" instead of a constant. What structure absorbs that in $O(1)$ and why two arrays?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A second-order (two first-order) difference. The added value at cell $i$ is $d\cdot i + (t-\ell d)$ — a line in $i$. Keep one difference array for the slope $d$ and one for the intercept, four boundary writes per update, then one scan that accumulates both running sums and emits `cb*i + cc`. $O(1)$ per update, $O(n)$ to materialise (@sec-nd-a4, @sec-nd-p3-aprange).
+:::
+
+**5. You must answer range-sum *queries* after those linear updates. How do the two halves of the chapter compose, and what is the total cost?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Difference for the writes, prefix for the reads. Rebuild `a` with the two-array difference in $O(n+k)$, then `prefix1d` over `a` so every query is `P[r+1]-P[l]` in $O(1)$. Overall $O(n + k + q)$ — the inverse pair used in one pipeline (@sec-nd-p3-linear).
+:::
+
+**6. A grid query asks for the sum along a diagonal, not a rectangle. What changes in the preprocessing?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The axis you prefix *along*. Bucket cells by $d = i-j$ (or $s=i+j$) in increasing $i$, run an ordinary 1D prefix inside each bucket once ($O(nm)$), and a diagonal run is two reads of that bucket's prefix — the 1D trick on a slanted slice (@sec-nd-a5, @sec-nd-p4-diag).
+:::
+
+**7. What is a contribution / multiplicity argument, and give the 1D formula for "sum of every subarray"?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Instead of iterating the containers (subarrays/pairs), iterate the elements and multiply each by how many containers it appears in, weighted. A 1D element at index $i$ lies in $(i+1)(n-i)$ subarrays, so the total is $\sum_i a[i](i+1)(n-i)$ — one weighted pass instead of $O(n^2)$. The 2D version separates to $\sum_{i,j} a[i][j](i{+}1)(n{-}i)(j{+}1)(m{-}j)$ (@sec-nd-a6, @sec-nd-p4-rybinsk).
+:::
+
+**8. CF 1195D2 sums an interleaving of all ordered pairs. Why is it a weighted prefix and how do you handle the $n^2$ pairs?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Never build the pairs. Each digit's *place value* depends only on the two numbers' lengths and the digit's index from the right, so group by length ($\le 10$ classes), precompute per-length digit sums, and sum the $\le 10\times 10$ length-pairs with each digit charged its power-of-ten weight. That is exactly the multiplicity idea with $10^{\text{power}}$ as the weight, done mod $998244353$ (@sec-nd-p4-rybinsk, @sec-nd-a6).
+:::
+
+**9. Given a static grid and $2\cdot10^{5}$ rectangle-sum queries with $n,m\le10^{3}$, choose prefix vs per-query scan and justify by numbers.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Prefix. Scanning is $q\cdot nm$ up to $2\cdot10^{11}$ — too slow; a $O(nm)$ build ($10^{6}$) plus $O(1)$ per query is $O(nm + q)\approx10^{6}$. The table costs $10^{6}$ cells of memory, comfortably fine; a value up to $10^{15}$ demands 64-bit (@sec-nd-p1-rectsum).
+:::
+
+**10. When does this whole family stop working — i.e. updates and queries arrive interleaved, online? What do you switch to?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Prefix and difference tables are *offline/static* (a difference needs a final scan; a prefix rebuild is $O(nm)$ per point change). Interleaved online point/rectangle updates with rectangle sums need a Fenwick / 2D BIT in $O(\log^2 n)$, or a lazy segment tree; a large offline batch with a hard-to-decompose answer may instead go to Mo. That is a different data structure, @sec-ds / @sec-mo (@sec-nd-a6).
+:::
+
+**11. Walk us through the overflow discipline for weighted sums. When can a $10^{5}$-element, $10^{9}$-value problem still blow a `long long`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A single product $a[i](i{+}1)(n{-}i)$ with those bounds is $10^{9}\cdot(10^{5})^{2} = 10^{19}$, already past the $9.22\cdot10^{18}$ `long long` ceiling before you even sum. Mitigate by taking a given modulus after every multiply/add, by factoring the sum so no intermediate exceeds $\sim10^{14}$, or by `__int128` accumulation (@sec-nd-pit, @sec-nd-p3-linear, @sec-nd-p4-rybinsk).
+:::
+
+**12. A problem is tagged `matrices` and asks for rectangle sums, but a plain 2D prefix TLEs. Give three reasons that happen and how you'd diagnose which.**
+
+::: {.callout-note collapse="true" title="Answer"}
+(1) Updates interleave with queries → it is a 2D BIT (SPOJ MATSUM, CF 1252K). (2) The update applies a transform/matrix to a range → lazy segtree with matrix exponentiation (CF 718C). (3) The query answer is a DP over toggled cells, not a static sum (CF 1598E). Diagnosis: read whether the grid *changes* between questions and whether "sum" is literally additive — the tag is not the technique (@sec-nd-pit, @sec-nd-p1).
+:::
+
+**13. Prove your difference-and-prefix duality claim: for the same rectangle-add workload, show that prefixing the difference array yields exactly the painted grid.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Each add writes $D[r_0][c_0]{+}=v$, $D[r_1][c_0]{-}=v$, $D[r_0][c_1]{-}=v$, $D[r_1][c_1]{+}=v$. The 2D prefix at cell $(i,j)$ sums $D$ over $[0,i]\times[0,j]$; the $+v$ at $(r_0,c_0)$ enters that window for every $(i,j)$ with $i\ge r_0, j\ge c_0$, and the three cancelling marks subtract it again exactly once $i$ or $j$ pass $r_1/c_1$. Net $v$ iff $(i,j)\in[r_0,r_1)\times[c_0,c_1)$ — the painted cell. Linearity over operations gives the full grid (@sec-nd-a2, @sec-nd-p2-rectadd).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **2D / $d$-dim prefix (read).** Build $P$ once in $O(nm)$; a sub-rectangle is $2^d$ signed table reads in $O(1)$; pad a zero row/column so a bound at $0$ reads $0$ (@sec-nd-a1, @sec-nd-a3, @sec-nd-p1-rectsum, @sec-nd-p2-3dbox).
+- **2D difference (write).** The prefix's inverse: $2^d$ corner writes per rectangle-add in $O(1)$, one final prefix materialises; size the array one larger so the exclusive far corner fits (@sec-nd-a2, @sec-nd-p2-rectadd).
+- **Higher-order / AP difference.** Split a range-add into slope and intercept difference arrays; fuse their two scans into `a[i] = cb*i + cc`. A degree-$k$ polynomial add needs order $k{+}1$ (@sec-nd-a4, @sec-nd-p3-aprange, @sec-nd-p3-linear).
+- **Diagonal & weighted prefix.** Choose the axis: prefix along $i-j$ / $i+j$ buckets for diagonal runs; turn a double-loop sum into $\sum (\text{multiplicity})\cdot(\text{value})$ for a weighted/contribution read (@sec-nd-a5, @sec-nd-a6, @sec-nd-p4-diag, @sec-nd-p4-rybinsk).
+- **The triage.** Static, arbitrary slice → prefix table; batched adds, read once → difference array; linear-in-index adds → higher-order difference; *interleaved online* updates+queries → Fenwick / 2D BIT (@sec-ds); large offline batch with a hard answer → Mo (@sec-mo).
+:::
+
+- Every "sum over a range/box/diagonal/weight" question here is the *same* move — precompute a running sum along the right coordinate, then read a slice with a constant number of table lookups; only the coordinate and the corner count change (@sec-nd-a1, @sec-nd-a3, @sec-nd-a5).
+- Difference is prefix in reverse: reading wants the prefix table, writing a batch of adds wants the difference, and the inverse scan that turns one into the other is the same $2^d$-corner pattern (@sec-nd-a2, @sec-nd-p3-linear).
+- A growth that is linear in the index is absorbed by one extra difference array — that single realisation covers arithmetic progressions, affine adds, and (with more arrays) any polynomial range-add (@sec-nd-a4, @sec-nd-p3-aprange).
+- A double loop you cannot afford is usually a contribution sum in disguise: ask how many places each element is counted and at what weight, and $O(n^2)$ becomes one weighted $O(n)$ (or $O(10^2)$-classes) pass (@sec-nd-a6, @sec-nd-p4-rybinsk).
+- Overflow is the recurring tax of this family: 2D sums hit $10^{15}$ and weighted sums can exceed even $10^{18}$, so 64-bit is the floor and early moduli or `__int128` are the norm, not the exception (@sec-nd-pit, @sec-nd-p3-linear).
+- The shape of the input is a weaker signal than the *operations*: several `matrices`-tagged problems are segment trees or DP, and only static-additivity legitimises a prefix — check the updates before committing (@sec-nd-a6, @sec-nd-pit).
+
+## Practice ladder
+
+Ordered by pattern. The two Codeforces problems solved in Part B are marked `.solved`; self-authored solved tasks are named with their section anchor and are fully stressed against a brute force in this chapter. Every other entry is "solve it after the lesson named"; ratings and names are verbatim from the judge. CF 1648A is solved in another chapter and is cited only, never re-solved here.
+
+::: {.practice}
+- [CF 932B · Recursive Queries](https://codeforces.com/problemset/problem/932/B){.solved rating="1300"} — a prefix table over the *value* domain; count $g(x)=k$ in $[\ell,r]$ with two reads (@sec-nd-p1-rq)
+- Static Sub-Rectangle Sums (@sec-nd-p1-rectsum) — self-authored: the 2D prefix in isolation, four-corner $O(1)$ read, brute + stress
+- Many Rectangle Paints (@sec-nd-p2-rectadd) — self-authored: 2D difference, four corner writes + one recover scan, brute + stress
+- Cube Box Sums (@sec-nd-p2-3dbox) — self-authored: the 3D prefix, eight signed reads per box, brute + stress
+- [CF 1195D2 · Submarine in the Rybinsk Sea (hard edition)](https://codeforces.com/problemset/problem/1195/D2){.solved rating="1800"} — digit-position weighted contribution, mod $998244353$ (@sec-nd-p4-rybinsk)
+- Progression Range Adds (@sec-nd-p3-aprange) — self-authored: AP on a range via slope + intercept difference, brute + stress
+- Affine Range Adds Then Range Sums (@sec-nd-p3-linear) — self-authored: difference rebuild composed with a prefix read, brute + stress
+- Diagonal Segment Sums (@sec-nd-p4-diag) — self-authored: 1D prefixes along $i-j$ buckets, two reads per run, brute + stress
+- [CF 1648A · Weird Sum](https://codeforces.com/problemset/problem/1648/A){rating="1400"} — separable-axis *contribution* on a grid; solved in another chapter, cited as the weighted-sum sibling (@sec-nd-a6)
+- [CF 844B · Rectangles](https://codeforces.com/problemset/problem/844/B){rating="1300"} — per-element multiplicity (probability solve); the contribution framing, not a prefix (@sec-nd-a6)
+- [CF 1598E · Staircases](https://codeforces.com/problemset/problem/1598/E){rating="2100"} — grid shapes with per-cell flips; the caution that a grid query is not always a 2D prefix (@sec-nd-pit, @sec-nd-p1)
+- [CF 718C · Sasha and Array](https://codeforces.com/problemset/problem/718/C){rating="2300"} — range updates + queries via matrix exponentiation on a segment tree: a look-alike, not prefixing (@sec-nd-pit)
+- [CF 1252K · Addition Robot](https://codeforces.com/problemset/problem/1252/K){rating="2100"} — the same online-range-update trap in `matrices` clothing; a lazy segment tree (@sec-nd-pit, @sec-ds)
+- [SPOJ MATSUM · Matrix Summation](https://www.spoj.com/problems/MATSUM/){difficulty="Hard"} — interleaved point updates and rectangle sums: the dynamic 2D structure you build *after* this chapter (@sec-ds, @sec-nd-a6)
+:::
+
+## Further reading
+
+- [CSES Problem Set booklet — Prefix Sums & Dynamic Range Queries (Ch. 8, 10)](https://cses.fi/book/book.pdf) — the 1D/2D prefix and the Fenwick versions this chapter builds toward and defers to @sec-ds.
+- [CP-Algorithms — Segment Tree and Lazy Propagation](https://cp-algorithms.com/data_structures/segment_tree.html) — the online structure that takes over the moment range updates and range queries interleave (@sec-nd-a6, @sec-ds).
+- [CP-Algorithms — Mo's algorithm](https://cp-algorithms.com/misc/mo-algorithm.html) — where a large offline batch whose answer cannot be decomposed as a prefix goes instead (@sec-mo).
+
+For the offline-versus-online boundary see the Mo chapter @sec-mo and the sqrt-decomposition chapter @sec-sqrt; for a grid too large to store whole see @sec-coord; and for the genuinely matrix-algebraic look-alikes this chapter deliberately does *not* solve with a prefix (CF 718C, CF 1252K) see @sec-mat.

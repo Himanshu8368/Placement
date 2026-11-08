@@ -1,0 +1,385 @@
+% =====================================================================
+%  21.1  The Merge-Sort Tree: counting by value in a static range
+%  Exports: sec:c19-mst  def:c19-mst  thm:c19-mstcount
+%           lst:c19-mst-build  lst:c19-mst-count  lst:c19-kquery-soln
+%           prob:c19-kquery    fig:c19-mstcount
+%  All numbers agree with 00_opener (fig:c19-mst + the count trace):
+%    A = (3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2), sum 49, 16 slots.
+%    merge-sort top levels (same heap layout as Ch.19's sum grid):
+%      t1 [1-16]=(0,1,1,1,2,2,2,3,3,3,4,4,5,5,6,7)
+%      t2 [1-8] =(1,1,2,3,3,4,5,5)   t3 [9-16]=(0,1,2,2,3,4,6,7)
+%      t4 [1-4] =(2,3,4,5)  t5 [5-8]=(1,1,3,5)  t6 [9-12]=(0,2,4,7)  t7 [13-16]=(1,2,3,6)
+%    count<=3 on [2..9] via canonical nodes: leaf[2..2]={2}->1,
+%      t9[3..4]={4,5}->0, t5[5..8]={1,1,3,5}->3, leaf[9..9]={7}->0 => 1+0+3+0 = 4.
+%  SPOJ KQUERY (live-verified on spoj.com): n<=30000, 1<=a_i<=1e9,
+%    q<=200000, each query (i,j,k) asks "# of elements > k in a[i..j]".
+%    Official sample: n=5, a=(5,1,2,3,4), q=3:
+%      (2,4,1): a[2..4]=(1,2,3) -> >1 is {2,3} -> 2
+%      (4,4,4): a[4..4]=(3)     -> >4 is {}    -> 0
+%      (1,5,2): a=(5,1,2,3,4)   -> >2 is {5,3,4} -> 3   Output: 2 0 3.
+% =====================================================================
+\section{The Merge-Sort Tree: Counting Values in a Range}\label{sec:c19-mst}
+
+\begin{previouslybox}[Ch.~19 could fold any aggregate over an interval -- but only \emph{one} number per node]
+Chapter~19 (\chref{c13}) stored, at each node, a \emph{single} aggregate -- a sum, a min, a \(\gcd\) -- of the whole interval that node owns, and answered ``what is the combine over \(a[l..r]\)'' in \(\bigO{\log n}\) by folding the canonical cover.  That machinery is silent on a different, equally common question: \emph{how many of the values in \(a[l..r]\) are at most \(x\)?}  A lone aggregate throws the values away; it knows their sum, not their order.  Chapter~19 flagged exactly this gap and pointed the \emph{static} ``count / \(k\)-th by value in a range'' case forward to this section.  The fix is small and very old in spirit: keep, at each node, not one number but the interval's \term{sorted list}.  The tree you get is the \term{merge-sort tree} -- merge-sort's divide step kept as a data structure.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{merge-sort tree} on an array \(A[1..n]\) is the Ch.~19 heap-layout segment tree in which each node \(v\) owning interval \([l_v,r_v]\) stores \(M_v\), the \emph{sorted} list of \(A[l_v..r_v]\).  A leaf holds one element; an internal node's list is the merge of its two children's lists -- which is exactly why the build costs the same \(\bigO{n\log n}\) as merge-sort itself.  To count values \(\le x\) inside a query range \([l,r]\), decompose \([l,r]\) into its \(O(\log n)\) canonical nodes and, in each, \emph{bisect} its sorted list with an \code{upper\_bound}; sum the counts.  That is \(\bigO{\log n}\) nodes \(\times\) \(\bigO{\log n}\) per bisection \(=\) \(\bigO{\log^2 n}\) per query.  The tree never changes once built -- it is the right engine only for \emph{static} arrays -- but it turns Ch.~19's interval fold into a two-dimensional one: an \emph{index} axis (the canonical cover) crossed with a \emph{value} axis (the bisection).
+
+\textbf{Prerequisites.} Ch.~19 (\chref{c13}) is assumed: the heap intervals \([l_v,r_v]\), the split at \(\mathit{mid}\), and the canonical-cover decomposition of a range into \(O(\log n)\) nodes (\(\coderef{c13-build}\), \(\secref{c13-core}\)).  The running array \(A\) and its merge-sort overlay are fixed in the opener (\figref{c19-mst}); nothing here re-derives them.  \(\secref{c19-chairman}\) later beats this section's \(k\)-th pipeline with a different structure; this section is the slower, more obvious first answer.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item read a sorted list off any merge-sort node and bisect it to count \(\le x\); \hfill\lv{2}
+  \item write the \(\bigO{n\log n}\) build (merge on the way up) and the \(\bigO{\log^2 n}\) range count from memory; \hfill\lv{3}
+  \item answer the \(k\)-th smallest of \(a[l..r]\) by \emph{binary-searching the value} against the count oracle (\(\bigO{\log^3 n}\)); \hfill\lv{3}--\lv{4}
+  \item decide, on sight of the constraints, that a \emph{static} ``count / \(k\)-th values \(\le x\) in a range'' input wants this tree and not a lazy or Fenwick structure. \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``count or k-th by value, array never changes'']
+\reckey{``how many of \(a[l..r]\) are \(\le x\)'' / ``\(\ge x\)'' / ``in \([p,q]\)''; ``the \(k\)-th smallest in \(a[l..r]\)''; many \((l,r,x)\) queries all answered on \emph{one fixed} array; a \tle after a brute force that re-walks the range and sorts it on every query -- the tell is that the \emph{array} is static but the \emph{value threshold} keeps changing.}
+\recuse{
+  \item static array, count values \(\le x\) in a range -- this section's \code{countLE} (\(\coderef{c19-mst-count}\)), SPOJ~KQUERY;
+  \item static \(k\)-th smallest in a range, and \(\bigO{\log^3 n}\) is fast enough -- the external value-binary-search below;
+  \item ``\(k\)-th in a range'' at a \emph{tighter} budget -- the chairman tree, \(\secref{c19-chairman}\), does it in \(\bigO{\log V}\) with no outer search.
+}
+\recnotuse{
+  \item the array is \emph{updated} between queries -- a merge-sort tree cannot absorb writes cheaply (every edit would re-merge \(\log n\) sorted lists); use Ch.~19's plain tree for point writes, or persistence (\(\secref{c19-copy}\)) if you must read old versions;
+  \item the aggregate is a plain sum / min / \(\gcd\) of the range, not a count by value -- Ch.~19's one-number-per-node already handles it in \(\bigO{\log n}\);
+  \item the range query is idempotent \(\min/\max\) with no value threshold -- the sparse table (\(\secref{c19-sparse}\)) answers in \(O(1)\).
+}
+One-line test: \emph{a fixed array, a range, and a question about the \emph{values} (how many \(\le x\)? which is \(k\)-th?) -- then hang a sorted list on each Ch.~19 node and bisect; that is the merge-sort tree.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: one number per node throws the order away}
+% ---------------------------------------------------------------
+
+Ch.~19's combine law is about the \emph{interval}, not the value axis: node \(v\) stores \(\mathcal{M}\big(A[l_v..r_v]\big)\), a single scalar, and the query folds \(O(\log n)\) such scalars.  Nothing in that scalar lets you ask ``how many entries are \(\le 3\)'', because the count \emph{depends on the threshold \(x\)} -- a second input a lone aggregate never stores.  The remedy is to keep more state: at node \(v\), store not the sum but the whole \emph{sorted multiset} \(M_v = \mathrm{sort}(A[l_v..r_v])\).  Once a node's list is sorted, the number of its entries \(\le x\) is just a bisection -- \code{upper\_bound} \(-\) begin, \(O(\log\) of the list length\().\)
+
+Now a query range \([l,r]\) is, as in Ch.~19, a disjoint union of \(O(\log n)\) canonical nodes.  Counting is additive across a disjoint union:
+\[
+  \#\{\,i\in[l,r]: A_i \le x\,\} \;=\; \sum_{v\ \in\ \text{canonical cover}} \ \#\{\,y\in M_v : y \le x\,\},
+\]
+and each summand is one bisection.  So one query costs \(O(\log n)\) bisections of \(O(\log n)\) lists \(=\bigO{\log^2 n}\).  The \emph{build} pays for the sortedness once: each internal node merges its two already-sorted child lists, the classic merge of merge-sort -- \(O(\text{interval length})\) work per node, and \(O(\log n)\) node-levels each totalling \(O(n)\), hence \(\bigO{n\log n}\) and \(\bigO{n\log n}\) memory.
+
+\begin{definition}{Merge-sort tree}{c19-mst}
+Let \(A[1..n]\) be a \emph{static} array.  Its \term{merge-sort tree} is the recursive heap-layout segment tree (root \(t_1\), node \(v\) owns \([l_v,r_v]\), split at \(\mathit{mid}=\lfloor (l_v+r_v)/2\rfloor\), children \(2v,2v{+}1\)) in which every node stores \(M_v\), the nondecreasing sort of \(A[l_v..r_v]\).  A leaf has \(M_v=(A[l_v])\); an internal node has \(M_v = \mathrm{merge}(M_{2v}, M_{2v+1})\).  A \term{range-count} query \(\mathit{count}(l,r,x)\) returns \(\sum_{v}\mathit{lower}(M_v,x)\) summed over the canonical cover of \([l,r]\), where \(\mathit{lower}(M_v,x)=\) the number of entries of \(M_v\) that are \(\le x\), obtained by bisection.
+\end{definition}
+
+\begin{theorem}{Build and range count on a merge-sort tree}{c19-mstcount}
+On \(n\) elements the merge-sort tree is built in \(\bigO{n\log n}\) time and \(\bigO{n\log n}\) space.  A range count \(\mathit{count}(l,r,x)\) runs in \(\bigO{\log^2 n}\): it visits \(O(\log n)\) canonical nodes (\thmref{c13-merge}'s cover bound, reused verbatim) and performs one \(O(\log n)\) bisection per visited node.  The \(k\)-th smallest of \(A[l..r]\) is then found in \(\bigO{\log^2 n\cdot\log W}\) by binary-searching the answer value over a width-\(W\) range against the count oracle.
+\end{theorem}
+\begin{proofbox}
+\textbf{Build.} Each node's list is produced by a linear merge of its two children's lists, costing \(O(r_v-l_v+1)=O(\text{len}(v))\).  At a fixed depth the node intervals are disjoint and partition \([1,n]\), so a whole depth level costs \(O(n)\); the tree has \(\lceil\log_2 n\rceil+1=O(\log n)\) levels.  Total \(\bigO{n\log n}\) time, and the same in space since every node keeps its own \(O(\text{len})\) list.\\
+\textbf{Count.} \(\coderef{c19-mst-count}\) recurses exactly like \(\coderef{c13-query}\): a node's interval is either disjoint from \([l,r]\) (contributes \(0\)), fully covered (contributes one bisection \(\mathit{lower}(M_v,x)=O(\log\text{len})\le O(\log n)\)), or partial (descend).  By \thmref{c13-merge} the cover has \(O(\log n)\) fully-covered nodes and \(O(\log n)\) partial nodes, so the recursion is \(O(\log n)\) bisections of \(O(\log n)\) each \(=\bigO{\log^2 n}\).\\
+\textbf{\(k\)-th by value search.} Let \(f(x)=\mathit{count}(l,r,x)\), a nondecreasing step function of \(x\).  The \(k\)-th smallest is the smallest \(x\) with \(f(x)\ge k\); binary-search \(x\) over the value range (width \(W\)), each test one \(\bigO{\log^2 n}\) count, giving \(\bigO{\log W\cdot\log^2 n}\).
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  Ch.~19 kept one number per box and could only ever ask about that number.  Here every box keeps its values \emph{in order}, so a box can answer ``how many of mine are \(\le x\)'' for \emph{any} \(x\) instantly -- just walk down the sorted list and stop.  A range query is ``sum that answer over the \(O(\log n)\) boxes that tile the range.''  You trade Ch.~19's \(O(n)\) memory for \(O(n\log n)\) and its \(O(\log n)\) query for \(O(\log^2 n)\), and in exchange you gain a whole axis of questions it never could answer.  The price is that the array is frozen: a single write would force you to re-merge every list on the leaf's root path.
+
+% ---------------------------------------------------------------
+\subsection{The build and the count}
+% ---------------------------------------------------------------
+
+The build is Ch.~19's recursion with \code{merge} replacing \(+\); the query is Ch.~19's recursion with \code{upper\_bound} replacing the fold.
+
+\begin{lstlisting}[caption={merge-sort tree build: leaves hold one value, internal nodes MERGE the two sorted child lists -- O(n log n) total}, label={lst:c19-mst-build}]
+vector<int> mst[4*N];                       // sorted list stored at each heap node
+void build(int v, int tl, int tr, const vector<int>& A){
+    if (tl == tr){                          // leaf: the single element
+        mst[v] = { A[tl] };
+        return;
+    }
+    int tm = (tl + tr) / 2;
+    build(2*v,   tl,   tm, A);             // same interval geometry as Ch.19
+    build(2*v+1, tm+1, tr, A);
+    mst[v].resize(tr - tl + 1);             // MERGE the two sorted lists:
+    merge(mst[2*v].begin(),   mst[2*v].end(),   //   this is the "merge" in
+          mst[2*v+1].begin(), mst[2*v+1].end(), //   "merge-sort tree"
+          mst[v].begin());
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={range count: number of elements at most x in A(l..r) equals one bisection per canonical node -- O(log-squared n)}, label={lst:c19-mst-count}]
+int countLE(int v, int tl, int tr, int l, int r, int x){
+    if (l > r) return 0;                    // empty intersection -> identity
+    if (l == tl && r == tr)                 // node FULLY COVERED: bisect once
+        return upper_bound(mst[v].begin(), mst[v].end(), x)
+             - mst[v].begin();              //   # entries of M_v that are <= x
+    int tm = (tl + tr) / 2;                 // partial: split the request
+    return countLE(2*v,   tl,   tm, l,          min(r, tm), x)
+         + countLE(2*v+1, tm+1, tr, max(l, tm+1), r,      x);
+}
+// "# strictly > k" in A[i..j] (SPOJ KQUERY) = (j - i + 1) - countLE(1,1,n,i,j,k)
+\end{lstlisting}
+
+Note the exact parallel to Ch.~19: \(\coderef{c19-mst-count}\) returns at a fully-covered node (here a \emph{bisection} instead of a stored scalar) and descends only through partial nodes.  The list was bisected \emph{because it is sorted} -- sortedness is the only new invariant, bought once at build.
+
+% ---------------------------------------------------------------
+\subsection{The hand trace on \(A\)}
+% ---------------------------------------------------------------
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.62, transform shape]
+  % canonical cover of [2..9]: leaf t17(A2), t9[3..4], t5[5..8], leaf t24(A9)
+  \node[boxnode, primaryblue, minimum size=9mm, font=\scriptsize] (t1) at (4,3.4) {\(t_1\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=north] at (4,2.95) {\([1..16]\)};
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t2) at (2,1.9) {\(t_2\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=north] at (2,1.5) {\([1..8]\)};
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t3) at (6,1.9) {\(t_3\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=north] at (6,1.5) {\([9..16]\)};
+  % covered pieces
+  \node[boxnode, successgreen, minimum size=8mm, font=\scriptsize] (b2) at (0.4,0.4) {\([2..2]\)};
+  \node[font=\tiny\ttfamily, text=green!45!black, anchor=north] at (0.4,0.0) {\((2)\!\to 1\)};
+  \node[boxnode, successgreen, minimum size=8mm, font=\scriptsize] (t9) at (2,0.4) {\(t_9\)};
+  \node[font=\tiny\ttfamily, text=green!45!black, anchor=north] at (2,0.0) {\((4,5)\!\to 0\)};
+  \node[boxnode, successgreen, minimum size=8mm, font=\scriptsize] (t5) at (3.8,0.4) {\(t_5\)};
+  \node[font=\tiny\ttfamily, text=green!45!black, anchor=north] at (3.8,0.0) {\((1,1,3,5)\!\to 3\)};
+  \node[boxnode, successgreen, minimum size=8mm, font=\scriptsize] (b9) at (6,0.4) {\([9..9]\)};
+  \node[font=\tiny\ttfamily, text=green!45!black, anchor=north] at (6,0.0) {\((7)\!\to 0\)};
+  \draw[flow] (t1)--(t2); \draw[flow] (t1)--(t3);
+  \draw[flow] (t2)--(b2); \draw[flow] (t2)--(t9); \draw[flow] (t2)--(t5);
+  \draw[flow] (t3)--(b9);
+  \node[font=\scriptsize, text=darkgray, anchor=east] at (-0.4,0.4) {cover};
+\end{tikzpicture}
+\caption{The canonical cover of the query range \([2..9]\) in the merge-sort tree over \(A\).  It is exactly \(\{[2..2],\,t_9[3..4],\,t_5[5..8],\,[9..9]\}\) -- four nodes, no two overlapping, whose intervals tile \(2..9\).  Counting values \(\le 3\) bisects each node's \emph{sorted} list: \((2)\to 1\), \((4,5)\to 0\), \((1,1,3,5)\to 3\), \((7)\to 0\).  The green arrows sum to \(4\).}
+\label{fig:c19-mstcount}
+\end{figure}
+
+\begin{tracebox}[count values <= 3 on A(2..9) -- four bisections on the cover of figure c19-mstcount]
+\textbf{Cover.} From \(t_1[1..16]\): split at \(\mathit{mid}=8\).  The range reaches both halves, then further: the left part \([2..8]\) splits into leaf \([2..2]=\{2\}\), node \(t_9[3..4]=\{4,5\}\), node \(t_5[5..8]=\{1,1,3,5\}\); the right part contributes only \([9..9]=\{7\}\).  That is \(O(\log n)\) nodes -- four here.\\
+\textbf{Bisect each sorted list for \(\le 3\):}
+\[
+  (2)\to 1,\qquad (4,5)\to 0,\qquad (1,1,3,5)\to 3,\qquad (7)\to 0 .
+\]
+\textbf{Sum:} \(1+0+3+0=\boxed{4}\).\\
+\textbf{Cross-check} by brute force: \(A[2..9]=(2,4,5,1,1,5,3,7)\); the entries \(\le 3\) are \(2,1,1,3\) -- four of them.  The tree answered with four bisections and no re-sorting, because the sorted lists were paid for once at build.
+\end{tracebox}
+
+\begin{complexitybox}[The merge-sort tree]
+\textbf{Build} \(\bigO{n\log n}\) time and \textbf{memory} \(\bigO{n\log n}\) -- every one of the \(n\) elements appears once per level, and there are \(\log n\) levels.  \textbf{Range count} \(\bigO{\log^2 n}\) per query (\(\log n\) canonical nodes, one bisection each).  \textbf{\(k\)-th in a range} \(\bigO{\log^2 n\cdot\log W}\) via the external value binary search.  \textbf{Static only}: a point write re-merges \(\log n\) sorted lists and is \(\bigO{n}\)-ish in practice -- not the structure for a changing array.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: SPOJ KQUERY -- count greater-than in a range}
+% ---------------------------------------------------------------
+
+\solvedproblem{c19-kquery}{K-Query}{SPOJ KQUERY}
+  {https://www.spoj.com/problems/KQUERY/}{SPOJ L4}
+  {the textbook merge-sort tree; one bisection per canonical node counts elements above a threshold}
+
+\begin{problemstatement}[SPOJ KQUERY K-Query]
+An array \(a[1..n]\) of \(n\) integers.  Then \(q\) queries; each query is three integers \(i,\,j,\,k\) and asks for the \emph{number of elements strictly greater than \(k\)} in the subarray \(a[i..j]\).
+
+\textbf{Input.} \(n\) (\(1\le n\le 30000\)); the \(n\) values \(a_1,\dots,a_n\) (\(1\le a_i\le 10^9\)); \(q\) (\(1\le q\le 200000\)); then \(q\) lines, each \(i\ j\ k\) with \(1\le i\le j\le n\) and \(1\le k\le 10^9\).
+
+\textbf{Output.} For each query, one integer per line: the count of elements \(> k\) in \(a[i..j]\).
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+5
+5 1 2 3 4
+3
+2 4 1
+4 4 4
+1 5 2
+
+Output:
+2
+0
+3
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+Sorting the subarray per query is \(\bigO{q\cdot n\log n}\approx 2\cdot10^5\cdot 3\cdot10^4\log\) -- a hard \tle.  The threshold \(k\) changes every query but the \emph{array never does}, so the sorted order of any fixed interval is worth precomputing once.  That is precisely the merge-sort tree.
+\peek{which two numbers do you compare inside one covered node to get a count?}
+\nudge{inside a node's sorted list, the number of elements \(\le k\) is \code{upper\_bound}-\code{begin}; the number \emph{\(>k\)} is the node's length minus that.  Add over the canonical cover of \([i,j]\).}
+\fullhint{Build a merge-sort tree over \(a\) (\(\coderef{c19-mst-build}\)).  Answer \(\mathit{countLE}(1,1,n,i,j,k)\) (\(\coderef{c19-mst-count}\)); the answer to the query is \((j-i+1)-\mathit{countLE}\).  Total \(\bigO{n\log n + q\log^2 n}\approx 3\cdot10^4\cdot 15 + 2\cdot10^5\cdot 225\): about \(4.5\cdot10^7\) list steps -- comfortably \ac.  All values fit in \code{int}.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Each query is ``how many of \(a[i..j]\) exceed \(k\)?''  The array is fixed, so for any interval the sorted order is fixed too; only \(k\) and the range move.  A merge-sort tree makes the sorted order of \emph{every} canonical interval available for free, and within one sorted list ``how many \(\le k\)'' is a single bisection.  ``Greater than \(k\)'' is the complement inside the node, so each covered node contributes \(\text{len}-\mathit{lower}\), summed over the \(O(\log n)\) cover.
+
+\solstep{Key Observations}
+\begin{observation}
+This is the \emph{count-by-value} question Ch.~19 could not answer with one scalar per node.  The whole point of the extra sorted list is to let a node answer for \emph{any} threshold \(x\), not a baked-in one.
+\end{observation}
+\begin{observation}
+\textbf{Greater-than is a complement}: \(\#(>k)=\text{len}-\#(\le k)\).  Write the count oracle for \(\le\) and reuse it; do not bisect twice.
+\end{observation}
+\begin{observation}
+The tree is \emph{static}.  KQUERY has no updates, which is exactly the license a merge-sort tree needs -- the moment a problem adds writes, move to persistence (\(\secref{c19-copy}\)) or the plain tree.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Sort the subarray \(a[i..j]\) for every query and scan}
+{Sorting costs \(\bigO{(j-i+1)\log}\) per query; with \(q=2\cdot10^5\) ranges up to length \(3\cdot10^4\) this is \(\sim10^{10}\).  The re-sorting is pure waste when the array never changes.}
+\deadend{A Fenwick tree over the values}
+{A BIT counts \emph{prefixes} of the value axis; it answers ``how many \(\le k\) \emph{overall}'' but not restricted to an \emph{index} range \([i,j]\) without an offline sweep sorted by index -- and KQUERY's queries arrive as arbitrary \((i,j,k)\).  The merge-sort tree handles the two axes head-on.}
+\aha{Store each interval's \emph{sorted list}; a range count is \(O(\log n)\) bisections over the canonical cover -- \(\bigO{\log^2 n}\).}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}c p{0.24\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ sort per query & copy \(a[i..j]\), sort, scan & \(\bigO{q\,n\log n}\) & \tle \\
+2 & \lv{3}\ offline BIT on \(k\) & sort queries by \(k\), slide a BIT over indices & \(\bigO{(n+q)\log n}\) & \ac\\
+3 & \lv{3}\ \textbf{merge-sort tree} & sorted list per node, bisection (\(\coderef{c19-mst-count}\)) & \(\bigO{n\log n+q\log^2 n}\) & \ac \\
+4 & \lv{4}\ chairman tree (\(\secref{c19-chairman}\)) & prefix versions; \(\bigO{\log n}\) per count & \(\bigO{(n+q)\log n}\) & \ac\\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is a legitimate offline shortcut for KQUERY specifically (queries never interleave with updates, so sorting them by threshold and sliding a BIT over indices works); we build rung~3 because it answers queries \emph{online, in any order}, and because the same tree is the platform for the \(k\)-th pipeline and, in \(\secref{c19-chairman}\), gets refined into rung~4.
+
+\solstep{Solution}
+Build the merge-sort tree once (\(\coderef{c19-mst-build}\)).  For each query \((i,j,k)\), let \(c\) be the number of elements \(\le k\) in \(A[i..j]\) (\(\coderef{c19-mst-count}\)); output \((j-i+1)-c\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Count is right.} \(\coderef{c19-mst-count}\) mirrors \(\coderef{c13-query}\): it partitions \(A[i..j]\) into the disjoint canonical cover \(\mathcal{C}\) (thmref{c13-merge}), and for each \(v\in\mathcal{C}\) returns \(\mathit{lower}(M_v,k)\), the number of \(M_v\)'s entries \(\le k\).  Since \(M_v\) is the sorted multiset of \(A[l_v..r_v]\), \(\mathit{lower}(M_v,k)\) counts indices in \([l_v,r_v]\) with value \(\le k\); summing over the disjoint cover counts indices in \([i,j]\) with value \(\le k\) exactly once.  Then \((j-i+1)-\#(\le k)=\#(>k)\).\\
+\textbf{Complexity.} \(O(\log n)\) cover nodes \(\times\) one \(O(\log n)\) bisection \(=\bigO{\log^2 n}\) per query; build \(\bigO{n\log n}\).  With \(n\le3\cdot10^4, q\le 2\cdot10^5\) this is \(\sim4.5\cdot10^7\) steps, inside the limit.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={SPOJ KQUERY full solution: build a merge-sort tree, answer each query with one range count}, label={lst:c19-kquery-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int N = 30005;
+vector<int> mst[4*N];
+int A[N], n, q;
+
+void build(int v, int tl, int tr){
+    if (tl == tr){ mst[v] = { A[tl] }; return; }
+    int tm = (tl + tr) / 2;
+    build(2*v, tl, tm);
+    build(2*v+1, tm+1, tr);
+    mst[v].resize(tr - tl + 1);
+    merge(mst[2*v].begin(),   mst[2*v].end(),
+          mst[2*v+1].begin(), mst[2*v+1].end(),
+          mst[v].begin());
+}
+int countLE(int v, int tl, int tr, int l, int r, int x){
+    if (l > r) return 0;
+    if (l == tl && r == tr)
+        return upper_bound(mst[v].begin(), mst[v].end(), x) - mst[v].begin();
+    int tm = (tl + tr) / 2;
+    return countLE(2*v,   tl,   tm, l,          min(r, tm), x)
+         + countLE(2*v+1, tm+1, tr, max(l, tm+1), r,      x);
+}
+int main(){
+    scanf("%d", &n);
+    for (int i = 1; i <= n; i++) scanf("%d", &A[i]);
+    build(1, 1, n);
+    scanf("%d", &q);
+    while (q--){
+        int i, j, k; scanf("%d%d%d", &i, &j, &k);
+        int le = countLE(1, 1, n, i, j, k);
+        printf("%d\n", (j - i + 1) - le);   // elements strictly greater than k
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[KQUERY on a=(5,1,2,3,4): three queries]
+\(a=(5,1,2,3,4)\).  The merge-sort tree over it has root \((1,2,3,4,5)\).\\
+\textbf{(2,4,1)}: \(a[2..4]=(1,2,3)\); count \(\le 1\) is \(1\); answer \(3-1=\boxed{2}\) (\(\{2,3\}\) are \(>1\)).\\
+\textbf{(4,4,4)}: \(a[4..4]=(3)\); count \(\le 4\) is \(1\); answer \(1-1=\boxed{0}\) (nothing \(>4\)).\\
+\textbf{(1,5,2)}: \(a=(5,1,2,3,4)\); count \(\le 2\) is \(2\) (\(1,2\)); answer \(5-2=\boxed{3}\) (\(\{5,3,4\}\)).  Matches the official output \(2,\;0,\;3\).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Build \(\bigO{n\log n}\approx 4.5\cdot10^5\) list elements touched; queries \(\bigO{q\log^2 n}\approx 2\cdot10^5\cdot 225\approx 4.5\cdot10^7\) bisection steps -- \ac.  Memory \(\bigO{n\log n}\): about \(n\log n\approx 4.5\cdot10^5\) stored ints plus vector overhead, well inside SPOJ's limit.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.22\linewidth} p{0.30\linewidth} p{0.36\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+\(i=j\) single slot & cover is one leaf & bisect a length-1 list; \(\#>k\in\{0,1\}\) \\
+\(k\) below all values & everything counts & \(\mathit{countLE}=0\), answer \(=j-i+1\) \\
+\(k\) above all values & nothing counts & \(\mathit{countLE}=j-i+1\), answer \(0\) \\
+\(a_i\) up to \(10^9\) & \code{int} ceiling & fits \code{int}; counts fit \code{int} \\
+duplicate values & strict \(>k\) & \code{upper\_bound} keeps duplicates \(\le k\) out of the \(>k\) set \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{\code{upper\_bound} vs \code{lower\_bound}.}  For ``\(\le x\)'' use \code{upper\_bound} (first \(>x\)) minus begin; for ``\(< x\)'' use \code{lower\_bound}.  Swapping them shifts the count by every copy of \(x\) -- the signature merge-sort-tree off-by-one.
+  \item \textbf{Complement against the node \emph{length}, not \(n\).}  \(\#(>k)=(r_v-l_v+1)-\#(\le k)\) summed over cover nodes equals \((j-i+1)-\mathit{countLE}\); subtracting from the array size \(n\) is wrong.
+  \item \textbf{Memory is \(\bigO{n\log n}\), not \(O(n)\).}  Each level stores \(n\) ints, so budget \(\log n\) copies; a fixed \([4n]\) of \emph{vectors} is fine but never assume the lists are short.
+  \item \textbf{The tree is static.}  Do not try to `update' it in place -- a write invalidates \(\log n\) merged lists.  If writes appear, this is a different chapter's problem.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: re-sorting per query instead of reusing the tree]
+The whole saving is that sortedness is computed \emph{once} at build.  Copying \(a[l..r]\) into a scratch array and sorting per query silently reintroduces \(\bigO{q\cdot n\log n}\) and \tle.  If you find yourself sorting inside the query loop, you did not build the tree.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: counting on the wrong axis at a covered node]
+A fully-covered node answers with a bisection of its \emph{sorted list}.  Descending further (to leaves) turns a \(\bigO{\log n}\) cover into a walk of the whole range -- \(\bigO{n}\).  Stop at the covered node and bisect, exactly as Ch.~19 stops and reads its scalar.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: mixing \(\le\), \(<\), and strict \(>\)]
+KQUERY wants ``strictly greater than \(k\)''.  Reach it as \((\text{length})-\#(\le k)\) with \code{upper\_bound}.  Using \code{lower\_bound} counts \(<k\) and leaves elements \(\equiv k\) on the wrong side; both bounds on equal values is the most common WA here.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: assuming the merge-sort tree survives an update]
+This structure is \emph{static}.  A single point write would force re-merging every list on the leaf's root path -- \(\bigO{n}\) at the top node.  If the input has updates, this is the wrong tool: use Ch.~19's tree for present-only reads, or path copying (\(\secref{c19-copy}\)) to keep versions.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Did your build \code{merge} the two \emph{sorted} child lists (linear), not re-sort from scratch (\(\bigO{n\log n}\) per node)?
+  \item At a fully-covered node, did you bisect and \emph{return}, without descending to leaves?
+  \item For ``\(>k\)'', did you subtract the \(\le k\) bisection count from the query length \((j-i+1)\)?
+  \item Did you pick \code{upper\_bound} for \(\le x\) (and would \code{lower\_bound} answer a different question)?
+  \item Is the array genuinely static?  If a write appears, stop and rethink the engine.
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Little Elephant and Array}{CF 220B}
+    {https://codeforces.com/problemset/problem/220/B}
+    {CF 1800 L3}
+    {Given \(a[1..n]\) and queries \((l,r)\), report how many values \(x\) satisfy ``\(x\) occurs exactly \(x\) times in \(a[l..r]\)''.  The condition couples a \emph{value} to its \emph{count} inside a range -- exactly the count-by-value muscle of \(\coderef{c19-mst-count}\), except the predicate is ``\(=x\)'' not ``\(\le x\)''.  Build a merge-sort tree and, for a candidate value, bisect the cover to get its frequency in \([l,r]\); note that only values \(\le n\) can qualify, which bounds how many you probe.  A cleaner offline route sorts queries by right end with a BIT over positions (Ch.~18, \chref{c14}); do it both ways and feel the \(\bigO{\log^2 n}\) per-node cost the merge-sort tree pays.}
+  \practice{Fruit Sequences}{CF 1428F}
+    {https://codeforces.com/problemset/problem/1428/F}
+    {CF 2400 L5}
+    {Find the longest contiguous segment that can be made all-equal after at most \(k\) ``increase one element by \(1\)'' operations; the answer is \(\max\cdot(\text{count of max})\) style.  The winning shape is \emph{binary-search the segment length}, then for a fixed length decide quickly whether some window is feasible -- and the decision needs ``how many positions in this window hold the current maximum,'' a range count you can serve with a per-value ordered set (a merge-sort-style structure keyed by value).  Mirror \(\coderef{c19-mst-count}\): the outer search is over the \emph{answer}, the inner oracle counts elements of a value in a \emph{range}, exactly the value\(\times\)index split this section introduced.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+Chapter~19 (\chref{c13}) owns the interval geometry and the canonical-cover bound this section reuses verbatim (\thmref{c13-merge}); the merge-sort tree changes \emph{what a node stores}, not \emph{which nodes a query touches}.  Forward: \(\secref{c19-chairman}\) replaces the \(O(\log^2 n)\) count and the \(\bigO{\log^3 n}\) \(k\)-th pipeline with a \(\bigO{\log V}\) joint descent (the ``rung~4'' above); \(\secref{c19-copy}\) relaxes the ``static only'' restriction that binds this whole section by path-copying around writes; \(\secref{c19-sparse}\) handles the idempotent \(\min/\max\) special case in \(O(1)\) with no value axis at all.  Chapter~18 (\chref{c14}) owns the offline BIT sweep that is KQUERY's shortcut rung~2.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 21.1 in 10 seconds]
+The merge-sort tree is Ch.~19's heap tree with a \emph{sorted list} \(M_v\) at each node instead of one scalar.  Build merges sorted child lists on the way up: \(\bigO{n\log n}\) time and space.  \(\mathit{count}(l,r,x)\) tiles \([l,r]\) into \(O(\log n)\) canonical nodes and bisects each \((\le x\) via \code{upper\_bound}\()\) -- \(\bigO{\log^2 n}\).  \(k\)-th smallest in \([l,r]\) is the smallest \(x\) with \(\mathit{count}(l,r,x)\ge k\), found by binary-searching the value: \(\bigO{\log^2 n\cdot\log W}\).  It is a \emph{static} structure -- writes are fatal to it.  Worked: SPOJ~KQUERY (\(\probref{c19-kquery}\), \(\coderef{c19-kquery-soln}\)) -- count \(>k\) as \((j-i+1)-\mathit{countLE}\).
+\selftest{
+  \item Why can Ch.~19's one-aggregate-per-node tree not answer ``how many of \(a[l..r]\) are \(\le x\)''?
+  \item State the merge-sort build cost and \emph{why} it is that of merge-sort.
+  \item On \(A\), give the canonical cover of \([2..9]\) and the four bisection counts summing to \(4\).
+  \item Turn \(\mathit{count}(l,r,x)\) into the \(k\)-th smallest -- what is searched, and at what cost?
+  \item KQUERY wants elements \(>k\); write the exact expression from the count oracle, naming the bound.
+}
+\end{recallbox}

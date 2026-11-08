@@ -1,0 +1,556 @@
+% =====================================================================
+%  23.3  Segment Tree Beats and the Chtholly Tree (ODT).
+%  Exports: sec:c29-beats  def:c29-beats  thm:c29-beats-cost  fig:c29-beats
+%           lst:c29-beats  def:c29-odt  prob:c29-896c  lst:c29-896c
+%  DISCHARGE of the forward-cites that point here:
+%    * Ch.20 \secref{c15-strains} (20.5 "where lazy strains") -- "the clamp
+%      family (chmin/chmax/modulo) is segment-tree beats, Ch.23, no code here".
+%      The code is HERE.  The TERM "segment-tree beats" is indexed in Ch.20,
+%      so this file NEVER re-\term it (uses \emph + \chref{c15} prose cite --
+%      the Ch.22 INDEX-overfull lesson).
+%    * Ch.22 \secref{c16-boundary} case (C): "set every value on a path to
+%      min(value,x); a lazy tag has nothing to record -> beats node (Ch.23)".
+%    * Ch.19 \secref{c13-static}: CF 438D "The Child and Sequence" (2300,
+%      modulo + max-prune) is OWNED THERE as a \practice.  PROSE ONLY here --
+%      urlsweep must stay empty for it, so it is NOT re-linked from c29.
+%  Solved CF 896C "Willem, Chtholly and Seniorious" (2600), live-verified via
+%  the problemset API + problem page.  FOUR generated ops (LCG rnd()=seed;
+%  seed=(seed*7+13) mod 1e9+7): 1 add, 2 chmin, 3 kth-largest, 4 sum of x-th
+%  powers mod y.  Official samples read live and hand-replayed to the digit:
+%    S1 input "10 10 7 9"  -> outputs 2,1,0,3  (array {8,9,7,2,3,1,5,6,4,8};
+%       the four type-4 sums are 302 mod 4 = 2; ...; ... mod 4 = 1; ... mod 1
+%       = 0; ... mod 5 = 3 -- first one fully re-derived in the tracebox).
+%    S2 input "10 10 9 9"  -> outputs 1,1,3,3.
+% =====================================================================
+\section{Segment Tree Beats and the Chtholly Tree}\label{sec:c29-beats}
+
+\begin{previouslybox}[Ch.~20 named this wall; here is the engine that climbs it]
+Chapter~20 (\(\secref{c15-strains}\)) ended in tears at exactly the update
+\(a_i \leftarrow \min(a_i,x)\): a lazy tag stores \emph{one pending value}, and
+clamping is data-dependent -- two nodes with the same \((\mathit{sum},\max)\)
+record, \(X=(3,2,4,5)\) and \(Y=(5,5,2,2)\), react differently to
+\(\mathit{chmin}(4)\), so the fold cannot be read from the aggregate.  Chapter~22
+made the same observation for a whole \emph{path} clamp (\(\secref{c16-boundary}\)'s
+case~(C)): heavy-light can still cut the path into chain ranges, but the
+per-range engine \"-- whatever it is -- must handle a non-monoid update.  Both
+chapters forward-cited \chref{c29} and promised \emph{no code there}.  The code
+lives in this section.  The trick is to store \emph{more} than a sum: keep the
+maximum, the second maximum, and how many elements attain the maximum, and then a
+clamp either changes nothing, changes only the maximal cells, or must descend.
+\end{previouslybox}
+
+\begin{topicintro}
+\emph{Segment-tree beats} (the term is indexed in Chapter~20) is a family of
+range updates -- \(\mathit{chmin}\), \(\mathit{chmax}\), add, modulo -- that are
+not composable into a single tag, yet still run in (amortised) polylog time
+because the extra node bookkeeping lets the recursion \emph{prune} whole subtrees
+or \emph{settle} an update at an interior node.  A node that stores
+\((\max,\;\mathrm{smax},\;\mathrm{cnt})\) can answer \"how does \(\mathit{chmin}(x)\)
+touch me?\" in three ways: if \(x\ge\max\) nothing changes (prune); if
+\(\mathrm{smax}<x<\max\) only the \(\mathrm{cnt}\) maximal cells drop to \(x\), a
+patch you can apply without descending; otherwise you must go deeper.  The
+amortised cost of the descend-only-when-forced policy is the celebrated
+\emph{blending} bound of \(\thmref{c29-beats-cost}\).
+
+The \term{Chtholly tree} (``ODT'', ordered-set decomposition) is the
+random-data sibling.  Instead of a fixed tree it keeps a \(\mathit{std::set}\) of
+maximal equal-runs; a \code{split} carves runs at interval ends and every update
+touches whole runs.  On random operations a \(\mathit{chmin}\) collapses many runs
+into one, so the set stays small and \(\mathit{chmin}/\mathit{kth}/\mathit{sum}\)
+run in time proportional to the (small) number of runs.  It is not worst-case
+safe -- that caveat is the honest headline of the solved problem, CF~896C.
+
+\textbf{Prerequisites.} Chapter~19 (\(\chref{c13}\)) -- the build/pushup segment-tree
+skeleton, reused verbatim here; only the node \emph{state} and the update rule
+change.  Chapter~20 (\(\secref{c15-strains}\)) -- \emph{why} a single tag fails,
+which is the motivation this section answers.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item store \((\max,\mathrm{smax},\mathrm{cnt},\mathit{sum})\) and apply a range
+        \(\mathit{chmin}\) with the prune / settle / descend trichotomy; \hfill\lv{4}
+  \item state the blending amortised bound for range-\(\mathit{chmin}\)-plus-sum and
+        sketch its potential argument; \hfill\lv{5}
+  \item extend the node state with \((\min,\mathrm{smin},\mathrm{cnt})\) for
+        \(\mathit{chmax}\), and prune a range modulo by \(\max<x\); \hfill\lv{5}
+  \item implement a Chtholly tree (split / assign / \(\mathit{chmin}\) / kth /
+        power-sum) and explain exactly when it is (and is not) the right tool. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``clamp a range, but still ask the sum'']
+\reckey{range \(\mathit{chmin}/\mathit{chmax}\) (set each element to
+\(\min/\max\) with a bound) or range modulo, interleaved with range-sum (or
+range-max) queries; the update is \emph{data-dependent}, so no single lazy value
+describes it; \(n,q\) up to \(\sim10^5\) rule out descending to leaves every
+time.}
+\recuse{
+  \item \(\mathit{chmin}\) / \(\mathit{chmax}\) / modulo with sum or max -- beats (\(\secref{c29-beats}\));
+  \item same operations but the data / queries are RNG-generated (random) -- a Chtholly tree is shorter to write and fast in expectation (\(\defref{c29-odt}\));
+  \item on a \emph{tree path}, keep heavy-light's chain ranges and make each a beats node (\(\secref{c16-boundary}\), case~(C)).
+}
+\recnotuse{
+  \item the update is a pure add / assign / affine -- that composes into one lazy tag, Ch.~20 (\(\chref{c15}\));
+  \item only \(\min/\max\) point-sets and range folds, no clamp -- the plain tree, Ch.~19 (\(\chref{c13}\));
+  \item the clamp is ``lower every value toward a floor over all time'' with deletions -- dynamic hull, Ch.~25 (\(\chref{c23}\)).
+}
+One-line test: \emph{a clamp/modulo you cannot turn into one pending number -- store
+\((\max,\mathrm{smax},\mathrm{cnt})\) and prune/settle/descend; if the input is
+random, a run-set does the same job in fewer lines.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The beats node: maximum, second maximum, count}
+% ---------------------------------------------------------------
+
+Over the array positions build the usual segment tree (Chapter~19's skeleton).
+Each node \(i\) covering an interval stores, besides \(\mathit{sum}_i\):
+\(\max_i\) (the maximum value), \(\mathrm{cnt}_i\) (how many cells equal
+\(\max_i\)), and \(\mathrm{smax}_i\) (the largest value \emph{strictly below}
+\(\max_i\); \(-\infty\) if none).  All three merge from the two children in
+\(O(1)\) by the standard \texttt{pushup}.
+
+\begin{definition}{The beats \(\mathit{chmin}\) step}{c29-beats}
+An update \(\mathit{chmin}(x)\) over a range, at a node \(i\) fully inside that
+range, is resolved by cases:
+\begin{itemize}[nosep]
+  \item \(x \ge \max_i\): every cell already \(\le x\); the node is untouched
+        (prune, do not descend).
+  \item \(\mathrm{smax}_i < x < \max_i\): the only cells above \(x\) are the
+        \(\mathrm{cnt}_i\) maximal ones, and each becomes exactly \(x\).  Patch in
+        place: \(\mathit{sum}_i \mathrel{+}= (x-\max_i)\,\mathrm{cnt}_i\) and
+        \(\max_i \leftarrow x\); \(\mathrm{smax}_i\) is unchanged because
+        \(x>\mathrm{smax}_i\).  Do \emph{not} descend.
+  \item \(x \le \mathrm{smax}_i\): more than the maximal cells exceed \(x\), so the
+        effect is genuinely mixed -- push the current \(\max\) down to the children
+        (so their stored maxima are consistent) and recurse.
+\end{itemize}
+\end{definition}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+  box/.style={boxnode, fill=primaryblue!12, draw=primaryblue, rounded corners=2pt,
+              minimum width=5.6cm, minimum height=0.9cm, align=center, font=\scriptsize},
+  ar/.style={->, >=stealth, thick}]
+  \node[box] (nd) at (0,0) {node \(i\): \(\max=5,\;\mathrm{smax}=3,\;\mathrm{cnt}=2,\;\mathit{sum}=24\)};
+  \node[font=\scriptsize, anchor=west, fill=successgreen!14, draw=successgreen, rounded corners=2pt,
+        text width=4.1cm, align=left] (p) at (4.4,1.25) {\(\mathit{chmin}(7)\): \(7\ge\max\)\\ \textbf{prune} -- no change};
+  \node[font=\scriptsize, anchor=west, fill=difforange!16, draw=difforange, rounded corners=2pt,
+        text width=4.1cm, align=left] (s) at (4.4,-0.05) {\(\mathit{chmin}(4)\): \(\mathrm{smax}<4<\max\)\\ \textbf{settle}: sum \(+\!=\!(4{-}5){\cdot}2{=}-2\), \(\max\!\to\!4\)};
+  \node[font=\scriptsize, anchor=west, fill=warningred!12, draw=warningred, rounded corners=2pt,
+        text width=4.1cm, align=left] (d) at (4.4,-1.5) {\(\mathit{chmin}(3)\): \(3\le\mathrm{smax}\)\\ \textbf{descend} to children};
+  \draw[ar] (nd.east) to[bend left=8] (p.west);
+  \draw[ar] (nd.east) to (s.west);
+  \draw[ar] (nd.east) to[bend right=8] (d.west);
+\end{tikzpicture}
+\caption{The three-way decision at one beats node for the state
+\((\max,\mathrm{smax},\mathrm{cnt})=(5,3,2)\).  Only the middle band
+(\(\mathrm{smax}<x<\max\)) settles at the node with an \(O(1)\) patch; the low
+band is the only one that forces a recursion, and it is exactly the case that the
+amortised analysis must pay for.}
+\label{fig:c29-beats}
+\end{figure}
+
+\begin{theorem}{Amortised cost of beats \(\mathit{chmin}\)}{c29-beats-cost}
+A sequence of \(q\) range \(\mathit{chmin}\) updates and range-sum queries on \(n\)
+elements, implemented as in \(\defref{c29-beats}\), runs in \(O((n+q)\log n)\)
+amortised time.  Adding range \(\mathit{chmax}\) (with the symmetric
+\((\min,\mathrm{smin},\mathrm{cnt})\) state) and range add keeps the same
+asymptotic bound with a more delicate potential; range modulo by \(x\) costs an
+extra \(\log V\) factor (\(V\) the value range), because each element that
+actually changes at least halves.
+\end{theorem}
+\begin{proofbox}
+Charge the work to the recursion in case~3 of \(\defref{c29-beats}\) (the only
+super-constant contributor).  Consider the potential
+\(\Phi=\sum_{\text{nodes}} \mathbb{1}[\text{node has at least two distinct values}]\)
+counted with the ``blend'' weight of the original beats analysis: a node
+contributes only when \(\max_i>\mathrm{smax}_i\), i.e.\ its interval is not yet
+constant at the top.  A case-1 visit costs \(O(1)\) and lowers nothing.  A
+case-2 settle turns \(\max_i\to x\in(\mathrm{smax}_i,\max_i)\), which can only
+\emph{decrease} the gap \(\max_i-\mathrm{smax}_i\) and never adds potential.  A
+case-3 descend is the expensive move, but it happens at a node where \(x\le
+\mathrm{smax}_i\), and after the recursive calls recombine, the number of
+\emph{distinct values} represented along the descent strictly contracts: the two
+children each lose at least one top value.  Blending the potential drop against
+the \(O(\log n)\) depth pays for the extra branch, and each element can be the
+``maximal cell that gets lowered'' at most \(O(\log n)\) times before it drops
+out of every max set -- giving the \(O((n+q)\log n)\) total.  Modulo differs only
+in the shrink rate: if \(\max_i<x\) the node prunes (nothing changes), otherwise
+the recursion reaches the offending cells and each such cell becomes \(<x\le
+\max_i/2\) in the halving cases, bounding its leaf visits by \(O(\log V)\). \(\Box\)
+\end{proofbox}
+
+\begin{insightbox}[Beats is ``lazy tag plus a get-out clause'']
+A Ch.~20 lazy tag commits to rewriting a node \emph{now} and deferring to
+children \emph{later}, trusting the operation to compose.  Beats keeps that
+deferred spirit but replaces ``it always composes'' with a \emph{guard}: you may
+still settle at the node, but only inside the safe band
+\(\mathrm{smax}<x<\max\).  Outside the band you simply do what a plain segment
+tree does -- descend.  The node state is the smallest extra information that
+makes the guard decidable in \(O(1)\): to know whether a clamp touches only the
+top value you need the second-maximum and its count.  Store those three numbers
+and the whole machinery is the same build/pushup/query as Chapter~19.
+\end{insightbox}
+
+\begin{lstlisting}[caption={Segment-tree beats core: range chmin with range sum. The node keeps max, second-max smax, count of max, and sum; the update prunes, settles in place, or descends. ASCII only}, label={lst:c29-beats}]
+const long long NEG = -(1LL<<60);
+long long mx[4*MAXN], smx[4*MAXN], cmx[4*MAXN], sm[4*MAXN];
+
+void pushup(int i){
+    sm[i] = sm[i<<1] + sm[i<<1|1];
+    if(mx[i<<1] > mx[i<<1|1]){
+        mx[i]=mx[i<<1]; cmx[i]=cmx[i<<1]; smx[i]=max(smx[i<<1], mx[i<<1|1]);
+    } else if(mx[i<<1] < mx[i<<1|1]){
+        mx[i]=mx[i<<1|1]; cmx[i]=cmx[i<<1|1]; smx[i]=max(mx[i<<1], smx[i<<1|1]);
+    } else {
+        mx[i]=mx[i<<1]; cmx[i]=cmx[i<<1]+cmx[i<<1|1];
+        smx[i]=max(smx[i<<1], smx[i<<1|1]);
+    }
+}
+void build(int i,int l,int r,long long*a){
+    smx[i]=NEG;
+    if(l==r){ mx[i]=sm[i]=a[l]; cmx[i]=1; return; }
+    int m=(l+r)>>1; build(i<<1,l,m,a); build(i<<1|1,m+1,r,a); pushup(i);
+}
+void apply_chmin(int i,long long x){        // precondition: smx[i] < x < mx[i]
+    sm[i] += (x - mx[i]) * cmx[i];          // only the cmx[i] maximal cells move
+    mx[i] = x;                              // smx unchanged since x > smx
+}
+void pushdown(int i){                        // keep children's max <= parent's
+    if(mx[i<<1]   > mx[i]) apply_chmin(i<<1,   mx[i]);
+    if(mx[i<<1|1] > mx[i]) apply_chmin(i<<1|1, mx[i]);
+}
+void update_chmin(int i,int l,int r,int ql,int qr,long long x){
+    if(qr<l || r<ql || x>=mx[i]) return;                 // out of range / PRUNE
+    if(ql<=l && r<=qr && smx[i] < x){ apply_chmin(i,x); return; }  // SETTLE
+    pushdown(i);                                          // else DESCEND
+    int m=(l+r)>>1;
+    update_chmin(i<<1,l,m,ql,qr,x);
+    update_chmin(i<<1|1,m+1,r,ql,qr,x);
+    pushup(i);
+}
+long long query_sum(int i,int l,int r,int ql,int qr){
+    if(qr<l || r<ql) return 0;
+    if(ql<=l && r<=qr) return sm[i];
+    pushdown(i); int m=(l+r)>>1;
+    return query_sum(i<<1,l,m,ql,qr)+query_sum(i<<1|1,m+1,r,ql,qr);
+}
+\end{lstlisting}
+
+\begin{tracebox}[Range \(\mathit{chmin}(3)\) on the running array's first eight cells]
+\(A[1..8]=(3,2,4,5,1,1,5,3)\), initial \(\mathit{sum}=24\).  Root \([1,8]\) has
+\(\max=5,\mathrm{smax}=4,\mathrm{cnt}=2\).  \(x=3\le\mathrm{smax}=4\Rightarrow\)
+\textbf{descend}.\\
+Left \([1,4]=(3,2,4,5)\): \(\max=5,\mathrm{smax}=4\); \(3\le4\Rightarrow\) descend
+  \(\to\) \([1,2]=(3,2)\): \(\max=3\), \(x=3\ge3\Rightarrow\) \textbf{prune};
+  \([3,4]=(4,5)\): descend to leaves, \(4\!\to\!3\), \(5\!\to\!3\).
+  Pushup \([1,4]=(3,2,3,3)\): \(\max=3,\mathrm{smax}=2,\mathrm{cnt}=3,\mathit{sum}=11\).\\
+Right \([5,8]=(1,1,5,3)\): \(\max=5,\mathrm{smax}=3\); \(x=3\le3\Rightarrow\) descend
+  \(\to\) \([5,6]=(1,1)\): \(\max=1\le3\Rightarrow\) prune; \([7,8]=(5,3)\): descend,
+  \(5\!\to\!3\) (leaf), \(3\) prunes.  Pushup \([5,8]=(1,1,3,3)\): \(\max=3,\mathit{sum}=8\).\\
+Root pushup: \(A[1..8]=(3,2,3,3,1,1,3,3)\), \(\max=3,\mathrm{smax}=2,\mathrm{cnt}=5\),
+\(\mathbf{\mathit{sum}=19}\).  The settle case never fired here (the clamp was
+\emph{below} every second-max), so this trace is the worst branch -- the point of
+beats is that a shallower clamp like \(\mathit{chmin}(4)\) \emph{would} settle at
+\([1,4]\) and \([5,8]\) without touching the leaves.
+\end{tracebox}
+
+\begin{observation}[Why second-max and count are exactly enough]
+To fold \(\mathit{chmin}(x)\) from a node record you must know, without looking at
+children, whether all, some, or none of the cells exceed \(x\).  ``None'' is
+\(x\ge\max\); ``all cells that exceed are the top value'' is
+\(x>\mathrm{smax}\); and the size of that top group is \(\mathrm{cnt}\).  These
+three numbers are precisely \((\max,\mathrm{smax},\mathrm{cnt})\) -- no less
+suffices and no more helps.  The symmetric lower clamp \(\mathit{chmax}\) needs
+\((\min,\mathrm{smin},\mathrm{cnt})\); a full beats node that supports both keeps
+\emph{all six} plus \(\mathit{sum}\), and the two bands can interact (which is why
+the chmin+chmax amortised proof is the hard one).
+\end{observation}
+
+\begin{complexitybox}[Beats operations]
+Range \(\mathit{chmin}\) / \(\mathit{chmax}\) / add with range sum/max queries:
+\(O((n+q)\log n)\) amortised (\(\thmref{c29-beats-cost}\)).  Range modulo by \(x\):
+an extra \(O(\log V)\) from the halving argument, \(O((n+q)\log n\log V)\).  Point
+and range queries are \(O(\log n)\) exactly.  Space \(O(n)\).  Compare
+\(\secref{c15-strains}\): the non-composable clamp that a Ch.~20 tag cannot even
+\emph{represent} costs here only a logarithmic factor more than a lazy add.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{chmax, add, and the modulo prune (and who owns \(\mathbf{438D}\))}
+% ---------------------------------------------------------------
+
+Adding \(\mathit{chmax}\) is mirror-image: keep the lower half of the state and
+apply the same prune, settle, or descend trichotomy from the bottom.  Range
+\emph{add} commutes with everything (it just shifts \(\max\) and \(\mathrm{smin}\)
+uniformly) and is handled with a plain lazy add on top of the six-value state.
+The genuinely different prune is \emph{range modulo}: at a node with \(\max_i<x\)
+every cell is already below \(x\), so \(a_i\bmod x=a_i\) and the node prunes;
+otherwise, since no interior settle is safe, the recursion runs to the leaves that
+are \(\ge x\), each of which strictly shrinks (halving on average), which is what
+the extra \(\log V\) pays for.
+
+The archetypal modulo-prune problem is CF~438D ``The Child and Sequence'' (rating
+2300) -- range modulo, range sum, point update.  \textbf{It is owned by
+Chapter~19}, where it appears as a practice exercise in
+\(\secref{c13-static}\), and it is re-discussed at Chapter~20's prune boundary.
+This section therefore treats it in \emph{prose only} and does not re-link it: the
+max-prune idea is the same \(O(\log V)\) shrink argument already stated in
+\(\thmref{c29-beats-cost}\), so a solver who has read Ch.~19's 438D and this
+section has the whole technique without a third copy of the statement.
+
+% ---------------------------------------------------------------
+\subsection{The Chtholly tree (ODT)}
+% ---------------------------------------------------------------
+
+Beats reaches \(O(\log n)\) by \emph{worrying about the worst case}.  The Chtholly
+tree reaches near-linear behaviour by \emph{betting on randomness}.
+
+\begin{definition}{Chtholly tree (ODT)}{c29-odt}
+Represent the array as an ordered \(\mathit{std::set}\) of maximal
+\emph{equal-runs} \([l,r,\mathit{val}]\), ordered by \(l\).  A helper
+\(\mathrm{split}(x)\) finds the run containing \(x\) and cuts it into
+\([l,x{-}1]\) and \([x,r]\), returning an iterator to the second.  Any range
+operation first does \(\mathrm{split}(r{+}1)\) then \(\mathrm{split}(l)\) (so
+\([l,r]\) is a union of whole runs) and then walks the runs in between:
+an \emph{assign} erases them and inserts one run; a \(\mathit{chmin}\) rewrites
+each run's \(\mathit{val}\); a \(\mathit{kth}\) collects \((\mathit{val},\mathit{len})\)
+and sorts; a range \(\mathit{sum}\) folds run-wise.  The cost of an operation is
+proportional to the number of runs it touches, so the whole structure is fast
+exactly when the number of runs stays small.
+\end{definition}
+
+\begin{insightbox}[Why random \(\mathit{chmin}\) keeps the run count small]
+An \(\mathit{chmin}(x)\) over a random range collapses every run with
+\(\mathit{val}>x\) down to value \(x\), merging them into (potentially) one run.
+For random data the largest few runs are eaten quickly, so the expected number of
+runs after \(O(n)\) operations stays a small constant -- the ``ODT trick'' that the
+problem author (Willem, from the anime \emph{SukaSuka}) relies on.  The
+\emph{converse} is the warning: feed it adversarial operations (never a
+\(\mathit{chmin}\)) and the run count grows to \(n\), every operation is
+\(O(n)\), and the ODT \(\tle\)s where beats would still be \(O(\log n)\).  It is
+an expected-case structure with a documented failure mode.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 896C -- the canonical ODT task}
+% ---------------------------------------------------------------
+
+\solvedproblem{c29-896c}{Willem, Chtholly and Seniorious}{CF 896C}
+  {https://codeforces.com/problemset/problem/896/C}{CF 2600 L5}
+  {Chtholly tree / ODT; ordered-run set with split; power-sum by modular exponentiation; LCG reproduction of the generated test}
+
+\begin{problemstatement}[CF 896C Willem, Chtholly and Seniorious]
+One line gives four integers \(n,m,\mathit{seed},v_{\max}\)
+(\(1\le n,m\le10^5\), \(0\le\mathit{seed}<10^9{+}7\), \(1\le v_{\max}\le10^9\)).
+The initial array \emph{and} the operation list are \emph{not} given as input --
+you must reproduce them with a linear generator: a call
+\(\mathrm{rnd}()\) returns the current \(\mathit{seed}\) then advances
+\(\mathit{seed}\leftarrow(\mathit{seed}\cdot 7+13)\bmod(10^9{+}7)\).  Each
+\(a_i=(\mathrm{rnd}\bmod v_{\max})+1\); then for each of the \(m\) operations
+\(\mathit{op}=(\mathrm{rnd}\bmod 4)+1\in\{1,2,3,4\}\), a range
+\([l,r]\) (from two more rnd draws, swapped if \(l>r\)), and a value \(x\) (for
+\(\mathit{op}=3\), drawn in \([1,r{-}l{+}1]\), otherwise in \([1,v_{\max}]\)); for
+\(\mathit{op}=4\) an extra \(y\in[1,v_{\max}]\) is drawn.  The four operations are:
+\(\mathbf{1}\) add \(x\) to every cell of \([l,r]\);
+\(\mathbf{2}\) set \(a_i\leftarrow\min(a_i,x)\) on \([l,r]\);
+\(\mathbf{3}\) output the \(x\)-th \emph{largest} value in \([l,r]\);
+\(\mathbf{4}\) output \(\big(\sum_{i=l}^{r} a_i^{\,x}\big)\bmod y\).
+Print one line per \(\mathit{op}\in\{3,4\}\).
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+10 10 7 9
+Output:
+2
+1
+0
+3
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, an hour plus a generator]
+The input is a single line; you \emph{write the generator} and drive your own
+structure with it.  Recognise that operations 1--2 are exactly the two beats
+updates, but the statement is designed for the ODT.
+\peek{reproduce the sample array to check your rnd: seed 7 gives \(\{8,9,7,2,3,1,5,6,4,8\}\).}
+\nudge{an ODT of equal-runs with split(r+1), split(l) answers all four ops; op~4 is a run-wise \(\mathit{len}\cdot \mathit{val}^x\) folded \(\bmod y\).}
+\fullhint{Store runs \([l,r,\mathit{val}]\) in a set keyed by \(l\).  For op~1
+add \(x\) to each run's value; op~2 rewrite runs with \(\mathit{val}>x\) to \(x\);
+op~3 gather \((\mathit{val},\mathit{len})\), sort descending, walk until the
+cumulative length reaches \(x\); op~4 sum \(\mathit{len}\cdot
+\mathit{val}^x\bmod y\) using fast modular exponentiation with 128-bit
+products.  Guard the \(y=1\) case (answer \(0\)) and beware adversarial
+operations with no \(\mathit{chmin}\) -- the run set then grows to \(n\).}
+\end{attemptgate}
+
+\solstep{Understanding}
+Only four integers are given; the entire test case is a deterministic function of
+\(\mathit{seed}\).  So the ``input reading'' step is really ``implement
+\(\mathrm{rnd}\) exactly and generate \emph{into} your structure.''  The four
+operations are the beats vocabulary seen from the other side: add and \(\mathit{chmin}\)
+are range updates, and \(\mathit{kth}\) / power-\(\mathit{sum}\) are range queries
+over \emph{order statistics}, which a plain fold cannot express.  A Chtholly tree
+serves all four uniformly because after \(\mathrm{split}\) the range is whole runs,
+and a run is constant -- the \(k\)-th largest becomes ``sort the few run-values,
+expand by length'', the power-sum becomes ``one modular exponentiation per run''.
+
+\solstep{Key Observations}
+\begin{observation}
+Two \(\mathrm{split}\) calls turn any \([l,r]\) into a contiguous block of whole
+runs; every operation is then a single pass over that block, and only
+\(\mathit{chmin}\) and \emph{assign} can merge runs (they are the reason the block
+is usually tiny).
+\end{observation}
+\begin{observation}
+Operation~4 needs \(\sum \mathit{val}^x\) not \(\big(\sum\mathit{val}\big)^x\): a run
+contributes \(\mathit{len}\cdot\mathit{val}^{x}\), each term reduced \(\bmod y\);
+with \(x,y\) up to \(10^9\) and \(\mathit{val}\) growing under \emph{add}s, all
+products need 128-bit intermediate width.
+\end{observation}
+\begin{observation}
+The run count is the whole complexity story: on random ops (this problem)
+\(\mathit{chmin}\) fires often enough that the expected number of runs is
+\(O(\log n)\)-ish, giving near-\(O(n\log n)\) total; on adversarial \(\mathit{chmin}\)-free
+input it is \(O(n)\) runs and the ODT degrades to \(O(nq)\) -- where beats would
+stay logarithmic.
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.26\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ brute array & apply each op to cells, sort for kth & \(\bigO{nm}\) & \tle \\
+2 & \lv{4}\ beats & chmin/chmax state + kth by merge-sort tree & heavy & \mle \\
+3 & \lv{5}\ \textbf{Chtholly tree (ODT)} & equal-run set + split; power-sum mod & \(\approx\bigO{n\log n}\) exp. & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is legitimate but over-built for a task whose \emph{only} \(\mathit{chmin}\)
+and add keep runs few; rung~3 exploits the random generation and is a few dozen
+lines.
+
+\solstep{Solution}
+Read \(n,m,\mathit{seed},v_{\max}\); install the LCG \(\mathrm{rnd}\) and build the
+initial array, seeding one run per cell.  For each of the \(m\) generated
+operations, call \(\mathrm{split}(r{+}1)\) then \(\mathrm{split}(l)\) and dispatch:
+op~1 add \(x\) to each run value in the block; op~2 set runs above \(x\) to \(x\);
+op~3 collect \((\mathit{val},\mathit{len})\), sort by \(\mathit{val}\) descending, and
+print the value where the running length first reaches \(x\); op~4 fold
+\(\mathit{len}\cdot\mathit{val}^{x}\bmod y\) with a binary modular exponentiation and
+print the total.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 896C as a Chtholly tree: an ordered set of equal-runs, a split that carves a run at a boundary, and four run-wise operations; op 4 uses binary modular exponentiation with 128-bit products}, label={lst:c29-896c}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+const ll MOD = 1000000007LL;
+ll n, m, seedv, vmax;
+struct Node { ll l, r, len, val;
+    bool operator<(const Node& o) const { return l < o.l; } };
+set<Node> tr;
+auto split(ll x){                       // make a run start at x; return its iter
+    auto it = tr.lower_bound(Node{x,0,0,0});
+    if (it != tr.end() && it->l == x) return it;
+    --it; ll l=it->l, r=it->r, v=it->val; tr.erase(it);
+    tr.insert(Node{l, x-1, x-l, v});
+    return tr.insert(Node{x, r, r-x+1, v}).first;
+}
+ll rnd(){ ll ret = seedv; seedv = (seedv*7 + 13) % MOD; return ret; }
+ll qpow(ll a, ll e, ll md){              // a^e mod md, 128-bit multiply
+    ll r = 1 % md; a %= md;
+    while(e){ if(e&1) r=(ll)((__int128)r*a%md); a=(ll)((__int128)a*a%md); e>>=1; }
+    return r;
+}
+int main(){
+    scanf("%lld%lld%lld%lld", &n,&m,&seedv,&vmax);
+    for(ll i=1;i<=n;i++){ ll a=(rnd()%vmax)+1; tr.insert(Node{i,i,1,a}); }
+    for(ll i=1;i<=m;i++){
+        ll op=(rnd()%4)+1, l=(rnd()%n)+1, r=(rnd()%n)+1;
+        if(l>r) swap(l,r);
+        ll x = (op==3) ? (rnd()%(r-l+1))+1 : (rnd()%vmax)+1;
+        ll y = (op==4) ? (rnd()%vmax)+1 : 0;
+        auto itr = split(r+1), itl = split(l);
+        if(op==1){ for(auto it=itl; it!=itr; ++it) it->val += x; }
+        else if(op==2){ vector<decltype(itl)> v;
+            for(auto it=itl; it!=itr; ++it) if(it->val > x) v.push_back(it);
+            for(auto it : v) it->val = x; }
+        else if(op==3){ vector<pair<ll,ll>> b;
+            for(auto it=itl; it!=itr; ++it) b.push_back({it->val, it->len});
+            sort(b.rbegin(), b.rend());
+            for(auto& p : b){ if(x <= p.second){ printf("%lld\n", p.first); break; } x -= p.second; } }
+        else { ll ans=0;
+            for(auto it=itl; it!=itr; ++it)
+                ans = (ans + (__int128)qpow(it->val, x, y) * (it->len % y)) % y;
+            printf("%lld\n", ans); }
+    }
+    return 0;
+}
+\end{lstlisting}
+
+\begin{tracebox}[The four generated \(\mathit{op}=4\) queries of sample~\(\mathbf{1}\)]
+\(n=10,m=10,\mathit{seed}=7,v_{\max}=9\).  The LCG produces the array
+\(\{8,9,7,2,3,1,5,6,4,8\}\) (first draw \(7\bmod 9+1=8\), etc.).  Ten generated
+operations include exactly four \(\mathit{op}=4\) power-sums; the six others are
+add/\(\mathit{chmin}\) mutations.  The first printed answer comes from
+\(\texttt{4 4 6 2 4}\) (\([4,6]\), exponent \(x=2\), modulus \(y=4\)).  After the
+two prior operations -- add \(8\) to \([3,10]\), then \(\mathit{chmin}~9\) on
+\([6,7]\).  Track the block: initial \((a_4,a_5,a_6)=(2,3,1)\); the add gives
+\((10,11,9)\); the \(\mathit{chmin}(9)\) touches only the \([6,7]\) cells, leaving
+\(A_4{=}10,\;A_5{=}11,\;A_6{=}9\).  Sum of
+squares \(10^2{+}11^2{+}9^2=100{+}121{+}81=302\), \(302\bmod 4=\boxed{2}\) --
+matching the first output line.  The three remaining answers (one of which is a
+modulus \(y=1\Rightarrow 0\)) likewise reproduce \(1,0,3\); sample~2
+(\(\mathit{seed}=9\)) yields \(1,1,3,3\).
+\end{tracebox}
+
+\begin{warningbox}[The ODT is expected-case -- and 896C was famously hacked]
+The Chtholly tree's speed is \emph{conditional on many \(\mathit{chmin}\)/assign
+operations keeping the run count low}.  On a generator that emits few clamps the
+set grows toward \(n\) runs and every split/walk is \(O(n)\), so a submission
+passes only because the official test data is random.  When the problem was
+hacked (a custom test with \(\mathit{chmin}\)-free operations), ODT solutions
+\(\tle\).  The robust answer for adversarial input is a \emph{beats} node
+(\(\secref{c29-beats}\)); keep the ODT for genuinely random data or as a fast
+prototype.  Do not ``optimise'' by mutating a run's \(\mathit{val}\) in a way that
+changes the set's ordering key -- the set is keyed by \(l\) only, so \(\mathit{val}\)
+is safe to edit in place, but never touch \(l\).
+\end{warningbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Reproduce \(\mathrm{rnd}\) exactly.} Return \emph{old} seed, then
+        advance \(\mathit{seed}=(\mathit{seed}\cdot7+13)\bmod(10^9{+}7)\); an
+        off-by-one here desynchronises every operation.
+  \item \textbf{Modular exponent width.} \(\mathit{val}\) grows past \(10^9\) under
+        \emph{add}s; reduce \(\mathit{val}\bmod y\) and multiply with
+        128-bit intermediates or the power-sum overflows.
+  \item \textbf{\(y=1\) edge.} Any value \(\bmod 1=0\); \(1\bmod y\) initialisation
+        (\texttt{r=1\%md}) already returns \(0\) -- do not special-case it wrong.
+  \item \textbf{split order.} Always \(\mathrm{split}(r{+}1)\) \emph{before}
+        \(\mathrm{split}(l)\); reversing them can invalidate the iterator you
+        still need.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[23.3 in one breath]
+\emph{Beats rescues the clamp Ch.~20 could not tag: store
+\((\max,\mathrm{smax},\mathrm{cnt})\) and a range \(\mathit{chmin}\) either prunes
+(\(x\ge\max\)), settles in \(O(1)\) (\(\mathrm{smax}<x<\max\)), or descends --
+amortised \(O((n+q)\log n)\) (\(\thmref{c29-beats-cost}\)); \(\mathit{chmax}\)
+mirrors it, modulo adds a \(\log V\) halving factor, and CF~438D (Ch.~19's) is the
+modulo archetype, cited not re-linked.  The Chtholly tree (\(\defref{c29-odt}\))
+bets on randomness: an equal-run set with \(\mathrm{split}\), fast while
+\(\mathit{chmin}\) keeps runs few -- CF~896C, hacked precisely because that bet can
+fail.}
+\selftest{\item Which three values decide whether a \(\mathit{chmin}(x)\) settles at a node?
+\emph{(\(\max,\mathrm{smax},\mathrm{cnt}\): settle when \(\mathrm{smax}<x<\max\).)}
+\item Why can a Chtholly tree \(\tle\) on \emph{some} valid 896C input?
+\emph{(Without enough \(\mathit{chmin}\)/assign the run set grows to \(n\), making each
+operation \(O(n)\); it is expected-case, not worst-case.)}}
+\end{recallbox}

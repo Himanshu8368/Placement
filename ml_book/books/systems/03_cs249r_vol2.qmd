@@ -1,0 +1,214 @@
+# CS249r Volume 2: Scaling ML Systems {#sec-sys-cs249r-vol2}
+
+::: {.callout-note title="Sources"}
+CS249r Vol 2, preview v0.3.0, 1,686 pages: [PDF](../cs249r/Machine-Learning-Systems-Vol2.pdf) · [EPUB](../cs249r/Machine-Learning-Systems-Vol2.epub) · [online](https://mlsysbook.ai/vol2/). Vol 2 is a *preview* release, so check the online version for newer text. The "Master" lists paraphrase each chapter's own learning objectives. Page numbers refer to the bundled PDF.
+:::
+
+Vol 2 begins where one node stops being enough. Its organising tools are the **Fleet Law** and the **C³ taxonomy** (Compute, Communication, Coordination), both introduced in @sec-sys-cs249r.
+
+| CS249r part | Chapters | Starts at |
+|---|---|---|
+| Fleet | 1 Introduction · 2 Compute Infrastructure · 3 Network Fabrics · 4 Data Storage | [p. 68](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=68) |
+| Distributed ML | 5 Collective Communication · 6 Distributed Training · 7 Fault Tolerance · 8 Fleet Orchestration | [p. 336](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=336) |
+| Fleet in production | 9 Fleet Efficiency · 10 Serving at Scale · 11 Edge Intelligence · 12 ML Operations at Scale | [p. 667](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=667) |
+| Responsible fleet | 13 Security & Privacy · 14 Robust AI · 15 Sustainable AI · 16 Responsible AI · 17 Conclusion | [p. 1103](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1103) |
+| Notation (communication, parallelism, reliability, serving constants) | front matter | [p. 26](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=26) |
+| Appendices | Single-machine, C³, fleet, communication, reliability, and inference foundations | [p. 1532](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1532) |
+
+★ marks a chapter on the interview-sprint path.
+
+## Part 1: The fleet
+
+### Ch. 1 Introduction · [p. 68–110](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=68) · [online](https://mlsysbook.ai/vol2/01_introduction/01_introduction.html)
+
+**Master.** Why leaving one machine moves the binding constraint to the network, energy, and routine failure. Scaling laws as the driver of fleet growth, and where they break down. The C³ taxonomy. Using the Fleet Law to separate useful compute from overhead. The fleet stack.
+**Read with.** Part XII, *Scaling laws and compute*.
+
+::: {.callout-note collapse="true" title="Self-check: Why is failure \"routine\" at fleet scale?"}
+If each of $n$ components fails independently with mean time between failures $M$, the whole fleet sees a failure about every $M/n$. With tens of thousands of GPUs, MTBF per device measured in years becomes a job interruption every few hours. So checkpointing, elastic recovery, and failure detection are part of normal operation (ch. 7).
+:::
+
+### Ch. 2 Compute Infrastructure · [p. 122–201](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=122) · [online](https://mlsysbook.ai/vol2/02_compute_infrastructure/02_compute_infrastructure.html)
+
+**Master.** The memory, communication, power, and reliability walls at each physical scale (accelerator → node → rack → pod). GPU vs TPU vs ASIC. Memory capacity vs memory bandwidth as separate tests. Token-latency floors and pod training time from specs. Matching tensor, pipeline, and data parallelism to the interconnect hierarchy.
+**Read with.** Vol 1 ch. 11. Part XII, *LLM inference I*.
+
+::: {.callout-note collapse="true" title="Self-check: Why place tensor parallelism inside a node and data parallelism across nodes?"}
+Tensor parallelism communicates activations inside every layer (all-reduce or all-gather on the critical path, many times per step), so it needs the highest bandwidth and lowest latency: NVLink or NVSwitch inside a node. Data parallelism communicates gradients once per step, and that traffic can overlap with backward, so it tolerates the slower inter-node network. Pipeline parallelism sends only boundary activations and also fits across nodes.
+:::
+
+::: {.callout-note collapse="true" title="Self-check: What is the minimum time per token for a 70B bf16 model on one GPU with 3.35 TB/s HBM?"}
+Each decode step reads about 140 GB of weights, and $140/3350 \approx 42$ ms, so at most about 24 tokens/s per sequence at batch size 1, before counting the KV cache. Raising aggregate bandwidth (tensor parallelism across GPUs) or cutting bytes (quantization) moves this floor.
+:::
+
+### Ch. 3 Network Fabrics · [p. 206–261](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=206) · [online](https://mlsysbook.ai/vol2/03_network_fabrics/03_network_fabrics.html)
+
+**Master.** Why synchronised collective traffic breaks normal data-centre assumptions. The α–β cost model (latency vs bandwidth regimes). RDMA, InfiniBand, and RoCE. Topologies (fat tree, rail-optimised) and bisection bandwidth. Congestion control and tail latency. Debugging with telemetry.
+
+::: {.callout-note collapse="true" title="Self-check: What is the α–β model?"}
+The time to send a message of $m$ bytes is $T(m)=\alpha+m/\beta$, where $\alpha$ is the startup latency and $\beta$ the bandwidth. Small messages are latency-dominated (so batch or bucket them). Large messages are bandwidth-dominated. Collective algorithms are chosen by which regime they fall in.
+:::
+
+### Ch. 4 Data Storage · [p. 264–334](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=264) · [online](https://mlsysbook.ai/vol2/04_data_storage/04_data_storage.html)
+
+**Master.** Storage demands of training, checkpointing, and serving. Input bandwidth needed per accelerator. Shards, prefetching, and GPUDirect Storage. Checkpoint staging and replication. Versioned data with commit and replay contracts. Serving-time storage, such as retrieval indexes bound by IOPS.
+**Read with.** Vol 1 ch. 4. Part XII, *Text embeddings and vector search*.
+
+::: {.callout-note collapse="true" title="Self-check: Why are checkpoints a storage problem at scale?"}
+Full training state (weights plus optimizer state, about 16 bytes per parameter) for a 70B model is over 1 TB, written every N minutes by thousands of ranks at once. Synchronous writes stall training. The fixes are asynchronous or staged checkpointing (to local NVMe or host memory first), sharded checkpoints written in parallel, and incremental or redundant copies.
+:::
+
+## Part 2: Distributed ML
+
+### Ch. 5 Collective Communication ★ · [p. 346–410](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=346) · [online](https://mlsysbook.ai/vol2/05_collective_communication/05_collective_communication.html)
+
+**Master.** The primitives: broadcast, reduce, all-reduce, all-gather, reduce-scatter, all-to-all. Cost models for ring, tree, double-tree, and hierarchical algorithms. Topology awareness. Gradient compression with error feedback. Overlapping communication with backward through bucket fusion. NCCL and similar libraries.
+**Read with.** Part XII, *Mixture of experts* (all-to-all).
+
+::: {.callout-note collapse="true" title="Self-check: Why is ring all-reduce bandwidth-optimal, and what does it cost?"}
+It is a reduce-scatter followed by an all-gather, each with $n-1$ steps of $m/n$-byte chunks. Each device sends about $2(n-1)m/n \approx 2m$ bytes, which is independent of $n$ and optimal for bandwidth. But latency grows as $2(n-1)\alpha$, so tree or hierarchical algorithms win for small messages or very large $n$.
+:::
+
+::: {.callout-note collapse="true" title="Self-check: Which parallelism uses which collective?"}
+Data parallelism uses all-reduce on gradients (ZeRO/FSDP uses reduce-scatter on gradients plus all-gather on parameters). Tensor parallelism uses all-reduce or all-gather on activations inside layers. Pipeline parallelism uses point-to-point sends between stages. Expert parallelism (MoE) uses all-to-all to dispatch tokens to experts and gather them back.
+:::
+
+### Ch. 6 Distributed Training ★ · [p. 414–499](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=414) · [online](https://mlsysbook.ai/vol2/06_distributed_training/06_distributed_training.html)
+
+**Master.** Diagnosing a regime with the Fleet Law. Data-parallel scaling efficiency and useful (critical) batch size. Memory sharding (ZeRO stages and FSDP). Tensor, pipeline, sequence, expert, and data parallelism mapped onto bandwidth tiers. Pipeline bubbles and schedules (1F1B, interleaved). Low-precision sync and stragglers. Hybrid 3D/4D parallelism. Multi-model training for RLHF.
+**Read with.** Part VII, *Optimizers*. Part XII, *Scaling laws*, *RLHF*.
+
+::: {.callout-note collapse="true" title="Self-check: Describe the ZeRO stages."}
+ZeRO-1 shards the optimizer state across data-parallel ranks. ZeRO-2 also shards the gradients (reduce-scatter instead of all-reduce). ZeRO-3 (≈ FSDP) also shards the parameters, all-gathering each layer just in time for forward and backward. Memory per rank falls from about 16N bytes to about 16N/n. ZeRO-3 adds parameter all-gathers, roughly 1.5× the communication of plain DP.
+:::
+
+::: {.callout-note collapse="true" title="Self-check: What is the pipeline bubble, and how do you shrink it?"}
+With $p$ stages and $m$ micro-batches in a GPipe-style schedule, idle time is about $(p-1)/(m+p-1)$ of the step. Shrink it with more micro-batches ($m\gg p$), the 1F1B schedule (which also bounds activation memory), or interleaved virtual stages, which cut the bubble by the interleaving factor at the cost of more communication.
+:::
+
+::: {.callout-note collapse="true" title="Self-check: Why can't you scale data parallelism forever by growing the batch?"}
+Beyond the *critical batch size*, more samples per step stop reducing the number of steps needed (gradient noise is already low). Each step costs more, but convergence doesn't get faster, so efficiency per sample drops. LR scaling rules (linear or square-root, with warm-up) help only up to that point.
+:::
+
+### Ch. 7 Fault Tolerance · [p. 502–584](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=502) · [online](https://mlsysbook.ai/vol2/07_fault_tolerance/07_fault_tolerance.html)
+
+**Master.** Fleet MTBF arithmetic. Hardware, software, silent data corruption, and slow-but-alive failures. Choosing a checkpoint interval. Distributed and elastic recovery. Serving redundancy and failover. Graceful degradation. Fault injection.
+
+::: {.callout-note collapse="true" title="Self-check: How often should you checkpoint?"}
+The Young–Daly rule: $\tau^\ast\approx\sqrt{2\,C\,M}$, where $C$ is the time to write a checkpoint and $M$ is the fleet MTBF. Checkpointing more often wastes time writing. Less often wastes more recomputation after each failure.
+:::
+
+::: {.callout-note collapse="true" title="Self-check: What is silent data corruption, and why is it dangerous for training?"}
+Hardware (often a marginal chip) produces wrong arithmetic without raising any error. In training it can quietly corrupt gradients and therefore the weights, sometimes showing up only as loss spikes or NaNs much later. Defences: redundant computation and checksums, monitoring for loss and gradient anomalies, screening hardware, and the ability to roll back to a known-good checkpoint.
+:::
+
+### Ch. 8 Fleet Orchestration · [p. 588–665](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=588) · [online](https://mlsysbook.ai/vol2/08_fleet_orchestration/08_fleet_orchestration.html)
+
+**Master.** Batch vs declarative control planes (Slurm vs Kubernetes). Gang scheduling, multi-dimensional fit, and topology constraints. Fairness (dominant resource fairness). Topology-aware placement onto NVLink domains. Elastic, preemptible, and spot policies. Allocated vs active vs productive capacity. Serving quotas.
+
+::: {.callout-note collapse="true" title="Self-check: Why does distributed training need gang scheduling?"}
+A data- or model-parallel job needs *all* of its workers running at the same time, because each collective waits for every rank. Starting a partial job just holds GPUs idle and can deadlock with other partial jobs. Gang scheduling allocates all of a job's resources atomically or none.
+:::
+
+## Part 3: The fleet in production
+
+### Ch. 9 Fleet Efficiency · [p. 676–757](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=676) · [online](https://mlsysbook.ai/vol2/09_performance_engineering/09_performance_engineering.html)
+
+**Master.** ML goodput = scheduling goodput × runtime goodput × program goodput. Measuring each, and finding where the loss is. MFU and MBU (model bandwidth utilisation). Fleet-level levers: compiler partitioning, overlap under contention, compilation.
+
+::: {.callout-note collapse="true" title="Self-check: MFU is 50%, but the job finishes much later than expected. Where else can time go?"}
+Into scheduling goodput (queueing, waiting for a gang allocation, preemption) and runtime goodput (restarts after failures, checkpoint stalls, lost work, slow restarts). MFU measures only program goodput while the job is actually running. End-to-end goodput multiplies all three.
+:::
+
+### Ch. 10 Serving at Scale ★ · [p. 760–877](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=760) · [online](https://mlsysbook.ai/vol2/10_inference/10_inference.html)
+
+**Master.** Lifetime serving cost dominates training cost. SLO goodput. Batching and scheduling for vision, LLM, recommender, and streaming workloads. KV-cache capacity, fragmentation, and interference between prefill and decode. Sharding, prefill–decode disaggregation, quantized serving. Routing, overload control, isolation. Autoscaling and multi-region serving.
+**Read with.** Part XII, *LLM inference I/II*. Part XVI, *ML system design*.
+
+::: {.callout-note collapse="true" title="Self-check: Why disaggregate prefill and decode onto different machines?"}
+Prefill is compute-bound and bursty. Decode is memory-bound and steady. Running both on the same GPU makes long prefills stall everyone's decode steps, which inflates time-between-tokens. Disaggregation lets each pool be sized and batched for its own bottleneck, at the cost of moving the KV cache from the prefill pool to the decode pool over the network.
+:::
+
+::: {.callout-note collapse="true" title="Self-check: Which latency metrics matter for LLM serving?"}
+TTFT (time to first token, dominated by queueing and prefill), TPOT or ITL (time per output token, dominated by decode), and end-to-end latency. Measure throughput as *SLO goodput*: requests per second that meet their TTFT and TPOT targets, not raw tokens per second.
+:::
+
+### Ch. 11 Edge Intelligence · [p. 880–966](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=880) · [online](https://mlsysbook.ai/vol2/11_edge_intelligence/11_edge_intelligence.html)
+
+**Master.** Centralised training vs on-device learning vs federated learning. On-device training overhead. Adapting models within memory budgets, and forgetting. Federated learning algorithms (FedAvg) and systems: client sampling, non-IID data, secure aggregation.
+**Read with.** Part XIV, *Continual learning*, *Distribution shift*.
+
+::: {.callout-note collapse="true" title="Self-check: What does FedAvg do, and why does non-IID data hurt it?"}
+Each sampled client runs several local SGD steps on its own data. The server averages the resulting models, weighting each by its data size. With non-IID client data, local models drift toward their own optima (client drift), so the average converges slowly or to a biased solution. Fixes include fewer local steps, proximal terms (FedProx), and control variates (SCAFFOLD).
+:::
+
+### Ch. 12 ML Operations at Scale ★ · [p. 970–1102](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=970) · [online](https://mlsysbook.ai/vol2/12_ops_scale/12_ops_scale.html)
+
+**Master.** Operational load grows with *coupling* between models, not with how many there are. Registries, release gates, and evaluation contracts. Feature-store freshness and skew. Sizing staged rollouts and online experiments. Monitoring hierarchies and reliability budgets. Platform economics.
+**Read with.** Part IV, *Comparing models and A/B testing*. Part XVI, *ML debugging and production scenarios*.
+
+::: {.callout-note collapse="true" title="Self-check: Why do online experiments of ML models need extra care?"}
+Model changes interact through shared features and feedback loops. Treatment and control can interfere with each other (for example in marketplaces or recommendation feeds). Effects can be small, so you need enough samples, a stopping rule fixed in advance (to avoid peeking), guardrail metrics, and sometimes cluster or switchback randomisation.
+:::
+
+## Part 4: The responsible fleet
+
+### Ch. 13 Security & Privacy · [p. 1114–1214](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1114) · [online](https://mlsysbook.ai/vol2/13_security_privacy/13_security_privacy.html)
+
+**Master.** Security vs privacy, and threat models. Memorisation and extraction through authorised outputs. Model theft, poisoning, adversarial examples, gradient leakage, hardware attacks. Layered defences. Differential privacy accounting (ε, δ, composition, sampling).
+**Read with.** Part XIII, *Agent security and safety*. Part XII, *Interpretability and safety*.
+
+::: {.callout-note collapse="true" title="Self-check: What does DP-SGD do?"}
+It clips each example's gradient to norm $C$, adds Gaussian noise with standard deviation $\sigma C$ to the summed gradient, and tracks the privacy loss (ε, δ) across steps with an accountant (moments or RDP), using privacy amplification by subsampling. Each individual's influence on the model is bounded, at the cost of accuracy and compute (per-example gradients).
+:::
+
+### Ch. 14 Robust AI · [p. 1218–1275](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1218) · [online](https://mlsysbook.ai/vol2/14_robust_ai/14_robust_ai.html)
+
+**Master.** Classifying a silent failure. Covariate shift vs label shift vs concept drift. Calibration vs selective prediction vs conformal coverage. Adversarial attacks and defences (adversarial training, certification). Defences against data poisoning. Reliability of generative models (self-consistency, guardrails).
+**Read with.** Part IV, *Calibration, uncertainty, and conformal prediction*. Part XIV, *Distribution shift and domain adaptation*.
+
+::: {.callout-note collapse="true" title="Self-check: Distinguish covariate shift, label shift, and concept drift."}
+Covariate shift: $p(x)$ changes but $p(y\mid x)$ stays the same (for example a new camera). Label shift: $p(y)$ changes but $p(x\mid y)$ stays the same (for example disease prevalence rising). Concept drift: $p(y\mid x)$ itself changes (for example fraud tactics evolving). Covariate and label shift can be corrected by reweighting. Concept drift needs new labels and retraining.
+:::
+
+### Ch. 15 Sustainable AI · [p. 1278–1363](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1278) · [online](https://mlsysbook.ai/vol2/15_sustainable_ai/15_sustainable_ai.html)
+
+**Master.** Power and cooling as hard limits. Operational, embodied, and lifecycle carbon (energy × PUE × grid intensity + manufacturing). Comparing training and inference energy. Mitigation through algorithms, scheduling, carbon-aware operation, and hardware lifetime.
+
+::: {.callout-note collapse="true" title="Self-check: Estimate the operational carbon of a training run."}
+$\text{CO}_2 \approx E_\text{IT}\times\text{PUE}\times I_\text{grid}$. For example, 1,000 GPUs × 0.7 kW × 720 h ≈ 504 MWh of IT energy. × PUE 1.2 ≈ 605 MWh. × 0.4 tCO₂/MWh ≈ 242 tCO₂. Embodied carbon (manufacturing) comes on top.
+:::
+
+### Ch. 16 Responsible AI · [p. 1366–1459](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1366) · [online](https://mlsysbook.ai/vol2/16_responsible_ai/16_responsible_ai.html)
+
+**Master.** Governance and assurance across the lifecycle. Observational vs causal fairness definitions. Monitoring bias across groups and feedback loops. Privacy and machine unlearning. Choosing explanation methods under constraints. Automation bias. Building an auditable assurance case.
+**Read with.** Part IV, *Interpretability*. Part XIV, *Causal inference*. Vol 1 ch. 15.
+
+::: {.callout-note collapse="true" title="Self-check: Why is machine unlearning hard?"}
+A trained model mixes the influence of every example into shared weights, so you can't simply delete one example's contribution. Exact unlearning means retraining without the data, which is expensive unless training is sharded (SISA: retrain only the affected shard). Approximate methods (influence-based or fine-tuning updates) are cheaper but hard to verify.
+:::
+
+### Ch. 17 Conclusion · [p. 1466–1482](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1466) · [online](https://mlsysbook.ai/vol2/17_conclusion/17_conclusion.html)
+
+**Master.** The six principles of distributed ML systems (p. 1469). The constraint map. Use them, with the Vol 1 principles, as the final revision sheet.
+
+## Vol 2 appendices worth bookmarking
+
+| Appendix | Page |
+|---|---|
+| Single-machine foundations | [p. 1532](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1532) |
+| The C³ taxonomy | [p. 1544](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1544) |
+| Fleet foundations | [p. 1562](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1562) |
+| Communication foundations | [p. 1580](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1580) |
+| Reliability foundations | [p. 1594](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1594) |
+| Inference foundations | [p. 1610](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1610) |
+| System assumptions | [p. 1622](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1622) |
+| Glossary | [p. 1637](../cs249r/Machine-Learning-Systems-Vol2.pdf#page=1637) |
+
+## Vol 3 and Vol 4: to be plugged in
+
+CS249r **Vol 3, Agentic ML Systems** (20 chapters: foundation models, test-time compute, context engineering, the KV cache, memory, tool calling, sandboxes, security, harnesses, durable execution, failure recovery, evaluation, operations, trajectory curation, fine-tuning, RLVR, multi-agent systems, economics) and **Vol 4, Physical AI Systems** are still being written by their authors. When they are released:
+
+1. Download their PDF and EPUB into `books/cs249r/` (add them to `scripts/fetch_cs249r.sh`).
+2. Add `systems/04_cs249r_vol3.qmd` (and `05_cs249r_vol4.qmd`) in the same format as this chapter, and list them in `_quarto.yml`.
+3. Cross-link Part XIII (Agentic Systems) of this book to the matching Vol 3 chapters.

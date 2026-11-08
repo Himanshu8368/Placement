@@ -1,0 +1,484 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  7.3  BST Queries and Order Statistics       sec:c05-queries
+%  Exports: prop:c05-kth  def:c05-succ  thm:c05-preorder
+%           lst:c05-build  lst:c05-mindiff  ex:c05-queries-run
+%           prob:c05-construct  lst:c05-construct  (practice: LC 530)
+% =====================================================================
+\section{BST Queries and Order Statistics}\label{sec:c05-queries}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Which single traversal turns a BST into a sorted array, and how do you stop it early?
+        (\thmref{c05-inorder}; the walk itself is \chref{c03})
+  \item You already answered ``kth smallest element of a BST'' -- where, and with what technique?
+        (\probref{c03-kth-smallest}, \chref{c03})
+  \item The preorder sequence lists a node \emph{before} its subtrees. Given that and the bounds rule
+        (\defref{c05-prop}), can you tell where a subtree ends just by reading values? (\thmref{c05-bounds})
+  \item What is $\mathrm{pre}(B)$ for the running BST, and what is its first element? (\figref{c05-running})
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Because the inorder walk \emph{is} the sorted order (\thmref{c05-inorder}), a BST is secretly a
+sorted array you can query with tree pointers. This section harvests that: \textbf{order statistics}
+(the $k$th smallest, the minimum/maximum, the inorder \emph{successor} and \emph{predecessor}) and
+\textbf{adjacency questions} (the smallest gap between any two keys, the key closest to a target) all
+become an inorder ride with an early exit -- you never materialise the whole list. The section's
+crown jewel runs the order \emph{backwards}: \textbf{reconstructing a BST from its preorder traversal
+alone}. For an ordinary binary tree you need two orders (\probref{c03-build-in-post}); a BST needs
+only one, because the bounds rule decides, at every step, which upcoming values still belong to the
+current subtree. That bound-descent rebuild (LC 1008) is the solved problem -- a one-scan
+construction that is really \thmref{c05-bounds} in disguise.
+\textbf{Prerequisites.} \thmref{c05-inorder} and \thmref{c05-bounds} from \secref{c05-property}; the
+inorder/preorder definitions and the two-order rebuild from \chref{c03}. The $k$th-smallest and
+BST-iterator problems are \emph{referenced} (\probref{c03-kth-smallest}), not re-taught.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item answer kth-smallest, min/max, successor/predecessor with an early-exit inorder in $\bigO{h+k}$ or $\bigO{h}$; \hfill\lv{2}--\lv{3}
+  \item compute the minimum absolute difference of any two keys in one streaming inorder; \hfill\lv{2}--\lv{3}
+  \item rebuild an entire BST from a \emph{single} preorder array via bound descent (\thmref{c05-preorder}); \hfill\lv{3}
+  \item recognise when ``two traversal orders'' collapses to ``one, because it is a BST''. \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ordered questions and one-order rebuilds]
+\reckey{the problem asks something \emph{about the sorted order} (rank, successor, closest, smallest
+gap) of a BST, or hands you \emph{one} traversal order and says ``build the BST''.}
+\recuse{
+  \item ``$k$th smallest'', ``minimum'', ``inorder successor of node $p$'' -- ride inorder with a
+        counter (\propref{c05-kth}, \defref{c05-succ}); \emph{the full }$k$\emph{th} \emph{solution is}
+        \probref{c03-kth-smallest};
+  \item ``smallest $|a-b|$ between any two keys'', ``closest value to target'' -- the minimum gap is
+        always \emph{adjacent} in the sorted line (\coderef{c05-mindiff});
+  \item ``given the preorder, reconstruct the BST'' -- bound descent, \thmref{c05-preorder}, \probref{c05-construct};
+  \item ``count keys in $[L,R]$'' -- a pruned descent that skips out-of-range subtrees
+        (Range Sum, \chref{c24}).
+}
+\recnotuse{
+  \item you need the tree \emph{built and kept} under edits with fast ranks -- \secref{c05-contests} or \chref{c14};
+  \item you are handed \emph{two} orders of a general binary tree -- that is \chref{c03}, not BST-specific;
+  \item the ordering is not promised -- no sorted line to ride, \chref{c02}.
+}
+One-line test: \emph{can I pretend I am querying a sorted array, or read one integer stream and know
+each value's legal interval? Then it is a query -- ride the order, do not rescan.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Two mental pictures drive everything here.
+
+\textbf{The sorted line.} Lay $B$ flat by inorder: $1,3,4,6,7,8,10,13,14$. Now every ``ordered''
+question is an array question -- $k$th smallest is the $k$th element, minimum gap is the smallest
+difference of \emph{neighbours} (in a sorted list the closest pair is always adjacent), successor of
+$p$ is the next element. But we do not build the array: we walk inorder and stop the instant we can
+\emph{prove} nothing later can help (a counter hitting $k$, or a subtree entirely past the target).
+That is why these run in $\bigO{h+k}$ or $\bigO{h}$, not $\bigO{n}$.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram]
+  \node[annot, anchor=east] at (-0.2,0) {\small inorder};
+  \foreach \x/\v [count=\i from 0] in {0/1,1/3,2/4,3/6,4/7,5/8,6/10,7/13,8/14} {
+    \node[cellnode] at (\x,0) {\v};
+  }
+  \draw[successgreen, line width=1.1pt, ->] (2.2,-0.5) -- (2.8,-0.5) node[midway, below, font=\scriptsize, text=successgreen] {min gap $=4-3=1$};
+  \node[annot, anchor=west] at (9.2,0) {\emph{adjacent} only};
+\end{tikzpicture}
+\caption{The sorted line of $B$. Order statistics live here: the $k$th smallest is index $k$, the
+minimum absolute difference is the smallest gap of \emph{neighbours} (green), the successor of $6$ is
+$7$. Streaming inorder visits cells left-to-right, so we read each answer off with one variable of
+history and can halt early -- no array, no sort.}\label{fig:c05-line}
+\end{figure}
+
+\textbf{The interval stream (for rebuilding).} Preorder emits a node, then its entire left subtree,
+then its entire right subtree. Read $8,3,1,6,4,7,10,14,13$. The first value $8$ is the root. Now
+$3$ is next: is it in $8$'s left or right subtree? $3<8$, so left. Keep consuming while values fit
+the \emph{open} interval: the left subtree of $8$ must lie in $(-\infty,8)$, and within it the left
+subtree of $3$ in $(-\infty,3)$. Value $1<3$: still left. Value $6$: $6>3$ but $6<8$, so $6$ closes
+$3$'s left subtree and becomes a node in $3$'s \emph{right} subtree, whose bound is $(3,8)$. This is
+exactly the bound descent of \thmref{c05-bounds} run as a \emph{parser}: whenever the next preorder
+value exceeds the current upper bound, that subtree is finished and we pop up to the enclosing
+interval. One left-to-right scan rebuilds the whole tree.
+
+\subsection{Definitions and Notation}
+
+\begin{proposition}{Order statistics by early-exit inorder}{c05-kth}
+The $k$th smallest key of a BST is the node reached by the $k$th visit of an inorder walk; running
+inorder with a counter and halting at count $k$ finds it in $\bigO{h+k}$ time and $\bigO{h}$ stack.
+The minimum (maximum) is the left-most (right-most) node, reached in $\bigO{h}$ by descending one
+child chain. This is the \emph{same} technique as the fully worked \probref{c03-kth-smallest} of
+\chref{c03}; we cite it rather than re-solve it.
+\end{proposition}
+\begin{proofbox}
+By \thmref{c05-inorder} the inorder sequence is the increasing order of keys, so its $k$th element is
+the $k$th smallest. The walk visits in increasing order, so it may stop after $k$ emissions. Cost of
+$k$ inorder steps is the path to the deepest visited node, $\bigO{h+k}$; min/max are the extreme
+$\bigO{h}$ descents since the left-most node has no left child. \end{proofbox}
+
+\begin{definition}{Inorder successor and predecessor}{c05-succ}
+The \term{inorder successor} of a node with key $x$ is the smallest key strictly greater than $x$;
+the \term{predecessor} is the largest key strictly less than $x$. In a BST the successor of $x$ is:
+if $x$ has a right subtree, the left-most node of that subtree; otherwise, the nearest ancestor to
+which $x$ (its subtree) is a left-descendant. Symmetrically for the predecessor.
+\end{definition}
+
+\noindent\textbf{In plain words.} On the sorted line, successor/predecessor are just ``one step
+right/left.'' Structurally: if you can go right then left-most, do -- you land on the next bigger
+key; if you cannot, you backtrack up until you arrive from a \emph{left} child, and that parent is the
+next bigger key. (Delete used exactly this to pick a splice node, \thmref{c05-delete}.)
+
+\begin{theorem}{Reconstruct a BST from its preorder alone}{c05-preorder}
+Let $\mathrm{pre}$ be the preorder of a BST with distinct keys. The tree is uniquely reconstructed by
+a single left-to-right scan: build a node from the current value, first attach as its left subtree all
+following values $<v$ that also respect the enclosing upper bound, then its right subtree up to that
+bound. Formally, \code{build(hi)} consumes \code{pre[i]} while it is $<\mathit{hi}$, making a node of
+key $v$ whose left child is \code{build(v)} and right child is \code{build(hi)}.
+\end{theorem}
+\begin{proofbox}
+Preorder guarantees a node appears before all its descendants, so \code{pre[i]} at entry \emph{is} the
+subtree root whenever it lies below the current upper bound $\mathit{hi}$ (keys $>\mathit{hi}$ belong
+to no subtree open at this level, so we return null and let the caller consume them). After taking
+$v$ as the root, every subsequent key $<v$ (and $<\mathit{hi}$) is in $v$'s left subtree -- that is
+\code{build(v)} with upper bound $v$; once \code{build(v)} stops (next key $\ge v$), the remaining
+keys that are still $<\mathit{hi}$ are exactly $v$'s right subtree -- \code{build(hi)}. Each element is
+consumed once ($i$ only increases), so the scan is $\bigO{n}$ and, by \defref{c05-prop}, produces the
+unique BST whose preorder is the input (the left/right partition by bound is forced). \end{proofbox}
+\begin{insightbox}
+Compare with \probref{c03-build-in-post}: a general binary tree needs inorder \emph{plus} preorder to
+split a subtree into ``everything left of the root, everything right.'' A BST replaces the second
+array with a \emph{comparison} -- the bound tells you where the subtree ends. Information you used to
+read from positions, you now infer from order.
+\end{insightbox}
+
+\subsection{The algorithm: a streaming inorder, and a bound-descent parser}
+
+\begin{lstlisting}[caption={Reconstruct a BST from a preorder array by bound descent (LeetCode 1008)}, label={lst:c05-build}]
+class Solution {
+    vector<int> a;              // preorder, scanned left to right by a global index
+    int i = 0;
+    TreeNode* build(int hi) {
+        if (i == (int)a.size() || a[i] > hi) return nullptr;   // next key is out of range: subtree ends
+        TreeNode* node = new TreeNode(a[i++]);                 // a[i] is this subtree's root
+        node->left  = build(node->val);                        // left keys must be < node->val
+        node->right = build(hi);                               // right keys share node's upper bound
+        return node;
+    }
+public:
+    TreeNode* bstFromPreorder(vector<int>& preorder) {
+        a = preorder; i = 0;
+        return build(INT_MAX);                                 // root has no upper bound
+    }
+};
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Minimum absolute difference of any two keys -- streaming inorder with a predecessor pointer}, label={lst:c05-mindiff}]
+class Solution {
+    TreeNode* prev = nullptr;   // previously visited key on the inorder line
+    int best = INT_MAX;
+    void inorder(TreeNode* r) {
+        if (!r) return;
+        inorder(r->left);
+        if (prev) best = min(best, r->val - prev->val);  // adjacent gap; r->val > prev->val
+        prev = r;
+        inorder(r->right);
+    }
+public:
+    int getMinimumDifference(TreeNode* root) { prev = nullptr; best = INT_MAX; inorder(root); return best; }
+};
+\end{lstlisting}
+\begin{complexitybox}
+Bound-descent rebuild: $\bigO{n}$ time (each preorder element consumed once) and $\bigO{h}$ stack
+(worst $\bigO{n}$ on a chain, but no extra arrays). Streaming inorder queries: $\bigO{n}$ for a full
+min-gap pass, $\bigO{h+k}$ for the $k$th-smallest early exit, $\bigO{h}$ for successor/predecessor/min/max
+-- each with $\bigO{h}$ auxiliary space and a single variable of history.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Rebuilding $B$ from its preorder $8,3,1,6,4,7,10,14,13$}{c05-queries-run}
+Run \coderef{c05-build} on $\mathrm{pre}(B)$. \code{build(INF)} takes $8$; \code{build(8)} takes $3$
+($3<8$); \code{build(3)} takes $1$ ($1<3$), then its left \code{build(1)} sees $6>1$ (null) and right
+\code{build(3)} sees $6>3$ (null) $\Rightarrow$ $1$ is a leaf. Back in \code{build(8)}'s node $3$:
+right \code{build(8)} takes $6$ ($6<8$, and $6>3$ so it left $3$'s left subtree); node $6$'s left
+\code{build(6)} takes $4$ ($4<6$), right \code{build(8)} takes $7$ ($7<8$, $7>6$); $7$ is a leaf. Now
+$8$'s own right \code{build(INF)} takes $10$; $10$'s left \code{build(10)} sees $14>10$ (null); right
+\code{build(INF)} takes $14$, whose left \code{build(14)} takes $13$ ($13<14$) and right sees array
+exhausted. Result \emph{is} $B$ (\figref{c05-running}) -- root $8$, left $3\!\to\!(1,6\!\to\!(4,7))$,
+right $10\!\to\!(\_,14\!\to\!(13,\_))$. Every ``subtree ends'' decision came from one comparison
+against an inherited bound, never from a second traversal.
+\end{example}
+\begin{tracebox}[Streaming inorder answers two queries in the same pass]
+Walk $B$ inorder, carrying \code{prev}: emit $1$ (prev null), $3$ (gap $3-1=2$, best $2$), $4$ (gap
+$1$, best $1$), $6$ (gap $2$), $7$ (gap $1$), $8,10,13,14$. Final best $=1$ -- the min absolute
+difference, attained by adjacent keys $3,4$ (and $6,7$). Had we wanted the $3$rd smallest we would
+have stopped at the $3$rd emission, $4$ (\propref{c05-kth}), never touching the right subtree: $\bigO{h+3}$.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Range count / sum $[L,R]$}: descend; add a whole subtree's cached sum when it
+        fits; prune when a node is $<L$ (ignore its left) or $>R$ (ignore its right). Range Sum of BST
+        is this exact pruning (\chref{c24}). \hfill\lv{2}--\lv{3}
+  \item \textbf{Closest value to target}: track the best node while descending toward \code{target};
+        each comparison both moves you and updates the answer -- $\bigO{h}$. \hfill\lv{3}
+  \item \textbf{Two-order rebuild check}: feed \coderef{c05-build} a \emph{post}-order reversed, or
+        verify by re-serialising (LC 449, \chref{c03}) -- the bound parser also \emph{validates}. \hfill\lv{3}
+  \item \textbf{Iterative rebuild with a stack}: push $(\text{node},\mathit{hi})$ pairs and attach the
+        next value left/right by comparing to \code{hi} -- same $\bigO{n}$, explicit stack instead of
+        recursion (survives a chain). \hfill\lv{3}--\lv{4}
+  \item \textbf{LCA of a BST}: descend from the root; the first node whose key lies in
+        $[\min(p,q),\max(p,q)]$ is the lowest common ancestor -- a single $\bigO{h}$ descent (the BST
+        version, distinct from the general-tree LCA of \chref{c03}). \hfill\lv{3}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c05-queries-pitfalls}
+
+\begin{warningbox}[Trap 1 -- materialising the inorder array to answer one ordered query]
+Dumping the whole tree into a vector and then indexing/inspecting is $\bigO{n}$ time and space for
+what \propref{c05-kth} does in $\bigO{h+k}$. For min-gap and closest-value the sorted property plus
+one \code{prev} variable suffices -- keep history, not the list. (Building the array is fine \emph{once}
+if you will answer \emph{many} queries; for a single question, ride the walk.)
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: collect everything to find one successor's neighbour}, language=C++, basicstyle=\ttfamily\small]
+vector<int> v; inorderInto(root, v);          // O(n) space
+int best = INT_MAX;
+for (int i = 1; i < (int)v.size(); ++i) best = min(best, v[i] - v[i-1]);
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: stream inorder, remember only the predecessor}, language=C++, basicstyle=\ttfamily\small]
+if (prev) best = min(best, r->val - prev->val);   // O(1) history, no vector
+prev = r;                                          // see lst:c05-mindiff
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- in the bound parser, comparing only to the node, not the inherited bound]
+When rebuilding from preorder, a right-subtree node must be $<\mathit{hi}$ (the \emph{ancestor} bound),
+not merely $>\text{parent}$. Dropping the outer bound makes you swallow a value that belongs to a
+grandparent's sibling. In \coderef{c05-build} the right child is \code{build(hi)}, \emph{not}
+\code{build(INF)}: it inherits the caller's ceiling. This mirrors the local-check trap of
+\thmref{c05-bounds} -- the same bug, in reverse.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- using $|a-b|$ over \emph{all} pairs for min gap]
+The minimum difference of any two keys is attained by \emph{adjacent} elements of the sorted line, not
+by scanning $\binom{n}{2}$ pairs. Prove it: in a sorted sequence the closest pair is consecutive, so
+if a non-adjacent pair were minimal, the element between them would give a smaller gap -- contradiction.
+One inorder pass of adjacent gaps is $\bigO{n}$ and exact (\coderef{c05-mindiff}).
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's anchor is LC 1008 -- build a BST from a single preorder traversal. It is the cleanest
+possible demonstration that ``a BST knows its own order'': the input is one array, and the bound
+descent -- \thmref{c05-bounds} run as a parser -- recovers the exact structure with no second
+sequence, no search, and one pass. It rewards you for having internalised the interval view.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c05-construct}{Construct Binary Search Tree from Preorder Traversal}{LeetCode 1008}
+  {https://leetcode.com/problems/construct-binary-search-tree-from-preorder-traversal/}{LC Medium L3}
+  {preorder parsing, bound descent, recursive interval construction, uniqueness of BST from preorder}
+
+\begin{problemstatement}[Construct BST from Preorder Traversal]
+Given an array \code{preorder} listing the values of nodes of a BST in \textbf{preorder} (root, left
+subtree, right subtree), return the \emph{root} of the BST the array describes. It is guaranteed the
+input is a valid preorder traversal of \emph{some} BST with distinct values. $1\le n\le 100$,
+$1\le \text{value}\le 100$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 25 minutes]
+The insight is that \emph{one} order suffices for a BST. If you reach for a second traversal, stop.
+\peek{Preorder starts with the root. The next values less than the root form its left subtree -- but
+where does that left subtree \emph{end}? What condition on the running array tells you ``this value no
+longer belongs under the current node''?}
+\nudge{Keep a global index $i$. To build a subtree whose keys must be $<\mathit{hi}$: if
+\code{pre[i] > hi}, this subtree is empty -- return null \emph{without} consuming. Otherwise make a
+node of \code{pre[i++]}, build its left with upper bound \code{node->val}, then its right with upper
+bound \code{hi}. Start the whole thing with \code{hi = INT\_MAX}.}
+\fullhint{Exactly \coderef{c05-build}: \code{build(hi)} consumes \code{a[i]} while
+\code{a[i] <= hi}, recursing \code{build(node->val)} for the left and \code{build(hi)} for the right.
+Each array slot is consumed once $\Rightarrow$ $\bigO{n}$. The bound \code{hi} is the inherited upper
+limit, \emph{not} the parent value -- that is the whole trick (Trap 2).}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+We must turn \emph{one} sequence -- preorder -- into the exact tree that generated it. For a general
+binary tree this is impossible from one order (\probref{c03-build-in-post} needs two), but the BST
+promise adds information: at any node, all smaller (but still within the ancestor ceiling) values are
+the left subtree and the rest are the right. So the ``where does the left subtree end?'' question,
+which normally needs a second array, is answered by a \emph{comparison}. The task is really parsing,
+and the grammar is \thmref{c05-bounds}'s interval rule.
+
+\solstep{Key Observations}
+\begin{observation}
+Preorder emits a subtree root immediately, then \emph{all} of its left subtree, then its right -- so
+the current array element is the subtree root whenever it fits the open upper bound.
+\end{observation}
+\begin{observation}
+A subtree with keys required to be $<\mathit{hi}$ ends exactly at the first element $>\mathit{hi}$.
+That element belongs to an enclosing subtree, so we must \emph{not} consume it when returning null.
+\end{observation}
+\begin{observation}
+The reconstruction is \emph{unique}: the left/right partition at every node is forced by the bound, so
+there is no choice to make -- one left-to-right scan, each element used once (\thmref{c05-preorder}).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Insert each preorder value into a growing BST one at a time with \defref{c05-insert}.}
+{Correct, and $\bigO{n\cdot h}$ -- acceptable here at $n\le100$, but wasteful and it hides the real
+structure: every insert re-descends from the root. The bound parser reads each element once and
+\emph{knows} where it goes from the current interval -- $\bigO{n}$ -- because preorder already tells us
+we are still inside a subtree until a value exceeds its ceiling.}
+\deadend{Regenerate the inorder by sorting \code{preorder} and use the two-order rebuild.}
+{It works (inorder $=$ sorted $=$ sort of preorder), but you pay an $\bigO{n\log n}$ sort and throw
+away the free information the BST gave you. The bound descent is strictly better and needs no extra
+array -- the whole point of this section.}
+\aha{Parse with an interval. \code{build(hi)}: consume \code{a[i]} as a node iff \code{a[i] <= hi};
+its left subtree is \code{build(a[i])} (keys below the node), its right is \code{build(hi)} (keys
+below the enclosing ceiling). One scan, unique tree.}
+\end{thinkbox}
+
+\solstep{Solution}
+Keep the array and a global index $i$. Define \code{build(hi)}: if $i$ is past the end or
+\code{a[i] > hi}, return null (this subtree is empty and the offending value is left for an ancestor);
+otherwise create \code{node = a[i++]}, set \code{node->left = build(node->val)} and
+\code{node->right = build(hi)}, return \code{node}. Call \code{build(INT\_MAX)} to start. As $i$ only
+advances on consumption, the scan is a single left-to-right pass, and each node's children are decided
+purely by the inherited bound -- \thmref{c05-preorder}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By induction on \code{build(hi)} calls. \emph{Claim:} \code{build(hi)} consumes exactly the maximal
+prefix of the remaining preorder that forms the subtree of keys $<\mathit{hi}$, returning its root,
+and leaves $i$ at the first key $\ge\mathit{hi}$. Base: if the next key exceeds $\mathit{hi}$ (or
+array ends), no such subtree exists -- return null, index unmoved, correct. Step: let $v=a[i]$ with
+$v\le\mathit{hi}$. By preorder, $v$ is this subtree's root; consume it ($i{+}{+}$). All keys of $v$'s
+left subtree are $<v$ and appear next in preorder, so \code{build(v)} consumes exactly that maximal
+left run (induction with $\mathit{hi}=v$) and stops at the first key $\ge v$. The remaining keys that
+are still $<\mathit{hi}$ are precisely $v$'s right subtree, consumed by \code{build(hi)} (induction).
+After both, the next key is $\ge\mathit{hi}$ by the inner call's guarantee. Thus the returned node has
+the correct left/right subtrees and the index rests where the enclosing call expects. Since the input
+is a genuine BST preorder, the intervals never conflict, and the constructed tree is the unique BST
+with that preorder (\thmref{c05-preorder}). \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Construct BST from Preorder Traversal -- submittable bound-descent parser (LeetCode 1008)}, label={lst:c05-construct}]
+/**
+ * Definition for a binary tree node.
+ * struct TreeNode { int val; TreeNode *left, *right; };
+ */
+class Solution {
+    vector<int> a;
+    int i = 0;
+    TreeNode* build(int hi) {
+        if (i == (int)a.size() || a[i] > hi) return nullptr;  // subtree of keys <hi is done
+        TreeNode* node = new TreeNode(a[i++]);                // a[i] is this subtree's root
+        node->left  = build(node->val);                       // left: keys < node->val
+        node->right = build(hi);                              // right: keys < enclosing bound
+        return node;
+    }
+public:
+    TreeNode* bstFromPreorder(vector<int>& preorder) {
+        a = preorder; i = 0;
+        return build(INT_MAX);
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Running preorder $8,3,1,6,4,7,10,14,13$]
+\code{build(INF)}: take $8$. \code{build(8)}: take $3$. \code{build(3)}: take $1$; \code{build(1)}
+sees $6>1$ null; \code{build(3)} sees $6>3$ null $\Rightarrow$ node $1$ leaf. node $3$'s
+\code{build(8)}: take $6$; \code{build(6)}: take $4$, children null; \code{build(8)}: take $7$, null
+$\Rightarrow$ node $6=(4,7)$. node $8$'s \code{build(INF)}: take $10$; left \code{build(10)} sees
+$14>10$ null; right \code{build(INF)}: take $14$; left \code{build(14)}: take $13$ (leaf); right null.
+Tree $=$ $B$ (\figref{c05-running}). \checkmark Each of the $9$ values consumed exactly once, $i$ ends
+at $9$, no second array read.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ -- the index $i$ advances once per element and each \code{build} call that consumes
+creates exactly one node, so $2n{+}1$ calls total. Space $\bigO{h}$ for the recursion stack ($\bigO{n}$
+worst case on a skewed preorder such as $1,2,\dots,n$; $\bigO{\log n}$ when balanced). At $n\le100$
+even the $\bigO{n\cdot h}$ repeated-insert variant passes, but the linear parser is the intended,
+structure-aware answer. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Three ways to break the parser: (i) right recursion as \code{build(INT\_MAX)} instead of
+\code{build(hi)} -- you then swallow a value meant for an ancestor (Trap 2). (ii) Advancing $i$ in the
+null base case -- the offending value must stay for the caller. (iii) Using $\ge$ vs $>$ inconsistently
+with the distinct-keys promise; with distinct keys, ``stop when \code{a[i] > hi}'' is exact.
+\emph{Variants:} an explicit stack parser gives the same $\bigO{n}$ iteratively (Variations, item 4);
+and the identical routine with $\mathit{hi}$ replaced by a \code{set}-style upper bound generalises to
+``is this array a valid BST preorder?'' (LC 449 verification, \chref{c03}).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \textbf{A BST needs one order, not two.} The bound rule (\thmref{c05-bounds}) supplies the
+        split that a general tree reads from a second traversal -- \thmref{c05-preorder}.
+  \item \textbf{Ordered queries are array queries on a line you never build.} Keep one \code{prev} /
+        one counter and ride inorder (\propref{c05-kth}, \coderef{c05-mindiff}).
+  \item \textbf{Min-gap is adjacent-only.} Sortedness collapses $\binom{n}{2}$ pairs to $n-1$
+        neighbours (Trap 3) -- the single most reused BST-query fact.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Iterative rebuild}: a stack of open ancestors; attach each new value as left (if
+        below the top) else pop to the last smaller ancestor and attach right. Same $\bigO{n}$, no
+        recursion depth risk on a chain -- the shape the Summit (\probref{c05-summit}) fears.
+  \item \textbf{Multiple queries}: if you must answer many rank/kth questions on a \emph{static} BST,
+        augment nodes with subtree sizes for $\bigO{h}$ per query -- the idea the Summit develops,
+        and the pointer cousin of the Fenwick engine (\chref{c14}).
+  \item \textbf{Successor without parent pointers}: the descent + backtrack of \defref{c05-succ};
+        with parent pointers, a cleaner $\bigO{h}$. BST Iterator (LC 173, \chref{c03}) streams this
+        in $\bigO{1}$ amortised per next() via a left-spine stack.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you \emph{stream} inorder with one \code{prev}/counter, instead of building the whole
+        array for a single query? (Trap 1, \propref{c05-kth}.)
+  \item For the min gap, did you check only \emph{adjacent} keys? (Trap 3, \coderef{c05-mindiff}.)
+  \item In the rebuild, did the right child inherit the \emph{enclosing} bound, not \code{INT\_MAX}?
+        (Trap 2, \thmref{c05-preorder}.)
+  \item Did you use \probref{c03-kth-smallest} as known instead of re-solving it here? (anti-repetition.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Minimum Absolute Difference in BST}{LeetCode 530}
+    {https://leetcode.com/problems/minimum-absolute-difference-in-bst/}{LC Easy L2}
+    {Return the smallest absolute difference between \emph{any} two distinct nodes of a BST. The
+    sorted line makes the answer an \emph{adjacent} gap (Trap 3), so do a streaming inorder that
+    remembers only the previous key and folds $\min$ over consecutive differences -- \coderef{c05-mindiff}
+    \emph{is} this solution; reproduce it from the bound-descent intuition rather than from the
+    listing. Do not compare a node to all its descendants (that finds non-adjacent, larger gaps) and
+    do not \code{sort} -- the tree is already sorted; you only have to read it in order.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 7.3 BST Queries and Order Statistics]
+Inorder $\equiv$ the sorted line (\thmref{c05-inorder}), so rank questions are array questions ridden
+with early exits: $k$th smallest in $\bigO{h+k}$ (\propref{c05-kth}, full build in \probref{c03-kth-smallest}),
+successor/predecessor by ``right-then-leftmost, else backtrack'' (\defref{c05-succ}), min-gap by
+\emph{adjacent} inorder neighbours (\coderef{c05-mindiff}). Rebuild a BST from \emph{one} preorder scan
+with a bound-descent parser -- \code{build(hi)} consumes while $\le\mathit{hi}$, left $=\text{build}(v)$,
+right $=\text{build}(\mathit{hi})$ (\thmref{c05-preorder}, \coderef{c05-build}, \probref{c05-construct}).
+One order is enough because the BST \emph{is} its own inorder.
+\selftest{
+  \item Why is the minimum absolute difference always between two \emph{consecutive} inorder keys?
+  \item Give the successor of node $6$ and of node $8$ in $B$ (\figref{c05-running}) using \defref{c05-succ}.
+  \item Rebuild $B$ from preorder up to and including node $6$: list the three bounds in play.
+  \item State why the right child of a rebuild node uses the \emph{enclosing} bound, not the node's own value.
+  \item For the $4$th smallest of $B$, which nodes does the early-exit inorder \emph{not} visit?
+}
+\end{recallbox}

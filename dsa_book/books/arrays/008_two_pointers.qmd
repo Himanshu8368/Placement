@@ -1,0 +1,1248 @@
+# Two Pointers {#sec-tp}
+
+<!--
+Author-facing provenance (not rendered): Chapter 8 of the arrays volume, per outline.yml
+("Two Pointers"). Lessons A1-A6 + patterns P1-P6 exactly as listed in the outline's covers
+line. Registry problems under books/problems/, boards under books/traces/arr008_traces.py.
+The HTML comment above is the only place a local path may appear, and it must never reach
+the rendered page.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 2.3 (the merge procedure and its loop-invariant proof) · **CPH** (Laaksonen) ch. 8.1 "Two pointers method" (opposite ends, same direction, and the amortised count of pointer moves) · **Gajentaan and Overmars** (1995), who introduced 3SUM-hardness (@sec-tp-fix) · **Dijkstra**'s Dutch national flag problem (three pointers, three regions) · the LeetCode and Codeforces problems of Part B.
+
+**Coverage:** the region invariant behind every pointer move · opposite ends on a sorted array and the one-discard-per-test proof · fix one element and squeeze the rest (3SUM, $k$-SUM, the 3SUM conjecture) · merging from the front, from the back in place, the gap method, and union / intersection / difference · same-direction pointers and monotone boundaries ("for each right, how many left") · runs and the group pointer · six patterns: opposite ends, fix-and-squeeze, merging and set operations, greedy pairing, counting pairs, runs.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- State the three-region invariant of a two-pointer walk — what is left of, between, and right of the pointers — and use it to decide *which* pointer a failed test lets you move.
+- Squeeze opposite ends of a sorted array on a monotone predicate (pair sums, area, capacity), proving each discard, and explain why moving *both* ends at once is never justified.
+- Solve 3SUM in $O(n^2)$ by fixing one element and squeezing the rest, deduplicate its output, and state the general $k$-SUM complexity and why it is probably not improvable.
+- Merge two sorted arrays from the front, from the back in place, and recognise the merge skeleton as union / intersection / difference with the emission rule swapped.
+- Count pairs with sum in a band in one sorted sweep (batching $\mathit{hi}-\mathit{lo}$ at a time), and count subarrays with a window whose left bound provably never rewinds.
+- Jump a group pointer over maximal runs (equal values, consecutive values, same-sign blocks) and charge the nested loop's work in one sentence.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+from functools import lru_cache
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr008_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-tp-why}
+
+::: {.callout-note title="In plain words"}
+Two pointers are two fingers on the same array, moving under a rule. The fingers replace loops: instead of "for every pair, check", you ask "the test failed *here* — which end can I therefore throw away?" Every technique in this chapter is one answer to that question: squeeze from opposite ends of a sorted array, walk both ends of two arrays like a merge, chase a left bound that only ever moves forward, or hop over whole blocks of equal things. What makes the moves legal is always the same thing: a **region invariant** — a promise about what the array parts outside the fingers already contain.
+:::
+
+Here is the interview-shaped argument, the mirror of the one in @sec-hash-why. Someone hands you a *sorted* array of $n = 10^5$ numbers and asks whether any two sum to a target. The direct reading of the definition — try every pair — is about $5\cdot10^9$ pair checks, far over the operation budget of @sec-cx-budget. The hashing chapter (@sec-hash) would hash its way out in $O(n)$ time and $O(n)$ memory. But sortedness is information, and two fingers spend it: put one at each end, look at the sum, and *one whole end is provably useless* — too small and the left finger can retire, too large and the right one can. Each glance discards a candidate, so $n$ glances decide everything: $O(n)$ time, and unlike the hash map it remembers *nothing*.
+
+That is the chapter's thesis. Hashing summarises **values**; prefix sums summarise **positions**; two pointers summarise **order** — they are the third way to turn $O(n^2)$ into $O(n)$, and the only one that needs sortedness or monotonicity to work, and the only one that needs no extra memory. When the statement says "the array is sorted", when you are free to sort, or when a predicate is monotone in an index, two fingers beat every machine. When none of that holds — the unordered, unsorted Two Sum of @sec-hash-p1-a — the hash map is the right tool, and knowing *which* world you are in is half the interview answer.
+
+The same handful of moves runs inside real systems. Every merge step of merge sort is two forward pointers over two sorted runs. A database's *sort-merge join* walks two sorted inputs with one cursor each, exactly the merge of @sec-tp-merge. Cheney's copying garbage collector keeps a *scan* pointer chasing a *free* pointer through the new heap, and the classic "two-finger" compaction algorithm is named after its two pointers. The fast/slow pointers that find a cycle in a linked list are the same idea on a structure you cannot index.
+
+Part A is six lessons — the invariant that makes every move legal (A1), the ends-squeeze and its proof (A2), fixing one element and squeezing the rest (A3), the merge family (A4), same-direction pointers and monotone boundaries (A5), and runs (A6). Part B is six patterns with two or three fully solved, stress-tested problems each. This chapter builds on the array basics of @sec-arr (half-open ranges, the read/write compaction), on prefix sums (@sec-pref) and on hashing (@sec-hash); the next chapter, @sec-sw, turns the same-direction pointers of A5 into the sliding window.
+
+## Part A — Lessons
+
+## A1. The two-pointer invariant: what the regions mean {#sec-tp-inv}
+
+::: {.callout-note title="In plain words"}
+Two fingers cut the array into three parts. In the ends-squeeze, everything **left of** $\mathit{lo}$ and **right of** $\mathit{hi}$ has been *decided* — proven unable to participate in any remaining answer — and the open interval between the fingers is all that is still alive. In a forward walk, the part left of the leading finger is *processed* and the part between the fingers is the live *window*. A pointer move is legal exactly when you can name the region each finger bounds and prove the discarded cell is decided. "Which end does the test eliminate?" is the whole game; the invariant is the proof.
+:::
+
+Write the invariant down before the loop and the code writes itself. For the opposite-ends walk on a sorted array:
+
+```text
+lo = 0, hi = n - 1
+loop invariant:
+  every pair with an index < lo or an index > hi is already excluded
+  (answer, if any, lives entirely inside [lo, hi])
+each step: test something about (lo, hi) and move ONE finger,
+           after proving the finger's cell cannot be in any live answer
+```
+
+Three habits make this bulletproof, and all three come from the half-open discipline of @sec-arr-ranges:
+
+- **Name the regions out loud.** "Left of `lo`: eliminated. Right of `hi`: eliminated. Between: still possible." If you cannot say who eliminated a cell and *why*, the move is not legal yet.
+- **Bound the loop's work by pointer motion, not by branches.** Each iteration moves $\mathit{lo}$ up or $\mathit{hi}$ down and never backwards, so the walk lasts at most $n$ steps no matter what the tests do — $O(n)$ "despite" each step looking at two cells. This is the same charging argument @sec-hash-p5-a used for an inner `while`, with the fingers paying instead of a set.
+- **`lo < hi` or `lo <= hi` is a decision, not a style choice.** It says whether a self-pair or the final single cell is in the live region; get it wrong and you either miss a candidate or pair an element with itself (@sec-arr-ranges is the one-line test to run: does the algorithm still see $[3,3]$ with $t = 6$?).
+
+The ancestral forward example — the read/write compaction you already own from @sec-arr-p2 — has the same anatomy with both fingers facing the same way:
+
+```{python}
+#| label: arr-tp-a1-demo
+def remove_if_leq(a, bound):          # the read/write compaction, region by region
+    w = 0                             # a[:w]      = kept, decided
+    for r in range(len(a)):           # a[w:r]     = deleted, decided
+        if a[r] > bound:              # a[r:]      = undecided
+            a[w] = a[r]
+            w += 1
+    return a[:w]
+
+for _ in range(300):
+    a = [random.randint(0, 9) for _ in range(random.randint(0, 12))]
+    bound = random.randint(0, 9)
+    assert remove_if_leq(a[:], bound) == [x for x in a if x > bound]
+assert remove_if_leq([1, 3, 2, 5, 4], 3) == [5, 4]
+print("a1 demo OK")
+```
+
+Read the comments as the invariant: at every instant the three regions hold *exactly* what their names say, and the only question each iteration asks is "which region does $a[r]$ join?" Every lesson and pattern in this chapter is some other three-region story — A2 makes the discard proof for the ends-squeeze, A5 shrinks a window, A6 lets a finger hop a whole block at once.
+
+::: {#fig-tp-a1-regions}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    vals = [1, 3, 5, 6, 8, 11]
+    lo, hi = 1, 4
+    cols = {j: "muted" for j in range(len(vals)) if j < lo or j > hi}
+    cols[lo] = "indigo"
+    cols[hi] = "violet"
+    V.array(ax, p, vals, regions=[(lo, hi + 1, "cyan", "live region")], colors=cols,
+            pointers=[(lo, "lo", "indigo", "bottom"), (hi, "hi", "violet", "top")],
+            note="grey = decided (dead); cyan = still alive")
+V.show(draw)
+```
+
+The three regions of an opposite-ends walk on $a = [1, 3, 5, 6, 8, 11]$: everything left of $\mathit{lo}$ and right of $\mathit{hi}$ has already lost the @sec-tp-ends argument and is **decided**; only the bracketed middle can still contain a pair. Naming these three parts out loud is what makes each finger move legal.
+
+:::
+
+## A2. Opposite ends on a sorted array: why discarding one end is safe {#sec-tp-ends}
+
+::: {.callout-note title="In plain words"}
+Stand at both ends of a sorted array and test the pair $(\mathit{lo}, \mathit{hi})$ — their sum, the water between them, any quantity whose best case for one finger is the other finger. If the test says "too small with the biggest available partner", then $\mathit{lo}$ is useless against *everyone* (sortedness made $\mathit{hi}$ its best chance), so retire $\mathit{lo}$. Symmetrically, a test that says "the right finger is too big for even the smallest partner" retires $\mathit{hi}$. Each glance deletes one index from the live region; $n$ glances, one pass, no memory.
+:::
+
+The proof is two lines and worth memorising verbatim, because it is the same in every pattern of @sec-tp-p1, @sec-tp-p2, and @sec-tp-p4: if $a[\mathit{lo}] + a[\mathit{hi}] < t$, then for *every* $k \le \mathit{hi}$, $a[\mathit{lo}] + a[k] \le a[\mathit{lo}] + a[\mathit{hi}] < t$ — the left finger's best partner was the right finger, and it wasn't good enough, so the entire column of pairs containing $\mathit{lo}$ dies at once. Retire $\mathit{lo}$; the live region shrinks by one. The predicate being **monotone** (larger index ⇒ larger sum) is the only assumption, and sortedness is what buys it.
+
+The trap that makes this a lesson instead of a footnote: *exactly one* finger moves per step. Moving both is tempting ("the sum was too small — clearly $\mathit{lo}$ is hopeless, and while we're here $\mathit{hi}$ looks big…") and is always unjustified, because a failed test at $(\mathit{lo}, \mathit{hi})$ says nothing about the *other* end's pairs with the middle. Concrete punishment, on $a = [1, 2, 4, 6, 7]$ with $t = 10$:
+
+```{python}
+#| label: arr-tp-a2-demo
+def squeeze_one_end(a, t):            # the legal version
+    lo, hi = 0, len(a) - 1
+    while lo < hi:
+        s = a[lo] + a[hi]
+        if s == t:
+            return (lo, hi)
+        if s < t:
+            lo += 1                   # only lo is proven dead
+        else:
+            hi -= 1
+    return None
+
+def squeeze_both_ends(a, t):          # "too small, retire the pair anyway"
+    lo, hi = 0, len(a) - 1
+    while lo < hi:
+        s = a[lo] + a[hi]
+        if s == t:
+            return (lo, hi)
+        if s < t:
+            lo, hi = lo + 1, hi - 1   # the unjustified double move
+        else:
+            lo, hi = lo + 1, hi - 1
+    return None
+
+assert squeeze_one_end([1, 2, 4, 6, 7], 10) == (2, 3)     # 4 + 6: the only pair
+assert squeeze_both_ends([1, 2, 4, 6, 7], 10) is None     # it teleported across (2, 3)
+assert squeeze_one_end([1, 2, 4, 6, 7], 8) == (0, 4)      # 1 + 7
+assert squeeze_one_end([1, 2, 4, 6, 7], 9) == (1, 4)      # 2 + 7
+assert squeeze_both_ends([1, 2, 4, 6, 7], 9) is None      # misses (1, 4) too
+print("a2 demo OK")
+```
+
+Run it before believing the comments. The punishing input is $t = 10$ on $a = [1, 2, 4, 6, 7]$: the first test is $1 + 7 = 8 < 10$, so the double move jumps to $(1, 3)$, tests $2 + 6 = 8 < 10$, jumps to $(2, 2)$, and halts with `None` — while the legal answer $(2, 3)$ ($4 + 6$) sat *inside* the region it teleported across. The one-finger walk is a four-step corridor: $1 + 7 = 8$ too small, retire $1$; $2 + 7 = 9$ too small, retire $2$; $4 + 7 = 11$ too big, retire $7$; $4 + 6 = 10$, answer. Every discard there is backed by the two-line proof above; the double move's discards are backed by nothing. One test proves one discard, never two — that is why every template in this chapter moves one finger at a time.
+
+::: {#fig-tp-a2-corridor}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a, t = [1, 2, 4, 6, 7], 10          # rows recorded by running the legal squeeze
+    lo, hi, rows = 0, len(a) - 1, []
+    while lo < hi:
+        s = a[lo] + a[hi]
+        rel = "= target" if s == t else ("< " if s < t else "> ") + str(t)
+        if s == t:
+            rows.append([f"lo = {lo}, hi = {hi}", f"{a[lo]} + {a[hi]} = {s}", rel, f"answer ({lo}, {hi})"])
+            break
+        act = f"retire lo ({a[lo]})" if s < t else f"retire hi ({a[hi]})"
+        rows.append([f"lo = {lo}, hi = {hi}", f"{a[lo]} + {a[hi]} = {s}", rel, act])
+        lo, hi = (lo + 1, hi) if s < t else (lo, hi - 1)
+    assert rows[-1][3] == "answer (2, 3)" and (lo, hi) == squeeze_one_end(a, t)
+    V.grid(ax, p, rows, row_labels=[f"step {k + 1}" for k in range(len(rows))],
+           colors={(len(rows) - 1, c): "green" for c in range(4)})
+V.show(draw)
+```
+
+The four-step corridor that @sec-tp-ends predicts on $a = [1, 2, 4, 6, 7]$, $t = 10$: each glance retires **exactly one** finger, and only the final row's test proves anything. The tempting double move would have teleported across $(2, 3)$ while the answer $4 + 6 = 10$ sat inside the region it skipped.
+
+:::
+
+## A3. Fixing one element, squeezing the rest: 3-sum and k-sum {#sec-tp-fix}
+
+::: {.callout-note title="In plain words"}
+Three moving fingers are one more than the squeeze knows how to handle — but a *fixed* finger does not move. So pin the smallest element of the triple, $a_i$, and the question "is there a pair after $i$ that sums to $-a_i$?" is a plain @sec-tp-ends squeeze on the suffix, $O(n)$ for that $i$. Repeat for every $i$: $n$ squeezes of $O(n)$ each is $O(n^2)$. The naive triple loop was $O(n^3)$; the squeeze replaced its two inner loops by one linear walk and saved exactly one factor of $n$.
+:::
+
+The accounting, since interviewers ask for it twice: sort in $O(n\log n)$; for each fix $i$ (that is $n$ fixes), one ends-sweep over the suffix is $O(n)$ — total $O(n^2)$, memory $O(1)$ beyond the array. Sortedness also gives cheap early exits. If $a[i] > 0$, all three values are positive and cannot sum to zero, and neither can any later fix: **break**. If $a[i] + a[i+1] + a[i+2] > 0$, the smallest triple this fix can make is already too big, and later fixes only make it bigger: **break**. If $a[i] + a[n-2] + a[n-1] < 0$, the largest triple this fix can make is too small — but a later, larger $a[i]$ might still reach zero, so this one only allows **continue**.
+
+The generalisation is mechanical: $k$-SUM fixes $k - 2$ elements and squeezes the last two, for $O(n^{k-1})$. And this $O(n^2)$ for 3SUM is *believed to be close to optimal*. The **3SUM conjecture** says no algorithm runs in $O(n^{2-\varepsilon})$ time for any $\varepsilon > 0$. It is unproved, but it is a standard hardness assumption: Gajentaan and Overmars (1995) showed that many problems in computational geometry are at least as hard as 3SUM, so a truly subquadratic 3SUM algorithm would speed all of them up. (Algorithms that beat $n^2$ by a few logarithmic factors are known; the conjecture is about polynomial savings.) When an interviewer asks "why is 3SUM famous", that is the answer: it is the problem other quadratic lower bounds are built on.
+
+```{python}
+#| label: arr-tp-a3-demo
+def count_zero_triples(a):            # index triples i<j<k with sum 0
+    n, s, c = len(a), sorted(a), 0
+    for i in range(n - 2):
+        lo, hi = i + 1, n - 1
+        while lo < hi:
+            t = s[i] + s[lo] + s[hi]
+            if t < 0:
+                lo += 1
+            elif t > 0:
+                hi -= 1
+            else:
+                if s[lo] == s[hi]:                 # all lo..hi equal: batch C(m,2)
+                    m = hi - lo + 1
+                    c += m * (m - 1) // 2
+                    break
+                x, dl, dr = s[lo], 1, 1
+                while lo + dl < hi and s[lo + dl] == x:
+                    dl += 1
+                y = s[hi]
+                while hi - dr > lo and s[hi - dr] == y:
+                    dr += 1
+                c += dl * dr
+                lo += dl
+                hi -= dr
+    return c
+
+def count_zero_triples_brute(a):
+    n = len(a)
+    return sum(1 for i in range(n) for j in range(i + 1, n) for k in range(j + 1, n)
+               if a[i] + a[j] + a[k] == 0)
+
+for _ in range(250):
+    a = [random.randint(-6, 6) for _ in range(random.randint(1, 11))]
+    assert count_zero_triples(a) == count_zero_triples_brute(a)
+assert count_zero_triples([0, 0, 0, 0]) == 4            # C(4, 3)
+assert count_zero_triples([-1, 0, 1, 2, -1, -4]) == 3   # three index triples, two value triples
+print("a3 demo OK")
+```
+
+The batch case (`s[lo] == s[hi]`) is the first sighting of the *run* idea — when the live region's two ends are equal, everything between them is equal too, and one formula replaces the rest of the sweep. @sec-tp-runs makes a lesson of it.
+
+::: {#fig-tp-a3-fix}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    vals = [-2, -1, 0, 1, 2]
+    i, lo, hi = 1, 2, 4
+    V.array(ax, p, vals, colors={i: "red", lo: "indigo", hi: "violet"},
+            regions=[(lo, hi + 1, "cyan", "suffix squeezed for -a[i] = 1")],
+            pointers=[(i, "i (fixed)", "red", "top"), (lo, "lo", "indigo", "bottom"),
+                      (hi, "hi", "violet", "bottom")],
+            note="fix a[i]; the rest is a Pattern-1 squeeze")
+V.show(draw)
+```
+
+3SUM as "one fixed finger plus a plain squeeze": with $a[i] = -1$ pinned (red), the question is just *find a pair in the cyan suffix summing to* $-a[i] = 1$ — exactly the @sec-tp-ends walk, run once per fix. The nested $O(n^2)$ is one $n$ below the triple loop because the fixed finger does not move during its sweep.
+
+:::
+
+## A4. Merging two sorted arrays: from the front, from the back, and the gap method {#sec-tp-merge}
+
+::: {.callout-note title="In plain words"}
+Two arrays, one finger each, always at the *smallest not-yet-processed* value of its array. Compare, consume the smaller, advance that finger — that is a **merge**, and it is one of the oldest two-pointer programs (it is the whole of merge sort's combine step, CLRS ch. 2.3.1). Three variants, one idea: merge *front-to-back* into fresh memory; merge *back-to-front* in place when the destination array has spare room at its tail; and the **gap method**, which drops the separate destination entirely and compares positions a shrinking distance apart. Union, intersection, and difference are the same skeleton with a different emission rule.
+:::
+
+**From the front** needs $O(n + m)$ fresh space and is the version you should write when the answer *is* a new array (@sec-tp-p3-b's squares, merge sort everywhere). **From the back** is the in-place trick: if the longer array has exactly enough free slots after its data (LC 88: $\mathit{nums1}$ of length $m + n$ holding $m$ values), fill the destination from position $m+n-1$ downwards, always writing the *larger* remaining value. The safety argument is a one-line equation you should be able to draw in the margin. With read cursors $p$ (in $\mathit{nums1}$) and $q$ (in $\mathit{nums2}$), the write cursor is always $k = p + q + 1$, because exactly $(m - 1 - p) + (n - 1 - q)$ values have been written. While $\mathit{nums2}$ still has values ($q \ge 0$), $k > p$: the slot being written lies beyond every unread $\mathit{nums1}$ value, so no write can clobber unread data (@fig-tp-a4-merge). Merging front-to-back in that same layout clobbers: the write cursor starts at index $0$, *in front of* the read cursors, and the first write can overwrite $\mathit{nums1}[i]$ before it is read. The direction is not a micro-optimisation; it is the correctness.
+
+```text
+front (fresh array):            back (in place, spare tail):
+i = j = w = 0                   p, q, k = m-1, n-1, m+n-1
+while i < m or j < n:           while p >= 0 or q >= 0:
+    take the smaller head,          write the LARGER tail at k,
+    advance its finger              advance its finger and k
+    and w
+
+gap method (no destination at all):
+g = ceil(len/2); while g: compare/swap pairs (i, i+g); g = next smaller gap
+```
+
+The **gap method** merges two sorted arrays laid end to end with no spare room at all, using swaps only. Treat the two arrays as one sequence of length $N$. Start with gap $g = \lceil N/2 \rceil$; compare every pair of positions $g$ apart and swap any pair that is out of order; then set $g \to \lceil g/2 \rceil$ and repeat, finishing with a pass at $g = 1$. Each pass is $O(N)$ and there are about $\log_2 N$ passes, so it costs $O(N\log N)$ with $O(1)$ extra space — slower than the finger merge's $O(N)$, which needs a destination. You meet it in "merge two sorted arrays without extra space" problems. It relies on the two halves being sorted; it is a merge, not a sort.
+
+```{python}
+#| label: arr-tp-a4-gap
+def gap_merge(a, b):                  # merge sorted a and b in place, O(1) extra
+    m, n = len(a), len(b)
+    N = m + n
+    def get(k):
+        return a[k] if k < m else b[k - m]
+    def put(k, v):
+        if k < m:
+            a[k] = v
+        else:
+            b[k - m] = v
+    g = (N + 1) // 2
+    while N > 1:
+        for i in range(N - g):
+            x, y = get(i), get(i + g)
+            if x > y:
+                put(i, y); put(i + g, x)
+        if g == 1:
+            break
+        g = (g + 1) // 2
+    return a, b
+
+for _ in range(400):
+    a = sorted(random.randint(0, 20) for _ in range(random.randint(0, 7)))
+    b = sorted(random.randint(0, 20) for _ in range(random.randint(0, 7)))
+    whole = sorted(a + b)
+    ga, gb = gap_merge(a[:], b[:])
+    assert ga + gb == whole
+assert gap_merge([1, 5], [2, 6]) == ([1, 2], [5, 6])
+print("gap merge OK")
+```
+
+The set operations are one template with three emission rules, because the merge already visits both arrays in sorted order — the same adjacency that makes @sec-hash-sets's membership questions cheap, but with *order* replacing the hash set:
+
+```{python}
+#| label: arr-tp-a4-demo
+def intersect_sorted(a, b):           # values, distinct like LC 349's output
+    res = []
+    i = j = 0
+    while i < len(a) and j < len(b):
+        if a[i] < b[j]:
+            i += 1
+        elif a[i] > b[j]:
+            j += 1
+        else:
+            if not res or res[-1] != a[i]:    # dedupe the equal run on the fly
+                res.append(a[i])
+            i += 1
+            j += 1                            # both fingers advance on a hit
+    return res
+
+def union_sorted(a, b):               # merged, deduped - same skeleton
+    res = []
+    i = j = 0
+    while i < len(a) or j < len(b):
+        xa = a[i] if i < len(a) else math.inf
+        xb = b[j] if j < len(b) else math.inf
+        x = min(xa, xb)
+        i += xa == x
+        j += xb == x                        # consumes every finger at value x
+        if not res or res[-1] != x:
+            res.append(x)
+    return res
+
+for _ in range(400):
+    a = sorted(random.randint(0, 15) for _ in range(random.randint(0, 9)))
+    b = sorted(random.randint(0, 15) for _ in range(random.randint(0, 9)))
+    assert intersect_sorted(a, b) == sorted(set(a) & set(b))
+    assert union_sorted(a, b) == sorted(set(a) | set(b))
+assert intersect_sorted([1, 2, 2, 1], [2, 2]) == [2]        # LC 349 sample shape
+assert union_sorted([1, 3, 5], [2, 3, 4]) == [1, 2, 3, 4, 5]
+print("a4 demo OK")
+```
+
+Note what the stress loop proves: the *sorted-with-duplicates* inputs go through the finger code, and the `set` code on the right is the definition of what "union/intersection" means — the two agreeing $400$ times is @sec-tp-p3's whole family in one assert. Difference is the third rule (emit $a[i]$ when $a[i] < b[j]$, and every remaining $a[i]$ once $b$ runs out); exercise 5 asks you to write it.
+
+::: {#fig-tp-a4-merge}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    n1, n2, m, n = [1, 2, 3, 0, 0, 0], [2, 5, 6], 3, 3
+    pp, qq, kk = m - 1, n - 1, m + n - 1
+    for _ in range(2):                 # run two steps of the back merge
+        if pp >= 0 and n1[pp] > n2[qq]:
+            n1[kk] = n1[pp]; pp -= 1
+        else:
+            n1[kk] = n2[qq]; qq -= 1
+        kk -= 1
+    assert (pp, qq, kk) == (2, 0, 3) and kk == pp + qq + 1 and n1[4:] == [5, 6]
+    c1 = {x: "indigo" for x in range(pp + 1)}
+    c1.update({x: "green" for x in range(kk + 1, m + n)})
+    c1[kk] = "amber"
+    V.trace(ax, p, [
+        {"values": n1, "label": "nums1", "colors": c1,
+         "pointers": [(pp, "p", "indigo", "top"), (kk, "k", "amber", "top")]},
+        {"values": n2, "label": "nums2", "colors": {qq: "violet", 1: "muted", 2: "muted"},
+         "pointers": [(qq, "q", "violet", "top")]},
+    ])
+V.show(draw)
+```
+
+The back-to-front merge of $[1, 2, 3, \_, \_, \_]$ and $[2, 5, 6]$ after two writes (computed by running it). Green slots are final, indigo is still unread in $\mathit{nums1}$, and the write cursor $k = p + q + 1 = 3$ (amber) sits strictly to the right of $p$. A front-to-back merge in the same array would write at index $0$, on top of an unread value — @sec-tp-p3-a's LC 88 trick depends on the direction.
+
+:::
+
+## A5. Same-direction pointers: monotone predicates and "for each right, how many left" {#sec-tp-count}
+
+::: {.callout-note title="In plain words"}
+Both fingers walk forward. The leading finger $r$ enumerates the problem's right endpoints one by one; the trailing finger $\ell$ tracks *the boundary of the valid region* among left endpoints. The trick that makes it linear: whenever $r$ advances, the boundary can only move **right** — new elements never make an old left endpoint newly valid, if the predicate is monotone. So $\ell$ never rewinds, the pair of fingers sweeps the array once, and $O(n)$ steps answer $n$ questions that look $O(n^2)$.
+:::
+
+The legal assumption, said precisely: a predicate $P(\ell, r)$ that is **monotone in each argument** — for fixed $r$, if $P(\ell, r)$ holds then $P(\ell', r)$ holds for every $\ell' \in [\ell, r]$ (shrinking a window never breaks it). "All distinct", "sum $\le$ budget" (when the values are non-negative), "at most $k$ types" — all monotone. Then for each $r$ there is a *least valid* $\ell^*(r)$, and $\ell^*$ is non-decreasing in $r$: raise $r$, repair $\ell$ by advancing it while the window violates, and the answer for this $r$ is a function of $[\ell, r]$ — usually $r - \ell + 1$ counts. This is CPH ch. 8.1's argument in one breath, and it is what licenses the code shape:
+
+```text
+l = 0
+for r in range(n):
+    add a[r] to the window's state
+    while window violates the rule:      # repair moves l ONLY forward
+        remove a[l]; l += 1
+    answer = combine(answer, f(l, r))    # f(l*, r) with l* = the boundary l tracks
+```
+
+The counting cousins drop the *window* and keep the *view*: "for each right, how many left". On a **sorted** array with a monotone pair predicate, the boundary for $\mathit{lo}$ given a fixed $\mathit{hi}$ also moves one way only — which is exactly how `count_le`'s batching becomes obvious rather than clever: accept $(\mathit{lo}, \mathit{hi})$ and every index between is also acceptable, $\mathit{hi} - \mathit{lo}$ of them, banked at once (@sec-tp-p5-b). Two pointer styles, one theorem: a monotone predicate has a monotone boundary, and a boundary that only moves forward can be *chased* instead of *searched*. (Chase-with-binary-search also works and is $O(n\log n)$; the linear chase is why two pointers exists at all — exercise 6 asks you to compare the two.)
+
+```{python}
+#| label: arr-tp-a5-demo
+def num_distinct_windows(a, cap):      # subarrays with AT MOST cap distinct values
+    cnt = defaultdict(int); l = c = 0
+    for r, x in enumerate(a):
+        cnt[x] += 1
+        while len(cnt) > cap:          # repair: move l forward, never back
+            cnt[a[l]] -= 1
+            if cnt[a[l]] == 0:
+                del cnt[a[l]]
+            l += 1
+        c += r - l + 1                 # every left end in [l, r] is valid, and exactly those
+    return c
+
+def num_distinct_brute(a, cap):
+    c = 0
+    for i in range(len(a)):
+        for j in range(i, len(a)):
+            if len(set(a[i:j + 1])) <= cap:
+                c += 1
+    return c
+
+for _ in range(300):
+    a = [random.randint(0, 5) for _ in range(random.randint(1, 12))]
+    cap = random.randint(1, 4)
+    assert num_distinct_windows(a, cap) == num_distinct_brute(a, cap)
+assert num_distinct_windows([1, 2, 1, 2, 3], 2) == 12       # 15 subarrays minus the 3 with all three values
+assert num_distinct_windows([1, 1, 1], 1) == 6              # every subarray: n(n+1)/2
+print("a5 demo OK")
+```
+
+Read `c += r - l + 1` as the whole "for each right, how many left" motto: the window invariant makes $[\ell, r]$ *exactly* the valid left ends, so the count is the region's size — no loop over lefts ever existed. Longest-window problems use the same skeleton and record $\max(r - \ell + 1)$ instead of adding it up; "exactly $k$ distinct" is $\text{atMost}(k) - \text{atMost}(k-1)$, the band trick of @sec-pref in window clothing. @sec-sw develops all of these.
+
+::: {#fig-tp-a5-boundary}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    vals = [1, 2, 1, 2, 3]
+    l, r = 0, 3
+    V.array(ax, p, vals, colors={l: "indigo", r: "violet"},
+            regions=[(l, r + 1, "cyan", "valid left ends: r - l + 1 = 4 counted")],
+            pointers=[(l, "l", "indigo", "bottom"), (r, "r", "violet", "top")],
+            note="at most 2 distinct; l only moves forward")
+V.show(draw)
+```
+
+The boundary view of a same-direction walk on $a = [1, 2, 1, 2, 3]$ capped at two distinct values: for the right end $r$, the acceptable left ends are exactly the cyan prefix $[l, r]$, and $l$ **never rewinds** as $r$ grows (adding elements cannot make an old left end newly valid). So the answer for $r$ is the region's size, `c += r - l + 1` — no loop over lefts ever existed.
+
+:::
+
+## A6. Runs: the group pointer that jumps a block {#sec-tp-runs}
+
+::: {.callout-note title="In plain words"}
+Sometimes the array is not one element at a time but *blocks*: equal neighbours, consecutive values, same-sign stretches. The right move is not a test per element but a **group pointer**: $\mathit{i}$ marks where the block starts, $\mathit{j}$ sprints forward while the block's chain test holds, you do *one* piece of work for the whole block $[\mathit{i}, \mathit{j}]$, and $\mathit{i}$ resumes where $\mathit{j}$ stopped. Both fingers only move forward, so despite the nested loops every element is touched a constant number of times.
+:::
+
+The shape, with its three interchangeable chain tests:
+
+```text
+i = 0
+while i < n:
+    j = i
+    while j + 1 < n and chain(a[j], a[j + 1]):   # equal:  a[j+1] == a[j]
+        j += 1                                   # consec: a[j+1] == a[j] + 1
+    work on block [i, j]                         # same sign: (a[j+1]>0) == (a[j]>0)
+    i = j + 1
+```
+
+The amortisation is the sentence interviewers actually want: *$\mathit{j}$ never decreases, $\mathit{i}$ only jumps to $\mathit{j}+1$, so the total number of inner tests across the entire scan is at most $n$* — same charging as @sec-hash-p5-a's run-start walks and @sec-arr-vec's growth, now with a group pointer instead of a set. Runs of equal elements are the most common shape of this (run-length encoding is the textbook example), and the same-sign version powers @sec-tp-p6-b.
+
+```{python}
+#| label: arr-tp-a6-demo
+def longest_chain(a):                  # longest NON-DECREASING contiguous stretch
+    best = i = 0
+    n = len(a)
+    while i < n:
+        j = i
+        while j + 1 < n and a[j + 1] >= a[j]:    # the chain test
+            j += 1
+        best = max(best, j - i + 1)              # one answer per block
+        i = j + 1
+    return best
+
+def longest_chain_scan(a):                       # the same answer, single-finger DP
+    best = run = 0
+    for k in range(len(a)):
+        run = run + 1 if k and a[k] >= a[k - 1] else 1
+        best = max(best, run)
+    return best
+
+for _ in range(400):
+    a = [random.randint(0, 9) for _ in range(random.randint(1, 14))]
+    assert longest_chain(a) == longest_chain_scan(a)
+assert longest_chain([1, 3, 6, 4, 1, 2, 8, 10]) == 4      # [1, 2, 8, 10]
+assert longest_chain([5, 4, 3]) == 1
+assert longest_chain([]) == 0
+print("a6 demo OK")
+```
+
+Two demos that agree on every random input is the house style for run logic: the block walker and the one-finger DP see the same chains from different ends, and any disagreement would mean a chain test with an off-by-one (@sec-arr-ranges again — `j + 1 < n` before touching `a[j + 1]` is the whole guard). The patterns that use runs: @sec-tp-p2 (skipping duplicate fixes and duplicate partners after each hit — dedup *is* run handling inside a squeeze) and @sec-tp-p6 (run ranges and run maxima).
+
+::: {#fig-tp-a6-runs}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    vals = [1, 3, 6, 4, 1, 2, 8, 10]
+    i, j = 4, 7
+    cols = {x: "muted" for x in range(i)}
+    cols.update({x: "green" for x in range(i, j + 1)})
+    V.array(ax, p, vals, colors=cols,
+            regions=[(i, j + 1, "cyan", "one non-decreasing run -> length 4")],
+            pointers=[(i, "i", "indigo", "bottom"), (j, "j", "violet", "top")],
+            note="j sprints the chain test; i jumps to j + 1")
+V.show(draw)
+```
+
+The group pointer on the @sec-tp-p6 sample $[1, 3, 6, 4, 1, 2, 8, 10]$: $\mathit{i}$ marks a block's start, $\mathit{j}$ sprints the chain test $a[\mathit{j}+1] \ge a[\mathit{j}]$ to its end, *one* settlement ($\max$ of the block) is taken, and $\mathit{i}$ resumes at $\mathit{j}+1$. Both fingers only move forward, so the nested loops still cost $O(n)$.
+
+:::
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that say "use me," a boxed template with its invariant, and its complexity. Then two or three problems are solved completely: statement, the one key observation, brute force refined into the pattern, runnable Python stress-tested against brute force, matching C++, complexity, and edge cases. The last form of each problem carries a step board wherever the fingers visibly move.
+
+## Pattern 1: Opposite ends on a sorted array {#sec-tp-p1}
+
+**Where we are.** Part A handed you one legal move: a test at the fingers proves one end dead, so one finger retires and the live region shrinks. The patterns order the chapter's thirteen problems by *what the fingers are asked to decide*: existence or value of a pair (this pattern), a pair under a fixed third element (Pattern 2), construction of a merged order (Pattern 3), a cover-by-pairs greedy (Pattern 4), a count of acceptable pairs (Pattern 5), and work measured per block instead of per element (Pattern 6).
+
+**Recognise it.** The statement promises *sorted* (or you are free to sort), asks about **pairs** — one pair's value, existence, or extremum — and the quantity tested is monotone in each index: pair sums, areas, capacities, distances. "Return the indices of the two numbers" / "the largest" / "closest to target" over a sorted input is the tell; the constraints ($n \le 10^5$–$10^6$) forbid the pair loop but fit one sweep exactly.
+
+::: {.callout-important title="Template"}
+Two fingers, one move per step, each move backed by the @sec-tp-ends discard proof.
+
+```text
+lo, hi = 0, n - 1
+while lo < hi:                       # or lo <= hi when the single cell matters
+    x = f(a[lo], a[hi])              # monotone in each finger
+    if x == target:  answer = (lo, hi); stop or record and skip runs
+    elif x < target: lo += 1         # lo's best partner failed: lo is dead
+    else:            hi -= 1         # hi's best partner failed: hi is dead
+```
+
+**Invariant.** Every pair touching an index $< \mathit{lo}$ or $> \mathit{hi}$ has been proven unacceptable; the answer, if it exists, lives inside the fingers. Exactly one finger moves per step, so the walk is $\le n$ steps.
+:::
+
+**Complexity.** $O(n)$ time after the input's sortedness (or after an $O(n\log n)$ sort you may perform), $O(1)$ space. The hash map of @sec-hash-p1-a also solves the pair question in $O(n)$ time, but it pays $O(n)$ memory to forget the order the array already has; Two Sum II explicitly asks for $O(1)$ extra space, which only the squeeze delivers.
+
+::: {#fig-tp-anim-squeeze}
+
+```{python}
+#| echo: false
+sp_a, sp_t = [1, 3, 5, 6, 8, 11], 11
+sp_lo, sp_hi, sp_frames, sp_caps = 0, len(sp_a) - 1, [], []
+while sp_lo < sp_hi:
+    s = sp_a[sp_lo] + sp_a[sp_hi]
+    if s == sp_t:
+        sp_caps.append(f"lo={sp_lo}, hi={sp_hi}: {sp_a[sp_lo]}+{sp_a[sp_hi]}={s} — target")
+        sp_frames.append((sp_lo, sp_hi, True))
+        break
+    if s < sp_t:
+        sp_caps.append(f"lo={sp_lo}, hi={sp_hi}: {sp_a[sp_lo]}+{sp_a[sp_hi]}={s} < {sp_t} -> retire lo ({sp_a[sp_lo]})")
+        sp_frames.append((sp_lo, sp_hi, False))
+        sp_lo += 1
+    else:
+        sp_caps.append(f"lo={sp_lo}, hi={sp_hi}: {sp_a[sp_lo]}+{sp_a[sp_hi]}={s} > {sp_t} -> retire hi ({sp_a[sp_hi]})")
+        sp_frames.append((sp_lo, sp_hi, False))
+        sp_hi -= 1
+assert sp_frames[-1] == (1, 4, True) and sp_a[1] + sp_a[4] == sp_t
+
+def sp_frame(ax, p, k):
+    lo, hi, hit = sp_frames[k]
+    cols = {j: "muted" for j in range(lo)}
+    cols.update({j: "muted" for j in range(hi + 1, len(sp_a))})
+    cols[lo] = cols[hi] = "green" if hit else "indigo"
+    V.array(ax, p, sp_a, colors=cols,
+            pointers=[(lo, "lo", "indigo", "bottom"), (hi, "hi", "indigo", "top")],
+            note=f"target {sp_t}; retired cells are grey")
+
+V.animate(sp_frame, len(sp_frames), captions=sp_caps, interval=1000)
+del s, sp_lo, sp_hi                   # keep the chapter's namespace clean
+```
+
+The squeeze on a sorted array, target $11$. Grey is *decided*: every pair touching a retired index failed the @sec-tp-ends proof. Three moves narrow $[0..5]$ to an answer $(1, 4)$ ($3 + 8$; the pair $(5, 6)$ at indices $(2, 3)$ also sums to $11$, but the squeeze meets $(1, 4)$ first).
+
+:::
+
+{{< include ../problems/lc-0167-two-sum-ii-input-array-is-sorted/problem.qmd >}}
+
+[**From existence to extremum.** Two Sum II stops at the first pair that matches. Container With Most Water never stops — every step *improves* the best area seen, and the discard proof changes from "this end cannot complete the target" to "this end cannot pair better with anything inside."]{.flow-bridge}
+
+{{< include ../problems/lc-0011-container-with-most-water/problem.qmd >}}
+
+## Pattern 2: Fix one element, squeeze the rest {#sec-tp-p2}
+
+**From one pair to a pair under a promise.** Pattern 1 decided about *the* pair of ends. When the answer is a *triple*, freeze one element — the outer loop is a finger that is not allowed to move during a sweep — and the remaining two ends are a plain Pattern 1 problem with a shifted target.
+
+**Recognise it.** "$k$ elements summing to (or closest to) a target", $k \ge 3$; the statement tolerates $O(n^2)$ ($n \le 3000$ for the quadratic, rarely more). The signature is *three* indices in the output and sortedness you may impose — that combination is 3SUM-shaped, and @sec-tp-fix is the complexity conversation.
+
+::: {.callout-important title="Template"}
+```text
+sort a
+for i in range(n - 2):                # 3SUM: fix one; k-SUM nests k-2 such loops
+    if i > 0 and a[i] == a[i-1]: continue    # run-skip duplicate fixes (@sec-tp-runs)
+    lo, hi = i + 1, n - 1             # squeeze on the suffix only: i < lo < hi
+    while lo < hi:
+        s = a[i] + a[lo] + a[hi]
+        ... standard Pattern 1 moves, then skip equal runs on a hit for distinct outputs
+```
+
+**Invariant.** During the sweep at fix $i$, every triple $(i, \mathit{lo}', \mathit{hi}')$ touching a retired end has been proven wrong for *this* $i$; fixes advance left-to-right, so each unordered value-triple is offered exactly once (dedup on $i$, dedup on the pair after each hit).
+:::
+
+**Complexity.** $O(n^2)$ time, $O(1)$ extra beyond the sort; $k$-SUM generalises to $O(n^{k-1})$ and the quadratic wall is conjecturally real (@sec-tp-fix). The brute triple loop you refine away is $O(n^3)$ — one full factor of $n$ bought by the ends-squeeze.
+
+::: {#fig-tp-anim-squeeze3sum}
+
+```{python}
+#| echo: false
+t2_a = [-2, -1, 0, 1, 2]
+t2_n, t2f, t2c, t2_found = len(t2_a), [], [], 0
+for t2_i in range(t2_n - 2):
+    t2_lo, t2_hi = t2_i + 1, t2_n - 1
+    while t2_lo < t2_hi:
+        t2_s = t2_a[t2_i] + t2_a[t2_lo] + t2_a[t2_hi]
+        if t2_s == 0:
+            t2_found += 1
+            t2f.append((t2_i, t2_lo, t2_hi, "hit", t2_found))
+            t2c.append(f"fix {t2_a[t2_i]}: {t2_a[t2_lo]} + {t2_a[t2_hi]} makes 0 -> emit [{t2_a[t2_i]}, {t2_a[t2_lo]}, {t2_a[t2_hi]}]")
+            t2_lo += 1; t2_hi -= 1
+        elif t2_s < 0:
+            t2f.append((t2_i, t2_lo, t2_hi, "raise", t2_found))
+            t2c.append(f"fix {t2_a[t2_i]}: sum {t2_s} < 0 -> raise lo")
+            t2_lo += 1
+        else:
+            t2f.append((t2_i, t2_lo, t2_hi, "lower", t2_found))
+            t2c.append(f"fix {t2_a[t2_i]}: sum {t2_s} > 0 -> lower hi")
+            t2_hi -= 1
+assert len(t2f) == 5 and t2_found == 2
+
+def t2_frame(ax, p, k):
+    t2_i, t2_lo, t2_hi, t2_kind, t2_fd = t2f[k]
+    t2_cols = {j: "muted" for j in range(t2_n) if j < t2_i or j > t2_hi or t2_i < j < t2_lo}
+    t2_cols[t2_i] = "red"
+    t2_cols[t2_lo] = "green" if t2_kind == "hit" else "indigo"
+    t2_cols[t2_hi] = "green" if t2_kind == "hit" else "violet"
+    V.array(ax, p, t2_a, colors=t2_cols,
+            pointers=[(t2_i, "i", "red", "top"), (t2_lo, "lo", "indigo", "bottom"),
+                      (t2_hi, "hi", "violet", "bottom")],
+            note=f"fix a[{t2_i}] = {t2_a[t2_i]}; squeeze the tail; {t2_fd} triple(s)")
+
+V.animate(t2_frame, len(t2f), captions=t2c, interval=1100)
+del t2_i, t2_lo, t2_hi, t2_s
+```
+
+3SUM on $[-2, -1, 0, 1, 2]$: the red cell is **fixed** — the outer loop is a finger that is not allowed to move during a sweep — and the two ends run a plain @sec-tp-ends squeeze on the tail for the shifted target $-a[i]$. Two triples pop out, one per fixed element; the $O(n^3)$ triple loop has been shaved by a factor of $n$.
+
+:::
+
+{{< include ../problems/lc-0015-3sum/problem.qmd >}}
+
+[**From "sum to zero" to "sum nearest to $t$."** 3Sum hunts an exact target and deduplicates hits. 3Sum Closest keeps the same fix-and-squeeze but the *best distance so far* replaces the halt: every step that improves it updates the answer, and the only early exit left is distance zero.]{.flow-bridge}
+
+{{< include ../problems/lc-0016-3sum-closest/problem.qmd >}}
+
+## Pattern 3: Merging and set operations on sorted arrays {#sec-tp-p3}
+
+**From deciding about pairs to constructing an order.** Patterns 1–2 used the fingers to *test*. When the two arrays are sorted and the answer is a merged sequence — or a union, intersection, difference of them — the fingers *emit*, each step consuming one head element and appending its contribution. This is the only pattern where the fingers usually live in two different arrays.
+
+**Recognise it.** Two sorted inputs and any word from: *merge, union, intersection, difference, common elements, combined sorted*; or "sorted output, but no extra array". The direction tell: if the destination is one of the inputs with a spare tail, you must merge **back-to-front** (@sec-tp-merge's inequality); if a fresh array is allowed, front-to-back.
+
+::: {.callout-important title="Template"}
+```text
+i, j = 0, 0                          # from the front (or m-1, n-1 for the back)
+while i < m and j < n:
+    if a[i] <= b[j]:  emit("from a", a[i]); i += 1
+    else:             emit("from b", b[j]); j += 1
+drain whichever finger has a tail left
+```
+
+**Invariant.** Everything before $i$ in $a$ and before $j$ in $b$ has been processed, and the output so far is exactly the merge of those prefixes — the emission rule (take-smaller / take-head / take-on-equality) is the *only* line that changes between merge, union, intersection, and difference.
+:::
+
+**Complexity.** $O(n + m)$ time; $O(n + m)$ output space front-to-back, $O(1)$ extra back-to-front. Merge sort is this skeleton applied recursively to halves; the sorting-algorithms chapter of this volume treats it in full.
+
+::: {#fig-tp-anim-merge}
+
+```{python}
+#| echo: false
+t3_a, t3_b = [1, 3, 5], [2, 4, 6]
+t3_m, t3_n = len(t3_a), len(t3_b)
+t3_out, t3f, t3c = [], [], []
+t3_i = t3_j = 0
+while t3_i < t3_m or t3_j < t3_n:
+    if t3_j >= t3_n or (t3_i < t3_m and t3_a[t3_i] <= t3_b[t3_j]):
+        t3_val, t3_src = t3_a[t3_i], "a"
+        t3_i += 1
+    else:
+        t3_val, t3_src = t3_b[t3_j], "b"
+        t3_j += 1
+    t3_out.append(t3_val)
+    t3f.append((t3_i, t3_j, t3_src, list(t3_out)))
+    t3c.append(f"take {t3_val} from {t3_src}; output so far {t3_out}")
+assert len(t3f) == 6 and t3_out == [1, 2, 3, 4, 5, 6]
+
+def t3_frame(ax, p, k):
+    t3_i2, t3_j2, t3_src, t3_ov = t3f[k]
+    ca = {x: "muted" for x in range(t3_i2)}
+    if t3_i2 < t3_m:
+        ca[t3_i2] = "indigo"
+    cb = {x: "muted" for x in range(t3_j2)}
+    if t3_j2 < t3_n:
+        cb[t3_j2] = "violet"
+    rows = [
+        {"values": t3_a, "label": "a", "colors": ca, "pointers": [(t3_i2, "i", "indigo", "top")]},
+        {"values": t3_b, "label": "b", "colors": cb, "pointers": [(t3_j2, "j", "violet", "top")]},
+        {"values": t3_ov + [None] * (t3_m + t3_n - len(t3_ov)), "label": "out",
+         "colors": {x: "green" for x in range(len(t3_ov))}},
+    ]
+    V.trace(ax, p, rows)
+
+V.animate(t3_frame, len(t3f), captions=t3c, interval=900)
+del t3_i, t3_j
+```
+
+The merge: two sorted inputs, one finger each parked on its smallest unconsumed head. Every step consumes the smaller head and appends it, so the green output prefix is *exactly* the merge of the two grey (already-consumed) prefixes — the skeleton @sec-tp-merge turns into union, intersection, and difference by swapping the emission rule.
+
+:::
+
+{{< include ../problems/lc-0088-merge-sorted-array/problem.qmd >}}
+
+[**From merging two orders to sorting a transformed one.** Merge Sorted Array consumes two sorted inputs. Squares of a Sorted Array has *one* input that hides two sorted runs — the negatives, squared, descending toward zero, and the non-negatives — and fills its output from the back with the same larger-tail write.]{.flow-bridge}
+
+{{< include ../problems/lc-0977-squares-of-a-sorted-array/problem.qmd >}}
+
+## Pattern 4: Greedy pairing — commit the extreme, then squeeze {#sec-tp-p4}
+
+**From pairs to covers.** Pattern 1 asked whether *a* pair met a target. The greedy patterns ask for a *decision on every element* — seat people two to a boat, or pair everybody so that the largest pair sum stays small — and the squeeze returns because a sorted extreme is the one element whose fate you can settle earliest: commit the heaviest, and the lightest is its only rational partner.
+
+**Recognise it.** "Minimum number of pairs / groups / boats", "each group has at most two", capacity or bound constraint, and you are free to sort. The tell is the *exchange argument* waiting in the solution (@sec-pf-p3): "giving the committed element any partner other than the extreme one the squeeze points at is never better." When the question instead *counts* configurations rather than building a minimum cover, the same ends become a counting device — Pattern 5.
+
+::: {.callout-important title="Template"}
+```text
+sort a
+lo, hi = 0, n - 1
+while lo <= hi:                     # the committed element is always a[hi]
+    if a[lo] + a[hi] <= cap:        # lightest fits with heaviest: pair them
+        lo += 1
+    hi -= 1                         # heaviest is committed either way
+    count one group
+```
+
+**Invariant.** After each step, $a[\mathit{hi}]$'s group is final and optimal for it (exchange: the lightest available partner maximises leftover room, and if even it does not fit, no partner exists); the live region $[\mathit{lo}, \mathit{hi}]$ is exactly the uncommitted elements.
+:::
+
+**Complexity.** $O(n\log n)$ dominated by the sort; $O(1)$ extra. Two variants share this shape. In Boats (@sec-tp-p4-a) only the heavy finger moves every step and the light one moves when it finds a seat. In Minimize Maximum Pair Sum (@sec-tp-p4-b) everyone must be paired, so both fingers move every step. Either way the proof is one swap.
+
+{{< include ../problems/lc-0881-boats-to-save-people/problem.qmd >}}
+
+[**From fewest boats to the smallest maximum.** Boats may leave a person alone, so only the heavy finger moves every step. Minimize Maximum Pair Sum pairs *everybody*, so both fingers move every step, and the quantity to control is the largest pair sum instead of a count of boats.]{.flow-bridge}
+
+{{< include ../problems/lc-1877-minimize-maximum-pair-sum-in-array/problem.qmd >}}
+
+## Pattern 5: Counting pairs with two pointers {#sec-tp-p5}
+
+**From one decision to all decisions.** Pattern 4 committed elements to groups; here nothing is committed — the fingers *tally*. The band $\{l \le \mathit{sum} \le r\}$ becomes a difference of two one-sided counts, and each one-sided count is a monotone-boundary walk in the @sec-tp-count view: for each right end, the acceptable left ends form a prefix of the live region, so their number is a subtraction, not a loop.
+
+**Recognise it.** "**Count** the pairs (i, j) with a monotone condition on $a_i + a_j$" — possibly after a transform that manufactures the array ($d_i = a_i - b_i$). Constraints at $n \le 2\cdot10^5$ say the $O(n^2)$ pair loop is out; sorted + count says the boundary chase is in. If the condition is an equality or divisibility rather than an inequality, the hash-map group count of @sec-hash-p2 is usually the right tool instead — monotonicity is the whole license.
+
+::: {.callout-important title="Template"}
+```text
+sort a                                  # or sort the transformed d
+def count_le(x):                        # pairs with sum <= x
+    lo, hi, c = 0, n - 1, 0
+    while lo < hi:
+        if a[lo] + a[hi] <= x:
+            c += hi - lo                # lo's acceptable partners: exactly lo+1..hi
+            lo += 1
+        else:
+            hi -= 1
+    return c
+band = count_le(r) - count_le(l - 1)    # difference-of-prefixes, @sec-pref's identity
+```
+
+**Invariant.** In `count_le`, every pair with first index $< \mathit{lo}$ is fully counted, every pair with second index $> \mathit{hi}$ is fully rejected, and each accepted step *banks* $\mathit{hi} - \mathit{lo}$ decisions at once — which is why the walk is $O(n)$ while the count is $\Theta(n^2)$.
+:::
+
+**Complexity.** $O(n\log n)$ per array (one sort, one or two $O(n)$ boundary walks), $O(1)$ extra. The count itself can be $\Theta(n^2)$-sized: 64-bit accumulator, always (@sec-arr-cost). One engine answers three statements: @sec-tp-p5-a (one-sided, after a transform), @sec-tp-p5-b (a band, as two one-sided counts) and @sec-tp-p5-c (a band in one sweep with two boundaries). @fig-tp-p5-staircase shows why a single subtraction can count a whole row of pairs.
+
+::: {#fig-tp-p5-staircase}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a, x = [1, 2, 2, 3, 4, 5], 6
+    n = len(a)
+    cells, cols, total = [], {}, 0
+    for i in range(n):
+        row = []
+        for j in range(n):
+            if j <= i:
+                row.append("")
+            else:
+                row.append(str(a[i] + a[j]))
+                ok = a[i] + a[j] <= x
+                total += ok
+                cols[(i, j)] = "green" if ok else "red"
+        cells.append(row)
+    assert total == 10            # the count_le(6) of @sec-tp-p5-b
+    V.grid(ax, p, cells, row_labels=[f"a[{i}] = {v}" for i, v in enumerate(a)],
+           col_labels=[str(v) for v in a], colors=cols)
+V.show(draw)
+```
+
+All $\binom{6}{2} = 15$ pair sums of the sorted array $[1, 2, 2, 3, 4, 5]$, row $i$ against column $j > i$; green means $a_i + a_j \le 6$. Because the array is sorted, the green cells of every row form a prefix that ends at some column $\mathit{hi}(i)$, and $\mathit{hi}(i)$ never moves right as $i$ grows — a staircase. `count_le` walks that staircase edge with two fingers and adds a whole row segment, $\mathit{hi} - \mathit{lo}$ cells, in one step: $10$ green cells, counted in $O(n)$ moves.
+
+:::
+
+{{< include ../problems/cf-1324d-pair-of-topics/problem.qmd >}}
+
+[**From a sign to a band.** Pair of Topics counts one-sided: $d_i + d_j > 0$. Number of Pairs counts two-sided, $l \le a_i + a_j \le r$ — which is two one-sided counts and a subtraction, so the counting squeeze gets a name, `count_le`.]{.flow-bridge}
+
+{{< include ../problems/cf-1538c-number-of-pairs/problem.qmd >}}
+
+[**From two calls to one sweep.** Number of Pairs counts the band as a difference of two walks. Count the Number of Fair Pairs adds negative values, which change nothing, and then counts the band directly: for each left element, two boundary fingers mark where its partners start and stop, and both only move left.]{.flow-bridge}
+
+{{< include ../problems/lc-2563-count-the-number-of-fair-pairs/problem.qmd >}}
+
+## Pattern 6: Runs of equal or consecutive elements {#sec-tp-p6}
+
+**From elements to blocks.** The last pattern changes the unit of work. A group pointer jumps a maximal block in one sweep — the chain test deciding what "same block" means — and one piece of arithmetic settles everything inside it. Every problem here is $O(n)$ after whatever order the input promised.
+
+**Recognise it.** The output or the objective is phrased in *blocks*: "ranges of consecutive values", "maximal runs", "compressed form", "choose one per same-sign stretch"; or the statement's array arrives sorted and unique (Summary Ranges) or arrives as arbitrary signs (Alternating Subsequence) but decomposes cleanly into runs. If you catch yourself writing `while` over neighbours *inside* a `for`, that is a group pointer asking to be drawn with named regions (@sec-tp-runs' charging sentence is the amortisation proof interviewers ask for).
+
+::: {.callout-important title="Template"}
+```text
+i = 0
+while i < n:
+    j = i
+    while j + 1 < n and chain(a[j], a[j + 1]):    # == / ==+1 / same sign
+        j += 1
+    work(a[i : j + 1])                            # ONE settlement per block
+    i = j + 1
+```
+
+**Invariant.** $[\mathit{i}, \mathit{j}]$ is a *maximal* run: the chain test fails at its right edge (or the array ends), and every index before $\mathit{i}$ belongs to an already-settled run — so the settlements are independent and the partition is complete. Total inner tests $\le n$.
+:::
+
+**Complexity.** $O(n)$ time, $O(1)$ extra beyond the output; the settlement $work$ differs (emit a range; add a maximum) while the skeleton does not. Comparison with the set/DP alternative is the point of @sec-tp-p6-a's oracle: when order is *given*, paying $O(n\log n)$ to re-derive it is the mistake the group pointer deletes.
+
+::: {#fig-tp-anim-runs}
+
+```{python}
+#| echo: false
+t6_nums = [0, 1, 2, 4, 5, 7]
+t6_n, t6_i, t6f, t6c, t6res = len(t6_nums), 0, [], [], []
+while t6_i < t6_n:
+    t6_j = t6_i
+    while t6_j + 1 < t6_n and t6_nums[t6_j + 1] == t6_nums[t6_j] + 1:
+        t6_j += 1
+    t6res.append(f"{t6_nums[t6_i]}" if t6_i == t6_j else f"{t6_nums[t6_i]}->{t6_nums[t6_j]}")
+    t6f.append((t6_i, t6_j, list(t6res)))
+    t6c.append(f"run [{t6_i}..{t6_j}] is consecutive -> emit '{t6res[-1]}', jump i to {t6_j + 1}")
+    t6_i = t6_j + 1
+assert len(t6f) == 3 and t6res == ["0->2", "4->5", "7"]
+
+def t6_frame(ax, p, k):
+    i, j, done = t6f[k]
+    cols = {x: "muted" for x in range(i)}
+    cols.update({x: "green" for x in range(i, j + 1)})
+    V.array(ax, p, t6_nums, colors=cols, regions=[(i, j + 1, "cyan", "one maximal run")],
+            pointers=[(i, "i", "indigo", "bottom"), (j, "j", "violet", "top")],
+            note=f"emitted so far: {done}")
+
+V.animate(t6_frame, len(t6f), captions=t6c, interval=1100)
+del t6_i, t6_j
+```
+
+The group pointer on $[0, 1, 2, 4, 5, 7]$: $\mathit{i}$ marks a run's start, $\mathit{j}$ sprints the chain test $a[\mathit{j}+1] = a[\mathit{j}] + 1$ to the run's end, one range is emitted, and $\mathit{i}$ resumes at $\mathit{j}+1$. $\mathit{j}$ never rewinds, so the nested loops still cost $O(n)$ — three blocks, three settlements.
+
+:::
+
+{{< include ../problems/lc-0228-summary-ranges/problem.qmd >}}
+
+[**From value runs to sign runs.** Summary Ranges chains on $a[j+1] = a[j] + 1$ and *emits* each block. Alternating Subsequence chains on "same sign" and *settles* each block with its maximum — the same two fingers, a different chain test and a different arithmetic.]{.flow-bridge}
+
+{{< include ../problems/cf-1343c-alternating-subsequence/problem.qmd >}}
+
+**Looking back.** One move, six economies. The ends-squeeze (P1) and its fixed-element extension (P2) decide *about* pairs; merging (P3) *constructs* an order; greedy pairing (P4) commits extremes; counting (P5) tallies a whole row of pairs in one subtraction; runs (P6) change the unit from element to block. Every one of them is legal for the reason A1 gave: name the regions, and discard only what the current test has proven dead. The next chapter, @sec-sw, is the same-direction walk of @sec-tp-count promoted to a subject of its own — the repair-`while` you already wrote becomes the sliding window.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Sorted (or free to sort), one pair to find / value / extremum | Opposite ends, one discard per test | @sec-tp-p1 |
+| Three or more indices summing to (or nearest to) a target | Fix $k-2$, squeeze the rest | @sec-tp-p2 |
+| Two sorted inputs; merge, union, intersection, difference | The merge skeleton, direction by destination | @sec-tp-p3, @sec-tp-merge |
+| In-place merge, spare room only at the tail | Back-to-front, larger-tail writes | @sec-tp-p3-a, @sec-tp-merge |
+| "Minimum groups, at most two per group", capacity bound | Commit the heaviest, test the lightest | @sec-tp-p4-a |
+| "Pair everybody, minimise the largest pair" | Smallest with largest, both fingers move | @sec-tp-p4-b |
+| "**Count** pairs with a sum above / below a bound" (after any per-index transform) | Counting squeeze, bank $\mathit{hi} - \mathit{lo}$ per step | @sec-tp-p5-a |
+| "**Count** pairs with $l \le \mathit{sum} \le r$" | Band = two one-sided counts, or one sweep with two boundaries | @sec-tp-p5-b, @sec-tp-p5-c |
+| Outputs or objectives phrased in blocks, runs, stretches | Group pointer, one settlement per block | @sec-tp-p6 |
+| Single pair, **unsorted**, original indices wanted | Hash map — sorting would lose the indices | @sec-hash-p1-a |
+| Equality / divisibility condition on pairs | Hash grouping, not fingers | @sec-hash-p2 |
+| Longest / shortest / count of *subarrays* with a monotone rule | Window with a never-rewinding left bound | @sec-tp-count, @sec-sw |
+| Pair counts reaching $\binom{n}{2} \approx 2\cdot10^{10}$ | Any counting form — plus a 64-bit accumulator | @sec-arr-cost |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Moving both ends on one failed test.** The test at $(\mathit{lo}, \mathit{hi})$ proves *one* index dead; the double move teleports across live cells and can skip the only answer — the $t = 10$ counterexample of @sec-tp-ends loses $(2, 3)$ exactly this way.
+- **Squeezing an unsorted array.** The discard proof reads "$a[\mathit{hi}]$ is $a[\mathit{lo}]$'s largest partner", which is only true after sorting. On unsorted data the walk silently misses pairs (exercise 3).
+- **Merging front-to-back into the array you are reading.** LC 88's layout has no spare *head* room: the first write clobbers an unread $\mathit{nums1}$ element. Back-to-front is the correctness, not an optimisation (@sec-tp-merge, @sec-tp-p3-a).
+- **Container: "move the shorter wall because it's shorter".** The actual proof is domination — every future container using that wall is narrower *and* no taller. Recite the proof, not the slogan (@sec-tp-p1-b).
+- **3Sum without dedup.** The squeeze finds *index* triples; the judge wants distinct *value* triples. Skip equal fixes, and on a hit skip equal $\mathit{lo}$s and $\mathit{hi}$s — run handling (@sec-tp-runs) hiding inside @sec-tp-p2-a.
+- **A `break` where only `continue` is justified.** In 3Sum, "$a[i] + a[n-2] + a[n-1] < 0$" kills only *this* fix; a later, larger $a[i]$ may still work (@sec-tp-fix).
+- **Loop condition off by one relative to the region.** `lo < hi` refuses self-pairs and stops with one live cell; `lo <= hi` settles every cell. Pair searches need the first (never pair $[3]$ with itself for $t = 6$); Boats needs the second, because a solo rider is a boat — with `lo < hi`, $[1, 2, 3]$ and $\mathit{limit} = 3$ returns $1$ instead of $2$ (@sec-tp-inv, @sec-tp-p4-a).
+- **32-bit accumulators and boundary tests.** $\binom{2\cdot10^5}{2} \approx 2\cdot10^{10}$ overflows `int` *silently* in C++; and in Summary Ranges `nums[j] + 1` overflows the *test* itself when `nums[j]` is $2^{31}-1$. Widen the accumulator and the boundary check (@sec-arr-cost, @sec-tp-p6-a).
+- **Pair of Topics: sorting $a$ and $b$ independently.** The key is the *per-index* difference $a_i - b_i$; sorting the arrays separately destroys the pairing and changes the problem (@sec-tp-p5-a).
+- **Sign tests written as `a[i] * a[j] > 0`.** It misfiles zero and can overflow at $10^9 \times 10^9$; compare signs with `(a[i] > 0) == (a[j] > 0)` (@sec-tp-p6-b).
+- **Rewinding a finger "just this once".** Any `lo--`, `hi++` or `l--` inside the walk destroys the $O(n)$ charging argument — the boundary is monotone *only* under a monotone predicate (@sec-tp-count, @sec-cx-loops).
+- **Batching an equality condition.** The batch $\mathit{hi}-\mathit{lo}$ is legal because "sum $\le x$" holds on a whole prefix of partners. "Sum exactly $k$" does not batch that way: count it as a band $[k, k]$ or with a hash map (@sec-hash-p1, @sec-tp-p5).
+:::
+
+## Exercises
+
+**1. [E] Trace the one-finger walk of @sec-tp-ends on $a = [1, 2, 4, 6, 7]$ with $t = 9$. Name the region each discard eliminates and say which proof backs it.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$1 + 7 = 8 < 9$: retire index $0$ — every pair with $1$ tops out at $1 + 7 = 8$, so index $0$ is dead (the domination proof of @sec-tp-ends). $2 + 7 = 9$: answer $(1, 4)$. Two glances; the live region shrank from $[0..4]$ to $[1..4]$ and then produced the answer. Note what is *not* eliminated: index $4$'s pairs with the interior — the first test said nothing about them, which is exactly why the double move of A2 fails.
+:::
+
+**2. [E] In Container With Most Water, state the one-line domination proof for "retire the shorter wall", and use it to explain why the taller wall's pairs survive this step.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let the shorter wall be $\mathit{lo}$ with height $h$. Every later container using $\mathit{lo}$ has its other wall strictly inside, so its width is smaller, and its height is still at most $h$: its area is below the current one, which is already recorded. So $\mathit{lo}$ can retire. The taller wall keeps hope: a taller wall inside could pair with it at a smaller width and a larger height. The proof eliminated one wall, not the other (@sec-tp-p1-b).
+:::
+
+**3. [E] The squeeze needs sortedness. Run `squeeze_one_end` from the A2 demo (@sec-tp-ends) on the *unsorted* $a = [1, 5, 3, 2, 4]$ with target $8$: what does it return, which pair actually exists, and which discard was unproven?**
+
+::: {.callout-note collapse="true" title="Solution"}
+It returns `None`, although $5 + 3 = 8$ at indices $(1, 2)$. Trace: $(0, 4)$: $1 + 4 = 5 < 8$, retire index $0$. $(1, 4)$: $5 + 4 = 9 > 8$, retire index $4$. $(1, 3)$: $5 + 2 = 7 < 8$, retire index $1$ — **this** discard is the fatal one: the proof would say "$2$ was $5$'s largest partner, and even that failed", but in an unsorted array $a[3] = 2$ is not the largest value left, and $5$'s real partner $3$ sits at index $2$. $(2, 3)$: $3 + 2 = 5 < 8$, retire index $2$; the fingers meet. The first two discards happen to be harmless, but nothing proved them either. On unsorted data, sort first or hash (@sec-hash).
+:::
+
+**4. [M] `count_le(a, x)` counts pairs with sum $\le x$. Write the mirror `count_ge(a, x)` (pairs with sum $\ge x$) *directly*, no total-minus trick, and give its value on sorted $a = [1, 2, 2, 3, 4, 5]$, $x = 7$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+On $a[\mathit{lo}] + a[\mathit{hi}] \ge x$, sortedness makes $a[k] + a[\mathit{hi}] \ge a[\mathit{lo}] + a[\mathit{hi}] \ge x$ for every $k \in [\mathit{lo}, \mathit{hi})$, so bank $\mathit{hi} - \mathit{lo}$ and *drop $\mathit{hi}$* (all its pairs are counted); otherwise $\mathit{lo}$ is too small even for $\mathit{hi}$, so raise $\mathit{lo}$. On $[1,2,2,3,4,5]$: $1 + 5 < 7$, raise; $2 + 5 = 7$, bank $5 - 1 = 4$, drop $\mathit{hi}$; $2 + 4 < 7$ twice, raise past both $2$s; $3 + 4 = 7$, bank $1$; fingers meet. Total $\mathbf{5}$. Check: `count_le(6)` $= 10$ and $\binom{6}{2} = 15 = 5 + 10$ (@sec-tp-count, @sec-tp-p5-b).
+:::
+
+**5. [M] In `intersect_sorted` (@sec-tp-merge), why must *both* fingers advance on equality? Give an input where advancing only $i$ goes wrong. Then write `difference_sorted(a, b)` (distinct values of $a$ not in $b$) with the same skeleton.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Advancing only $i$: drop the dedupe line (the LC 350 version, which keeps multiplicities) and take $a = [2, 2]$, $b = [2]$. After matching $a[0]$ with $b[0]$ you leave $b[0]$ live, re-match it with $a[1]$, and emit $[2, 2]$ — one $b$ value used twice. Advancing both consumes the matched witness on each side. The dedupe line `res[-1] != a[i]` is a *choice*: LC 349 wants distinct values, LC 350 wants multiplicities.
+
+Difference, with the same three cases:
+
+```python
+def difference_sorted(a, b):
+    res, i, j = [], 0, 0
+    while i < len(a):
+        if j == len(b) or a[i] < b[j]:      # a[i] cannot appear later in b
+            if not res or res[-1] != a[i]:
+                res.append(a[i])
+            i += 1
+        elif a[i] > b[j]:
+            j += 1
+        else:                               # equal: a[i] is in b, skip it
+            i += 1
+    return res
+```
+
+The first branch is legal because $b$ is sorted: once $b[j] > a[i]$, no later $b$ value equals $a[i]$.
+:::
+
+**6. [M] Counting pairs with sum $\le x$ can be done "for each $\mathit{lo}$, binary-search the farthest $\mathit{hi}$". Compare the two complexities, say which one @sec-tp-p5-b's `count_le` is, and name the property that makes the binary search legal at all.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Binary search per left end: $O(n\log n)$ after the sort. The boundary *chase* of `count_le`: $O(n)$ after the sort. Both totals are dominated by the $O(n\log n)$ sort, but the chase has the smaller constant and is the answer to the follow-up "and if the array arrives sorted?". The property licensing either method: for fixed $\mathit{lo}$, the acceptable partners form a *prefix* of $(\mathit{lo}, n)$, and that prefix's end never moves right as $\mathit{lo}$ grows (monotonicity, @sec-tp-count).
+:::
+
+**7. [M] With the `atMost(cap)` window counter of @sec-tp-count, count the subarrays of $[1, 2, 1, 2, 3]$ with *exactly* two distinct values. Why is $\text{atMost}(k) - \text{atMost}(k-1)$ the clean route?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\text{atMost}(2) = 12$ (the demo's assert). $\text{atMost}(1) = 5$: no two neighbours are equal, so the only one-value subarrays are the five single cells. Exactly two distinct: $12 - 5 = 7$ — they are $[1,2]$, $[2,1]$, $[1,2]$, $[2,3]$, $[1,2,1]$, $[2,1,2]$, $[1,2,1,2]$. "Exactly $k$" is not monotone (shrinking a window can drop it to $k-1$), so the single-boundary template does not apply directly; "at most $k$" is monotone, and the difference of two monotone counts gives the band. It is the identity $\text{range} = \text{prefix}(R) - \text{prefix}(L-1)$ of @sec-pref, wearing a window.
+:::
+
+**8. [M] In the window template, the repair `while` moves $\ell$ forward only. Prove that $\ell^*(r)$, the least valid left end for right end $r$, is non-decreasing, and show a *non*-monotone rule where the template silently breaks.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Every subwindow of a valid window is valid (that is what monotone means here). Suppose some $\ell < \ell^*(r)$ were valid for $r + 1$. Then its subwindow $[\ell, r]$ would be valid for $r$, contradicting the minimality of $\ell^*(r)$. So $\ell^*(r+1) \ge \ell^*(r)$, and the repair never needs to move $\ell$ left. Break example: "sum exactly $s$" on $[1, -1, 1]$ with $s = 1$. The subarrays with sum $1$ are $[1]$, $[1, -1, 1]$ and the last $[1]$; for $r = 2$ the valid left ends are $0$ and $2$ but not $1$ — not a contiguous block, so no single forward boundary tracks it. That question belongs to the prefix-sum map of @sec-pref-hash.
+:::
+
+**9. [M] Longest subarray with sum $\le S$ over *positive* integers is a @sec-tp-count window. Explain why the same code fails when the array may contain negatives, and name the tool that takes over.**
+
+::: {.callout-note collapse="true" title="Solution"}
+With positive entries, adding $a[r]$ only raises the window sum and removing $a[\ell]$ only lowers it, so "sum $\le S$" is monotone and shrinking while `sum > S` is correct. With a negative entry, a window that was too big can become valid again after it *grows* (the new element is negative), so a left end evicted earlier may have been part of a longer valid window: the boundary is not monotone and the forward-only $\ell$ throws away real candidates. The replacement works on prefix sums $P$: the window $(\ell, r]$ is valid when $P_\ell \ge P_r - S$, so for each $r$ you look for the earliest $\ell$ with a large enough prefix — a search over prefix maxima (binary search on the running maximum of $P$), not a chase (@sec-pref).
+:::
+
+**10. [M] The Boats greedy commits the heaviest person $H$ to "the lightest person $L$ if they fit, else alone". Prove by exchange that this never costs an extra boat, and say which constraint the proof uses.**
+
+::: {.callout-note collapse="true" title="Solution"}
+If $H + L > \mathit{limit}$, then $H$ fits with nobody (everyone weighs at least $L$), so $H$ rides alone in every plan, and the greedy agrees. Otherwise take an optimal plan $O$ and change it so that $H$ shares with $L$, without adding a boat:
+
+- $H$ alone in $O$: move $L$ into $H$'s boat. $L$'s old boat loses a person (or disappears) and stays legal.
+- $H$ with $P \ne L$, and $L$ alone: swap $P$ and $L$. Boats $\{H, L\}$ and $\{P\}$ are legal.
+- $H$ with $P$, and $L$ with $Q$: swap to $\{H, L\}$ and $\{P, Q\}$. Then $H + L \le \mathit{limit}$ by the case assumption, and $P + Q \le P + H \le \mathit{limit}$ because $Q \le H$.
+
+In every case the boat count is unchanged or smaller, so some optimal plan contains the greedy's first boat; remove $H$ (and $L$) and repeat. The proof uses $p_i \le \mathit{limit}$ (a solo boat is always legal) and that $H$ is the heaviest; nothing else (@sec-tp-p4-a).
+:::
+
+**11. [M] `count_le` on $[-3, 0, 5, 7]$ with $x = 4$: hand-compute the count, list the qualifying pairs, and say what (if anything) the negatives break in the batching proof.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$(\mathit{lo}, \mathit{hi}) = (0, 3)$: $-3 + 7 = 4 \le 4$, accept and bank $3$ pairs — $(-3, 0), (-3, 5), (-3, 7)$ — then raise $\mathit{lo}$. $(1, 3)$: $0 + 7 = 7 > 4$, lower $\mathit{hi}$. $(1, 2)$: $0 + 5 = 5 > 4$, lower $\mathit{hi}$; the fingers meet. Count $= 3$, exactly the three pairs whose sums $-3, 2, 4$ are $\le 4$. Negatives break nothing: the batching step reads only "sorted, so the partners $\mathit{lo}+1..\mathit{hi}$ are all at most $a[\mathit{hi}]$", never "non-negative". What negatives and large values *do* demand is care with the arithmetic: the 64-bit accumulator and computing `lower - 1` in a signed type (@sec-tp-p5-c).
+:::
+
+**12. [M] @sec-tp-p6-a assumes a sorted, *unique* input. (a) On $[1, 2, 3, 5, 7, 8, 9]$, what ranges does it emit? (b) On $[9, 1, 2, 8, 7]$ (sortedness dropped), what does the same code print, and why is that wrong?**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) Three runs: `["1->3", "5", "7->9"]`. (b) The chain test `nums[j+1] == nums[j]+1` compares *adjacent positions* only, so it sees `9|1` (break), `1,2` (chain), `2|8` (break), `8|7` (break) and prints `["9", "1->2", "8", "7"]`. That is wrong because $7, 8, 9$ *are* a consecutive range the array holds: grouping by adjacency is only a statement about values when the array is sorted. Feed it unsorted data and you owe a sort first.
+:::
+
+**13. [M] Alternating Subsequence maximises length *first*, then sum. On $[2, 9, -100]$ report the length-first answer and the "maximum sum over any alternating subsequence" answer, and explain why the run-maxima greedy is correct only for the length-first rule.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Length-first: the sign runs are $[2, 9]$ and $[-100]$, so the maximum length is $2$, reached only by taking exactly one element per run; the best sum under that rule is $9 + (-100) = -91$. Maximum sum of any length: you may skip a whole run, so $[9]$ alone (sum $9$) wins. The run greedy is correct for length-first *because* the length rule forces exactly one pick from every run, which makes the runs independent; without it, "skip this run" becomes a legal choice and the per-run decomposition breaks (@sec-tp-p6-b, @sec-tp-runs).
+:::
+
+**14. [H] 3Sum Closest: which of 3Sum's early exits and dedup skips are still valid, which new exit appears, and what is the loop's invariant?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The dedup skips are still *correct* but become pure speed-ups: the answer is one sum, not a list of triples, so repeated triples do no harm. The `break` on $a[i] > 0$ does **not** carry over — it relied on the exact target $0$; for "closest to $t$" a positive pivot may still be the best. What does carry over, adapted, is the bound test: if $a[i] + a[i+1] + a[i+2] > t$, this fix's smallest triple is already above the target, so record that sum and break (later fixes only go higher). The new exit is `if s == target: return target` — distance $0$ cannot be beaten. Invariant: $\mathit{best}$ is the closest sum among all triples visited, and every retired pair is no closer than a recorded sum (the discard proof of @sec-tp-p2-b).
+:::
+
+**15. [H] Count index triples $i < j < k$ with $a_i + a_j + a_k = 0$ in $O(n^2)$. Derive the two batch formulas of the A3 demo (@sec-tp-fix) — `dl * dr` and the all-equal $\binom{m}{2}$ — and explain why a *listing* problem never needs them.**
+
+::: {.callout-note collapse="true" title="Solution"}
+On a hit with $a_{\mathit{lo}} = x \ne y = a_{\mathit{hi}}$, the acceptable partners are any copy of $x$ in the run starting at $\mathit{lo}$ ($\mathit{dl}$ copies) with any copy of $y$ in the run ending at $\mathit{hi}$ ($\mathit{dr}$ copies): $\mathit{dl} \cdot \mathit{dr}$ index triples, after which both runs retire. When $x = y$, the whole live block $[\mathit{lo}, \mathit{hi}]$ holds one value (it is sorted and both ends are equal), so every pair of its $m$ indices completes the triple: $\binom{m}{2}$. A listing problem emits each *value* triple once, so it only needs to skip runs, not measure them; a counting problem must keep the run sizes — the same split as index answers versus count answers in @sec-hash-p1.
+:::
+
+**16. [H] Run the gap method of @sec-tp-merge on the two sorted halves $[1, 5]$ and $[2, 6]$, listing every comparison. Then run it on $[3, 1]$ and $[4, 2]$ and say which precondition the method needs.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$N = 4$. Gap $2$: $(0, 2)$ compares $1, 2$ — fine; $(1, 3)$ compares $5, 6$ — fine. Gap $1$: $(0, 1)$: $1, 5$ fine; $(1, 2)$: $5 > 2$, swap, giving $[1, 2, 5, 6]$; $(2, 3)$: $5, 6$ fine. Result $[1, 2]$ and $[5, 6]$, as `gap_merge` asserts. On $[3, 1, 4, 2]$: gap $2$ compares $(3, 4)$ and $(1, 2)$, no swaps; gap $1$ swaps $3, 1$ to get $[1, 3, 4, 2]$, keeps $3, 4$, swaps $4, 2$, and stops at $[1, 3, 2, 4]$ — not sorted. The gap schedule only finishes the job when each half is already sorted; it is a merge, not a sort.
+:::
+
+**17. [H] "Sorted array, all index pairs summing to exactly $t$ — output every pair." Does a squeeze enumerate them in $O(n + \mathit{out})$? Write the loop and say what batching *cannot* do when the output lists indices.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Yes. On a hit with $x = a_{\mathit{lo}} \ne a_{\mathit{hi}} = y$, measure the run of $x$ starting at $\mathit{lo}$ and the run of $y$ ending at $\mathit{hi}$, emit every index of the first run paired with every index of the second, and retire both runs. If $x = y$, the live block is one value, and you emit all $\binom{m}{2}$ index pairs inside it and stop. The finger walk is $O(n)$ and each emitted pair is $O(1)$, so the total is $O(n + \mathit{out})$. Counting replaces the nested emission by one product, `dl * dr`; listing must pay for every line, because the output itself has $\mathit{out}$ lines (exercise 15's split again, now at the output layer).
+:::
+
+**18. [M] Sort Colors (LC 75): an array of $0$s, $1$s and $2$s must be sorted in place in one pass. Write the three-pointer Dutch national flag partition and state its four-region invariant.**
+
+::: {.callout-note collapse="true" title="Solution"}
+```python
+def sort_colors(a):
+    lo, mid, hi = 0, 0, len(a) - 1
+    while mid <= hi:
+        if a[mid] == 0:
+            a[lo], a[mid] = a[mid], a[lo]; lo += 1; mid += 1
+        elif a[mid] == 1:
+            mid += 1
+        else:
+            a[mid], a[hi] = a[hi], a[mid]; hi -= 1   # do not advance mid
+    return a
+```
+
+Invariant: $a[0..\mathit{lo})$ are $0$s, $a[\mathit{lo}..\mathit{mid})$ are $1$s, $a[\mathit{mid}..\mathit{hi}]$ is unknown, and $a(\mathit{hi}..n)$ are $2$s. Each step shrinks the unknown region by one, so the loop is $O(n)$. After swapping with $\mathit{hi}$ the new $a[\mathit{mid}]$ came from the unknown region and has not been examined, which is why $\mathit{mid}$ stays put. It is @sec-tp-inv's region naming with three fingers instead of two.
+:::
+
+**19. [E] Run-length encoding: turn $[4, 4, 4, 1, 1, 7, 4, 4]$ into (value, count) pairs with the group pointer of @sec-tp-runs. What does the charging argument say about its running time?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Chain test `a[j + 1] == a[j]`, one settlement `(a[i], j - i + 1)` per block: $[(4, 3), (1, 2), (7, 1), (4, 2)]$. The two $4$-blocks stay separate because runs are about *adjacent* positions. $j$ never decreases and $i$ jumps to $j + 1$, so the inner test runs at most $n - 1$ times in total: $O(n)$ despite the nested loops.
+:::
+
+## Interview questions
+
+**1. State the invariant of an opposite-ends walk. Which move is legal after "the test failed", and what must you prove before making it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Everything left of $\mathit{lo}$ and right of $\mathit{hi}$ is *decided* — proven unable to appear in any remaining answer; the answer lives between the fingers. After a failed test you may retire exactly *one* end, and only after proving its best chance failed: for pair sums, $a[\mathit{lo}] + a[\mathit{hi}] < t$ means $\mathit{lo}$'s largest partner was $\mathit{hi}$ and it lost, so all of $\mathit{lo}$'s pairs die (@sec-tp-ends). Moving both ends is the classic rejection — one test, two discards, one of them unproven (@sec-tp-inv).
+:::
+
+**2. Two Sum II: walk $[1, 3, 5, 6, 8, 11]$ toward target $11$, then answer "why not binary-search the partner of each element instead?"**
+
+::: {.callout-note collapse="true" title="Answer"}
+$1 + 11 = 12 > 11$: drop $\mathit{hi}$. $1 + 8 = 9 < 11$: drop $\mathit{lo}$. $3 + 8 = 11$: answer $(1, 4)$, or $[2, 5]$ in 1-based indices. Three glances, $O(n)$ in general. Binary-searching a partner per element is $O(n\log n)$ and also correct; the walk wins because the partner boundary for successive $\mathit{lo}$s only moves *left*, so $\mathit{hi}$ never rewinds and the $n$ searches share one sweep (@sec-tp-p1-a, @sec-tp-count).
+:::
+
+**3. Container With Most Water: prove "move the shorter wall". Why is the asymmetry the whole question?**
+
+::: {.callout-note collapse="true" title="Answer"}
+At $(\mathit{lo}, \mathit{hi})$ with $h[\mathit{lo}] \le h[\mathit{hi}]$, any future container using $\mathit{lo}$ is narrower and still capped at height $h[\mathit{lo}]$, so its area is below the one just recorded: $\mathit{lo}$ is dominated, retire it. No such argument covers the taller wall — a taller partner inside could raise the height — so retiring it can lose the optimum: on $[1, 100, 2, 100]$, always moving the taller wall reports $3$ instead of $200$ (@sec-tp-p1-b).
+:::
+
+**4. 3Sum: give the three ingredients, the complexity, and the early exits sortedness buys.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort; for each fix $i$, squeeze the suffix for target $-a[i]$; deduplicate (skip equal fixes, skip equal ends after a hit). $O(n^2)$ time, $O(1)$ extra beyond the sort and the output. Exits: $a[i] > 0$ — break, since three positives cannot sum to $0$; $a[i] + a[i+1] + a[i+2] > 0$ — break, this and every later fix is too big; $a[i] + a[n-2] + a[n-1] < 0$ — only *continue*, since a larger $a[i]$ may still work (@sec-tp-p2-a, @sec-tp-fix).
+:::
+
+**5. Why is $k$-SUM solved in $O(n^{k-1})$, and why does 3SUM matter beyond interviews?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Fix $k - 2$ elements ($O(n^{k-2})$ choices) and squeeze the last two in $O(n)$: $O(n^{k-1})$. For $k = 3$, the conjecture that no $O(n^{2-\varepsilon})$ algorithm exists is a standard hardness assumption: since Gajentaan and Overmars (1995), many geometric problems have been shown 3SUM-hard, so a polynomially faster 3SUM would speed all of them up. It plays the role for quadratic problems that the $\Omega(n\log n)$ comparison bound plays for sorting — except that it is unproved (@sec-tp-fix).
+:::
+
+**6. Merge Sorted Array: why is writing from the back safe, in one equation? What changes in the code from the front merge?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The write cursor is always $k = p + q + 1$, so while $\mathit{nums2}$ has values ($q \ge 0$), $k > p$: slot $k$ is past every unread $\mathit{nums1}$ value — either free space or a value already moved. A front merge in the same array writes at index $0$, where an unread value sits. The code change: start the three cursors at the ends, compare the *tails*, write the *larger*, and decrement; stop when $\mathit{nums2}$ is empty (@sec-tp-p3-a, @sec-tp-merge).
+:::
+
+**7. Squares of a Sorted Array has one input but merges two sorted sequences. Name them and the invariant the two fingers keep.**
+
+::: {.callout-note collapse="true" title="Answer"}
+The negative part, whose squares *decrease* as you move right toward zero, and the non-negative part, whose squares *increase*. Read from the outside in, both give squares in decreasing order, so the largest remaining square is always at one of the two ends. Invariant: the output, filled from the back, holds the largest squares in sorted order, and every unplaced square lies between the two fingers — the larger-tail rule of the back merge (@sec-tp-p3-b).
+:::
+
+**8. Count pairs with sum $\le x$ in a sorted array: give the batching step and the reason the walk is $O(n)$.**
+
+::: {.callout-note collapse="true" title="Answer"}
+If $a[\mathit{lo}] + a[\mathit{hi}] \le x$, then every pair $(\mathit{lo}, k)$ with $\mathit{lo} < k \le \mathit{hi}$ qualifies (sortedness), so bank $\mathit{hi} - \mathit{lo}$ and retire $\mathit{lo}$; otherwise retire $\mathit{hi}$. Each step moves one finger toward the other and neither moves back, so there are at most $n - 1$ steps; the $\Theta(n^2)$ pairs are counted, not visited (@sec-tp-p5-b, @fig-tp-p5-staircase).
+:::
+
+**9. Boats to Save People: state the greedy, sketch the exchange proof, and say which constraint it uses.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort; the heaviest waiting person boards now — with the lightest waiting person if they fit, else alone. If even the lightest does not fit, the heaviest is alone in every plan. If it fits, any optimal plan can be changed by a swap so that the heaviest shares with the lightest without adding a boat (the three cases of exercise 10; the key inequality is $P + Q \le P + H \le \mathit{limit}$). The proof uses that every person weighs at most $\mathit{limit}$, so a solo boat is always legal (@sec-tp-p4-a).
+:::
+
+**10. Number of Pairs / Fair Pairs: give the band identity, and explain why negative values change nothing.**
+
+::: {.callout-note collapse="true" title="Answer"}
+$\{l \le \mathit{sum} \le r\} = \{\mathit{sum} \le r\} \setminus \{\mathit{sum} \le l-1\}$, and the second set is inside the first, so the count is the difference of two `count_le` calls. The batching proof reads only "sorted", never "non-negative", so negatives are harmless; what they threaten is bookkeeping — the accumulator reaches $\binom{10^5}{2} \approx 5\cdot10^9$ (64-bit) and $l - 1$ must be computed in a signed type. A one-sweep alternative keeps two boundary fingers that both move left (@sec-tp-p5-b, @sec-tp-p5-c).
+:::
+
+**11. Pair of Topics: fuse two arrays into one, and say precisely why sorting them separately is a different problem.**
+
+::: {.callout-note collapse="true" title="Answer"}
+$a_i + a_j > b_i + b_j \iff (a_i - b_i) + (a_j - b_j) > 0$: key each *index* by $d_i = a_i - b_i$, sort $d$, and count pairs with a positive sum. Sorting $a$ and $b$ separately breaks the link between $a_i$ and $b_i$ — the $k$-th smallest $a$ and the $k$-th smallest $b$ usually belong to different topics — so the counted inequality no longer refers to any real pair (@sec-tp-p5-a).
+:::
+
+**12. Runs: give the group-pointer skeleton, its chain tests, and the amortisation sentence. Which two problems in this chapter share the skeleton with a different chain test?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$i$ starts a block, $j$ advances while `chain(a[j], a[j+1])` holds, one settlement per block $[i, j]$, then $i = j + 1$. Chain tests: equality (dedupe, run-length encoding), $\mathit{next} = \mathit{prev} + 1$ (Summary Ranges), same sign (Alternating Subsequence). Sentence: "$j$ never decreases and $i$ jumps past it, so the inner test runs at most $n$ times in total." The pair: @sec-tp-p6-a and @sec-tp-p6-b — and 3Sum's dedup skips are the equality test inside a squeeze (@sec-tp-runs).
+:::
+
+**13. When is two pointers the *wrong* tool for a pair problem? Answer in one sentence, with examples.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Two pointers need a predicate whose true set, for each fixed finger, is a prefix or suffix that moves one way; hashing needs only a key and pays memory instead of order. So: unsorted single-pair search with original indices (LC 1 — a hash map), equality or divisibility conditions (pairs with difference $k$, equal remainders — hash grouping, @sec-hash-p2), and "subarray sum exactly $s$" with negative values (a prefix-sum map, @sec-pref-hash) are hashing problems, not squeezes (@sec-tp-why).
+:::
+
+**14. Trapping Rain Water (LC 42) with two pointers: each step moves one finger and adds water at that column. Justify it — the invariant is not a pair invariant, so what is it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Water above column $c$ is $\min(\text{tallest wall on its left}, \text{tallest on its right}) - h_c$ (counting $c$ itself in both). Keep $\mathit{leftMax}$ = tallest of $h[0..\mathit{lo}]$ and $\mathit{rightMax}$ = tallest of $h[\mathit{hi}..n-1]$. If $\mathit{leftMax} \le \mathit{rightMax}$, then column $\mathit{lo}$'s true right maximum is at least $\mathit{rightMax} \ge \mathit{leftMax}$, so its water is exactly $\mathit{leftMax} - h[\mathit{lo}]$ whatever the unseen middle holds: settle it and advance $\mathit{lo}$. Otherwise settle $\mathit{hi}$ symmetrically. The invariant is one-sided: "the far finger already guarantees a wall at least as tall as the near side's maximum". $O(n)$ time, $O(1)$ space — the region idea of @sec-tp-inv applied to columns instead of pairs.
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Ends-squeeze:** `while lo < hi`, one test, *one* retire (the proof of @sec-tp-ends), $O(n)$ after the sort. Pairs: existence, value, extremum (@sec-tp-p1).
+- **Fix-and-squeeze:** sort, outer loop over fixes, Pattern 1 on the suffix; dedup = run skips; $O(n^{k-1})$ for $k$-SUM (@sec-tp-p2, @sec-tp-fix).
+- **Merge skeleton:** fingers at the smallest unprocessed heads (or the largest tails, in place); union / intersection / difference change the *emission rule* only (@sec-tp-p3, @sec-tp-merge).
+- **Greedy pairing:** sort, commit the extreme, test the opposite end; prove it with one swap (@sec-tp-p4).
+- **Counting:** bank $\mathit{hi} - \mathit{lo}$ per accepted step; band $=$ `count_le(r) - count_le(l - 1)`, or one sweep with two left-moving boundaries; 64-bit accumulator (@sec-tp-p5).
+- **Group pointer:** $j$ jumps the chain, one settlement per run, $O(n)$ by charging (@sec-tp-p6).
+:::
+
+- The chapter in one sentence: *a test at the fingers proves a region dead — name the regions before you move a finger* (@sec-tp-inv).
+- Sortedness (or a monotone predicate) is the whole budget: it buys $O(1)$-memory sweeps where hashing pays $O(n)$ memory, and it is exactly what unordered pair problems lack (@sec-tp-why, @sec-hash).
+- The arrays volume now has four ways to beat the pair loop: scans keep running state over *positions* (@sec-arr-scan), prefix sums tabulate *positions* (@sec-pref), hashing indexes *values* (@sec-hash), and two pointers exploit *order*.
+- One test proves one discard; one finger moves per test. The only exceptions are moves the problem itself forces, such as pairing everybody in @sec-tp-p4-b.
+- Direction is correctness: back-to-front merging, never rewinding a boundary, and `lo < hi` versus `lo <= hi` are each the invariant's geometric face (@sec-tp-merge, @sec-tp-count).
+- One engine, many statements: the counting squeeze answers CF 1324D (after a transform), CF 1538C (a band) and LC 2563 (negatives, one sweep) (@sec-tp-p5).
+- Run handling is the quiet third technique: 3Sum's dedup, Summary Ranges' chains and the same-sign maxima are all the group pointer, priced by the charging sentence (@sec-tp-runs).
+- Windows with a monotone rule are the next chapter (@sec-sw); @sec-tp-count is their foundation.
+
+## Practice ladder
+
+Ordered by concept, following the chapter: at least one step beyond each solved problem, Codeforces first where a good one exists.
+
+::: {.practice}
+- [CF 6C · Alice, Bob and Chocolate](https://codeforces.com/problemset/problem/6/C){rating="1200"} — two fingers from opposite ends, the one that is behind moves: the squeeze as a simulation.
+- [CF 2060C · Game of Mathletes](https://codeforces.com/problemset/problem/2060/C){rating="900"} — after @sec-tp-p1-a: count disjoint pairs with sum $k$ by sorting and squeezing; a hit retires both ends.
+- [CF 1669F · Eating Candies](https://codeforces.com/problemset/problem/1669/F){rating="1100"} — after @sec-tp-p1-b: move the finger whose running total is smaller.
+- [LC 42 · Trapping Rain Water](https://leetcode.com/problems/trapping-rain-water/){difficulty="Hard"} — the one-sided invariant of interview question 14.
+- [LC 18 · 4Sum](https://leetcode.com/problems/4sum/){difficulty="Medium"} — after @sec-tp-p2-a: fix two, squeeze two, and the dedup guards multiply.
+- [LC 923 · 3Sum With Multiplicity](https://leetcode.com/problems/3sum-with-multiplicity/){difficulty="Medium"} — count index triples: the run batching of exercise 15.
+- [CF 2032C · Trinity](https://codeforces.com/problemset/problem/2032/C){rating="1400"} — after @sec-tp-p2-b: sort, then a triangle condition between the two smallest and the largest of a block, with a second finger.
+- [LC 611 · Valid Triangle Number](https://leetcode.com/problems/valid-triangle-number/){difficulty="Medium"} — fix the largest side, then *count* pairs with a squeeze.
+- [CF 600B · Queries about less or equal elements](https://codeforces.com/problemset/problem/600/B){rating="1300"} — after @sec-tp-p3-a: sort both arrays and walk them together like a merge.
+- [CF 489B · BerSU Ball](https://codeforces.com/problemset/problem/489/B){rating="1200"} — two sorted arrays, two forward fingers, greedy matching of partners that differ by at most one.
+- [LC 350 · Intersection of Two Arrays II](https://leetcode.com/problems/intersection-of-two-arrays-ii/){difficulty="Easy"} — after @sec-tp-p3-b: the merge with the "both advance on equality" rule (exercise 5).
+- [LC 21 · Merge Two Sorted Lists](https://leetcode.com/problems/merge-two-sorted-lists/){difficulty="Easy"} — the front merge with `next` pointers instead of indices.
+- [CF 1729D · Friends and the Restaurant](https://codeforces.com/problemset/problem/1729/D){rating="1200"} — after @sec-tp-p4-a: sort by $y_i - x_i$ and pair the most generous friend with the least generous one it can carry.
+- [CF 1921D · Very Different Array](https://codeforces.com/problemset/problem/1921/D){rating="1100"} — after @sec-tp-p4-b: sort both arrays and match extremes against extremes; each step takes the better of two end pairings.
+- [LC 455 · Assign Cookies](https://leetcode.com/problems/assign-cookies/){difficulty="Easy"} — greedy matching across two sorted arrays with forward fingers.
+- [LC 2824 · Count Pairs Whose Sum is Less than Target](https://leetcode.com/problems/count-pairs-whose-sum-is-less-than-target/){difficulty="Easy"} — after @sec-tp-p5-a: the counting squeeze in its plainest form.
+- [CF 2051D · Counting Pairs](https://codeforces.com/problemset/problem/2051/D){rating="1200"} — after @sec-tp-p5-b and @sec-tp-p5-c: a band on $a_i + a_j$ in disguise.
+- [LC 75 · Sort Colors](https://leetcode.com/problems/sort-colors/){difficulty="Medium"} — three fingers, four regions: the Dutch national flag of exercise 18.
+- [LC 26 · Remove Duplicates from Sorted Array](https://leetcode.com/problems/remove-duplicates-from-sorted-array/){difficulty="Easy"} — read/write fingers over runs of equal values.
+- [CF 1676F · Longest Strike](https://codeforces.com/problemset/problem/1676/F){rating="1300"} — after @sec-tp-p6-a: filter, sort, then the longest run of consecutive values.
+- [CF 1843B · Long Long](https://codeforces.com/problemset/problem/1843/B){rating="800"} — after @sec-tp-p6-b: count the maximal runs of negative values.
+- [CF 1899C · Yarik and Array](https://codeforces.com/problemset/problem/1899/C){rating="1100"} — maximum-sum subarray whose neighbours alternate in parity: cut the array into maximal alternating runs, then a running sum inside each.
+- [LC 141 · Linked List Cycle](https://leetcode.com/problems/linked-list-cycle/){difficulty="Easy"} — fast and slow fingers on a structure you cannot index.
+:::
+
+## Further reading
+
+- [CPH (Laaksonen), *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf) — ch. 8.1 "Two pointers method": the subarray-sum and 2SUM examples and the amortised argument that each pointer moves $O(n)$ times.
+- [USACO Guide — Two Pointers](https://usaco.guide/silver/two-pointers) — a graded problem list for opposite-ends and same-direction pointers, with short solutions; a good next stop after this chapter.
+- [Wikipedia — Merge algorithm](https://en.wikipedia.org/wiki/Merge_algorithm) — the two-finger merge, its use in merge sort, $k$-way merging, and parallel merge.
+- [Wikipedia — 3SUM](https://en.wikipedia.org/wiki/3SUM) — the quadratic algorithm of @sec-tp-fix, the 3SUM conjecture, the slightly subquadratic algorithms, and the problems known to be 3SUM-hard.
+- [Wikipedia — Dutch national flag problem](https://en.wikipedia.org/wiki/Dutch_national_flag_problem) — Dijkstra's three-pointer partition (exercise 18) and its use inside quicksort.
+- [Wikipedia — Sort-merge join](https://en.wikipedia.org/wiki/Sort-merge_join) — the merge of @sec-tp-merge as the join algorithm inside relational databases.
+- [Wikipedia — Cheney's algorithm](https://en.wikipedia.org/wiki/Cheney%27s_algorithm) — a copying garbage collector in which a scan pointer chases a free pointer through the new heap: the read/write fingers of A1 at systems scale.

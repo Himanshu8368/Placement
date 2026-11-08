@@ -1,0 +1,418 @@
+% =====================================================================
+%  21.2  Persistence by Path Copying                    sec:c19-copy
+%  Exports: sec:c19-copy  def:c19-pathcopy  thm:c19-memory
+%           lst:c19-parray  lst:c19-pseg  lst:c19-707-soln
+%           prob:c19-707d  fig:c19-copy
+%  Numbers agree with 00_opener (the ONE authoritative persistence act):
+%    A = (3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2), sum 49; base sum grid
+%    t1=49,t2=24,t3=25,t4=14,t5=10,t6=13,t7=12,t8=5,t9=9,t10=2,t11=8,
+%    t12=7,t13=6,t14=7,t15=5 (leaves t16..t31 = A[1..16]).
+%    v0 -> v1 by A[3]=9 (leaf t18, old 4 -> 9, delta +5): copies EXACTLY the
+%    root-to-leaf path t1,t2,t4,t9,t18 (5 of 31); new sums t1=54,t2=29,t4=19,
+%    t9=14,t18=9; every off-path node is SHARED with v0.  Read [1..8]:
+%    v1 -> t2 = 29 ; v0 -> t2 = 24 (the shared old node, untouched).
+%  CF 707D Persistent Bookcase (live-verified on codeforces.com), *2200:
+%    n,m <= 1000, q <= 1e5.  Ops: 1 i j place (if empty) at (i,j);
+%    2 i j remove at (i,j) if present; 3 i invert shelf i; 4 k return to the
+%    state after operation k (k=0 -> empty).  After EACH op print # books.
+%    Versions form a TREE (op i's parent is i-1 for types 1/2/3, else k).
+%    Samples replayed:
+%      S1 2 3 3 / [1 1 1][3 2][4 0]                  -> 1 4 0
+%      S2 4 2 6 / [3 2][2 2 2][3 3][3 2][2 2 2][3 2] -> 2 1 3 3 2 4
+%      S3 2 2 2 / [3 2][2 2 1]                       -> 2 1
+% =====================================================================
+\section{Persistence by Path Copying}\label{sec:c19-copy}
+
+\begin{previouslybox}[Ch.~11 copied a trie's spine; here we copy a segment tree's -- and keep every version]
+Chapter~11's tries (\chref{c08}) already met persistence: \defref{c08-persistent} added a number to a binary trie \emph{without destroying} the old trie by copying only the depth-many nodes on the new key's path and sharing the rest (LC~1707).  That is the whole idea of this section, promoted from a trie to an arbitrary structure -- here, Ch.~19's segment tree.  Chapters~18, 19 and~20 all keep \emph{one live copy}: a write overwrites and the pre-write state is gone.  But a family of problems asks you to read the state \emph{as it was} -- ``after the \(k\)-th update'', ``the version before we touched this'' -- and for those you must refuse to overwrite.  A \term{persistent} data structure answers about \emph{any} version that ever existed.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{persistent} structure keeps a whole family of versions \(r_0, r_1, r_2, \dots\) and answers a query against \emph{any} chosen \(r_i\).  Persistence by \term{path copying} does this cheaply for a tree-shaped structure: when version \(r_i\) differs from \(r_{i-1}\) by one point update, you do not rebuild the tree -- you allocate a \emph{fresh root} and clone, on the way down to the updated leaf, exactly the nodes whose children change, re-pointing the cloned node's child toward the freshly cloned node and keeping every untouched pointer \emph{shared} with the old version.  A point update therefore creates only \(O(\log n)\) new nodes and leaves all previous roots valid.  Because you no longer have a fixed \(4n\) array (nodes are born dynamically), you allocate from an explicit \term{node pool} sized to the \emph{total} number of created nodes, about \(n + q\log n\).  This section builds the persistent \emph{array} (a segtree keyed by index, reading one cell), then the persistent point-update / range-query \emph{segment tree}, then the memory law that keeps the pool honest, and closes on why Ch.~20's lazy tag is the one thing persistence refuses to share.
+
+\textbf{Prerequisites.} Ch.~19 (\chref{c13}) for the segment tree and its interval geometry; Ch.~11 tries (\chref{c08}, \defref{c08-persistent}) for the path-copy idea already taught -- never re-derived here.  The running array \(A\) and the single persistence act \(A[3]=9\) are fixed in the opener; this section's hand trace reuses them verbatim.  Chapter~20 (\chref{c15}) is the contrast in the last subsection.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item hand-copy the root-to-leaf path of a small tree for one update, naming which nodes are shared; \hfill\lv{3}
+  \item size a node pool for \(q\) point updates on \(n\) leaves and explain why \(4n\) is wrong; \hfill\lv{3}--\lv{4}
+  \item write a persistent point-update / range-query segment tree (build, update, query) from a pool; \hfill\lv{4}
+  \item recognise when the versions form a \emph{tree} (a ``return to version \(k\)'' operation), and solve it by DFS with rollback (CF~707D). \hfill\lv{4}--\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``answer about a PAST version, or read the array as it was at time t'']
+\reckey{``after each update, answer a query on the \emph{current} state'' but with ``\emph{return to the state after operation \(k\)}''; ``queries ask about version \(v\)''; ``persistent'' named outright; \emph{offline} requests ``what was the sum of \(a[l..r]\) right after the \(t\)-th write?''; any time you must NOT destroy history.  If an operation ``go back to how things were at step \(k\)'', the version graph is a \emph{tree}, not a line.}
+\recuse{
+  \item sequential versions, point writes, range reads about any past version -- persistent segment tree, this section;
+  \item ``return to version \(k\)'' branches the timeline into a \emph{version tree} -- DFS-with-rollback, this section's Problem Lab (CF~707D);
+  \item the versions are the array \emph{prefixes} \(A[1..i]\) -- that special choice is the chairman tree, \(\secref{c19-chairman}\).
+}
+\recnotuse{
+  \item you only ever read the \emph{latest} state -- Ch.~19's plain tree; persistence's pool is pure overhead;
+  \item range \emph{updates} with a tag present -- Ch.~20's lazy tag, which does not persist cleanly (last subsection);
+  \item the updates are invertible and you can process queries offline in order -- Ch.~18's Fenwick tree; no version is retained.
+}
+One-line test: \emph{if a query can name a version number -- ``as it was after step \(t\)'' -- then overwrite is forbidden, and copying the touched root path (sharing the rest) is what buys you the whole past for \(O(\log n)\) per write.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: clone the spine, share the rest}
+% ---------------------------------------------------------------
+
+A \emph{mutable} segment tree update walks to a leaf and rewrites the \(O(\log n)\) nodes on the path, losing the old values.  Persistence wants the old root to stay a complete, correct tree.  The trick: on that same walk, \emph{allocate a fresh node} wherever you would have overwritten, copy the old node's two child-pointers and aggregate into it, then re-point the one child you are descending through to the next fresh node.  Every node you did \emph{not} walk through is shared verbatim with the previous version.  So a path copy \(r_i = \mathrm{update}(r_{i-1}, \mathit{pos}, \mathit{val})\) clones the \(\lceil\log_2 n\rceil{+}1\) nodes on the spine down to \(\mathit{pos}\) and shares every off-path child with \(r_{i-1}\); the rest of the tree is literally the same nodes in memory, and the old root still points at a valid tree.  This is Ch.~11's \defref{c08-persistent} with \(\log n\) in place of trie-depth.
+
+\begin{definition}{Path copying and the version root}{c19-pathcopy}
+A \term{persistent node} stores an aggregate and two \emph{child indices} into a shared \term{node pool} (not fixed array slots).  A \term{version} is a single pool index -- the \term{root pointer} -- naming a whole structure.  \(\mathit{update}(r, l, r', \mathit{pos}, \mathit{val})\) returns a \emph{new} root index: it calls \code{newnode} to clone node \(r\), recurses into the child containing \(\mathit{pos}\), sets that clone's corresponding child to the newly returned index, and recomputes the clone's aggregate from its children; the \emph{other} child pointer is copied unchanged and stays shared with version \(r\).  No pool slot is ever overwritten after it is returned by \code{newnode}.
+\end{definition}
+
+\begin{theorem}{Node and time cost of persistent point updates}{c19-memory}
+On a persistent segment tree over \(n\) leaves, building version \(r_0\) costs \(\bigO{n}\) nodes (a full tree), and each subsequent point update creates exactly \(\lceil\log_2 n\rceil + 1\) new nodes (the root-to-leaf path, one clone per visited node), leaving all earlier roots intact.  After \(q\) point updates the pool holds \(\bigO{n + q\log n}\) nodes, so the pool \emph{must} be sized for that total; a fixed \(4n\) array -- correct for one mutable tree -- overflows as soon as versions stack up.  Each update and each range query is \(\bigO{\log n}\) time.
+\end{theorem}
+\begin{proofbox}
+A point update descends one root-to-leaf path of length \(\lceil\log_2 n\rceil+1\) and clones each visited node (one \code{newnode} each), touching nothing else: hence exactly that many new nodes, and all shared subtrees stay reachable from old roots (they were never written).  \(q\) updates therefore add \(q(\lceil\log_2 n\rceil+1)\) nodes on top of the \(\bigO{n}\) build, giving \(\bigO{n+q\log n}\).  Time per operation mirrors \(\coderef{c13-update}\)/\(\coderef{c13-query}\): one step per level, \(\bigO{\log n}\).  The \(4n\) bound for a single \emph{mutable} heap-layout tree is irrelevant once nodes are allocated on demand across versions -- there is no static slot to reuse, so the honest budget is the total node count.
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  Persistence is an \emph{undo-for-free} discipline: you never erase, so every past state survives.  The cost is that a single write is no longer \(O(1)\) memory -- it is \(\log n\) fresh nodes -- so your arrays become pools you must size for \(n + q\log n\).  Get that budget wrong and you get a crash or a \mle\ that is really an off-by-\(\log\) sizing error.  The reward: version \(r_{17}\) and version \(r_{3}\) can be read, side by side, in the same \(\bigO{\log n}\) walk, because they are genuinely different trees that merely share most of their parts.
+
+% ---------------------------------------------------------------
+\subsection{The persistent array, then the persistent segment tree}
+% ---------------------------------------------------------------
+
+Build up on a persistent \emph{array}: the same point-set / single-get, seen as a segtree whose leaves hold the values.  It isolates the path-copy mechanism before we add a range aggregate.
+
+\begin{lstlisting}[caption={persistent array as a path-copying tree: set returns a new root, get reads any version -- O(log n) nodes per set}, label={lst:c19-parray}]
+int lc[POOL], rc[POOL]; long long val[POOL]; int pool;   // POOL ~ n + q*log n
+int leaf(long long x){ val[pool]=x; lc[pool]=rc[pool]=-1; return pool++; }
+int node(int L, int R){ lc[pool]=L; rc[pool]=R; val[pool]=0; return pool++; }
+// set position pos to x, returning a FRESH root; old root untouched
+int pset(int r, int tl, int tr, int pos, long long x){
+    if (tl == tr) return leaf(x);                     // fresh leaf; old shared
+    int tm = (tl + tr) / 2;
+    if (pos <= tm)                                    // clone r, redo LEFT:
+        return node( pset(lc[r], tl, tm, pos, x), rc[r] );   // right SHARED
+    else
+        return node( lc[r], pset(rc[r], tm+1, tr, pos, x) ); // left SHARED
+}
+long long pget(int r, int tl, int tr, int pos){       // read version r at pos
+    if (tl == tr) return val[r];
+    int tm = (tl + tr) / 2;
+    return (pos <= tm) ? pget(lc[r], tl, tm, pos) : pget(rc[r], tm+1, tr, pos);
+}
+\end{lstlisting}
+
+The full persistent \term{segment tree} keeps a \emph{sum} aggregate at each node so that a whole range can be read from any version.  Nothing about Ch.~19's query changes; only the update now clones a path instead of writing in place.
+
+\begin{lstlisting}[caption={persistent point-update, range-sum segment tree -- build, update, query, all from the node pool}, label={lst:c19-pseg}]
+struct PNode { long long sum; int l, r; } T[POOL];   // POOL = n + (int)(q*(log2 n + 2))
+int pool = 0;
+int newnode(long long s, int L, int R){ T[pool] = {s, L, R}; return pool++; }
+int build(int tl, int tr, const long long A[]){                 // version r0
+    if (tl == tr) return newnode(A[tl], -1, -1);
+    int tm = (tl + tr) / 2;
+    int L = build(tl, tm, A), R = build(tm+1, tr, A);
+    return newnode(T[L].sum + T[R].sum, L, R);
+}
+int update(int v, int tl, int tr, int pos, long long val){      // one point SET
+    if (tl == tr) return newnode(val, -1, -1);                  // fresh leaf
+    int tm = (tl + tr) / 2;
+    int L = T[v].l, R = T[v].r;                                 // v is NOT mutated
+    if (pos <= tm){
+        int nL = update(L, tl, tm, pos, val);                   // clone left spine
+        return newnode(T[nL].sum + T[R].sum, nL, R);            // right SHARED
+    } else {
+        int nR = update(R, tm+1, tr, pos, val);                 // clone right spine
+        return newnode(T[L].sum + T[nR].sum, L, nR);            // left SHARED
+    }
+}
+long long query(int v, int tl, int tr, int l, int r){           // sum A[l..r] of version v
+    if (l > r) return 0;
+    if (l == tl && r == tr) return T[v].sum;
+    int tm = (tl + tr) / 2;
+    return query(T[v].l, tl, tm, l, min(r, tm))
+         + query(T[v].r, tm+1, tr, max(l, tm+1), r);
+}
+\end{lstlisting}
+
+Each \code{update} call returns a fresh index and \emph{never} mutates \(T[v]\); the previous root \(v\) is still a whole tree, sharing every subtree the path did not enter.  Re-point exactly one child of the clone and copy the other.
+
+% ---------------------------------------------------------------
+\subsection{The hand trace on \(A\)}
+% ---------------------------------------------------------------
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.60, transform shape]
+  % v0 (shared, gray) and v1 (copied spine, orange). A[3]=9 copies t1,t2,t4,t9,t18.
+  \node[font=\scriptsize\bfseries, text=gray] at (0,4.2) {version \(v_0\) (kept intact)};
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (a1) at (0,3.2) {\(t_1{=}49\)};
+  \node[boxnode, primaryblue, minimum size=7mm, font=\scriptsize] (a2) at (-1.4,1.9) {\(t_2{=}24\)};
+  \node[boxnode, primaryblue, minimum size=7mm, font=\scriptsize] (a4) at (-2.2,0.7) {\(t_4{=}14\)};
+  \node[boxnode, primaryblue, minimum size=7mm, font=\scriptsize] (a9) at (-1.4,-0.5) {\(t_9{=}9\)};
+  \node[boxnode, primaryblue, minimum size=6mm, font=\scriptsize] (a18) at (-0.7,-1.6) {\(t_{18}{=}4\)};
+  \node[boxnode, gray!50, minimum size=6mm, font=\scriptsize] (a3) at (1.4,1.9) {\(t_3\)};
+  \node[boxnode, gray!50, minimum size=6mm, font=\scriptsize] (a5) at (-0.6,0.7) {\(t_5\)};
+  \draw[flow] (a1)--(a2); \draw[flow] (a1)--(a3); \draw[flow] (a2)--(a4); \draw[flow] (a2)--(a5);
+  \draw[flow] (a4)--(a9); \draw[flow] (a9)--(a18);
+  % v1 copies
+  \node[font=\scriptsize\bfseries, text=difforange] at (4.6,4.2) {version \(v_1\) (\(A_3{=}9\))};
+  \node[boxnode, difforange, minimum size=8mm, font=\scriptsize, fill=difforange!12] (b1) at (4.6,3.2) {\(t_1'{=}54\)};
+  \node[boxnode, difforange, minimum size=7mm, font=\scriptsize, fill=difforange!12] (b2) at (3.2,1.9) {\(t_2'{=}29\)};
+  \node[boxnode, difforange, minimum size=7mm, font=\scriptsize, fill=difforange!12] (b4) at (2.4,0.7) {\(t_4'{=}19\)};
+  \node[boxnode, difforange, minimum size=7mm, font=\scriptsize, fill=difforange!12] (b9) at (3.2,-0.5) {\(t_9'{=}14\)};
+  \node[boxnode, difforange, minimum size=6mm, font=\scriptsize, fill=difforange!15] (b18) at (3.9,-1.6) {\(t_{18}'{=}9\)};
+  \node[boxnode, gray!50, minimum size=6mm, font=\scriptsize] (b3) at (6.1,1.9) {\(t_3\)};
+  \node[boxnode, gray!50, minimum size=6mm, font=\scriptsize] (b5) at (4.1,-0.5) {\(t_5\)};
+  \node[font=\tiny, text=gray, anchor=west] at (5.6,-1.0) {shared with \(v_0\)};
+  \draw[flow] (b1)--(b2); \draw[flow,dashed,gray] (b1)--(b3); \draw[flow] (b2)--(b4);
+  \draw[flow] (b4)--(b9); \draw[flow] (b9)--(b18); \draw[flow,dashed,gray] (b2)--(b5);
+\end{tikzpicture}
+\caption{Path copying one write \(A[3]=9\) on the running array (opener's grid).  Only the five nodes on the root-to-leaf path to \(t_{18}\) are \emph{freshly cloned} (orange, \(+5\) folded into each sum: \(49{\to}54,\,24{\to}29,\,14{\to}19,\,9{\to}14,\,4{\to}9\)).  Their untouched siblings (dashed gray) are \emph{shared} with \(v_0\).  Both roots stay valid trees, so reading \([1..8]\) on \(v_1\) gives \(t_2'{=}29\) while the same read on \(v_0\) still gives \(t_2{=}24\).}
+\label{fig:c19-copy}
+\end{figure}
+
+\begin{tracebox}[build v0; clone the path for A(3)=9 into v1; read range 1..8 on BOTH versions]
+\textbf{Build \(v_0\).} \(\coderef{c19-pseg}\)'s \code{build} allocates the 31-node sum tree; root \(t_1\), grid \(t_1{=}49,\dots\) (opener).\\
+\textbf{update(\(v_0\), pos\(=3\), val\(=9\)).} Leaf \(A_3\) is heap node \(t_{18}\); its path is \(t_1, t_2, t_4, t_9, t_{18}\) (root to leaf, \(5=\log_2 16{+}1\) nodes).  Clone each and fold \(\Delta = 9-4 = +5\) into the sum: \(t_1'{=}54,\; t_2'{=}29,\; t_4'{=}19,\; t_9'{=}14,\; t_{18}'{=}9\).  At \(t_4'\) the right child \(t_5\) is \emph{copied by pointer} from \(t_4\) (shared); at \(t_2'\) the right child \(t_3\) is shared; everywhere off the path is shared.  New root \(v_1 = t_1'\); \(v_0=t_1\) is untouched.\\
+\textbf{read \([1..8]\) on \(v_1\).} \([1..8]\) is node \(t_2\)'s whole interval, so \code{query} returns the clone \(t_2'\) immediately \(\Rightarrow \boxed{29}\).\\
+\textbf{read \([1..8]\) on \(v_0\).} The same walk from the OLD root returns \(t_2\) \(\Rightarrow \boxed{24}\).  Both are simultaneously correct: five new nodes bought a second, independent version.
+\end{tracebox}
+
+\begin{complexitybox}[Persistent point-update / range-query segment tree]
+\textbf{Memory} \(\bigO{n + q\log n}\) pool nodes -- the theorem; \emph{size the pool for the total across all versions}, never \(4n\).  \textbf{Build} \(\bigO{n}\).  \textbf{Update} (point) \(\bigO{\log n}\) new nodes and time.  \textbf{Range query} \(\bigO{\log n}\) against \emph{any} root.  \textbf{Fat nodes} are the other persistence style -- keep a list \((\text{version},\text{value})\) per slot and pick the right one on read; they win when few slots change a lot, path copying when the tree is deep and writes are sparse.
+\end{complexitybox}
+
+\begin{center}\renewcommand{\arraystretch}{1.2}\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.24\linewidth} p{0.36\linewidth} p{0.32\linewidth}@{}}
+\toprule
+\textbf{Aspect} & \textbf{Path copying} & \textbf{Fat nodes}\\
+\midrule
+a write does & clone the root-to-leaf spine (\(\log n\) nodes) & append \((\text{ver},\text{val})\) to each touched slot's list \\
+read cost & \(\bigO{\log n}\), one tree walk & \(O(\log \text{writes-per-slot})\) via a bisect \\
+best when & deep tree, sparse point writes & shallow structure, a few hot slots updated \\
+history & every version = one root pointer & per-slot timelines (partial persistence) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 707D Persistent Bookcase}
+% ---------------------------------------------------------------
+
+\solvedproblem{c19-707d}{Persistent Bookcase}{CF 707D}
+  {https://codeforces.com/problemset/problem/707/D}{CF 2200}
+  {versions branch into a TREE via a return-to-step-k operation; DFS the version tree with rollback}
+
+\begin{problemstatement}[CF 707D Persistent Bookcase]
+A bookcase has \(n\) shelves, each with \(m\) positions; initially every position is empty.  Apply \(q\) operations in order; the four types are:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{1 i j} -- place a book at position \(j\) of shelf \(i\), if there is none there;
+  \item \textbf{2 i j} -- remove the book at position \(j\) of shelf \(i\), if there is one;
+  \item \textbf{3 i} -- invert shelf \(i\): every occupied position becomes empty and every empty one becomes occupied;
+  \item \textbf{4 k} -- return the whole bookcase to the state it was in right after operation \(k\) (\(k=0\) means the initial empty state).
+\end{itemize}
+After \emph{each} operation, output the total number of books in the bookcase.
+
+\textbf{Input.} \(n, m, q\) (\(1\le n,m\le 1000\), \(1\le q\le 10^5\)); then \(q\) lines, each one operation in the format above; in every type-4 operation \(k\) is \(0\) or an operation strictly before it.
+
+\textbf{Output.} \(q\) lines: the number of books after each operation.
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+2 3 3
+1 1 1
+3 2
+4 0
+
+Output:
+1
+4
+0
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+The trap is the type-4 ``return to the state after operation \(k\)'' operation: after it, the \emph{current} state jumps to an old one, so the versions do not form a line \(v_0\!\to\!v_1\!\to\!\cdots\); they form a \textbf{tree}.  Do not reach for a persistent \emph{segment} tree of shelf counts -- a type-3 invert rewrites an entire shelf, and a type-1/2 depends on whether one cell is occupied, which a count aggregate cannot see.
+\peek{if operation \(i\)'s parent version is \(i{-}1\) for types 1/2/3 but \(k\) for type 4, what shape is the version graph?}
+\nudge{a tree.  Build it explicitly, then DFS from version \(0\) keeping ONE mutable bookcase, applying each node's operation on the way down and UNDOING it on the way up (rollback).  Answer each node as you visit it.}
+\fullhint{Hold each shelf as a bitset of length \(m\) plus its count, and a running \(\mathit{total}\).  Edge into node \(i\): type1 set bit if empty (\(\mathit{total}{+}{+}\)); type2 clear if present (\(\mathit{total}{-}{-}\)); type3 flip the shelf and \(\mathit{total}\mathrel{+}=m-2\cdot\text{count}\) then \(\text{count}\mathrel{+}{=}\mathit{m}-2\cdot\text{count}\)... i.e.\ \(\text{count}\leftarrow m-\text{count}\); type4 no change (its parent is \(k\)).  \emph{Record whether the operation actually changed something} so rollback only undoes real writes.  DFS the version tree; \(\mathit{ans}[i]=\mathit{total}\) at node \(i\).  A \code{bitset} makes one invert \(O(m/64)\).}
+\end{attemptgate}
+
+\solstep{Understanding}
+Every operation produces exactly one answer, and a type-4 operation makes operation \(i\) a \emph{child} of operation \(k\) rather than of \(i-1\): the state after \(i\) equals the state after \(k\) with no further change, so its answer is \(k\)'s answer, and \(i{+}1\) continues from there.  Reading operations \(1..q\) as versions, the parent of version \(i\) is
+\[
+  \mathit{par}(i) = \begin{cases} i-1 & \text{op } i \text{ is type } 1,2,3,\\ k & \text{op } i \text{ is ``4 } k\text{''}. \end{cases}
+\]
+That is a tree rooted at version \(0\) (the empty bookcase).  We need not keep all versions in memory -- we can walk the tree with \emph{one} mutable bookcase, applying an operation on entry and rolling it back on exit, recording the total at each node.  This is the offline sibling of path copying.
+
+\solstep{Key Observations}
+\begin{observation}
+\textbf{Versions are a tree, not a line.}  Type-4 branches; a DFS over that tree reproduces every operation's resulting state exactly once.
+\end{observation}
+\begin{observation}
+A count aggregate is \emph{not} enough: type-1/type-2 depend on a single cell's occupancy and type-3 rewrites a whole shelf.  Keep per-cell state (a bitset per shelf) plus per-shelf counts, and a running total.
+\end{observation}
+\begin{observation}
+Every change must be \emph{undoable}: reset the bit we set, set the bit we reset, flip-and-recount for an invert -- restoring the parent state before the next sibling.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Store every version as a full \(n\times m\) grid}
+{That is \(\bigO{q\cdot nm}=10^5\cdot10^6\) -- \mle.  Persistence by path copying helps only when an update touches \(O(\log)\) nodes; a type-3 invert touches all \(m\) cells of a shelf and grid copies are ruinous.}
+\deadend{Process operations in the given order with one bookcase}
+{Operation \(i{+}1\) may branch from an \emph{old} state (a type-4 sends you back), so chronological order is not a single walk -- you can only replay every branch by exploring the version tree offline.}
+\aha{Build the version tree, DFS it with a mutable bookcase, applying and rolling back each node's operation; read the total at each visit.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.22\linewidth} p{0.26\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ grid per version & copy the whole \(n\times m\) each op & \(\bigO{q\,nm}\) & \mle \\
+2 & \lv{4}\ persistent segtree of counts & one leaf per shelf & fails on invert/occupancy & no \\
+3 & \lv{4}\ \textbf{version tree + rollback} & DFS, apply/undo on bitsets & \(\bigO{q\,m/64}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is the seductive wrong turn: it assumes a persistent \emph{segment} tree is always the right persistence.  When an update is not a cheap point change, the offline version-tree DFS (rung~3) wins -- same persistence \emph{contract}, different mechanism, and the one Ch.~17 (\chref{c28}) generalises as rollback.
+
+\solstep{Solution}
+Build the version tree as above.  DFS from node \(0\): at each node \(i\), apply op \(i\) (recording whether it changed anything), write \(\mathit{ans}[i]=\mathit{total}\), recurse into children, then undo.  Print \(\mathit{ans}[1..q]\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Tree encodes states.} By construction the state after operation \(i\) equals the state of \(\mathit{par}(i)\) with op \(i\) applied: for types 1/2/3, op \(i\) applies to the running state, which after \(i-1\) is version \(i-1\); for type 4, the state after \(i\) is defined to be the state after \(k\), so \(\mathit{par}(i)=k\) and op \(i\) applies nothing.\\
+\textbf{DFS reproduces it.} On entry to \(i\) the bookcase equals \(\mathit{par}(i)\)'s state (induction on the DFS path, since we apply on entry and undo on exit); applying op \(i\) yields exactly version \(i\)'s state, so \(\mathit{ans}[i]=\mathit{total}\) is correct, and every node is visited once.  Undo restores the parent state for the next sibling -- hence the ``did it change'' guard, so a no-op place/remove is not spuriously undone.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 707D: build the version tree, DFS with rollback over per-shelf bitsets and a running total}, label={lst:c19-707-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int Q = 100005, S = 1005;
+int n, m, q;
+bitset<S> shelf[S];           // occupancy per shelf (positions 1..m, m <= 1000)
+int onShelf[S];               // book count on each shelf
+vector<int> child[Q];         // version tree adjacency
+int typ[Q], a[Q], b[Q];       // parsed operations
+long long ans[Q], totalBooks;
+
+int applyOp(int i){                       // returns 1 if it actually changed state
+    if (typ[i]==1){ int s=a[i],p=b[i]; if(!shelf[s][p]){ shelf[s].set(p); onShelf[s]++; totalBooks++; return 1; } }
+    if (typ[i]==2){ int s=a[i],p=b[i]; if( shelf[s][p]){ shelf[s].reset(p); onShelf[s]--; totalBooks--; return 1; } }
+    if (typ[i]==3){ int s=a[i]; shelf[s].flip(); totalBooks += m - 2*onShelf[s]; onShelf[s] = m - onShelf[s]; return 1; }
+    return 0;                             // typ 4: state already = parent k's state
+}
+void undoOp(int i, int did){
+    if (!did) return;
+    if (typ[i]==1){ int s=a[i],p=b[i]; shelf[s].reset(p); onShelf[s]--; totalBooks--; }
+    if (typ[i]==2){ int s=a[i],p=b[i]; shelf[s].set(p); onShelf[s]++; totalBooks++; }
+    if (typ[i]==3){ int s=a[i]; shelf[s].flip(); totalBooks += m - 2*onShelf[s]; onShelf[s] = m - onShelf[s]; }
+}
+void dfs(int v){
+    int did = 0;
+    if (v != 0){ did = applyOp(v); ans[v] = totalBooks; }
+    for (int c : child[v]) dfs(c);
+    if (v != 0) undoOp(v, did);
+}
+int main(){
+    scanf("%d%d%d", &n, &m, &q);
+    for (int i=1;i<=q;i++){
+        scanf("%d", &typ[i]);
+        if (typ[i]==1 || typ[i]==2){ scanf("%d%d",&a[i],&b[i]); child[i-1].push_back(i); }
+        else if (typ[i]==3){ scanf("%d",&a[i]); child[i-1].push_back(i); }
+        else { scanf("%d",&a[i]); child[a[i]].push_back(i); }   // "4 k" -> parent k
+    }
+    dfs(0);
+    for (int i=1;i<=q;i++) printf("%lld\n", ans[i]);
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Samples}
+\begin{tracebox}[CF 707D sample 1: n=2, m=3; ops 1 1 1 / 3 2 / 4 0]
+\(n=2,m=3\), empty bookcase, \(\mathit{total}=0\).\\
+\textbf{op1} ``1 1 1'': place at shelf1 pos1 (was empty) \(\Rightarrow\) total \(=1\). \(\mathit{ans}[1]=\boxed{1}\), parent \(0\).\\
+\textbf{op2} ``3 2'': invert shelf2 (empty \(\to\) all 3 filled) \(\Rightarrow\) total \(=1+3=4\). \(\mathit{ans}[2]=\boxed{4}\), parent \(1\).\\
+\textbf{op3} ``4 0'': parent is version \(0\), op applies nothing \(\Rightarrow\) total at node \(0\) is \(0\). \(\mathit{ans}[3]=\boxed{0}\).\\
+The DFS goes \(0\!\to\!1\!\to\!2\), rolls back to \(0\), then \(0\!\to\!3\), giving \(1,4,0\).  Sample~2 rolls out \(2,1,3,3,2,4\); sample~3 gives \(2,1\) -- both match the official output.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+The version tree has \(q\) nodes; each is entered and rolled back once.  Types 1/2/4 steps are \(O(1)\); a type-3 invert is \(O(m/64)\) on a \code{bitset}.  Total \(\bigO{q\cdot m/64}\approx 10^5\cdot16\) word-ops plus \(O(q)\) edges -- \ac\ within \(2\)s.  Memory \(\bigO{n\cdot m/8 + q}\) \(\approx\) a few MB.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.24\linewidth} p{0.32\linewidth} p{0.34\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+type-4 to \(k{=}0\) & jump to empty & child of root; op applies nothing; answer \(0\)\\
+place on an occupied cell & type-1 is idempotent & guard returns \texttt{did}=0; rollback skips it\\
+invert twice & shelf returns to prior & flip is its own inverse, count via \(m-\text{count}\)\\
+rollback order & undo only \emph{after} children & \code{undoOp} runs after the child loop\\
+\(\mathit{totalBooks}\) size & \(nm\le10^6\) & \code{long long} holds it easily\\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Only undo what you changed.}  A type-1/2 that hit its guard is a no-op; undoing it would flip a cell the operation never touched -- the classic 707D WA.
+  \item \textbf{Type-4 is not ``undo everything after \(k\)}.''  It makes \(i\) a \emph{child} of \(k\); the running timeline continues from there, which is why the structure is a tree explored DFS, not a stack unwound to \(k\).
+  \item \textbf{Do not force a persistent segment tree here.}  Whole-shelf inverts and occupancy-dependent writes defeat a count-only aggregate; recognising the version \emph{tree} is the win.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Why lazy tags refuse to be persistent}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[A pending tag lives in no single version]
+Chapter~20's lazy tag (\chref{c15}) stores an update at node \(v\) that is \emph{folded into \(t_v\) but not yet into \(v\)'s children}.  Persistence insists that every node be immutable and every version a complete, independently readable tree -- but a \(\mathit{tag}_v\) means version \(r\)'s \emph{descendants} are not the truth: their values depend on a pending add sitting at an \emph{ancestor} of \(v\), which belongs to no single version.  To persist a range update you would have to push the tag all the way to the affected leaves at write time (defeating laziness) or record, per version, which tags were live -- both \(\bigO{n}\) in the worst case.  This is precisely the wall Ch.~20 drew at \(\secref{c15-strains}\): range-\emph{update} persistence is a research-grade structure, not path copying, so this chapter keeps updates \emph{point}-wise and hands range tags back to Ch.~20.
+\end{warningbox}
+
+\noindent A short contrast with \emph{rollback} (Ch.~17, \chref{c28}): path copying and rollback both preserve history, on opposite trades.  Path copying \emph{keeps} every version by allocating nodes (random access to any \(r_i\), more memory); rollback \emph{undoes} to a previous version with an action log and \emph{discards} the branches it did not take (constant memory, but only along one DFS path).  CF~707D's version-tree DFS is rollback's showcase; the chairman tree (\(\secref{c19-chairman}\)) is path copying's.
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Did your \code{update} \emph{clone} each path node, or did you wrongly write in place and destroy the old root?
+  \item Is your pool sized \(n + q\log n\) -- not \(4n\)?  Off-by-\(\log\) here is a crash, not a WA.
+  \item In 707D, did you make each type-4 operation's version a \emph{child} of \(k\) (not a rewind of a linear stack)?
+  \item Does your rollback fire only when the operation actually changed state?
+  \item Did you keep per-cell state where the update depends on occupancy, instead of only a count aggregate?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Professor's task}{CF 70D}
+    {https://codeforces.com/problemset/problem/70/D}
+    {CF 2700 L5}
+    {Points are added one at a time (a growing set); after each insert you answer a query about the convex hull of \emph{the versions so far} by binary-searching for a tangent point.  Persist a segment tree over the \(x\)-sorted points: each insert path-copies \(O(\log n)\) nodes into a fresh root, and you binary-search over chosen version roots -- a direct, sequential-line sibling of \(\coderef{c19-pseg}\).  Budget the pool for \(q\log n\) nodes; sizing it like a mutable \(4n\) is the intended trap.}
+  \practice{Powerful array}{CF 86D}
+    {https://codeforces.com/problemset/problem/86/D}
+    {CF 2200 L4}
+    {Given \(a[1..n]\) and queries \((L,R)\), value \(=\sum_v v\cdot\mathrm{freq}(v)^2\) over \(a[L..R]\).  This is range state read many ways; the clean solution is Mo's offline ordering (forward-cite Ch.~27, \chref{c21}), but before looking it up, ask the persistence question: could you path-copy a structure to answer any \((L,R)\) directly, and why does the \(\mathrm{freq}^2\) combine resist an \(O(\log n)\)-node update?  Contrast with \(\coderef{c19-pseg}\) to see exactly which updates a persistent tree absorbs in \(O(\log n)\).}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+Chapter~11 (\chref{c08}, \defref{c08-persistent}) taught the path-copy spine on a trie; this section generalises it to the segment tree, and is why Ch.~11 deferred the ``full persistence abstraction'' here.  Chapter~19 (\chref{c13}) owns the interval geometry and \(\coderef{c13-update}\)/\(\coderef{c13-query}\) whose shape \(\coderef{c19-pseg}\) mirrors.  Forward: \(\secref{c19-chairman}\) is path copying with the versions chosen for you (prefix \(A[1..i]\)); \(\secref{c19-ontrees}\) plants these roots on a tree; Ch.~20 (\(\secref{c15-strains}\)) is the range-tag wall the last subsection stands on; Ch.~17 (\chref{c28}) generalises CF~707D's DFS-with-rollback as partial persistence.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 21.2 in 10 seconds]
+Persistence = never overwrite: \emph{clone} the root-to-leaf path (\(\lceil\log_2 n\rceil{+}1\) nodes) and \emph{share} every off-path child; old roots stay whole trees.  A version is one root pointer; point update \emph{and} query are \(\bigO{\log n}\).  The pool must be sized \(\bigO{n+q\log n}\) (the \(4n\) of one mutable tree dies).  Fat nodes are the per-slot-list alternative.  When an operation says ``return to version \(k\),'', versions form a \emph{tree}: DFS it with one mutable structure + rollback (CF~707D, \(\coderef{c19-707-soln}\)) rather than forcing a persistent segment tree.  Lazy tags (\chref{c15}) do not persist -- a pending tag belongs to no single version.
+\selftest{
+  \item How many nodes does one point update path-copy on a \(16\)-leaf tree, and which ones on the \(A[3]=9\) act?
+  \item Why is \(\bigO{n+q\log n}\) the pool budget and \(4n\) wrong?
+  \item In CF~707D, why is a type-4 operation's version a child of \(k\) rather than a rewind of a linear timeline?
+  \item Give the one-line reason a Ch.~20 lazy tag cannot be path-copied cheaply.
+  \item Name the two persistence mechanisms and the memory/access trade between them.
+}
+\end{recallbox}

@@ -1,0 +1,1300 @@
+# Complexity Analysis {#sec-complexity}
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 2–4 (growth of functions, recurrences, master theorem), ch. 16 (amortized analysis) · **Erickson** *Algorithms* ch. 1 (recursion trees), App. II (solving recurrences) · **CPH** ch. 2 (time complexity, estimating efficiency) · **CP-Algorithms**: master theorem, Akra–Bazzi.
+
+**Coverage:** O/Ω/Θ/o/ω and the limit test · growth-rate ladder · best/worst/average and expected cost · loop analysis (nested, dependent, logarithmic, √n, harmonic, log log n) · recurrences (substitution, recursion tree, master theorem, subtract-and-conquer, Akra–Bazzi) · amortized analysis (aggregate, accounting, potential) · space and the recursion stack · input-size → complexity table · hidden costs of library operations · pseudo-polynomial time · constant factors and the memory hierarchy.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Read a problem's constraints and name the complexity the intended solution must have before writing any code.
+- Count the work done by any loop nest, including dependent bounds, $\sqrt n$ loops, harmonic loops over multiples, and loops whose counter grows geometrically.
+- Solve divide-and-conquer recurrences with the recursion tree and the master theorem, and recognise when neither applies.
+- Prove amortized bounds with the aggregate, accounting and potential methods, and spot amortized $O(1)$ inner loops.
+- Account for space, including the recursion stack, and for hidden costs such as string slicing, list membership tests and hash collisions.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import deque
+from functools import lru_cache
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters
+
+::: {.callout-note title="First time seeing big-O? Skim this line first"}
+Big-O is just a *way of talking* about how fast a program's work grows as the input gets bigger. It is not a number of seconds and it is not a quiz on Greek letters — you only need to *recognise* the symbols, not memorise their proofs. Take the chapter slowly, run the code cells, and come back to any section a later chapter leans on.
+:::
+
+Think about what actually happens when you solve a problem. You write some code, it gives the right answer, and you feel good — and then the judge replies **Time Limit Exceeded**. Nothing is wrong with your *logic*; the program is simply too slow on large inputs. That is the whole idea behind complexity: it is the language we use to describe how fast a program slows down as its input grows.
+
+It earns its keep in two places. In an **interview**, every answer ends with "and the complexity is …," and naming the right figure shows you understand your own code. In a **contest**, the constraints quietly tell you how fast the answer has to be: if $n$ is $2\cdot10^5$, then a correct $O(n^2)$ program does around $4\cdot10^{10}$ steps and never finishes, so "correct but slow" really means "wrong."
+
+Learning to read complexity hands you three practical powers:
+
+1. **A budget.** From $n$ and the time limit, you know roughly how many operations you are allowed to spend (@sec-cx-budget).
+2. **A filter.** You can reject an idea in ten seconds — before coding it — just because its complexity cannot possibly fit the budget.
+3. **A shared language.** Phrases like "amortized $O(1)$", "$O(n \log n)$ expected", and "$O(h)$ stack space" are precise claims an interviewer can check on the spot.
+
+Here is the plan. We build the tools one at a time — the notation, counting loops, solving recurrences, amortized analysis, and space — and then turn them into six patterns, each worked through with fully solved problems. Nothing here is a leap you cannot follow. If a step ever feels too fast, run the code cell right beneath it and watch the idea happen.
+
+## Asymptotic notation {#sec-cx-notation}
+
+Let us begin with the core idea. We describe an algorithm's cost as a function $T(n)$: for an input of size $n$, how many basic steps does the program take? A "basic step" is something small and fixed — one comparison, one addition, one read from memory. Unless we say otherwise, we count the worst case, because that is exactly what the judge will try to hand you.
+
+Counting every single step would be hopeless, and worse, pointless: the exact total changes with your machine, your compiler, even your language. So we deliberately throw the fine print away. We drop constant multipliers and small terms and keep only the part that keeps **growing** — the growth rate. That is why $2n^2$ and $100n^2 + 5n$ count as "the same": once $n$ is large, the $n^2$ is all that matters.
+
+### Definitions
+
+::: {.callout-important title="The five asymptotic relations"}
+For non-negative functions $f, g$ of $n$:
+
+| Notation | Meaning | Formal definition |
+|---|---|---|
+| $f = O(g)$ | $f$ grows **at most** like $g$ | $\exists\, c>0, n_0$: $f(n) \le c\,g(n)$ for all $n \ge n_0$ |
+| $f = \Omega(g)$ | $f$ grows **at least** like $g$ | $\exists\, c>0, n_0$: $f(n) \ge c\,g(n)$ for all $n \ge n_0$ |
+| $f = \Theta(g)$ | same growth | $f = O(g)$ and $f = \Omega(g)$ |
+| $f = o(g)$ | **strictly** slower | for **every** $c>0$ $\exists\, n_0$: $f(n) < c\,g(n)$ for $n \ge n_0$ |
+| $f = \omega(g)$ | **strictly** faster | $g = o(f)$ |
+:::
+
+::: {.callout-note title="In plain words"}
+Read the symbols as comparisons of *how fast things grow*, not as exact times:
+
+- $O(g)$ — "**no worse than** $g$": a safe upper limit. A program that is $O(n\log n)$ will never blow past $n\log n$ once $n$ is large.
+- $\Omega(g)$ — "**no better than** $g$": a lower limit. You cannot beat it in general.
+- $\Theta(g)$ — "**about** $g$": the upper and lower limits match, so this is the tight, honest answer.
+- $o(g)$ and $\omega(g)$ — the *strict* versions: "definitely smaller" and "definitely bigger", the steps $\prec$ on the ladder below.
+
+In interviews, when someone says "it runs in $O(n^2)$" they almost always *mean* $\Theta(n^2)$. Use $\Theta$ when you can and you will never sound vague.
+:::
+
+If you like a shortcut, read the five symbols as the ordinary comparisons you already know: $O$ behaves like $\le$, $\Omega$ like $\ge$, $\Theta$ like $=$, and $o$ and $\omega$ like the strict $<$ and $>$. One wrinkle is worth knowing early. Any two *numbers* can be compared, but two *functions* sometimes cannot. Take $f(n) = n$ and $g(n) = n^{1+\sin n}$: the ratio between them keeps swinging up and down forever, so neither $f = O(g)$ nor $g = O(f)$ is true.
+
+A second thing trips up nearly everyone: the "=" in $f = O(g)$ is not real equality. It secretly means "$f$ belongs to the *set* of functions that grow no faster than $g$", that is, $f \in O(g)$. Because it is membership and not equality, the direction matters. You may write $n = O(n^2)$, but writing $O(n^2) = n$ is nonsense, and $n^2 \ne O(n)$ shows the relation is not symmetric.
+
+### Proving a bound from the definition
+
+Definitions look intimidating, so let's use one immediately and see that it is not frightening. Suppose a program really does $3n^2 + 10n + 7$ steps. Is that genuinely $\Theta(n^2)$, or are the small terms hiding something? We answer by proving it in both directions, one half at a time.
+
+**Claim.** $3n^2 + 10n + 7 = \Theta(n^2)$.
+
+*Upper bound* (the $O$ half). We must show the whole expression never outruns a fixed multiple of $n^2$. Once $n \ge 1$, the small terms are easy to swallow: $10n \le 10n^2$ and $7 \le 7n^2$. Adding them on gives $3n^2 + 10n + 7 \le 20 n^2$, so this holds with $c = 20$ from $n_0 = 1$ onward.
+
+*Lower bound* (the $\Omega$ half). Almost free: for $n \ge 1$ every term is positive, so $3n^2 + 10n + 7 \ge 3n^2$ by itself. Take $c = 3$, $n_0 = 1$. $\blacksquare$
+
+Look at what we actually did — we just folded the leftover terms into the $n^2$. The very same three lines work for **any polynomial**: as long as the top term is $n^d$, the answer is $\Theta(n^d)$, since each smaller term $a_i n^i$ can be bounded by $|a_i| n^d$. This is the single most common proof you will ever write, and it is never harder than this.
+
+### The limit test
+
+Proving bounds straight from the definition, as we just did, always works but is slow. In practice you will reach for a shortcut: take the ratio of the two functions and simply watch where it goes as $n$ grows toward infinity. If the ratio shrinks to $0$, the top is the smaller function; if it settles on a fixed number, they are tied; if it runs off to infinity, the top is the bigger one. Formally, if $L = \lim_{n\to\infty} f(n)/g(n)$ exists, then
+
+$$
+\begin{cases}
+f = o(g) & \text{if } L = 0,\\
+f = \Theta(g) & \text{if } 0 < L < \infty,\\
+f = \omega(g) & \text{if } L = \infty.
+\end{cases}
+$$ {#eq-cx-limit}
+
+Use L'Hôpital's rule for logs and exponentials. For example, $\lim \frac{\ln n}{n^{\varepsilon}} = \lim \frac{1/n}{\varepsilon n^{\varepsilon-1}} = \lim \frac{1}{\varepsilon n^\varepsilon} = 0$, so **every power of $n$ beats every logarithm**: $\log^k n = o(n^\varepsilon)$ for any $k$ and any $\varepsilon > 0$. Similarly $n^k = o(c^n)$ for any $c > 1$: **every exponential beats every polynomial**.
+
+The converse fails: the limit may not exist even when $f = \Theta(g)$. For $f(n) = (2 + (-1)^n)\,n$, the ratio $f/n$ alternates between 1 and 3, yet $f = \Theta(n)$.
+
+### Useful facts
+
+- **Bases of logarithms do not matter inside $O$:** $\log_a n = \frac{\log_b n}{\log_b a}$, a constant factor. We write $\log n$.
+- **Bases of exponentials do matter:** $2^n = o(3^n)$, since $2^n/3^n = (2/3)^n \to 0$.
+- **Sum rule:** $O(f) + O(g) = O(\max(f, g))$. **Product rule:** $O(f) \cdot O(g) = O(fg)$.
+- **Stirling:** $\log(n!) = \Theta(n \log n)$. Proof: $n! \le n^n$ gives the upper bound; the top half of the factors are each $\ge n/2$, so $n! \ge (n/2)^{n/2}$, giving $\log n! \ge \frac n2 \log \frac n2$.
+- **Harmonic numbers:** $H_n = \sum_{k=1}^n \frac1k = \ln n + O(1)$.
+- **Geometric series:** $\sum_{k=0}^{m} r^k = \Theta(r^m)$ if $r > 1$, $\Theta(1)$ if $r < 1$, and $m+1$ if $r = 1$. "The largest term dominates" when terms grow geometrically.
+
+### The growth-rate ladder
+
+It helps to line the common growth rates up on a ladder, slowest at the top. Each rung is strictly smaller (little-$o$) than the one below it, so you can tell at a glance which of two algorithms wins just by seeing where each one sits:
+
+$$
+\begin{aligned}
+&1 \;\prec\; \log^* n \;\prec\; \log\log n \;\prec\; \log n \;\prec\; \sqrt n \;\prec\; n \\
+&\quad\prec\; n\log n \;\prec\; n^2 \;\prec\; n^3 \;\prec\; 2^n \;\prec\; n! \;\prec\; n^n
+\end{aligned}
+$$
+
+Most of these names you already know. The odd one out is $\log^* n$, read as "log star", which counts how many times in a row you can take $\log_2$ before the value drops to 1 or below. It sounds dramatic but grows absurdly slowly: for any $n$ you will ever type into a program, $\log^* n$ is at most 5. You will meet it again in the analysis of union–find, and that is really the only place it turns up.
+
+::: {#fig-cx-growth}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+n = np.arange(1, 61)
+fs = {
+    r"$\log n$": np.log2(n), r"$\sqrt{n}$": np.sqrt(n), r"$n$": n, r"$n\log n$": n * np.log2(n),
+    r"$n^2$": n**2.0, r"$n^3$": n**3.0, r"$2^n$": 2.0**n,
+}
+def growth(ax, p):
+    for (label, y), c in zip(fs.items(), ["muted", "cyan", "green", "indigo", "amber", "pink", "red"]):
+        ax.plot(n, np.maximum(y, 1), label=label, lw=2, color=p[c])
+    ax.axhline(1e8, ls="--", c=p["line"], lw=1)
+    ax.set_yscale("log"); ax.set_xlabel("n"); ax.set_ylabel("steps")
+    ax.legend(ncol=2, fontsize=8)
+V.plot(growth)
+```
+
+Common growth rates on a log scale. Above about 10^8 (dashed), a solution will not finish in one second.
+
+:::
+
+```{python}
+#| label: cx-ladder-check
+# Check the ladder numerically at a large n: each function is far below the next.
+def log_star(x):
+    k = 0
+    while x > 1:
+        x, k = math.log2(x), k + 1
+    return k
+
+N = 2.0**64
+ladder = [log_star(N), math.log2(math.log2(N)), math.log2(N), math.sqrt(N), N, N * math.log2(N), N**2]
+assert all(a < b for a, b in zip(ladder, ladder[1:]))
+assert log_star(2**16) == 4 and log_star(65536.0**2) == 5
+print([f"{v:.3g}" for v in ladder])
+```
+
+### Best, worst, average, expected and amortized
+
+The phrase "the complexity" actually hides several different questions you can ask about one and the same algorithm, and people mix them up constantly. The habit to build is to always say *which* one you mean. The table contrasts them using quicksort, played twice: once with a fixed way of choosing a pivot and once with a random one:
+
+| Measure | Question | Quicksort with a fixed pivot | Quicksort with a random pivot |
+|---|---|---|---|
+| Worst case | Max over inputs of size $n$ | $\Theta(n^2)$ (sorted input) | $\Theta(n^2)$, but with tiny probability |
+| Best case | Min over inputs | $\Theta(n \log n)$ | $\Theta(n \log n)$ |
+| Average case | Mean over a **distribution of inputs** (e.g. random permutations) | $\Theta(n \log n)$ | $\Theta(n \log n)$ |
+| Expected | Mean over the algorithm's **own coin flips**, worst input | — | $\Theta(n \log n)$ for **every** input |
+| Amortized | Worst-case total of a **sequence** of operations, divided by its length | — | — |
+
+Three of these are easy to confuse, so here is the distinction that actually matters:
+
+- **Average case** assumes something about your *inputs* ("suppose the array is random…"). That assumption can be violated — a careful adversary, or a Codeforces hacker, will hand you the worst input on purpose.
+- **Expected** case assumes nothing about the input at all. The randomness lives *inside your algorithm* (say, flipping a coin to pick a pivot), so no fixed input can be unlucky for you every single time.
+- **Amortized** case has no probability anywhere in it. It is a hard guarantee about a *sequence* of operations: no matter how the individual steps fall, the total cost of $m$ operations never exceeds $m$ times the amortized bound (@sec-cx-amortized).
+
+## Analysing loops {#sec-cx-loops}
+
+Notation shows how to *describe* a cost; now we need to *measure* one in code you would actually write. Almost every non-recursive program is some nest of loops, and costing a loop nest is refreshingly down-to-earth: for each iteration, add up the work done in the body, then put all those pieces together. In other words, turn the loops into a sum and evaluate it. The shapes below cover nearly everything you will meet, so it pays to recognise them on sight:
+
+### The standard shapes
+
+| Loop shape | Iterations | Why |
+|---|---|---|
+| `for i in range(n): for j in range(n)` | $n^2$ | product |
+| `for i in range(n): for j in range(i)` | $\frac{n(n-1)}{2} = \Theta(n^2)$ | $\sum_{i<n} i$ |
+| `i = 1; while i < n: i *= 2` | $\lceil \log_2 n \rceil$ | after $k$ steps $i = 2^k$ |
+| `i = n; while i > 0: i //= 2` | $\lfloor \log_2 n \rfloor + 1$ | halving |
+| `i = 1; while i * i <= n: i += 1` | $\lfloor\sqrt n\rfloor$ | stops at $i > \sqrt n$ |
+| `for i in 1..n: for j in i, 2i, 3i, … ≤ n` | $\sum_i \lfloor n/i \rfloor = n H_n = \Theta(n \log n)$ | harmonic sum |
+| `i = 2; while i < n: i = i * i` | $\Theta(\log \log n)$ | $i = 2^{2^k}$ |
+| `for i in range(n): j = 1; while j < i: j *= 2` | $\sum_i \log i = \Theta(n \log n)$ | Stirling |
+| `for s in range(1 << n): for b in range(n)` | $n\,2^n$ | all subsets times $n$ |
+
+Two simple rules catch most of the mistakes people make when counting loops:
+
+1. **Only loops *inside* other loops multiply.** If one loop runs *after* another, you add their costs, so $O(n) + O(n) = O(n)$ — never $O(n^2)$. You multiply only for genuine nesting.
+2. **For an inner loop, watch its counter across the whole run, not one outer step.** This is the classic trap: an inner `while` may look like it costs $O(n)$ each time, but if it only pushes a pointer forward and that pointer *never comes back*, then over the entire outer loop it takes at most $n$ steps in total. The whole nest is then $O(n)$, not $O(n^2)$. You will meet this trick again and again (@sec-cx-p3), and @sec-cx-amortized explains exactly why it works.
+
+### Counting with code
+
+It is easy to reason yourself into the wrong answer, so when in doubt, simply *count*. The cell below runs each loop for small $n$, tallies the iterations exactly, and checks the tally against the formula we claim — if the two agree, you can trust the analysis:
+
+```{python}
+#| label: cx-loop-counts
+def count_dependent(n):
+    return sum(1 for i in range(n) for j in range(i))
+
+def count_doubling(n):
+    i, c = 1, 0
+    while i < n:
+        i, c = i * 2, c + 1
+    return c
+
+def count_sqrt(n):
+    i, c = 1, 0
+    while i * i <= n:
+        i, c = i + 1, c + 1
+    return c
+
+def count_harmonic(n):
+    return sum(len(range(i, n + 1, i)) for i in range(1, n + 1))
+
+def count_squaring(n):
+    i, c = 2, 0
+    while i < n:
+        i, c = i * i, c + 1
+    return c
+
+for n in [10, 100, 1000, 4096]:
+    assert count_dependent(n) == n * (n - 1) // 2
+    assert count_doubling(n) == math.ceil(math.log2(n))
+    assert count_sqrt(n) == math.isqrt(n)
+    assert count_harmonic(n) == sum(n // i for i in range(1, n + 1))
+    # n*H_n is within n of n ln n + 0.5772 n
+    assert abs(count_harmonic(n) - (n * math.log(n) + 0.5772 * n)) <= n
+    assert count_squaring(n) == math.ceil(math.log2(math.log2(n)))
+
+print({n: (count_dependent(n), count_doubling(n), count_sqrt(n), count_harmonic(n), count_squaring(n))
+       for n in [1000, 4096]})
+```
+
+::: {#fig-cx-harmonic}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    n = 10
+    rows = [[str(j) if j % i == 0 else "" for j in range(1, n + 1)] for i in range(1, n + 1)]
+    colors = {(i - 1, j - 1): "indigo" for i in range(1, n + 1) for j in range(i, n + 1, i)}
+    total = sum(n // i for i in range(1, n + 1))
+    assert total == len(colors) == count_harmonic(n)
+    V.grid(ax, p, rows, row_labels=[f"i = {i}" for i in range(1, n + 1)], colors=colors, size=9)
+    V.text(ax, p, n + 0.6, -n / 2 + 1, f"{total} visits\nvs n² = {n * n}", ha="left", color="violet")
+V.show(draw)
+```
+
+The harmonic loop for n = 10: row i visits the multiples of i. Row i has ⌊n/i⌋ cells, so the total is about n·ln n, far fewer than the n² cells of a full double loop.
+
+:::
+
+### Worked example 1: a loop that looks quadratic
+
+```python
+j = 0
+for i in range(n):
+    while j < n and a[j] < a[i] + k:
+        j += 1
+```
+
+At first glance this one looks quadratic, and most people call it $O(n^2)$ — which is wrong. The temptation is to reason: "the `while` can run up to $n$ times for a single `i`, and there are $n$ values of $i$, so $n$ times $n$." But hold onto rule 2 above. The pointer `j` only ever moves forward and never passes $n$, so across the *entire* run — no matter how the `for` loop is arranged — the `while` body executes at most $n$ times in all. Add the $O(n)$ for the outer loop itself and everything together is $O(n)$, not $O(n^2)$. This is really the aggregate method from @sec-cx-amortized wearing a disguise.
+
+### Worked example 2: the triple loop with a shrinking range
+
+```python
+for i in range(n):
+    for j in range(i, n):
+        for k in range(i, j + 1):
+            work()
+```
+
+One glance can mislead you here, but the honest count is cubic. The innermost body runs once for every $k$ from $i$ up to $j$, so the total is $\sum_{i=0}^{n-1} \sum_{j=i}^{n-1} (j - i + 1) = \sum_{i} \sum_{L=1}^{n-i} L = \sum_{m=1}^{n} \frac{m(m+1)}{2} = \frac{n(n+1)(n+2)}{6} = \Theta(n^3)$. There is also a prettier way to see the same number with no algebra at all: the three nested loops simply pick indices that obey $1 \le i \le k \le j \le n$, and the count of those is "$n$ choose $3$ with repetition", or $\binom{n+2}{3}$. The cell below counts it by hand and agrees:
+
+```{python}
+#| label: cx-triple
+def count_triple(n):
+    return sum(j - i + 1 for i in range(n) for j in range(i, n))
+
+assert all(count_triple(n) == math.comb(n + 2, 3) for n in range(0, 40))
+```
+
+### Worked example 3: logarithmic inner loop
+
+```python
+for i in range(1, n + 1):
+    j = i
+    while j > 0:
+        j //= 2
+```
+
+For one fixed $i$, halving $j$ down to 0 takes $\lfloor \log_2 i \rfloor + 1$ steps, so the whole nest costs $\sum_{i=1}^{n} (\lfloor \log_2 i\rfloor + 1) = \Theta(\log n!) = \Theta(n \log n)$, where the last jump uses Stirling's fact from the list above. And this is the true cost, not merely an upper limit: at least half of the values of $i$ are $\ge n/2$, each contributing about $\log n$ steps on its own, so the total can never drop below $n \log n$. The bound is tight.
+
+## Recurrences {#sec-cx-recurrences}
+
+Loops were easy because you could watch the counters change. Recursive programs need a fresh tool, because there is no loop to count — the work is hidden inside repeated self-calls. We describe them with a **recurrence**: an equation that writes the cost for size $n$ in terms of the cost for *smaller* sizes. Take the classic example, merge sort. It cuts the array in half, sorts each half by calling itself, and then stitches the two sorted halves back together in linear time. As a recurrence, that reads:
+
+$$
+T(n) = 2T(n/2) + \Theta(n), \qquad T(1) = \Theta(1).
+$$
+
+Four methods will settle almost every recurrence you meet, and each one gives a different kind of intuition. We begin with the most visual.
+
+### Method 1: the recursion tree
+
+**The idea.** Picture the recursion as a tree hanging upside down from the very first call. Each node is one call, and beside it we write only the work that call does *by itself*, not counting the sub-calls it makes. Then we add that work up one level at a time, and the total cost simply falls out.
+
+Let us run it on merge sort's $T(n) = 2T(n/2) + cn$. Pick any level, say level $\ell$. By the time you reach it, the tree has doubled $\ell$ times, so it holds $2^\ell$ nodes; each node works on a slice of size $n/2^\ell$, and each spends $c\,n/2^\ell$ doing its own work. Now multiply those together and something delightful happens: the $2^\ell$ cancels, and *every single level* contributes exactly $cn$. The tree is $\log_2 n + 1$ levels tall, so the total is $T(n) = cn(\log_2 n + 1) = \Theta(n \log n)$. The same cost on every level, times $\log n$ levels — that is where the $\log n$ in $n\log n$ truly comes from.
+
+Once you can *see* the tree, three patterns explain nearly everything, and they depend only on what the work does as you walk downward:
+
+- If the work **grows** as you go down, the bottom tells the whole story: the **leaves** dominate.
+- If the work **stays the same** on every level, the answer is just (work per level) $\times$ (number of levels) — exactly the merge-sort case above.
+- If the work **shrinks** as you go down, the top tells the whole story: the **root** dominates.
+
+Hold these three pictures in mind, because the famous master theorem is nothing more than the very same observation written down once and for all.
+
+::: {#fig-cx-recursion-tree}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def build(n):
+    return V.Node(str(n), [] if n == 1 else [build(n // 2), build(n // 2)], color="indigo" if n > 1 else "green")
+def draw(ax, p):
+    V.tree(ax, p, build(8), dx=1.1, level_notes=["8", "4 + 4 = 8", "2 · 4 = 8", "1 · 8 = 8"])
+V.show(draw)
+```
+
+Recursion tree of T(n) = 2T(n/2) + n for n = 8. Each node shows its input size, which is also the work it does outside the recursive calls. Every level sums to n, and there are log₂ n + 1 levels.
+
+:::
+
+### Method 2: the master theorem
+
+::: {.callout-important title="Master theorem"}
+Let $T(n) = a\,T(n/b) + f(n)$ with constants $a \ge 1$, $b > 1$. Compare $f(n)$ with $n^{\log_b a}$, the total work at the leaves:
+
+1. If $f(n) = O(n^{\log_b a - \varepsilon})$ for some $\varepsilon > 0$ (leaves dominate): $T(n) = \Theta(n^{\log_b a})$.
+2. If $f(n) = \Theta(n^{\log_b a} \log^k n)$ with $k \ge 0$ (balanced): $T(n) = \Theta(n^{\log_b a} \log^{k+1} n)$.
+3. If $f(n) = \Omega(n^{\log_b a + \varepsilon})$ for some $\varepsilon > 0$, **and** the regularity condition $a f(n/b) \le c f(n)$ holds for some $c < 1$ (root dominates): $T(n) = \Theta(f(n))$.
+:::
+
+*Proof sketch.* The recursion tree has $\log_b n$ levels, level $\ell$ has $a^\ell$ nodes of size $n/b^\ell$, and there are $a^{\log_b n} = n^{\log_b a}$ leaves. The total is $\Theta(n^{\log_b a}) + \sum_{\ell=0}^{\log_b n - 1} a^\ell f(n/b^\ell)$. In case 1 the sum is geometric and increasing, so it is dominated by its last term, the leaves. In case 2 every term is about $n^{\log_b a}\log^k n$, and there are $\log_b n$ terms. In case 3 the regularity condition makes the sum geometric and decreasing, dominated by its first term $f(n)$. The full proof (including floors and ceilings) is CLRS §4.6.
+
+| Recurrence | Algorithm | $a, b, f$ | $n^{\log_b a}$ | Case | Result |
+|---|---|---|---|---|---|
+| $T(n) = T(n/2) + O(1)$ | binary search, fast power | 1, 2, 1 | $1$ | 2, $k=0$ | $\Theta(\log n)$ |
+| $T(n) = 2T(n/2) + O(1)$ | tree traversal, max by halving | 2, 2, 1 | $n$ | 1 | $\Theta(n)$ |
+| $T(n) = 2T(n/2) + O(n)$ | merge sort | 2, 2, $n$ | $n$ | 2, $k=0$ | $\Theta(n \log n)$ |
+| $T(n) = 2T(n/2) + O(n\log n)$ | naive closest pair | 2, 2, $n\log n$ | $n$ | 2, $k=1$ | $\Theta(n \log^2 n)$ |
+| $T(n) = 3T(n/2) + O(n)$ | Karatsuba | 3, 2, $n$ | $n^{1.585}$ | 1 | $\Theta(n^{1.585})$ |
+| $T(n) = 7T(n/2) + O(n^2)$ | Strassen | 7, 2, $n^2$ | $n^{2.807}$ | 1 | $\Theta(n^{2.807})$ |
+| $T(n) = 8T(n/2) + O(n^2)$ | naive block matrix multiply | 8, 2, $n^2$ | $n^3$ | 1 | $\Theta(n^3)$ |
+| $T(n) = T(n/2) + O(n)$ | quickselect (good pivots) | 1, 2, $n$ | $1$ | 3 | $\Theta(n)$ |
+| $T(n) = 2T(n/2) + O(n^2)$ | — | 2, 2, $n^2$ | $n$ | 3 | $\Theta(n^2)$ |
+
+::: {#fig-cx-master-regimes}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+L = 10
+levels = np.arange(L + 1)
+cases = {
+    "3T(n/2) + n   (case 1)": [3**l * 2**(L - l) for l in levels],
+    "2T(n/2) + n   (case 2)": [2**l * 2**(L - l) for l in levels],
+    "2T(n/2) + n²  (case 3)": [2**l * 4**(L - l) for l in levels],
+}
+assert len(set(cases["2T(n/2) + n   (case 2)"])) == 1          # flat: n on every level
+def regimes(ax, p):
+    w = 0.27
+    for k, ((name, work), c) in enumerate(zip(cases.items(), ["pink", "indigo", "green"])):
+        ax.bar(levels + (k - 1) * w, work, w, label=name, color=p["soft"][c], edgecolor=p[c])
+    ax.set_yscale("log"); ax.set_xlabel("level (0 = root)"); ax.set_ylabel("work on the level")
+    ax.legend(fontsize=8)
+V.plot(regimes)
+```
+
+Work on each level of the recursion tree for n = 2^10 in the three cases: growing towards the leaves (case 1), the same on every level (case 2), shrinking away from the root (case 3).
+
+:::
+
+**When it does not apply.** The master theorem is a powerful hammer, but plenty of recurrences are not nails, so always check before you swing. Two conditions catch people out. First, cases 1 and 3 demand a genuine *polynomial* gap (that $\varepsilon$); a gap that is only a logarithmic factor is not enough. For example $T(n) = 2T(n/2) + n/\log n$ slides between cases 1 and 2 and the theorem says nothing — yet the recursion tree still handles it, giving $\sum_\ell \frac{n}{\log n - \ell} = n H_{\log n} = \Theta(n \log\log n)$. Second, the shape must be exactly $a$ equal pieces of size $n/b$: the theorem does not cover unequal splits like $T(n) = T(n/3) + T(2n/3) + n$, recurrences that *subtract* instead of divide like $T(n) = T(n-1) + n$, or a branching factor $a$ that is not a constant.
+
+```{python}
+#| label: cx-master
+def master(a, b, f_deg, f_log=0):
+    """Solve T(n) = a T(n/b) + Theta(n^f_deg log^f_log n). Returns (deg, log_power) of the answer."""
+    crit = math.log(a, b)
+    if abs(f_deg - crit) < 1e-12:
+        return (crit, f_log + 1)          # case 2
+    if f_deg < crit:
+        return (crit, 0)                  # case 1
+    return (f_deg, f_log)                 # case 3 (regularity holds for polynomial f)
+
+assert master(1, 2, 0) == (0, 1)         # binary search: log n
+assert master(2, 2, 1) == (1, 1)         # merge sort: n log n
+assert master(2, 2, 0) == (1, 0)         # traversal: n
+assert master(2, 2, 1, 1) == (1, 2)      # n log^2 n
+assert abs(master(3, 2, 1)[0] - 1.58496) < 1e-4
+assert master(1, 2, 1) == (1, 0)         # quickselect: n
+
+
+def T(n, a, b, f, memo):
+    if n <= 1:
+        return 1
+    if n not in memo:
+        memo[n] = a * T(n // b, a, b, f, memo) + f(n)
+    return memo[n]
+
+# Numerical check: the ratio T(n) / predicted settles to a constant.
+for a, b, f, pred in [(2, 2, lambda n: n, lambda n: n * math.log2(n)),
+                      (3, 2, lambda n: n, lambda n: n ** math.log2(3)),
+                      (1, 2, lambda n: n, lambda n: n)]:
+    r = [T(2**k, a, b, f, {}) / pred(2**k) for k in (16, 18, 20)]
+    assert max(r) / min(r) < 1.15, r
+```
+
+### Method 3: substitution (guess and prove by induction)
+
+The last method is the most manual but the most trustworthy, because it works even when the other three fail. You *guess* an answer, then *prove* it with strong induction, keeping every constant fully explicit so nothing can hide inside big-Oh.
+
+**Claim.** $T(n) = 2T(\lfloor n/2 \rfloor) + n$ with $T(1) = 1$ satisfies $T(n) \le n \log_2 n + n$ for $n \ge 1$.
+
+*Base.* $T(1) = 1 \le 0 + 1$.
+
+*Step.* Assume the bound for all $m < n$. With $m = \lfloor n/2 \rfloor \le n/2$:
+$T(n) \le 2(m \log_2 m + m) + n \le 2\cdot\frac n2(\log_2 n - 1) + n + n = n\log_2 n + n$. $\blacksquare$
+
+One trap breaks more induction proofs than everything else combined, so let's name it now. Imagine trying to "prove" $T(n) = O(n)$ for merge sort's recurrence by writing $T(n) \le 2(cn/2) + n = cn + n$. It looks like it worked, but look closer: you ended with $cn + n$, not the $cn$ your hypothesis assumed. The constant quietly grew, which means nothing was actually proven. The rule is unforgiving — your induction step must come back with the *very same* constant you started with; if it does not, strengthen the guess (subtract a small lower-order term) and try again.
+
+### Method 4: subtract-and-conquer and unrolling
+
+Everything so far *divided* the input at each step. Some recurrences instead *subtract* a little each call, like $T(n) = T(n-1) + \dots$, and the master theorem cannot touch those. The trick here is to simply unroll the recurrence — write out $T(n)$, then $T(n-1)$, then $T(n-2)$, and let the pattern reveal itself. A handful show up constantly:
+
+- $T(n) = T(n-1) + O(1) = O(n)$: linear recursion, e.g. recursive sum of a list.
+- $T(n) = T(n-1) + O(n) = O(n^2)$: selection sort, quicksort's worst case.
+- $T(n) = 2T(n-1) + O(1) = O(2^n)$: Tower of Hanoi (exactly $2^n - 1$ moves).
+- $T(n) = T(n-1) + T(n-2) + O(1) = \Theta(\varphi^n)$ with $\varphi \approx 1.618$: naive Fibonacci.
+
+::: {.callout-important title="Master theorem for subtract-and-conquer"}
+If $T(n) = a\,T(n - b) + O(n^k)$ with $a > 0$, $b > 0$, $k \ge 0$, then
+$T(n) = O(n^k)$ if $a < 1$, $\;O(n^{k+1})$ if $a = 1$, $\;O(n^k a^{n/b})$ if $a > 1$.
+:::
+
+```{python}
+#| label: cx-hanoi
+def hanoi(n, src="A", dst="C", via="B", moves=None):
+    if moves is None:
+        moves = []
+    if n:
+        hanoi(n - 1, src, via, dst, moves)
+        moves.append((src, dst))
+        hanoi(n - 1, via, dst, src, moves)
+    return moves
+
+assert all(len(hanoi(n)) == 2**n - 1 for n in range(12))
+
+calls = 0
+def fib_naive(n):
+    global calls
+    calls += 1
+    return n if n < 2 else fib_naive(n - 1) + fib_naive(n - 2)
+
+# The call count of naive Fibonacci is 2 F(n+1) - 1, which grows like phi^n.
+fibs = [0, 1]
+while len(fibs) < 30:
+    fibs.append(fibs[-1] + fibs[-2])
+for n in range(25):
+    calls = 0
+    assert fib_naive(n) == fibs[n] and calls == 2 * fibs[n + 1] - 1
+```
+
+::: {#fig-cx-fib-tree}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+FIB_COL = {5: "indigo", 4: "cyan", 3: "amber", 2: "pink", 1: "green", 0: "muted"}
+def fib_tree(n):
+    return V.Node(f"f({n})", [] if n < 2 else [fib_tree(n - 1), fib_tree(n - 2)], color=FIB_COL[n])
+def size(v):
+    return 1 + sum(size(c) for c in v.children)
+assert size(fib_tree(5)) == 2 * fibs[6] - 1 == 15
+def draw(ax, p):
+    V.tree(ax, p, fib_tree(5), dx=1.05, dy=1.3, size=10)
+V.show(draw)
+```
+
+The calls made by naive fib(5): 15 calls but only 6 distinct arguments. Nodes of the same colour compute the same value again; memoisation keeps one of each.
+
+:::
+
+### Unequal splits and Akra–Bazzi
+
+One family still slips past the master theorem: splits that are unequal, such as $T(n) = T(n/3) + T(2n/3) + n$. The recursion-tree picture rescues us again. The pieces on each level always add back up to the whole array, so no single level ever costs more than $n$. The only wrinkle is that the tree is lopsided — one branch shrinks by a third (a depth of $\log_3 n$) and the other by two-thirds (a depth of $\log_{3/2} n$) — but both depths are $\Theta(\log n)$, so levels $\times$ cost-per-level still gives $T(n) = \Theta(n \log n)$.
+
+When you want one tool that handles *all* of these unequal splits in full generality, there is a theorem that swallows both the master theorem and its lopsided cousins. It is called **Akra–Bazzi**, and the recipe is short: for $T(n) = \sum_{i=1}^{k} a_i T(b_i n) + g(n)$ with every $0 < b_i < 1$, first find the exponent $p$ that makes $\sum_i a_i b_i^p = 1$. Then plug into
+$$
+T(n) = \Theta\!\left(n^p \left(1 + \int_1^n \frac{g(u)}{u^{p+1}}\,du\right)\right).
+$$
+It looks fearsome but is quick once you try it. On $T(n) = T(n/3) + T(2n/3) + n$ we solve $\left(\tfrac13\right)^p + \left(\tfrac23\right)^p = 1$, which gives $p = 1$; the integral is then $\int_1^n \frac{u}{u^2}\,du = \ln n$, so $T(n) = \Theta(n\log n)$, matching what the tree already told us. Use it on the median-of-medians recurrence $T(n) = T(n/5) + T(7n/10) + n$: here $\tfrac15 + \tfrac7{10} < 1$, which forces $p < 1$, and the theorem hands back $T(n) = \Theta(n)$.
+
+## Amortized analysis {#sec-cx-amortized}
+
+Here is a case the tools so far genuinely cannot handle. Some operations are almost free but, now and then, one costs a great deal — think of a list that appends cheaply until, all of a sudden, it has to copy everything. Asking "what does *one* operation cost?" gives a misleading answer, because it depends entirely on which operation you happen to pick. Amortized analysis asks a better question instead: over a whole *sequence* of $m$ operations, what is the total cost, divided by $m$? The remarkable part is that this carries no probability at all — it is a hard guarantee that holds for *every* sequence, which is exactly the amortized promise we flagged back in @sec-cx-notation.
+
+We will develop the whole idea on two down-to-earth examples and reuse them for all three methods:
+
+- **A binary counter**, like the digits of a digital clock but written in base 2. Adding one flips every trailing 1 to 0 and turns the first remaining 0 into a 1 — usually touching just a couple of bits, but occasionally (on a rollover like 0111 → 1000) flipping up to $\log n$ of them.
+- **A dynamic array**, like Python's `list` or C++'s `vector`. Appending writes into spare room and costs $O(1)$ — until the room runs out, at which point the array grabs twice as much space and copies every element over, and that one append costs $\Theta(n)$.
+
+### Method 1: aggregate
+
+The aggregate method is the most direct: forget about individual operations and simply add up the total cost of a long run. Ask how many bit-flips happen across $n$ increments of a counter that starts at 0. The answer is easy once you look bit by bit: bit 0 flips on *every* increment, bit 1 only every second one, bit 2 every fourth, and in general bit $i$ flips once every $2^i$ steps — so it flips $\lfloor n/2^i \rfloor$ times. Adding over all bits gives $\sum_{i \ge 0} \lfloor n/2^i \rfloor < 2n$ flips for the whole run. Spread across the $n$ increments, that is fewer than 2 flips each, so the amortized cost is $O(1)$ — even though a single increment can touch many bits.
+
+The dynamic array goes the same way. The costly copies only happen at the moments the array is exactly full, which is when it holds $1, 2, 4, \dots, 2^{\lfloor\log n\rfloor}$ elements, and those copy costs add up to a geometric series below $2n$. Layer on the $n$ ordinary writes and all $n$ appends together cost under $3n$, so each one is amortized $O(1)$.
+
+### Method 2: accounting (banker's)
+
+The second method thinks like an accountant. Fix a price for every operation — one you deliberately set *higher* than the cheap operations really cost — and whenever you overcharge, stash the surplus as credit saved on a specific element. When an expensive operation finally arrives, you pay for it out of that saved credit instead of the client's wallet. The whole scheme is valid the moment you show the credit can never fall below zero: overcharging now has quietly covered the spikes to come.
+
+For the counter, we charge 2 per increment. Flipping the new bit from 0 up to 1 costs a real step, so spend 1 credit on it and park the other credit *on that bit*. Later, when that very bit has to flip back from 1 down to 0, its parked credit pays for the flip. Because each increment turns exactly one 0 into a 1 — storing exactly one credit — while spending the credits of the 1-bits it clears, the balance never dips below zero. A price of 2 always suffices, so the amortized cost is $O(1)$.
+
+For the array, we charge 3 per append. One of those pays for writing the element itself; we save the other two *on the element*. Why two? Because when the array finally doubles from capacity $c$ to $2c$, each of the $c/2$ elements added since the last doubling is carrying 2 saved credits, and together they are exactly enough to pay for copying all $c$ of them across. So the cheap appends quietly build the fund, and the rare doubling spends it.
+
+### Method 3: potential
+
+The third method is the accountant's idea again, but automated so you never have to choose where to put each credit. Suppose the structure stores some non-negative "energy" $\Phi \ge 0$ — its **potential** — starting at $\Phi_0 = 0$. We then declare each operation's amortized cost to be its real cost *plus* however much potential it changed: $\hat c_i = c_i + \Phi_i - \Phi_{i-1}$. When you add these over a whole sequence something satisfying happens — each operation's $+\Phi_i$ cancels the next operation's $-\Phi_{i-1}$, so the middle terms all collapse and only the final potential is left:
+
+$$
+\sum_{i=1}^m \hat c_i = \sum_{i=1}^m c_i + \Phi_m - \Phi_0 \;\ge\; \sum_{i=1}^m c_i.
+$$ {#eq-cx-potential}
+
+For the counter, let $\Phi$ be the number of 1-bits. An increment that flips $t$ trailing 1s down to 0 and one 0 up to 1 really costs $t + 1$ steps, and it changes $\Phi$ by $1 - t$ (one bit gained, $t$ lost). Put the two together and $\hat c = (t+1) + (1-t) = 2$, always — no matter how many bits that particular increment happened to flip.
+
+For the array, let $\Phi = 2\cdot\text{size} - \text{capacity}$. This stays non-negative as soon as the array is at least half full, which is exactly the situation right after each doubling. A cheap append costs 1 and lifts $\Phi$ by 2, giving $\hat c = 3$. An append that triggers a doubling from $c$ to $2c$ costs $c + 1$, while $\Phi$ falls from $2c - c = c$ down to $2(c+1) - 2c = 2$, giving $\hat c = c + 1 + 2 - c = 3$ again. Every operation comes out at 3, so the amortized cost is $O(1)$.
+
+```{python}
+#| label: cx-amortized
+def counter_flips(n, bits=32):
+    b, total, worst = [0] * bits, 0, 0
+    for _ in range(n):
+        i = flips = 0
+        while b[i] == 1:
+            b[i], i, flips = 0, i + 1, flips + 1
+        b[i] = 1
+        flips += 1
+        total, worst = total + flips, max(worst, flips)
+    return total, worst
+
+class DynArray:
+    def __init__(self, growth=2.0):
+        self.cap, self.size, self.copies, self.growth = 1, 0, 0, growth
+    def append(self):
+        if self.size == self.cap:
+            self.copies += self.size
+            self.cap = max(self.cap + 1, int(self.cap * self.growth))
+        self.size += 1
+
+for n in [1, 10, 1000, 2**15, 100_000]:
+    total, worst = counter_flips(n)
+    assert total < 2 * n and worst <= n.bit_length()
+    d = DynArray()
+    for _ in range(n):
+        d.append()
+    assert d.copies < 2 * n
+
+# Growing by a constant (+100) instead of a factor makes appends Theta(n) amortized.
+d = DynArray(growth=1.0)
+d.cap = 100
+for _ in range(20_000):
+    if d.size == d.cap:
+        d.copies += d.size
+        d.cap += 100
+    d.size += 1
+print("copies with +100 growth for 20000 appends:", d.copies)
+assert d.copies > 20_000 * 20_000 / 250
+```
+
+::: {#fig-cx-counter}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    rows, colors, flips = [], {}, []
+    for v in range(9):
+        bits = f"{v:04b}"
+        rows.append(list(bits))
+        if v:
+            changed = [c for c in range(4) if bits[c] != f"{v - 1:04b}"[c]]
+            colors.update({(v, c): "amber" for c in changed})
+            flips.append(len(changed))
+    assert sum(flips) == 15 == counter_flips(8)[0]
+    V.grid(ax, p, rows, row_labels=[str(v) for v in range(9)],
+           col_labels=["bit 3", "bit 2", "bit 1", "bit 0"], colors=colors, cell_w=1.3)
+    for v in range(1, 9):
+        V.text(ax, p, 4 * 1.3 + 0.4, -v + 0.5, f"{flips[v - 1]} flip" + "s" * (flips[v - 1] > 1),
+               ha="left", color="muted", size=9)
+V.show(draw)
+```
+
+A 4-bit counter counting from 0 to 8. Highlighted bits flip on that increment. Bit i flips every 2^i increments, so 8 increments flip 8 + 4 + 2 + 1 = 15 < 2·8 bits in total.
+
+:::
+
+::: {#fig-cx-dynarray}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+costs, cap, size_ = [], 1, 0
+for _ in range(40):
+    c = 1
+    if size_ == cap:
+        c, cap = c + size_, cap * 2
+    size_ += 1
+    costs.append(c)
+total = np.cumsum(costs)
+assert all(total[i] < 3 * (i + 1) for i in range(40))
+def dyn(ax, p):
+    x = np.arange(1, 41)
+    ax.bar(x, costs, color=p["soft"]["amber"], edgecolor=p["amber"], label="cost of append i")
+    ax.plot(x, total, color=p["indigo"], lw=2, label="total cost so far")
+    ax.plot(x, 3 * x, color=p["green"], lw=1.5, ls="--", label="3 · i")
+    ax.set_xlabel("append number i"); ax.set_ylabel("cost"); ax.legend(fontsize=8)
+V.plot(dyn)
+```
+
+Cost of each append to a doubling array (bars): usually 1, with a spike when the array is copied. The running total (solid) always stays below 3 per append (dashed).
+
+:::
+
+One number inside that last cell deserves a pause, because it explains *why* we always double. Growing by a fixed *factor* keeps appends amortized $O(1)$; but the code also tries growing by a fixed *amount* (+100 each time), and then the copy costs pile up into $\Theta(n^2)$, making each append $\Theta(n)$. So doubling is not a careless convention — it is precisely what makes the whole scheme cheap, and switching to additive growth throws that guarantee away.
+
+::: {.callout-warning title="Amortized is not worst case"}
+A single `append` can still take $\Theta(n)$. Amortized bounds are fine for throughput, but not for hard real-time guarantees, and they can break under **persistence**: if you can save an old version of the structure and replay the expensive operation from it many times, the credit is spent repeatedly.
+:::
+
+## Space complexity {#sec-cx-space}
+
+Time is only half of the efficiency story; the other half is memory. Space complexity counts how much memory an algorithm needs as $n$ grows. Just be careful what you include, because people quietly mean different things: when an interviewer asks for the space, they almost always mean **auxiliary space** — the *extra* memory beyond the input you were handed (and beyond the output, too, if you are required to produce one).
+
+Three things tend to get forgotten, so make sure your count includes all of them:
+
+- Arrays, hash maps and other structures you allocate.
+- **The recursion stack.** Each active call holds a frame, so a recursion of depth $d$ uses $\Theta(d)$ space even if each call allocates nothing. Recursive DFS on a path of $n$ nodes uses $\Theta(n)$ stack; recursive binary search uses $\Theta(\log n)$.
+- Copies made by slicing (`a[1:]` in Python copies), string concatenation, and passing containers by value in C++.
+
+Two practical limits matter in contests:
+
+| Limit | Typical value | Consequence |
+|---|---|---|
+| Memory limit | 256 MB | about $6\cdot10^7$ `int`s or $3\cdot10^7$ `long long`s in C++; a Python `list` of ints uses 8 bytes per slot **plus** 28 bytes per distinct int object |
+| Stack | typically 1–8 MB by default (much larger on Codeforces) | C++ recursion of depth $10^6$ may crash on other judges; CPython's default recursion limit is 1000 |
+
+**Tail recursion.** A call is a tail call if nothing remains to do after it returns. Some compilers (C++ with `-O2`, usually) turn tail recursion into a loop, so it uses $O(1)$ stack. Python never does. Do not rely on it: when depth can reach $10^5$, write the loop yourself.
+
+## Constraints and the operation budget {#sec-cx-budget}
+
+Now let's turn the entire chapter into a *reading tool* for contest problems. Here is the one practical fact worth memorising: a typical judge carries out somewhere around $10^8$ to $10^9$ simple operations per second in C++, but only about $10^7$ per second in Python. A one-second time limit therefore caps how large your complexity is allowed to be. Read the constraints, glance at this table, and the intended algorithm almost names itself:
+
+| Largest $n$ | Feasible complexity | Typical techniques |
+|---|---|---|
+| $n \le 10$–$11$ | $O(n!)$, $O(n!\,n)$ | all permutations |
+| $n \le 20$ | $O(2^n n)$ | subsets, bitmask DP |
+| $n \le 40$ | $O(2^{n/2} n)$ | meet in the middle |
+| $n \le 100$–$500$ | $O(n^3)$ | Floyd–Warshall, interval DP |
+| $n \le 2000$–$5000$ | $O(n^2)$, $O(n^2 \log n)$ | 2D DP, all pairs |
+| $n \le 10^5$–$5\cdot10^5$ | $O(n \log n)$, $O(n\sqrt n)$ | sorting, binary search, segment tree, two pointers |
+| $n \le 10^6$–$10^7$ | $O(n)$, $O(n \log\log n)$ | linear scans, sieve, prefix sums |
+| $n \le 10^{12}$–$10^{18}$ | $O(\sqrt n)$, $O(\log n)$, $O(1)$ | divisor enumeration, binary search, fast power, formulas |
+
+The trick is to read the table in both directions, because each is useful. Spotting "$n \le 20$" in a statement is close to the author *winking* that an exponential solution is welcome. Spotting "$n \le 10^{18}$" is a firm promise that you cannot even afford to loop once up to $n$ — you will need $\log n$ or a closed formula.
+
+One subtlety with multiple test cases. Most statements bound the **sum** of the $n$'s over all tests (worded like "the sum of $n$ over all test cases does not exceed $2\cdot10^5$"), which means doing $O(n\log n)$ per test is perfectly fine — the total work is still $O(N\log N)$ for the whole input. Only when each individual $n$ is capped but the sum is *not* do you have to multiply by the number of tests $t$.
+
+```{python}
+#| label: cx-budget
+def max_n(cost, budget=10**8):
+    """Largest n (by doubling then binary search) with cost(n) <= budget."""
+    hi = 1
+    while cost(hi * 2) <= budget:
+        hi *= 2
+    lo, hi = hi, hi * 2
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        lo, hi = (mid, hi) if cost(mid) <= budget else (lo, mid)
+    return lo
+
+table = {
+    "n!": max_n(lambda n: math.factorial(n)),
+    "2^n n": max_n(lambda n: 2**n * n),
+    "n^3": max_n(lambda n: n**3),
+    "n^2": max_n(lambda n: n**2),
+    "n log n": max_n(lambda n: n * math.log2(max(n, 2))),
+}
+print(table)
+assert table["n!"] == 11 and table["2^n n"] == 22 and table["n^3"] == 464 and table["n^2"] == 10_000
+```
+
+::: {#fig-cx-budget}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+budget = {**table, "n√n": max_n(lambda n: n**1.5), "n": 10**8}
+order = ["n!", "2^n n", "n^3", "n^2", "n√n", "n log n", "n"]
+def budget_plot(ax, p):
+    vals = [budget[k] for k in order]
+    ax.barh(order, vals, color=p["soft"]["indigo"], edgecolor=p["indigo"])
+    for i, v in enumerate(vals):
+        ax.text(v * 1.3, i, f"{v:,}", va="center", color=p["text"], fontsize=9)
+    ax.set_xscale("log"); ax.set_xlim(1, 10**10); ax.invert_yaxis(); ax.set_xlabel("largest feasible n")
+V.plot(budget_plot, size=(6.4, 3.0))
+```
+
+Largest n that fits in about 10^8 simple operations, for each complexity (log scale). Read it from the constraints: n ≤ 20 points to 2^n·n, n ≤ 10^5 to n log n.
+
+:::
+
+### Pseudo-polynomial time
+
+There is a clever trap hiding inside the word "polynomial," and it catches nearly everyone once. An algorithm is truly polynomial only when its time is polynomial in the *length of the input written in bits* — not in the *values* of the numbers inside it. Look at the classic 0/1 knapsack dynamic program, which runs in $O(nW)$ where $W$ is the capacity. That *looks* polynomial, but the single number $W$ needs only about $\log_2 W$ bits to write down, so $O(nW)$ is really $O(n\,2^{\text{bits of }W})$ — exponential in the actual input size. Algorithms like this are called **pseudo-polynomial**: brilliantly fast while the numbers stay small, and utterly hopeless once $W$ reaches $10^{18}$. Testing whether $N$ is prime by trial division, at $O(\sqrt N)$, is pseudo-polynomial for the very same reason. Build the reflex: whenever a complexity mentions a *value* (like $W$ or $N$) rather than a *count* (like $n$), stop and check that value's upper bound before you trust the analysis.
+
+### Constant factors and the memory hierarchy
+
+Asymptotics deliberately throw away the constant sitting out front — yet on a real machine, close races are decided by exactly those constants, and the largest hidden constant of all is *how you touch memory*. When you read an array in order, the CPU happily loads a whole 64-byte cache line at once and your next several reads come free. When you jump around, each jump risks a cache miss costing on the order of a hundred cycles. This single fact is why walking a C++ 2D array row by row (`a[i][j]` with `j` inner) runs several times faster than walking it column by column — even though, to our notation, both are $\Theta(n^2)$. The same reason makes plain arrays beat linked lists, and usually makes a `vector` beat a `set` for what looks like the same $O(\log n)$ work. In short: big-Oh picks the algorithm, but memory order picks the winner among algorithms that tie.
+
+## Pattern 1: read the constraints first {#sec-cx-p1}
+
+**Where we are.** The lessons gave you the tools: asymptotic notation, loop counting, recurrences, amortisation, space, and the operation budget. The six patterns use them in the order you meet them when solving a problem. First read the constraints to know which complexity you are aiming for (this pattern). Then count a loop exactly when it is not a plain nested loop (Pattern 2), and count a loop whose inner work is shared across iterations (Pattern 3). Then price a recursion (Pattern 4), the memory including the call stack (Pattern 5), and finally the costs hidden inside library calls (Pattern 6). Each problem in a pattern adds one twist to the one before it.
+
+**Recognise it.** Every problem. Before thinking about an algorithm, look at the largest $n$ (and the largest **values**) and look up the feasible complexity in @sec-cx-budget.
+
+::: {.callout-important title="Template"}
+1. Find the largest size parameters and value bounds, and whether the sum over test cases is bounded.
+2. Look up the feasible complexity class. Very small bounds ($n \le 20$) invite brute force; huge bounds ($10^{9}$ and up) forbid even a linear loop.
+3. Write the brute force anyway (it is your stress-test oracle), then improve it until it fits.
+:::
+
+**Complexity.** The template itself costs nothing; its value is that it rules out ideas before you code them.
+
+::: {#fig-cx-anim-kadane}
+
+```{python}
+#| echo: false
+kd_a = [-2, 1, -3, 4, -1, 2, 1, -5, 4]
+kd_end, kd_best, kd_caps, cur, best = [], [], [], 0, None
+for i, x in enumerate(kd_a):
+    prev = cur
+    cur = x if i == 0 else max(x, prev + x)
+    best = cur if best is None else max(best, cur)
+    kd_end.append(cur)
+    kd_best.append(best)
+    how = f"start: {x}" if i == 0 else (f"extend: {prev} + {x} = {cur}" if cur == prev + x else f"start fresh at {x}")
+    kd_caps.append(f"i = {i}: best ending here, {how}; best so far = {best}")
+assert kd_best[-1] == 6 and len(kd_caps) == len(kd_a)
+
+def kd_frame(ax, p, k):
+    row = [str(v) if j <= k else "" for j, v in enumerate(kd_end)]
+    colors = {(0, k): "indigo", (1, k): "indigo"}
+    colors[(1, kd_end.index(kd_best[k]))] = "green"
+    V.grid(ax, p, [kd_a, row], row_labels=["a", "ending here"], colors=colors, cell_w=1.0)
+
+V.animate(kd_frame, len(kd_a), captions=kd_caps, interval=1000)
+del i, x, prev, cur, best, how                # keep the chapter's namespace clean
+```
+
+Kadane's algorithm on the sample of Maximum Subarray, one element per frame. Each step looks only at the previous cell of the lower row (extend it, or start fresh), so the whole scan is one pass: $O(n)$, comfortably inside the budget for $n = 10^5$. Green marks the best value so far, which ends at $6$.
+
+:::
+
+{{< include ../problems/lc-0053-maximum-subarray/problem.qmd >}}
+
+[**From a large n to a tiny one.** Maximum Subarray has $n = 10^5$, so the constraints rule out slow algorithms. Petr's lock has $n \le 15$, and the same reading now says that trying all $2^n$ choices is fine.]{.flow-bridge}
+
+
+{{< include ../problems/cf-1097b-petr-and-a-combination-lock/problem.qmd >}}
+
+[**From the size of the input to the size of the values.** Both problems so far were sized by $n$. In K-th Not Divisible the large number is the value $k \le 10^9$, so even a loop up to the answer is too slow and we need a formula.]{.flow-bridge}
+
+
+{{< include ../problems/cf-1352c-k-th-not-divisible-by-n/problem.qmd >}}
+
+## Pattern 2: count loops exactly ($\sqrt n$ and harmonic) {#sec-cx-p2}
+
+**From reading a bound to counting one.** Pattern 1 compared a known complexity with the budget. Here the loop is not a plain nested loop: it stops at $\sqrt n$, or its inner range shrinks like $n/i$, and you must add up the work exactly to see that it fits.
+
+**Recognise it.** The values are large (up to $10^{12}$) but you only need their divisors; or you need something for **every** number up to $n$ that involves its multiples or divisors.
+
+::: {.callout-important title="Template"}
+- **Divisors of one number $x$:** divisors come in pairs $(d, x/d)$ with $d \le \sqrt x$, so loop `d` while `d * d <= x`: $O(\sqrt x)$.
+- **Something for every number up to $n$ over its multiples:** loop `i` from 1 to $n$ and `j` over `i, 2i, 3i, …`. The total is $\sum_i n/i = O(n \log n)$, not $O(n^2)$.
+:::
+
+**Complexity.** $O(\sqrt x)$ per number; $O(n \log n)$ for the harmonic double loop.
+
+{{< include ../problems/cf-1203c-common-divisors/problem.qmd >}}
+
+[**From one number to all of them.** Common Divisors walks the divisors of a single number up to $\sqrt g$. Orac and Models does work for the multiples of **every** index, and the total $\sum n/i$ is the harmonic bound.]{.flow-bridge}
+
+
+{{< include ../problems/cf-1350b-orac-and-models/problem.qmd >}}
+
+## Pattern 3: amortized inner loops {#sec-cx-p3}
+
+**From counting each loop to counting the whole run.** In Pattern 2 every pass of the inner loop did a predictable amount of work. Here one pass can be expensive and the next one cheap, so we count the total work over the whole run instead: every element is moved or popped at most once.
+
+**Recognise it.** A `while` loop nested inside a `for` loop, where the inner loop **moves a pointer forward** or **pops from a stack**, and nothing ever moves it back or pushes the same item twice.
+
+::: {.callout-important title="Template"}
+Find a quantity that each inner iteration consumes and that the whole run can only supply $O(n)$ of: pointer positions, pushes onto a stack, elements moved between structures. Total inner work ≤ total supply = $O(n)$, so the loop nest is $O(n)$ overall, and each outer iteration is amortized $O(1)$.
+:::
+
+**Complexity.** $O(n)$ total; $O(n)$ worst case for a single outer iteration.
+
+{{< include ../problems/lc-0232-implement-queue-using-stacks/problem.qmd >}}
+
+[**From a data structure to a loop.** The two-stack queue spreads one expensive pour over many cheap pops. Daily Temperatures uses the same argument inside a single loop: a `while` that pops a stack looks quadratic, but each day is popped at most once.]{.flow-bridge}
+
+
+::: {#fig-cx-anim-temps}
+
+```{python}
+#| echo: false
+dt_t = [73, 74, 75, 71, 69, 72, 76, 73]
+dt_ans, dt_stack, dt_frames, dt_caps, dt_pops = [0] * len(dt_t), [], [], [], 0
+for i, t in enumerate(dt_t):
+    popped = []
+    while dt_stack and dt_t[dt_stack[-1]] < t:
+        j = dt_stack.pop()
+        dt_ans[j] = i - j
+        popped.append(j)
+    dt_stack.append(i)
+    dt_pops += len(popped)
+    dt_frames.append((list(dt_ans), list(dt_stack), popped))
+    what = (f"answers day{'s' if len(popped) > 1 else ''} {', '.join(map(str, popped))}") if popped else "answers nobody"
+    dt_caps.append(f"day {i} ({t}): {what}, then is pushed")
+assert dt_ans == [1, 1, 4, 2, 1, 1, 0, 0] and dt_pops < len(dt_t)
+
+def dt_frame(ax, p, k):
+    ans, stack, popped = dt_frames[k]
+    row = [str(ans[j]) if j <= k and ans[j] else "" for j in range(len(dt_t))]
+    colors = {(0, k): "indigo"}
+    colors.update({(1, j): "green" for j in popped})
+    V.grid(ax, p, [dt_t, row], row_labels=["temp", "wait"], colors=colors)
+    V.stack(ax, p, [f"{j}: {dt_t[j]}" for j in stack], x=len(dt_t) + 1.2, y=-1, title="waiting days", w=1.9)
+
+V.animate(dt_frame, len(dt_t), captions=dt_caps, interval=1100)
+del i, t, j, popped, what                # keep the chapter's namespace clean
+```
+
+Daily Temperatures, one day per frame. A warm day pops every colder day still waiting (green: answered now). One day can pop several, but each day is pushed once and popped at most once, so the total work over the run is linear, which is the amortized argument of this pattern.
+
+:::
+
+{{< include ../problems/lc-0739-daily-temperatures/problem.qmd >}}
+
+## Pattern 4: write the recurrence, then solve it {#sec-cx-p4}
+
+**From loops to recursion.** So far the work sat in loops we could count. A recursive solution hides its loop in the calls, so we first write the cost as a recurrence $T(n)$ and then solve it with the methods of @sec-cx-recurrences.
+
+**Recognise it.** The solution is recursive: it splits the input, or reduces $n$ to a smaller $n$. Write $T(n)$ = (number of calls) × $T$(size of each call) + (work outside the calls), then solve it with @sec-cx-recurrences.
+
+::: {.callout-important title="Template"}
+1. Write $T(n) = a\,T(n/b) + f(n)$ or $T(n) = a\,T(n-b) + f(n)$, counting **all** work outside the recursive calls, including slicing and copying.
+2. Solve it with the master theorem, its subtract-and-conquer version, or a recursion tree.
+3. If two calls share subproblems (the same arguments recur), memoise: the cost becomes (number of distinct states) × (work per state).
+:::
+
+**Complexity.** As given by the recurrence.
+
+{{< include ../problems/lc-0050-pow-x-n/problem.qmd >}}
+
+[**From one call to two.** Fast power makes one call on half the input, $T(n/2) + O(1)$. a-Good String makes two calls on halves and counts in linear time outside them, $2T(n/2) + O(n)$: the merge-sort shape.]{.flow-bridge}
+
+
+{{< include ../problems/cf-1385d-a-good-string/problem.qmd >}}
+
+[**From halving to subtracting.** Both recursions so far cut the input in half. Fibonacci reduces $n$ by 1 and by 2, and its two calls repeat so much work that the count is exponential until we memoise.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0509-fibonacci-number/problem.qmd >}}
+
+## Pattern 5: account for space, including the stack {#sec-cx-p5}
+
+**From time to memory.** Every pattern so far priced time. The next question in an interview is the space, and a recursion's space includes the call stack it keeps alive, which the code never mentions.
+
+**Recognise it.** The interviewer asks "and the space?", or the solution is recursive on something that can be deep (a linked list, a degenerate tree, a DFS on a path), or the memory limit is tight.
+
+::: {.callout-important title="Template"}
+1. List every structure you allocate and its size in terms of $n$.
+2. Add the recursion stack: **maximum depth** × frame size. Depth, not total number of calls: the calls of a recursion tree are not all alive at once.
+3. If the depth can be $\Theta(n)$ and $n$ is large, convert to an explicit stack or a loop.
+:::
+
+**Complexity.** Space = allocated structures + maximum recursion depth.
+
+{{< include ../problems/lc-0104-maximum-depth-of-binary-tree/problem.qmd >}}
+
+[**From depth you must pay to depth you choose.** A tree's depth costs stack space in any recursive walk. Reversing a list can be written with a loop or with recursion, and only the recursive version pays $O(n)$ stack.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0206-reverse-linked-list/problem.qmd >}}
+
+## Pattern 6: hidden costs of library operations {#sec-cx-p6}
+
+**From our loops to the library's.** Patterns 1–5 counted the loops we write. The last trap is the loops we do not see: one library call such as `x in list`, a slice, or a string concatenation can hide an $O(n)$ loop inside a loop that looks linear.
+
+**Recognise it.** The code *looks* linear but uses a library call inside a loop: membership in a list, slicing, string concatenation, `pop(0)`, `min()`/`sum()` over a container, sorting, or copying a container by value.
+
+::: {.callout-important title="Template"}
+Replace each line in a loop body by its true cost, then multiply. The usual costs:
+
+| Operation | Python | C++ |
+|---|---|---|
+| `x in list` / `find` on a vector | $O(n)$ | $O(n)$ |
+| `x in set/dict`, `unordered_map` | $O(1)$ average, $O(n)$ worst (collisions) | same |
+| `set`/`map` (balanced tree) | — | $O(\log n)$ |
+| slice `a[l:r]`, `substr` | $O(r-l)$ copy | $O(r-l)$ copy |
+| `s = s + t` on strings | $O(|s| + |t|)$ | $O(|s|+|t|)$ (use `+=` or `push_back`) |
+| `list.pop(0)`, `insert(0, x)`, `vector.erase(begin)` | $O(n)$ | $O(n)$ |
+| `deque.popleft()` / `appendleft` | $O(1)$ | $O(1)$ |
+| `len(x)`, `.size()` | $O(1)$ | $O(1)$ |
+| `sorted`, `sort` | $O(n\log n)$ | $O(n \log n)$ |
+| passing `vector<int>` by value | — | $O(n)$ copy; pass `const&` |
+| `endl` | — | flushes the stream; use `'\n'` |
+:::
+
+**Complexity.** The true complexity is the sum of the true costs; hidden linear costs inside a linear loop make it quadratic.
+
+{{< include ../problems/cf-4c-registration-system/problem.qmd >}}
+
+[**From hashing cost to copying cost.** Registration System's hidden cost is hashing a name, $O(L)$ per lookup. Removing Stars hides a worse one: rebuilding an immutable string after every star, $O(n)$ each time.]{.flow-bridge}
+
+
+{{< include ../problems/lc-2390-removing-stars-from-a-string/problem.qmd >}}
+
+**Looking back.** Every pattern asked the same question, how many basic steps does this really take, and only the place where the steps hide changed: in the constraints, in a loop's bounds, across the passes of a loop, in a recursion, in the call stack, and inside a library call. The pattern map below lists the signal for each.
+
+## Pattern map
+
+| Signal | Pattern | Section |
+|---|---|---|
+| Any problem: look at $n$ and the value bounds first | Constraints → complexity | @sec-cx-p1 |
+| $n \le 20$ | Enumerate subsets, $O(2^n n)$ | @sec-cx-p1-lock |
+| Values up to $10^{9}$–$10^{18}$ | Formula, binary search, $O(\sqrt{x})$, $O(\log x)$ | @sec-cx-p1-kth, @sec-cx-p2-common-divisors |
+| Divisors of a large number | Loop to $\sqrt x$ | @sec-cx-p2-common-divisors |
+| For every $i$, iterate its multiples | Harmonic sum, $O(n \log n)$ | @sec-cx-p2-orac |
+| `while` inside `for` that only moves forward or pops | Amortized $O(n)$ total | @sec-cx-p3 |
+| Recursion that halves the input | Master theorem | @sec-cx-p4-pow, @sec-cx-p4-good-string |
+| Recursion with overlapping subproblems | Memoise: states × work per state | @sec-cx-p4-fib |
+| Recursion on a list or a skewed tree | $O(n)$ stack; convert to iteration | @sec-cx-p5 |
+| Library call inside a loop | Replace by its true cost | @sec-cx-p6 |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Multiplying sequential loops.** Only nesting multiplies; consecutive loops add.
+- **Charging an amortized inner loop $O(n)$ per outer iteration.** Ask how many times the inner body can run *in total*.
+- **Forgetting the value bound.** $O(nW)$ is fine for $W = 10^3$ and impossible for $W = 10^9$ (pseudo-polynomial time).
+- **Two recursive calls where one is enough.** `pow(x, n/2) * pow(x, n/2)` is $O(n)$, not $O(\log n)$.
+- **Ignoring the recursion stack** in space analysis, and hitting Python's recursion limit or a C++ stack overflow on deep inputs.
+- **Hidden $O(n)$ operations:** `in` on a list, slicing, `pop(0)`, string rebuilding, `vector` passed by value.
+- **Trusting average-case hash performance** on adversarial judges (Codeforces hacks).
+- **Ignoring test-case counts.** Per-test $O(n)$ with $t = 10^4$ tests and no bound on $\sum n$ can be $10^9$.
+- **Misreading "average" as "amortized".** Amortized bounds need no probability and hold for every sequence.
+- **"Proving" $O(n)$ by induction with a growing constant** (@sec-cx-recurrences, substitution method).
+:::
+
+## Exercises
+
+**1. [E]** Order by growth rate: $n\log n$, $2^{\log_2 n}$, $\sqrt n\log n$, $n^{1.01}$, $\log(n!)$, $(\log n)^{100}$, $1.01^n$.
+
+::: {.callout-note collapse="true" title="Solution"}
+$(\log n)^{100} \prec \sqrt n \log n \prec 2^{\log_2 n} = n \prec n\log n = \Theta(\log n!) \prec n^{1.01} \prec 1.01^n$. Polylogs lose to any power, $n \log n = o(n^{1.01})$ since $\log n = o(n^{0.01})$, and any exponential with base $> 1$ beats any polynomial. $n\log n$ and $\log n!$ are tied ($\Theta$).
+:::
+
+**2. [E]** Prove from the definition that $n^2 \ne O(n)$.
+
+::: {.callout-note collapse="true" title="Solution"}
+Suppose $n^2 \le cn$ for all $n \ge n_0$. Dividing by $n$ gives $n \le c$ for all $n \ge n_0$, which fails at $n = \max(n_0, \lceil c\rceil + 1)$. Contradiction.
+:::
+
+**3. [E]** What is the complexity of this loop?
+```python
+i = n
+while i > 1:
+    i = i // 3
+    for j in range(i):
+        work()
+```
+
+::: {.callout-note collapse="true" title="Solution"}
+The inner loop runs $n/3 + n/9 + n/27 + \dots < n/2$ times in total (a decreasing geometric series), and the outer loop adds $O(\log n)$. Total: $\Theta(n)$.
+:::
+
+**4. [E]** Solve with the master theorem: (a) $T(n) = 4T(n/2) + n$; (b) $T(n) = 4T(n/2) + n^2$; (c) $T(n) = 4T(n/2) + n^3$.
+
+::: {.callout-note collapse="true" title="Solution"}
+$n^{\log_2 4} = n^2$. (a) Case 1: $\Theta(n^2)$. (b) Case 2: $\Theta(n^2\log n)$. (c) Case 3 (regularity: $4(n/2)^3 = n^3/2$): $\Theta(n^3)$.
+:::
+
+**5. [E]** A recursive function on a list of length $n$ calls itself on `a[1:]` and does $O(1)$ other work. What are its time and space complexity in Python?
+
+::: {.callout-note collapse="true" title="Solution"}
+The slice copies $n-1$ elements, so $T(n) = T(n-1) + \Theta(n) = \Theta(n^2)$ time. Space: depth $n$ with a slice alive at each level of size $n-1, n-2, \dots$, so $\Theta(n^2)$ memory at the deepest point. Passing an index instead of a slice makes it $O(n)$ time and $O(n)$ stack.
+:::
+
+**6. [M]** Show that $\sum_{i=1}^{n} \lfloor \log_2 i \rfloor = \Theta(n\log n)$ without Stirling's formula.
+
+::: {.callout-note collapse="true" title="Solution"}
+Upper: each term is $\le \log_2 n$, so the sum is $\le n\log_2 n$. Lower: the $n/2$ terms with $i \ge n/2$ are each $\ge \log_2(n/2) - 1 = \log_2 n - 2$, so the sum is $\ge \frac n2 (\log_2 n - 2) = \Omega(n\log n)$.
+:::
+
+**7. [M]** What is the complexity of this sieve-like loop, and why?
+```python
+for i in range(2, n + 1):
+    if is_prime[i]:
+        for j in range(i * i, n + 1, i):
+            is_prime[j] = False
+```
+
+::: {.callout-note collapse="true" title="Solution"}
+The inner loop runs about $n/p$ times for each prime $p \le \sqrt n$ (for larger $p$, $p^2 > n$ and it does nothing). $\sum_{p \le n} 1/p = \ln\ln n + O(1)$ (Mertens), so the total is $O(n \log\log n)$. Iterating over all $i$ instead of primes only would give $O(n\log n)$ by the harmonic sum.
+:::
+
+**8. [M]** Solve $T(n) = T(\sqrt n) + 1$ and $T(n) = 2T(\sqrt n) + \log n$.
+
+::: {.callout-note collapse="true" title="Solution"}
+Substitute $n = 2^m$ and $S(m) = T(2^m)$. (1) $S(m) = S(m/2) + 1 = \Theta(\log m)$, so $T(n) = \Theta(\log\log n)$. (2) $S(m) = 2S(m/2) + m = \Theta(m\log m)$, so $T(n) = \Theta(\log n \log\log n)$.
+:::
+
+**9. [M]** A stack supports `push`, `pop`, and `multipop(k)` (pop $\min(k, \text{size})$ items). Prove that any sequence of $m$ operations starting from an empty stack takes $O(m)$ time.
+
+::: {.callout-note collapse="true" title="Solution"}
+Aggregate: each item is popped (by `pop` or `multipop`) at most once after being pushed once. The number of pushes is at most $m$, so total pops are at most $m$. Total work is $O(m)$. Potential: $\Phi$ = stack size; `push` has amortized cost $1 + 1 = 2$, `pop` $1 - 1 = 0$, `multipop(k)` $k' - k' = 0$ where $k'$ items are popped.
+:::
+
+**10. [M]** A dynamic array doubles when full and **halves when it drops to half full**. Show a sequence of $n$ operations that costs $\Theta(n^2)$, and fix the rule.
+
+::: {.callout-note collapse="true" title="Solution"}
+Fill the array to exactly capacity $c$, then alternate push, pop, push, pop. Each push triggers a doubling (copy $c$) and each pop drops it back to half full, triggering a halving (copy $c$): $\Theta(c)$ per operation, $\Theta(n^2)$ overall. Fix: shrink only when the array is **a quarter** full (to half the capacity). After any resize the array is exactly half full, so at least $\Theta(c)$ cheap operations must happen before the next resize, which restores amortized $O(1)$ (CLRS §16.4).
+:::
+
+**11. [M]** Write and solve the recurrence for the time of this code:
+```python
+def f(n):
+    if n <= 1: return 1
+    s = sum(range(n))            # O(n)
+    return f(n // 2) + f(n // 2) + f(n // 2) + s
+```
+
+::: {.callout-note collapse="true" title="Solution"}
+$T(n) = 3T(n/2) + \Theta(n)$. $n^{\log_2 3} \approx n^{1.585}$ dominates $n$ (case 1), so $T(n) = \Theta(n^{\log_2 3})$. Computing `f(n // 2)` once and reusing it gives $T(n) = T(n/2) + \Theta(n) = \Theta(n)$.
+:::
+
+**12. [M] (coding)** Given $n \le 10^6$, compute the number of divisors of every integer $1..n$ in $O(n\log n)$. Check against direct counting for small $n$.
+
+::: {.callout-note collapse="true" title="Solution"}
+For each $d$, add 1 to every multiple of $d$: the harmonic loop.
+
+```{python}
+def divisor_counts(n):
+    cnt = [0] * (n + 1)
+    for d in range(1, n + 1):
+        for m in range(d, n + 1, d):
+            cnt[m] += 1
+    return cnt
+
+c = divisor_counts(300)
+assert all(c[x] == sum(x % d == 0 for d in range(1, x + 1)) for x in range(1, 301))
+```
+:::
+
+**13. [M] (coding)** Count pairs $i < j$ with $a_i + a_j \le K$ in $O(n\log n)$ and verify against $O(n^2)$.
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort, then two pointers: for the smallest remaining $a_{lo}$, if $a_{lo} + a_{hi} \le K$, all of $lo+1..hi$ pair with $lo$. Sorting dominates: $O(n\log n)$.
+
+```{python}
+def count_pairs(a, K):
+    a = sorted(a)
+    lo, hi, total = 0, len(a) - 1, 0
+    while lo < hi:
+        if a[lo] + a[hi] <= K:
+            total += hi - lo
+            lo += 1
+        else:
+            hi -= 1
+    return total
+
+for _ in range(300):
+    a = [random.randint(-20, 20) for _ in range(random.randint(0, 25))]
+    K = random.randint(-30, 30)
+    assert count_pairs(a, K) == sum(a[i] + a[j] <= K for i in range(len(a)) for j in range(i + 1, len(a)))
+```
+:::
+
+**14. [H]** Prove that any comparison-based sorting algorithm needs $\Omega(n\log n)$ comparisons in the worst case.
+
+::: {.callout-note collapse="true" title="Solution"}
+Model the algorithm as a binary decision tree: each internal node is a comparison, each leaf an output order. All $n!$ permutations of distinct inputs need different leaves, so the tree has at least $n!$ leaves and height at least $\log_2 n! = \Theta(n\log n)$ (Stirling, @sec-cx-notation). The height is the worst-case number of comparisons. The same argument applied to the average depth of leaves gives an $\Omega(n\log n)$ average-case bound.
+:::
+
+**15. [H]** Use the recursion tree to solve $T(n) = T(n/4) + T(3n/4) + n$, and verify numerically.
+
+::: {.callout-note collapse="true" title="Solution"}
+Each full level sums to $n$ (the pieces partition the input). The shallowest leaf is at depth $\log_4 n$ and the deepest at $\log_{4/3} n$, so the total is between $n\log_4 n$ and $n\log_{4/3} n$: $\Theta(n\log n)$. Akra–Bazzi agrees: $(1/4)^p + (3/4)^p = 1$ at $p = 1$.
+
+```{python}
+@lru_cache(maxsize=None)
+def T_uneven(n):
+    return 1 if n < 4 else T_uneven(n // 4) + T_uneven(3 * n // 4) + n
+
+ratios = [T_uneven(n) / (n * math.log2(n)) for n in (10**4, 10**5, 10**6)]
+assert max(ratios) / min(ratios) < 1.1, ratios
+```
+:::
+
+**16. [H]** An algorithm runs in $O(n\sqrt n)$ and another in $O(n\log^2 n)$. Which is asymptotically faster, and for $n = 2\cdot10^5$ which does fewer operations if both have constant 1?
+
+::: {.callout-note collapse="true" title="Solution"}
+$\log^2 n = o(\sqrt n)$, so $n\log^2 n$ is asymptotically faster. At $n = 2\cdot10^5$: $\sqrt n \approx 447$ and $\log_2^2 n \approx 17.6^2 \approx 310$, so $n\log^2 n$ is also smaller here, but only by about 30%. Constant factors (cache-friendly sqrt decomposition versus pointer-heavy structures) often decide in practice.
+:::
+
+## Interview questions
+
+**1. What does $O(n)$ mean, precisely, and how is it different from $\Theta(n)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$f = O(n)$ means that beyond some $n_0$, $f(n) \le cn$ for a constant $c$: an upper bound only. $\Theta(n)$ adds the matching lower bound. Binary search is $O(n)$ (true but loose) and $\Theta(\log n)$ (tight). In interviews people say "O" when they mean the tight bound, but you should know the difference.
+:::
+
+**2. Is hash-map lookup $O(1)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Expected/average $O(1)$ under a good hash function and a bounded load factor (resizing keeps it bounded, which is amortized $O(1)$ per insert). The worst case is $O(n)$ when many keys collide, which an adversary can force against a fixed, known hash function, as on Codeforces. Defences: randomised hashing, or a balanced tree map with guaranteed $O(\log n)$.
+:::
+
+**3. Explain amortized $O(1)$ for `vector::push_back`. Why must the growth be multiplicative?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When full, it reallocates to $2\times$ (or $1.5\times$) and copies. Over $n$ pushes, the copies total $1 + 2 + 4 + \dots < 2n$, so $O(1)$ amortized. With additive growth by $k$, the copies are $k + 2k + 3k + \dots \approx n^2/2k$, which is $\Theta(n)$ amortized. A single push can still be $\Theta(n)$.
+:::
+
+**4. Your solution is $O(n^2)$ and $n = 10^5$. Will it pass?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Usually not: $10^{10}$ operations against a budget of about $10^8$–$10^9$ per second. Very simple inner loops in C++ with SIMD can reach a few $10^9$, so $n = 10^5$ with a tiny constant sometimes passes in 2–3 s, but you should look for $O(n\log n)$. In Python, $O(n^2)$ is hopeless beyond $n \approx 5000$.
+:::
+
+**5. What is the space complexity of recursive merge sort?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(n)$ auxiliary space for the merge buffer plus $O(\log n)$ for the recursion stack: $O(n)$ total. (A naive implementation that allocates new arrays at every level still has only $O(n)$ alive at once, since the arrays along one root-to-leaf path sum to $n + n/2 + \dots < 2n$, but it allocates $O(n\log n)$ in total.)
+:::
+
+**6. Why is quicksort $O(n\log n)$ "on average" but $O(n^2)$ worst case, and how do you avoid the worst case?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Balanced splits give $T(n) = 2T(n/2) + n = O(n\log n)$; maximally unbalanced splits (always picking the min or max) give $T(n) = T(n-1) + n = O(n^2)$, which a fixed pivot rule hits on sorted input. A random pivot makes the expected cost $O(n\log n)$ for every input. Introsort (used by `std::sort`) switches to heapsort when recursion gets too deep, which guarantees $O(n\log n)$ worst case.
+:::
+
+**7. How do you analyse a recursive function with memoisation?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Time = (number of distinct states that are actually reached) × (work per state, not counting recursive calls that hit the cache). Space = memo table + maximum recursion depth. For example, the edit-distance DP has $nm$ states with $O(1)$ work each: $O(nm)$ time and space.
+:::
+
+**8. What is the time complexity of building a binary heap from $n$ elements?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(n)$, not $O(n\log n)$. Bottom-up heapify sifts down each node by at most its height; there are about $n/2^{h+1}$ nodes of height $h$, so the total is $\sum_h \frac{n}{2^{h+1}} h = O(n)$ because $\sum h/2^h$ converges. Inserting the elements one by one is $O(n\log n)$.
+:::
+
+**9. Two nested loops, and the inner one is `while j < n and cond: j += 1` with `j` declared outside. Complexity?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(n)$ total. `j` only increases and is bounded by $n$, so the inner body executes at most $n$ times over the whole run. This is the two-pointer and sliding-window argument (aggregate amortization).
+:::
+
+**10. What is pseudo-polynomial time? Is the 0/1 knapsack DP polynomial?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Polynomial in the numeric value of the input, but exponential in its length in bits. Knapsack DP is $O(nW)$, and $W$ takes $\log W$ bits, so it is pseudo-polynomial. Knapsack is NP-hard, so no truly polynomial algorithm is known; the DP is fast only when $W$ is small.
+:::
+
+**11. Your Python DFS crashes on a tree with $10^5$ nodes. Why, and what do you do?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Recursion depth reaches $10^5$ on a path-shaped tree, above CPython's default limit of 1000 (and raising the limit can overflow the C stack and crash the process). Convert to an iterative DFS with an explicit stack, or run the recursion in a thread with a larger stack size. In C++, the same issue appears on judges with small stacks around depth $10^5$–$10^6$.
+:::
+
+**12. When does an $O(n\log n)$ algorithm lose to an $O(n^2)$ one?**
+
+::: {.callout-note collapse="true" title="Answer"}
+For small $n$, when the constant factors favour the quadratic one. Insertion sort beats merge sort below roughly 16–32 elements (cache-friendly, no allocation, few branches), which is why hybrid sorts (Timsort, introsort) switch to insertion sort for small subarrays. Asymptotics describe growth, not speed at a specific $n$.
+:::
+
+**13. What is the complexity of checking if a number $N \le 10^{12}$ is prime by trial division, and is it polynomial?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(\sqrt N) = 10^6$ steps, which is fast here. But it is exponential in the number of digits ($\sqrt N = 2^{b/2}$ for a $b$-bit $N$), so it is not polynomial. Miller–Rabin runs in $O(k\log^3 N)$ and is used for large $N$.
+:::
+
+## Summary
+
+::: {.callout-important title="Key facts"}
+- $O$ / $\Omega$ / $\Theta$ / $o$ / $\omega$ ↔ $\le$ / $\ge$ / $=$ / $<$ / $>$ on growth rates; use the limit test (@eq-cx-limit).
+- $\log^k n \prec n^\varepsilon \prec c^n$; $\log n! = \Theta(n\log n)$; $H_n = \ln n + O(1)$.
+- Master theorem: compare $f(n)$ with $n^{\log_b a}$ — leaves, balanced (multiply by $\log n$), or root.
+- Subtract-and-conquer: $T(n-1) + n^k \to n^{k+1}$; $aT(n-1)$ with $a > 1$ is exponential.
+- Amortized: total over any sequence; aggregate, accounting, potential (@eq-cx-potential).
+- Budget: about $10^8$ simple C++ operations per second, about $10^7$ in Python.
+:::
+
+- Read the constraints first; they almost always reveal the intended complexity.
+- Only nested loops multiply. For `while` loops inside `for` loops, count the inner work over the whole run.
+- Divisors of $x$: $O(\sqrt x)$. A loop over the multiples of every $i \le n$: $O(n\log n)$.
+- A recursion's cost is its recurrence; count everything outside the calls, including copies.
+- Memoised recursion costs (distinct states) × (work per state).
+- Space includes the recursion stack, which is the maximum depth, not the number of calls.
+- Know the real cost of every library call you put inside a loop.
+- Amortized, average and expected are different guarantees; say which one you mean.
+
+## Practice ladder
+
+Ordered by idea, not by rating. Each problem uses a technique from this chapter; it may also need ideas from later chapters, which are noted.
+
+::: {.practice}
+- [CF 913A · Modular Exponentiation](https://codeforces.com/problemset/problem/913/A){rating="900"}
+- [CF 550B · Preparing Olympiad](https://codeforces.com/problemset/problem/550/B){rating="1400"}
+- [CF 1360D · Buying Shovels](https://codeforces.com/problemset/problem/1360/D){rating="1300"}
+- [CF 230B · T-primes](https://codeforces.com/problemset/problem/230/B){rating="1300"}
+- [CF 1520D · Same Differences](https://codeforces.com/problemset/problem/1520/D){rating="1200"}
+- [CF 501B · Misha and Changing Handles](https://codeforces.com/problemset/problem/501/B){rating="1100"}
+- [CF 1324D · Pair of Topics](https://codeforces.com/problemset/problem/1324/D){rating="1400"}
+- [CF 279B · Books](https://codeforces.com/problemset/problem/279/B){rating="1400"}
+- [CF 343B · Alternating Current](https://codeforces.com/problemset/problem/343/B){rating="1600"}
+- [CF 1512G · Short Task](https://codeforces.com/problemset/problem/1512/G){rating="1700"}
+- [CF 448C · Painting Fence](https://codeforces.com/problemset/problem/448/C){rating="1900"}
+- [CF 5C · Longest Regular Bracket Sequence](https://codeforces.com/problemset/problem/5/C){rating="1900"}
+- [CF 1154G · Minimum Possible LCM](https://codeforces.com/problemset/problem/1154/G){rating="2200"}
+:::
+
+| Problem | Idea it practises |
+|---|---|
+| 913A | Huge exponent: notice $2^n > m$ once $n \ge 27$, so no loop is needed (@sec-cx-p1-kth) |
+| 550B | $n \le 15$: enumerate all subsets (@sec-cx-p1-lock) |
+| 1360D | Divisors up to $\sqrt n$ (@sec-cx-p2-common-divisors) |
+| 230B | $x \le 10^{12}$ is a T-prime iff $x = p^2$; sieve to $10^6$ (@sec-cx-p2) |
+| 1520D | Hash map replaces an $O(n^2)$ pair loop: count equal $a_i - i$ (@sec-cx-p6) |
+| 501B | Dictionary of chains instead of list scans (@sec-cx-p6-registration) |
+| 1324D | $n = 2\cdot10^5$: sort plus two pointers, $O(n\log n)$ (@sec-cx-p1) |
+| 279B | Sliding window with a forward-only pointer, amortized $O(n)$ (@sec-cx-p3) |
+| 343B | Stack cancellation, each item pushed and popped once (@sec-cx-p3-temperatures) |
+| 1512G | Harmonic sieve for divisor sums up to $10^7$ (@sec-cx-p2-orac) |
+| 448C | Divide and conquer whose recurrence is $O(n^2)$ worst case (@sec-cx-p4) |
+| 5C | Stack of indices, amortized $O(n)$ (@sec-cx-p3) |
+| 1154G | Harmonic loop over multiples of every $d \le 10^7$ (@sec-cx-p2-orac) |
+
+## Further reading
+
+- **[CLRS, *Introduction to Algorithms*, 4th ed.](https://mitpress.mit.edu/9780262046305/introduction-to-algorithms/)** — ch. 3 (asymptotic notation), ch. 4 (recurrences, master theorem with full proof), ch. 16 (amortized analysis, dynamic tables).
+- **[Jeff Erickson, *Algorithms*](https://jeffe.cs.illinois.edu/teaching/algorithms/)** — ch. 1 and appendix II: recursion trees and a careful treatment of recurrences with floors and ceilings.
+- **[Antti Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf)** — ch. 2: time complexity and estimating efficiency from constraints.
+- **[Akra and Bazzi (1998), "On the solution of linear recurrence equations"](https://doi.org/10.1023/A:1018373005182)** — the general theorem for unequal splits.
+- **[Tarjan (1985), "Amortized computational complexity"](https://doi.org/10.1137/0606031)** — the paper that introduced the potential method.
+- **[neal, "Blowing up unordered\_map, and how to stop getting hacked on it"](https://codeforces.com/blog/entry/62393)** — why default hashing is unsafe in contests.

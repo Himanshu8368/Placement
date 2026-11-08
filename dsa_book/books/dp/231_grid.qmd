@@ -1,0 +1,1588 @@
+# Two-Dimensional Grid DP {#sec-gd}
+
+::: {.callout-note title="Sources"}
+**`dp_book` ch. 3** (the grid as a DAG, memory and prefix sums, an extra index, combining tables, two-index grids, then path counting and richer moves). This chapter starts from the grid-path pattern of the introduction (@sec-dpi-p3, especially @sec-dpi-p3-unique and @sec-dpi-p3-minpath) and from the look-back lesson (@sec-od-look). The state is no longer one index on a line. It is a cell, and the moves decide which cells that cell is allowed to read.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Model a grid process as a DAG of cells, pick a fill order that respects the arrows, and spot when a cycle forces a graph algorithm.
+- Fit a grid DP into memory: two rolling rows, an in-place row, and a compact table of choices when the path itself has to be written out.
+- Add a coordinate to a cell (steps, a remainder, a balance, a direction) and estimate the cost before filling the table.
+- Combine a forward table and a backward table to answer "through this cell" and "meet here".
+- Run a grid DP backwards when the requirement is decided by the future, and synchronise two walkers on anti-diagonals.
+- Compute a shape quantity — a largest square, a largest rectangle, a count of all-ones submatrices — from a cell-local transition and a 2D prefix sum.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from functools import lru_cache
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import dp231_traces as Traces
+random.seed(0)
+MOD = 10**9 + 7
+```
+
+## Why this matters
+
+@sec-od kept one index and let it read many earlier cells. This chapter adds the second index back, as in the grid paths of @sec-dpi-p3, and then asks what else a cell can carry: richer moves, a direction of fill that runs backwards, a second walker, a shape anchored at the cell.
+
+Unique Paths II (@sec-dpi-p3-unique) and Minimum Path Sum (@sec-dpi-p3-minpath) both move only right or down. The fill order is then obvious: row by row, left to right, because each cell reads the cell above it and the cell to its left. The look-back lesson (@sec-od-look) asked, for a fixed index on a line, which earlier indices it reads. A grid asks the same question of a cell. The answer is no longer a fixed pair of neighbours.
+
+A queen that slides until a wall, a falling path that may land in any other column, two people who must share exactly one cell, a path that has to spell a balanced bracket string: each of these is still a DP on cells. What changes is the set of cells a cell reads, how much of the path the future still needs to know, and whether one table is enough. Draw an arrow from each cell to the cells it depends on. The DP is valid when those arrows form a DAG, and the fill order has to respect every arrow. If an arrow can run backwards, there is no order, and the problem is a shortest path.
+
+## Lesson 1: the grid is a DAG {#sec-gd-dag}
+
+The move set fixes the arrows, and the arrows fix the order. Six situations cover the grids in this chapter.
+
+| Moves into $(r, c)$ come from | Fill order | What it is for |
+|---|---|---|
+| up, left | rows downward, columns left to right | a path to the bottom-right (@sec-dpi-p3) |
+| down, right, down-right | rows upward, columns right to left | "from here to the end" |
+| the whole previous row | row by row; order inside the row is free | a falling path |
+| the previous column | column by column, left to right | every move goes right |
+| two walkers with $r_1 + c_1 = r_2 + c_2$ | one anti-diagonal $r + c = t$ at a time | two paths that stay in step |
+| any neighbour, and nothing else increases | no order | a cycle: BFS, 0-1 BFS, or Dijkstra |
+
+::: {#fig-gd-orders}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["", "", ""], ["", "", ""], ["", "", ""]],
+           colors={(0, 1): "amber", (1, 0): "amber", (1, 1): "indigo"}, cell_w=0.85)
+    V.text(ax, p, 1.25, -2.55, "reads up and left", size=9)
+    V.grid(ax, p, [["A", "B"], ["D", "C"]], x=4.2,
+           colors={(0, 0): "red", (0, 1): "red", (1, 0): "red", (1, 1): "red"}, cell_w=0.85)
+    V.text(ax, p, 5.05, -1.55, "A→B→C→D→A", size=9)
+V.show(draw)
+```
+
+Indigo is the cell being written. Amber cells are already final. The red square has a cycle, so no cell is ready.
+
+:::
+
+Two orders are not "rows" or "columns", and both are still DAGs.
+
+**By value.** "Step to a neighbour with a strictly larger value" allows all four directions, and it still has no cycle: the value rises along every path. Process the cells in increasing order of value, or let memoised recursion discover that order. On
+
+$$
+\begin{bmatrix} 9 & 9 & 4 \\ 6 & 6 & 8 \\ 2 & 1 & 1 \end{bmatrix}
+$$
+
+the path $1 \to 2 \to 6 \to 9$ is a valid order. A smaller value is never waiting on a larger one.
+
+**By time.** "Any direction, at most $T$ moves" cycles in the grid, and the state $(t, r, c)$ does not: $t$ strictly increases. The grid is copied once per time step. The outer loop is the layer.
+
+If a walker may step to any of the four neighbours, with no budget and no monotone quantity, cell $A$ can depend on cell $B$ and $B$ on $A$. No fill order exists. Unit costs are a BFS, costs in $\{0, 1\}$ are a 0-1 BFS, and non-negative costs are Dijkstra. The trap is to run the right/down DP on a statement that also allows up or left. It passes every sample whose optimum happens to be monotone, and it fails on the first detour. Before writing the table, name the quantity that every allowed move increases: the row, the column, $r + c$, the time, or the value.
+
+Four checks, with the order each one forces:
+
+1. Down, down-left, down-right: every move enters the next row, so the rows go top to bottom.
+2. Right, up-right, down-right: every move enters the next column, so the columns go left to right.
+3. Right, down, and left, even with "not the same cell twice in a row": left and right inside one row form a cycle. That is not a plain grid DP.
+4. Any knight move, exactly $k$ of them: the state is $(t, r, c)$ for $t = 0..k$.
+
+```{python}
+grid = [[9, 9, 4], [6, 6, 8], [2, 1, 1]]
+path = [(2, 1), (2, 0), (1, 0), (0, 0)]
+assert [grid[r][c] for r, c in path] == [1, 2, 6, 9]
+assert all(grid[r][c] < grid[r2][c2] for (r, c), (r2, c2) in zip(path, path[1:]))
+
+orders = {
+    "down": "row",
+    "rightward": "column",
+    "left and right": "not a DP",
+    "knight, k moves": "layer by time",
+}
+assert orders["down"] == "row" and orders["rightward"] == "column"
+assert orders["left and right"] == "not a DP" and orders["knight, k moves"] == "layer by time"
+```
+
+## Lesson 2: memory and prefix sums {#sec-gd-mem}
+
+A grid DP has $mn$ states. At $m = n = 5000$ that is $2.5 \cdot 10^7$ cells: 100 MB of 32-bit integers, 200 MB of 64-bit integers. Most of these transitions read only the previous row.
+
+**Two rolling rows.** If row $r$ reads only row $r - 1$, keep `prev` and `cur` and swap them. This is the safe default.
+
+**One row, updated in place.** With up and left only, one array is enough, the same trick as the grid paths of @sec-dpi-p3. When column $c$ is updated, `row[c]` still holds the value from above and `row[c - 1]` already holds the new value to the left. The up-left neighbour is the value that was overwritten one step earlier. Save it before the write:
+
+```text
+tmp = row[c]
+row[c] = f(row[c], row[c - 1], diag)
+diag = tmp
+```
+
+`diag` is the old `row[c - 1]`, which is about to become the up-left of the next cell. Adding that third neighbour without the variable reads a value from the wrong row.
+
+**Roll the smaller side.** A grid of $10^6 \times 5$ does not want a rolling array of length $10^6$. When the arrows allow it, iterate so that the rolling array has length $\min(m, n)$.
+
+A rolling array throws the old rows away. If the path has to be printed, keep a separate choice table of $mn$ bytes ("came from up / left / diagonal") and roll the values. At $5000 \times 5000$ that is 25 MB of choices instead of 200 MB of 64-bit values.
+
+| Grid | Full table, 64-bit | Two rows | Choices, 1 byte |
+|---|---|---|---|
+| $1000 \times 1000$ | 8 MB | 16 KB | 1 MB |
+| $5000 \times 5000$ | 200 MB | 80 KB | 25 MB |
+| $10^4 \times 10^4$ | 800 MB, too much | 160 KB | 100 MB |
+| $(t, r, c)$ at $50^3$ | 1 MB | — | — |
+
+**A rectangle sum is itself a small DP.** Many grid problems ask for the sum inside a rectangle over and over. Let $P[r][c]$ be the sum of $a[i][j]$ over $i < r$ and $j < c$:
+
+$$
+P[r+1][c+1] = a[r][c] + P[r][c+1] + P[r+1][c] - P[r][c].
+$$
+
+The last term is subtracted because the top-left block was added twice. The sum of rows $r_1..r_2$ and columns $c_1..c_2$, inclusive, undoes the same overlap:
+
+$$
+P[r_2+1][c_2+1] - P[r_1][c_2+1] - P[r_2+1][c_1] + P[r_1][c_1].
+$$
+
+::: {#fig-gd-prefix}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+cells = [["3", "0", "1", "4"], ["5", "6", "3", "2"], ["1", "2", "0", "1"], ["4", "1", "0", "5"]]
+colors = {(r, c): "amber" for r in (1, 2) for c in (1, 2, 3)}
+def draw(ax, p):
+    V.grid(ax, p, cells, colors=colors, cell_w=0.8, size=10)
+V.show(draw)
+```
+
+Rows $1..2$ and columns $1..3$ of the example matrix. The amber rectangle sums to $6+3+2+2+0+1 = 14$.
+
+:::
+
+The same four corners run backwards. To add $v$ to every cell of many rectangles and read the grid only at the end, add $v$ at $(r_1, c_1)$ and $(r_2+1, c_2+1)$, subtract it at $(r_1, c_2+1)$ and $(r_2+1, c_1)$, and take one 2D prefix sum. Prefix sums and difference arrays are inverses, the 2D form of the line.
+
+```{python}
+def prefix_sum(a):
+    m, n = len(a), len(a[0])
+    P = [[0] * (n + 1) for _ in range(m + 1)]
+    for r in range(m):
+        for c in range(n):
+            P[r + 1][c + 1] = a[r][c] + P[r][c + 1] + P[r + 1][c] - P[r][c]
+    def rect(r1, c1, r2, c2):
+        return P[r2 + 1][c2 + 1] - P[r1][c2 + 1] - P[r2 + 1][c1] + P[r1][c1]
+    return rect
+
+def add_rect(diff, r1, c1, r2, c2, v):
+    diff[r1][c1] += v
+    diff[r2 + 1][c2 + 1] += v
+    diff[r1][c2 + 1] -= v
+    diff[r2 + 1][c1] -= v
+
+def from_diff(diff):
+    m, n = len(diff), len(diff[0])
+    g = [[0] * n for _ in range(m)]
+    for r in range(m):
+        for c in range(n):
+            up = g[r - 1][c] if r else 0
+            left = g[r][c - 1] if c else 0
+            diag = g[r - 1][c - 1] if r and c else 0
+            g[r][c] = diff[r][c] + up + left - diag
+    return g
+
+def paths_row(g):
+    """Right/down counts in one row. A wall writes 0 and cuts both neighbours."""
+    H, W = len(g), len(g[0])
+    row = [0] * W
+    for r in range(H):
+        for c in range(W):
+            if g[r][c] == "#":
+                row[c] = 0
+                continue
+            if r == 0 and c == 0:
+                row[c] = 1
+                continue
+            up = row[c] if r else 0
+            left = row[c - 1] if c else 0
+            row[c] = (up + left) % MOD
+    return row[-1]
+
+_a = [[3, 0, 1, 4], [5, 6, 3, 2], [1, 2, 0, 1], [4, 1, 0, 5]]
+_rect = prefix_sum(_a)
+assert _rect(1, 1, 2, 3) == 14 and _rect(0, 0, 3, 3) == 38
+_diff = [[0] * 4 for _ in range(4)]
+add_rect(_diff, 0, 0, 1, 1, 5)
+_back = from_diff(_diff)
+assert prefix_sum(_back)(0, 0, 1, 1) == 20 and _back[2][2] == 0
+assert paths_row(["....", ".#..", "...."]) == 4
+```
+
+On the example matrix, rows $1..2$ and columns $1..3$ sum to 14, and the whole matrix sums to 38. Adding 5 to the top-left $2 \times 2$ four times over, once per cell, is the same difference array read back as 20. The one-row path count on `....` / `.#..` / `....` is 4: the wall at $(1, 1)$ is a 0, and the cells past it are sums of whatever is still open.
+
+## Lesson 3: an extra index on a cell {#sec-gd-extra}
+
+Two partial paths that end on the same cell must have the same possible futures. Often they do not. One has used more steps, made more turns, or opened more brackets. The cell alone is then not a state, and the missing fact becomes another coordinate.
+
+| Extra coordinate | Range | The rule that forces it |
+|---|---|---|
+| steps used or left | $0..T$ | at most $T$ moves, in any direction |
+| sum modulo $k$ | $0..k-1$ | the path sum must be divisible by $k$ |
+| bracket balance | $0..\lfloor (m+n)/2 \rfloor$ | the path must spell a valid bracket string |
+| last direction | 2 or 4 | a turn has a cost, or two equal moves in a row are forbidden |
+| turns so far | $0..k$ | at most $k$ turns, so the count can be capped at $k+1$ |
+| the other walker | $0..n-1$ | two paths at once |
+
+The table has $mn$ times the length of that range, and the time multiplies by the number of moves as well. Compute the product before coding. $500 \times 500 \times 1000$ balances is $2.5 \cdot 10^8$ booleans, which is too many. The balance can never exceed the number of cells still to visit, and it has to stay at most $(m+n)/2$ to be closable, which often saves a factor of two to four.
+
+Keep only what the future uses. A sum becomes its remainder. A balance is capped by the cells that remain. "Number of turns" becomes "turns so far, capped at $k+1$" when the question is only "at most $k$". A large count becomes a parity when only the parity matters.
+
+**Paths with exactly $k$ turns.** In an $m \times n$ grid, count the right/down paths from the top-left to the bottom-right that change direction exactly $k$ times. A turn is a switch between a right move and a down move. The state $dp[r][c][t][d]$ is the number of paths that reach $(r, c)$ with $t$ turns so far and last move $d \in \{\mathrm{R}, \mathrm{D}\}$. The same direction keeps $t$. The other direction increases it. With four coordinates, "where can I go from here" is easier to list than "where could I have come from", so the natural writing is a push:
+
+$$
+\begin{aligned}
+dp[r][c+1][t][\mathrm{R}] &\mathrel{+}= dp[r][c][t][\mathrm{R}] + dp[r][c][t-1][\mathrm{D}],\\
+dp[r+1][c][t][\mathrm{D}] &\mathrel{+}= dp[r][c][t][\mathrm{D}] + dp[r][c][t-1][\mathrm{R}].
+\end{aligned}
+$$
+
+The first move leaves the corner with $t = 0$ in either direction. On a $4 \times 4$ grid the counts by number of turns are $0, 2, 4, 8, 4, 2, 0$. They sum to $\binom{6}{3} = 20$. One turn is the two L-shaped paths. Five turns is the two zigzags `RDRDRD` and `DRDRDR`. No path has 0 turns, because both directions are required, and none has 6, because six moves have only five gaps.
+
+Every move increases $r + c$, so the loops over $t$ and $d$ inside a cell can run in either order. A step coordinate $t$ with moves in all four directions is different: $t$ has to be the outermost loop, because the next layer depends on the whole previous layer and neighbours inside one layer do not depend on each other.
+
+```{python}
+def paths_by_turns(m, n):
+    K = m + n
+    dp = [[[[0, 0] for _ in range(K)] for _ in range(n)] for _ in range(m)]
+    dp[0][1][0][0] = 1
+    dp[1][0][0][1] = 1
+    for r in range(m):
+        for c in range(n):
+            for t in range(K - 1):
+                for d in range(2):
+                    v = dp[r][c][t][d]
+                    if not v:
+                        continue
+                    if c + 1 < n:
+                        dp[r][c + 1][t + (d == 1)][0] += v
+                    if r + 1 < m:
+                        dp[r + 1][c][t + (d == 0)][1] += v
+    return [dp[m - 1][n - 1][t][0] + dp[m - 1][n - 1][t][1] for t in range(7)]
+
+assert paths_by_turns(4, 4) == [0, 2, 4, 8, 4, 2, 0]
+assert sum(paths_by_turns(4, 4)) == 20
+```
+
+## Lesson 4: combining two tables {#sec-gd-comb}
+
+One table answers "what is the best, or how many, from the start to here?" Several questions need both sides of a cell. Which cells lie on some optimal path, or on every one? How many paths pass through $(r, c)$, and how many avoid it? If every cell might be blocked, what is the new answer, for every cell, without rerunning the DP? Where should two people meet?
+
+Every start-to-goal path through $X$ splits there into a prefix and a suffix, and the two halves are chosen independently. Any prefix can be glued to any suffix:
+
+$$
+\begin{aligned}
+\text{best path through } X &= f[X] + b[X] - v[X],\\
+\text{number of paths through } X &= F[X] \cdot B[X].
+\end{aligned}
+$$
+
+Sums add and counts multiply. The value $v[X]$ is subtracted once because both halves include the cell. A right/down path through $X$ stays in the rectangle from the start to $X$ and then in the rectangle from $X$ to the goal, so each table is an ordinary grid DP on its own rectangle.
+
+**Forward.** $f[r][c] = v[r][c] + \max(f[r-1][c], f[r][c-1])$, filled from the top-left. **Backward.** $b[r][c] = v[r][c] + \max(b[r+1][c], b[r][c+1])$, filled from the bottom-right. On
+
+$$
+\begin{bmatrix} 1 & 3 & 1 & 2 \\ 2 & 1 & 5 & 1 \\ 4 & 2 & 1 & 3 \end{bmatrix}
+$$
+
+the best path sums to 14. A cell lies on some optimal path exactly when $f + b - v = 14$. Cell $(1, 1)$ has $f = 5$, $b = 10$, $v = 1$, and $5 + 10 - 1 = 14$. Cell $(0, 3)$ gives at best $7 + 6 - 2 = 11$, so it lies on none. Following parent pointers recovers one optimal path. The combination, read at every cell, is the union of all of them.
+
+A right/down path crosses each anti-diagonal $r + c = \text{const}$ exactly once. A marked cell is on every optimal path when it is the only marked cell on its anti-diagonal. Here the anti-diagonals $0, 1, 3, 5$ each contain one marked cell, so $(0, 0)$, $(0, 1)$, $(1, 2)$ and $(2, 3)$ are unavoidable. Diagonals $2$ and $4$ contain two marked cells each, so the optimal paths still have a choice there.
+
+::: {#fig-gd-marked}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+marked = {(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (1, 3), (2, 2), (2, 3)}
+def draw(ax, p):
+    V.grid(ax, p,
+           [["1", "3", "1", "2"], ["2", "1", "5", "1"], ["4", "2", "1", "3"]],
+           colors={cell: "green" for cell in marked}, cell_w=0.8, size=10)
+V.show(draw)
+```
+
+The eight green cells are exactly the cells that lie on a maximum-sum right/down path. The optimum is 14.
+
+:::
+
+The counting version uses the same two sweeps with $+$ instead of $\max$. On an empty $3 \times 4$ grid there are 10 paths. The centre cell $(1, 1)$ is reached in 2 ways and left in 3, so $2 \cdot 3 = 6$ paths use it, and $10 - 6 = 4$ avoid it. Along any anti-diagonal the through-counts sum to the total, because each path crosses it once: $4 + 6 = 10$ on $r + c = 1$, and $1 + 6 + 3 = 10$ on $r + c = 2$. Under a modulus the sums agree modulo $10^9+7$. If $F \cdot B$ fails the test, one of the two tables is wrong.
+
+Blocking one cell is the complement, $\text{total} - F[X] \cdot B[X]$. Both factors are below the modulus, so the product fits in a 64-bit integer and not in a 32-bit one. The difference of two reduced values can be negative: add the modulus before the final reduction. With the two tables in hand, every "what if $X$ were blocked?" is one arithmetic operation. Rerunning the DP per cell is $O((mn)^2)$.
+
+Several blocked cells are not several subtractions. A path through two of them would be subtracted twice. That inclusion-exclusion, organised as a DP over the walls, is what a $10^5 \times 10^5$ grid with a few thousand walls needs. The state moves from "every cell" to "every interesting cell".
+
+The combination is valid only when any prefix can be glued to any suffix. It fails when the state carries history across the cut: "no cell visited twice" with moves in all directions, or a budget on the total number of turns. Then both sides need the extra coordinate, or the trick does not apply.
+
+Two walkers with different corners meet in one cell, and each walker's route splits into a half before the meeting and a half after it. That is four tables, one from each corner. The meeting cell itself is handled the way the statement says: counted once, counted twice, or not counted. @sec-gd-p1-work is that combination, with only two legal ways to cross the cell.
+
+```{python}
+def best_through(a):
+    H, W = len(a), len(a[0])
+    neg = -(10**18)
+    f = [[0] * W for _ in range(H)]
+    b = [[0] * W for _ in range(H)]
+    for r in range(H):
+        for c in range(W):
+            best = 0 if (r, c) == (0, 0) else neg
+            if r:
+                best = max(best, f[r - 1][c])
+            if c:
+                best = max(best, f[r][c - 1])
+            if (r, c) == (0, 0):
+                best = 0
+            f[r][c] = a[r][c] + best
+    for r in range(H - 1, -1, -1):
+        for c in range(W - 1, -1, -1):
+            best = 0 if (r, c) == (H - 1, W - 1) else neg
+            if r + 1 < H:
+                best = max(best, b[r + 1][c])
+            if c + 1 < W:
+                best = max(best, b[r][c + 1])
+            if (r, c) == (H - 1, W - 1):
+                best = 0
+            b[r][c] = a[r][c] + best
+    opt = f[H - 1][W - 1]
+    on = [(r, c) for r in range(H) for c in range(W) if f[r][c] + b[r][c] - a[r][c] == opt]
+    return opt, on
+
+def count_tables(g):
+    H, W = len(g), len(g[0])
+    F = [[0] * W for _ in range(H)]
+    B = [[0] * W for _ in range(H)]
+    for r in range(H):
+        for c in range(W):
+            if g[r][c] == "#":
+                continue
+            if r == 0 and c == 0:
+                F[r][c] = 1
+                continue
+            F[r][c] = ((F[r - 1][c] if r else 0) + (F[r][c - 1] if c else 0)) % MOD
+    for r in range(H - 1, -1, -1):
+        for c in range(W - 1, -1, -1):
+            if g[r][c] == "#":
+                continue
+            if r == H - 1 and c == W - 1:
+                B[r][c] = 1
+                continue
+            B[r][c] = ((B[r + 1][c] if r + 1 < H else 0) + (B[r][c + 1] if c + 1 < W else 0)) % MOD
+    return F, B
+
+_opt, _on = best_through([[1, 3, 1, 2], [2, 1, 5, 1], [4, 2, 1, 3]])
+assert _opt == 14 and len(_on) == 8 and (0, 3) not in _on and (1, 1) in _on
+_by_diag = {}
+for r, c in _on:
+    _by_diag.setdefault(r + c, []).append((r, c))
+assert [tuple(_by_diag[d]) for d in (0, 1, 3, 5)] == [((0, 0),), ((0, 1),), ((1, 2),), ((2, 3),)]
+_F, _B = count_tables(["....", "....", "...."])
+assert _F[2][3] == 10 and _F[1][1] * _B[1][1] == 6
+assert (_F[2][3] - _F[1][1] * _B[1][1]) % MOD == 4
+assert _F[0][1] * _B[0][1] + _F[1][0] * _B[1][0] == 10
+_pi, _pi_on = best_through([[3, 1, 4, 1], [5, 9, 2, 6], [5, 3, 5, 8]])
+assert _pi == 33 and len(_pi_on) == 8
+_Fw, _Bw = count_tables([".....", ".#...", "...#.", "....."])
+assert _Fw[3][4] == 7 and _Fw[2][2] * _Bw[2][2] == 2
+assert sum(_Fw[r][3 - r] * _Bw[r][3 - r] for r in range(4)) == 7
+```
+
+The $3 \times 4$ value grid has optimum 14 and eight cells on some optimal path. The four unavoidable cells are the anti-diagonals with a single marked cell. The empty $3 \times 4$ count is 10, six of those paths use the centre, and the anti-diagonal $r + c = 1$ sums back to 10. On
+
+$$
+\begin{bmatrix} 3 & 1 & 4 & 1 \\ 5 & 9 & 2 & 6 \\ 5 & 3 & 5 & 8 \end{bmatrix}
+$$
+
+the optimum is 33, eight cells lie on an optimal path, and a path forced through the top-right cell is worth only 23. The walled $4 \times 5$ grid `.....` / `.#...` / `...#.` / `.....` has 7 paths, and the cell $(2, 2)$ lies on 2 of them. Its anti-diagonal $r + c = 3$ also sums to 7.
+
+## Lesson 5: two indices are still a grid {#sec-gd-two}
+
+So far the grid was the input. Any DP whose state is a pair $(i, j)$ lives in a two-dimensional table, and the arrows, the fill order, the rolling rows, and the forward/backward split apply unchanged. Three families come back in every later chapter.
+
+**Two sequences.** $dp[i][j]$ is the answer for the prefixes $s[0..i)$ and $t[0..j)$. The cell reads up (drop a character of $s$), left (drop a character of $t$), and up-left (drop both). That is a right/down grid with one extra arrow. The longest common subsequence of `GRID` and `RIDGE` is 3, the letters `RID`. A match takes the diagonal and adds one. A mismatch takes the better of up and left. The `G` matched against the `G` of `RIDGE` cannot be extended: the only letter after that `G` is `E`. The fill order is rows, then columns. Two rolling rows hold the values. Reconstruction walks back from the bottom-right corner.
+
+**Items and a budget.** "Using the first $i$ items, with $k$ of something used" is a grid whose row $i$ depends only on row $i - 1$. Pascal's triangle is the smallest one: $C[i][k] = C[i-1][k] + C[i-1][k-1]$, skip the item or take it. One array of length $k + 1$, updated downwards, keeps $C[k-1]$ on the old row. That is the 0/1 direction of the loop. $C[4][2] = 3 + 3 = 6$.
+
+**Intervals.** The state is a contiguous piece $s[l..r]$. Only the triangle $l \le r$ is used, and $dp[l][r]$ reads shorter intervals: $[l+1, r]$, $[l, r-1]$, $[l+1, r-1]$, or a split. In the grid those cells lie to the left and below, so "rows top to bottom" is the wrong order. Fill by increasing length, or by decreasing $l$ and increasing $r$. The substrings of `abaab` that are palindromes are the five single letters, `aba`, `aa`, and `baab`: eight of them. A length of 1 or 2 needs only the two ends equal. A longer one also needs the strict inside to be a palindrome, which is the previous diagonal.
+
+| State | Reads | Fill order | Memory |
+|---|---|---|---|
+| a grid cell $(r, c)$ | the neighbours the moves name | the move set | rolling rows |
+| two prefixes $(i, j)$ | $(i-1, j)$, $(i, j-1)$, $(i-1, j-1)$ | rows, then columns | two rows |
+| items $\times$ budget $(i, k)$ | row $i-1$ only | rows; $k$ downwards if the row is updated in place | one row |
+| an interval $(l, r)$ | shorter intervals inside $[l, r]$ | by length, or $l$ downward and $r$ upward | the whole triangle |
+
+The habit is the picture. Whenever the state has two indices, sketch the table and draw the arrows of one cell. The picture says the order, how far back the arrows reach, and how to walk back from the answer cell.
+
+```{python}
+def lcs(s, t):
+    dp = [[0] * (len(t) + 1) for _ in range(len(s) + 1)]
+    for i in range(1, len(s) + 1):
+        for j in range(1, len(t) + 1):
+            if s[i - 1] == t[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    return dp[-1][-1]
+
+def choose(n, k):
+    C = [0] * (k + 1)
+    C[0] = 1
+    for i in range(1, n + 1):
+        for j in range(min(i, k), 0, -1):
+            C[j] += C[j - 1]
+    return C[k]
+
+def pal_count(s):
+    n, count = len(s), 0
+    pal = [[False] * n for _ in range(n)]
+    for length in range(1, n + 1):
+        for left in range(n - length + 1):
+            right = left + length - 1
+            pal[left][right] = s[left] == s[right] and (length <= 2 or pal[left + 1][right - 1])
+            count += pal[left][right]
+    return count
+
+assert lcs("GRID", "RIDGE") == 3
+assert choose(4, 2) == 6
+assert pal_count("abaab") == 8
+```
+
+The three tables are the same habit with different arrows (@fig-gd-two). A prefix cell reads up, left, and the diagonal. A budget cell reads only the previous row, and the in-place update walks $k$ downward so the old $C[k-1]$ is still there. An interval cell reads a shorter interval inside it, so the fill walks by increasing length. The lower triangle stays empty.
+
+::: {#fig-gd-two}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    s, t = "GRID", "RIDGE"
+    dp = [[0] * (len(t) + 1) for _ in range(len(s) + 1)]
+    for i in range(1, len(s) + 1):
+        for j in range(1, len(t) + 1):
+            if s[i - 1] == t[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    assert dp[-1][-1] == 3
+    tri = [[1]]
+    for i in range(1, 5):
+        row = [1]
+        for j in range(1, i):
+            row.append(tri[-1][j - 1] + tri[-1][j])
+        row.append(1)
+        tri.append(row)
+    assert tri[4][2] == 6
+    word = "abaab"
+    n = len(word)
+    pal = [[False] * n for _ in range(n)]
+    count = 0
+    for length in range(1, n + 1):
+        for left in range(n - length + 1):
+            right = left + length - 1
+            pal[left][right] = word[left] == word[right] and (length <= 2 or pal[left + 1][right - 1])
+            count += pal[left][right]
+    assert count == 8
+    V.text(ax, p, 2.2, 1.55, "prefixes", size=9)
+    V.grid(ax, p, [[str(c) for c in row] for row in dp], cell_w=0.62, size=7,
+           col_labels=[""] + list(t), row_labels=[""] + list(s),
+           colors={(4, 5): "green", (1, 4): "amber"})
+    V.text(ax, p, 8.6, 1.55, "budget", size=9)
+    V.grid(ax, p, [row + [""] * (5 - len(row)) for row in tri], x=7.2, cell_w=0.7, size=8,
+           colors={(4, 2): "green", (3, 1): "amber", (3, 2): "amber"})
+    V.text(ax, p, 13.4, 1.55, "intervals", size=9)
+    V.grid(ax, p, [["P" if pal[i][j] else "" for j in range(n)] for i in range(n)],
+           x=12.0, cell_w=0.7, size=8, col_labels=list(word), row_labels=list(word),
+           colors={(i, j): "green" for i in range(n) for j in range(n) if pal[i][j]})
+V.show(draw)
+```
+
+Green is the answer of each table: LCS 3, $C[4][2] = 6$, and the eight palindromes. Amber on the LCS grid is the `G` matched too early. Amber on the budget row is the previous row that $C[4][2]$ adds.
+
+:::
+
+## Pattern 1: path counting and combining tables {#sec-gd-p1}
+
+**Where we are.** The lessons showed that a grid is a DAG of cells and that a cell can carry an extra index. The patterns climb one idea at a time: count paths and combine a forward table with a backward one (this pattern), let a cell read a larger or stranger set of predecessors (Pattern 2), fill backwards when the requirement is set by the future, or add a move counter when the moves have cycles (Pattern 3), move two walkers on one clock (Pattern 4), and finally measure a shape anchored at the cell instead of a path that ends there (Pattern 5).
+
+**Recognise it.** The moves only go forward, so the cells are a DAG. The question is a count of paths, usually modulo $10^9+7$, or a best path value, and it mentions a cell in the middle: paths through $X$, paths avoiding $X$, the cells on some optimal path, two people who meet in exactly one cell. A wall is a cell that contributes nothing. A move that may cover a whole ray, a queen that cannot jump, is the same table with the ray summed by a running total.
+
+::: {.callout-important title="Template"}
+On a road, $F[r][c] = F[r-1][c] + F[r][c-1]$ modulo $10^9+7$, and a wall is 0. The backward table reads the cell below and the cell to the right, filled from its own corner. Paths through $X$ are $F[X] \cdot B[X]$. The best path forced through $X$ is $f[X] + b[X] - a[X]$.
+
+A queen move sums three rays, left, up, and up-left, each one stopped by the first wall. One running sum per ray makes the cell $O(1)$, and a wall resets all three sums. Two walkers who meet once need one table per corner. The shared cell is counted the way the statement says, which may be not at all.
+:::
+
+Each table is $O(HW)$. A few tables are still $O(HW)$. Summing a ray cell by cell is $O(HW(H+W))$, which at $2000 \times 2000$ is about $10^{10}$ additions. The memoised recursion is safe on depth: every call moves closer to the start, so the stack is at most $H + W - 1$. The table is still the one to write, and it shrinks to a rolling row (@sec-gd-mem).
+
+Leave this pattern when every move can go backwards: the count of paths is then infinite or needs a different definition, and the shortest path is a graph search (@sec-gd-dag). Leave it when the two walkers share many cells and a shared cell must be counted once: the halves are no longer independent. Leave it when the grid is $10^5 \times 10^5$ with a few walls: the table does not fit, and the state becomes the walls.
+
+::: {#fig-gd-p1-walls}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p,
+           [["1", "1", "1", "1", "1"],
+            ["1", "0", "1", "2", "3"],
+            ["1", "1", "2", "0", "3"],
+            ["1", "2", "4", "4", "7"]],
+           colors={(1, 1): "red", (2, 3): "red", (3, 4): "green", (2, 2): "amber"},
+           cell_w=0.72, size=9)
+V.show(draw)
+```
+
+Ways from the top-left on a $4 \times 5$ grid. The red cells are walls. The amber cell is reached in 2 ways. The green cell is the total, 7.
+
+:::
+
+{{< include ../problems/ac-abc183_e-queen-on-grid/problem.qmd >}}
+
+[**From one table to four.** The queen's count needs only paths that start at the top-left. Working Out asks about two people who must meet in exactly one cell, so each cell needs the best path into it and out of it from all four corners: four tables, combined at the meeting cell.]{.flow-bridge}
+
+{{< include ../problems/cf-429b-working-out/problem.qmd >}}
+
+## Pattern 2: richer moves {#sec-gd-p2}
+
+**From fixed neighbours to a predecessor set.** In Pattern 1 a cell read a few neighbours, or a ray summed by a running total. Now the set of cells a cell may be entered from, $P(r, c)$, is whatever the moves say: a whole previous row, three directions with ties to count, or a path whose value depends on the whole string it spells. The one idea is to summarise $P(r, c)$, or add the missing fact as an index.
+
+**Recognise it.** The path is still on a grid, and the steps are not just right and down. The statement says "down-left, down, or down-right", "any column of the next row except this one", "you may also move diagonally", or "the path as a whole must be a valid bracket string". Write $P(r, c)$ for the cells from which $(r, c)$ can be entered. The move set decides the fill order, and a large $P(r, c)$ is usually almost the same set for every cell of the row, so one summary of the previous row answers every cell.
+
+::: {.callout-important title="Template"}
+$dp[r][c] = g[r][c] \otimes \mathrm{COMBINE}_{(r', c') \in P(r, c)} dp[r'][c']$. Fill in any order that writes every cell of $P(r, c)$ before $(r, c)$.
+
+When $P(r, c)$ is the whole previous row, one minimum does every cell. When it is the whole row except column $c$, three numbers do it: the minimum, the column that holds it, and the second minimum, counting a duplicate of the minimum as a real second. A window of columns is the deque of @sec-od-p1-jump6. To count optimal paths, store the pair (best value, number of ways): replace on a strict improvement, add on a tie. An unreachable cell is marked by the value, not by a count of 0. A property of the whole path (a balance, a remainder) is one more index on the cell.
+:::
+
+A constant number of neighbours is $O(1)$ per cell, $O(mn)$ for the grid. A previous row of width $n$ is $O(n)$ per cell and $O(mn^2)$ for the grid, until the row summary brings it back to $O(mn)$. An extra index multiplies both the time and the memory by the length of its range. Row-major order is valid only when every predecessor is above, or in the same row and to the left. Moves that go right, up-right, and down-right have a predecessor in the next row. On $[[9, 1, 1], [1, 9, 9], [9, 9, 9]]$, column by column, the minimum is 3. The same recurrence in row-major order never sees the climb, and it returns 11.
+
+Leave this pattern when the moves have costs and run in all four directions: that graph has cycles (@sec-gd-dag). Leave it when the end condition depends on the cells still to come and the natural question is "how much do I need from here": that fill runs backwards. Leave it when two paths must be moved together.
+
+::: {#fig-gd-p2-pred}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["6", "2", "9", "3", "5"]],
+           colors={(0, 1): "green", (0, 3): "amber"}, cell_w=0.85, size=10)
+    V.text(ax, p, 2.1, -1.15, "min 2, second 3", size=9)
+V.show(draw)
+```
+
+The previous row, summarised once. Every column except the green one uses 2. The green column is not allowed to use itself, so it uses the amber 3.
+
+:::
+
+```{python}
+def side_min(g, by_column):
+    """Start in column 0, end in the last column. Moves: right, up-right, down-right.
+
+    A cell with no predecessor inside the grid starts a path. An in-bounds predecessor
+    that has not been written yet is still infinity, so a climb into a later row is invisible.
+    """
+    m, n = len(g), len(g[0])
+    inf = 10**18
+    dp = [[inf] * n for _ in range(m)]
+    pred = ((-1, -1), (0, -1), (1, -1))
+    outer = range(n) if by_column else range(m)
+    inner = range(m) if by_column else range(n)
+    for a in outer:
+        for b in inner:
+            r, c = (b, a) if by_column else (a, b)
+            best, seen = inf, False
+            for dr, dc in pred:
+                pr, pc = r + dr, c + dc
+                if 0 <= pr < m and 0 <= pc < n:
+                    seen = True
+                    best = min(best, dp[pr][pc])
+            dp[r][c] = g[r][c] + (best if seen else 0)
+    return min(dp[r][n - 1] for r in range(m))
+
+_side = [[9, 1, 1], [1, 9, 9], [9, 9, 9]]
+assert side_min(_side, True) == 3 and side_min(_side, False) == 11
+```
+
+{{< include ../problems/lc-1289-minimum-falling-path-sum-ii/problem.qmd >}}
+
+[**From the best value to the best value and its count.** Falling Path II only wants the minimum. Paths with Max Score also asks how many paths reach it, so every cell stores a pair, (best score, number of ways), replaced on a strict improvement and added on a tie.]{.flow-bridge}
+
+{{< include ../problems/lc-1301-number-of-paths-with-max-score/problem.qmd >}}
+
+[**From a score to a property of the whole path.** A score adds up cell by cell. A bracket string is valid only if its balance never dips below zero, so the cell alone is not a state: the balance so far becomes a third index.]{.flow-bridge}
+
+{{< include ../problems/lc-2267-check-if-there-is-a-valid-parentheses-string-path/problem.qmd >}}
+
+## Pattern 3: backward and layered DP {#sec-gd-p3}
+
+**From the past to the future.** Every table so far summarised the path behind a cell. Some questions are decided by the path **ahead**: how much health you need on entering a room depends on the rooms still to come. Turn the fill around and the summary becomes one number again. When the moves have cycles, a move counter that only grows plays the same role and gives the order.
+
+**Recognise it.** The number you have to fix at the start depends on what happens later on the path, or the moves point in every direction and only a counter (moves left, fuel, time, a strictly larger value) makes the states a DAG. A forward summary of "health so far" keeps two numbers that do not dominate each other. A suffix often has one number: the least health you must hold on entering the cell, or the number of ways to finish from here with $k$ moves left.
+
+::: {.callout-important title="Template"}
+**Backward.** $need(r,c)$ is the least value on entering $(r,c)$ that can still finish. For a dungeon,
+
+$$
+need(r,c) = \max\big(1,\ \min(need(r{+}1,c),\ need(r,c{+}1)) - g[r][c]\big),
+$$
+
+with a virtual cell after the target seeded at $1$ and every other outside cell at $+\infty$. Fill rows from the target back to the start, and each row from right to left. One rolling row is enough.
+
+**Layered.** Moves may go up, down, left, and right, but every move increases a counter $t$. Then
+
+$$
+dp[t{+}1][r'][c'] \mathrel{+}= dp[t][r][c]
+$$
+
+for each legal step, and a step that leaves the grid is an event you count rather than a cell you store. Layer $t{+}1$ is a different array from layer $t$.
+:::
+
+**Complexity.** The backward table is $O(mn)$ time and $O(n)$ memory. The layered count is $O(K \cdot mn)$ time and $O(mn)$ memory with two layers. A memo key that forgets $t$ is a different problem, and on a cyclic grid it does not even terminate. If nothing on the walk strictly increases, the search is BFS or Dijkstra, not a fill order.
+
+::: {#fig-gd-p3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["0", "−1", "3"], ["0", "1", "−3"]], colors={(0, 1): "amber", (1, 2): "red"})
+    V.grid(ax, p, [["2", "2", "1"], ["3", "3", "4"]], x=4.4, colors={(0, 0): "green", (1, 1): "indigo"})
+    V.text(ax, p, 1.5, 1.35, "rooms", size=10)
+    V.text(ax, p, 5.9, 1.35, "need", size=10)
+V.show(draw)
+```
+
+On this $2\times 3$ the forward "safest so far" prefers down first and needs $3$. The backward table needs $2$: the early dip to $-1$ is paid for by the $+3$.
+
+:::
+
+::: {#fig-gd-anim-dungeon}
+
+```{python}
+#| echo: false
+dg = [[-2, -3, 3], [-5, -10, 1], [10, 30, -5]]
+dg_m, dg_n = len(dg), len(dg[0])
+dg_need = [[None] * dg_n for _ in range(dg_m)]
+dg_order = []
+for r in range(dg_m - 1, -1, -1):
+    for c in range(dg_n - 1, -1, -1):
+        below = dg_need[r + 1][c] if r + 1 < dg_m else math.inf
+        right = dg_need[r][c + 1] if c + 1 < dg_n else math.inf
+        nxt = 1 if r == dg_m - 1 and c == dg_n - 1 else min(below, right)
+        dg_need[r][c] = max(1, nxt - dg[r][c])
+        dg_order.append((r, c, nxt))
+assert dg_need[0][0] == 7
+
+def dg_frame(ax, p, k):
+    done = {(r, c) for r, c, _ in dg_order[: k + 1]}
+    r0, c0, _ = dg_order[k]
+    cells = [[f"{dg[r][c]} | {dg_need[r][c]}" if (r, c) in done else f"{dg[r][c]} | ?" for c in range(dg_n)]
+             for r in range(dg_m)]
+    colors = {rc: "cyan" for rc in done}
+    colors[(r0, c0)] = "green" if k == len(dg_order) - 1 else "indigo"
+    V.grid(ax, p, cells, colors=colors, cell_w=1.9)
+
+dg_caps = []
+for r, c, nxt in dg_order:
+    src = "the princess's room: leave with at least 1" if nxt == 1 and (r, c) == (dg_m - 1, dg_n - 1)         else f"cheaper exit needs {nxt}"
+    dg_caps.append(f"need({r},{c}) = max(1, {nxt} - ({dg[r][c]})) = {dg_need[r][c]}; {src}")
+dg_caps[-1] += "; the knight starts with 7"
+V.animate(dg_frame, len(dg_order), captions=dg_caps, interval=1000)
+```
+
+Dungeon Game's first sample filled backwards, one cell per frame; each cell shows `room value | need`. A cell needs its cheaper exit's requirement minus what the room gives, and never less than 1. Filling from the princess's corner means every cell's exits are already known, which no forward summary can promise.
+
+:::
+
+{{< include ../problems/lc-0174-dungeon-game/problem.qmd >}}
+
+[**From backwards in space to forwards in time.** Dungeon reverses the fill because the moves only go right and down. A ball that can move in all four directions has cycles, so no fill order over cells exists; the number of moves made is what grows, and it becomes the layer index.]{.flow-bridge}
+
+{{< include ../problems/lc-0576-out-of-boundary-paths/problem.qmd >}}
+
+## Pattern 4: two walkers {#sec-gd-p4}
+
+**From one path to two.** Each DP so far moved one walker. When two paths collect from the same grid and a shared cell pays once, their choices interact, and optimising them one after the other is a greedy that loses. Move both on one clock, so the state holds both positions at the same time, and the shared cell is a test on that state.
+
+**Recognise it.** Two paths collect values, and a cell both of them visit is paid once. "Go to the corner and come back" is the same set of cells as two walks that both go to the corner. Optimising one path, erasing it, and optimising again is a greedy: on a $3\times 4$ of cherries it collects $5$ when $6$ is possible, and the best single path there is unique, so a tie-break does not save it.
+
+::: {.callout-important title="Template"}
+Move both walkers on one clock. After $t$ right-or-down steps, each walker stands on the anti-diagonal $r + c = t$, so the column is $t - r$ and the state is $(t, r_1, r_2)$.
+
+$$
+dp[t][r_1][r_2] = g[r_1][t - r_1] + [r_1 \ne r_2]\, g[r_2][t - r_2] + \max_{d_1, d_2 \in \{0, 1\}} dp[t - 1][r_1 - d_1][r_2 - d_2].
+$$
+
+A thorn makes the state $-\infty$, not $0$. The public answer is $\max(0, dp)$ at the far corner. Robots that both drop one row per turn use $(r, c_1, c_2)$ and nine moves, and they share a cell exactly when $c_1 = c_2$.
+:::
+
+**Complexity.** Diagonal walkers are $O((m + n) m^2)$ time, or half of that if you store only $r_1 \le r_2$ and read every predecessor at $(\min, \max)$. Two layers bring the memory to $O(m^2)$. Row-synchronised robots are $O(m n^2)$ time and $O(n^2)$ memory. The rows on diagonal $t$ of an $m \times n$ grid are $\max(0, t - n + 1)$ through $\min(m - 1, t)$.
+
+::: {#fig-gd-p4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    cells = [["0", "1", "−1"], ["1", "0", "−1"], ["1", "1", "1"]]
+    V.grid(ax, p, cells, colors={(0, 2): "red", (1, 2): "red", (0, 1): "green", (1, 0): "green", (2, 0): "green", (2, 1): "green", (2, 2): "green"})
+    V.text(ax, p, 1.5, 1.35, "t = r + c", size=10)
+V.show(draw)
+```
+
+Sample 1 of cherry pickup. The thorns sit on one anti-diagonal. The five green cherries are one round trip: the cell $(2, 1)$ lies on both walks and is counted once.
+
+:::
+
+{{< include ../problems/lc-0741-cherry-pickup/problem.qmd >}}
+
+[**From a clock we build to a clock we are given.** In Cherry Pickup the walkers are synchronised by the anti-diagonal $r + c = t$, which we chose. In Cherry Pickup II both robots drop one row per move, so the row is the clock, the state is $(r, c_1, c_2)$, and each robot has three moves.]{.flow-bridge}
+
+{{< include ../problems/lc-1463-cherry-pickup-ii/problem.qmd >}}
+
+## Pattern 5: shape DP {#sec-gd-p5}
+
+**From paths to shapes.** Every pattern so far asked about paths that end at a cell. A cell can also anchor a **shape**: the largest all-ones square whose bottom-right corner it is. The transition still reads the cell's neighbours, but the value means a size, not a path.
+
+**Recognise it.** The grid is binary, or a cell is "good" by a local test, and you want the largest axis-aligned square or rectangle, or the number of them. Anchor the shape at one cell. A square is described by one number, the side of the largest all-ones square whose bottom-right corner is that cell. A rectangle is not: fix the bottom row and the problem becomes one histogram per row.
+
+::: {.callout-important title="Template"}
+On a 1-cell,
+
+$$
+sq[r][c] = 1 + \min(sq[r-1][c],\ sq[r][c-1],\ sq[r-1][c-1]),
+$$
+
+and a 0-cell is $0$. The top row and the left column are $0$ or $1$, since only a $1\times 1$ fits. The answer maximal square asks for is $(\max sq)^2$. The number of all-ones squares is $\sum sq$, because a corner of side $k$ is the corner of $k$ squares.
+
+Column heights are $h[r][c] = h[r-1][c] + 1$ on a 1, and $0$ on a 0. The largest rectangle under one histogram is a monotonic stack, and the stack needs a final bar of height $0$.
+:::
+
+**Complexity.** The square recurrence is $O(mn)$ time. One rolling row is $O(n)$ memory, plus a variable that remembers the diagonal the row just overwrote. Heights plus a stack are $O(mn)$ time and $O(n)$ memory: each index is pushed and popped once per row. A prefix-sum check of every rectangle is $O(m^2 n^2)$ and is the oracle, not the submission.
+
+::: {#fig-gd-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(
+        ax, p,
+        [["1", "0", "1", "0", "0"], ["1", "0", "1", "1", "1"], ["1", "1", "1", "2", "2"], ["1", "0", "0", "1", "0"]],
+        colors={(2, 3): "green", (2, 4): "green", (1, 3): "indigo", (1, 4): "indigo", (2, 2): "indigo"},
+    )
+V.show(draw)
+```
+
+$sq$ on the shared sample. The two $2$s are $2\times 2$ squares, area $4$. The same matrix has a $2\times 3$ rectangle of area $6$; one number per corner cannot name that rectangle.
+
+:::
+
+::: {#fig-gd-anim-square}
+
+```{python}
+#| echo: false
+sq_g = [[1, 0, 1, 0, 0], [1, 0, 1, 1, 1], [1, 1, 1, 1, 1], [1, 0, 0, 1, 0]]
+sq_m, sq_n = len(sq_g), len(sq_g[0])
+sq = [[0] * sq_n for _ in range(sq_m)]
+for r in range(sq_m):
+    for c in range(sq_n):
+        if sq_g[r][c]:
+            sq[r][c] = 1 if r == 0 or c == 0 else 1 + min(sq[r - 1][c], sq[r][c - 1], sq[r - 1][c - 1])
+assert max(map(max, sq)) == 2 and sum(map(sum, sq)) == 15
+
+def sq_frame(ax, p, k):
+    cells = [[str(sq[r][c]) if r <= k else str(sq_g[r][c]) for c in range(sq_n)] for r in range(sq_m)]
+    colors = {(r, c): "muted" for r in range(k + 1, sq_m) for c in range(sq_n)}
+    colors.update({(k, c): "indigo" for c in range(sq_n)})
+    colors.update({(r, c): "green" for r in range(k + 1) for c in range(sq_n) if sq[r][c] == 2})
+    V.grid(ax, p, cells, colors=colors)
+
+sq_caps = [f"row {r}: sq = {sq[r]}" for r in range(sq_m)]
+sq_caps[0] = f"row 0: only 1 x 1 squares fit, sq = {sq[0]}"
+sq_caps[2] += " - two corners of 2 x 2 squares (green)"
+sq_caps[-1] += "; the largest side is 2, area 4"
+V.animate(sq_frame, sq_m, captions=sq_caps, interval=1100)
+```
+
+Maximal square on the shared sample, one row per frame. Grey rows still show the input; filled rows show $sq$, the side of the largest all-ones square ending at that cell, $1 + \min$(up, left, diagonal) on a one. The cell checks the maximum side (2) and the total $\sum sq = 15$, the number of all-ones squares.
+
+:::
+
+{{< include ../problems/lc-0221-maximal-square/problem.qmd >}}
+
+[**From one number per cell to one histogram per row.** A square is described by its side, so one number per corner is enough. A rectangle has a width and a height that trade against each other, and no neighbour-based rule finds it. Fix the bottom row instead: the ones above each column are a histogram, and a monotonic stack finds its largest rectangle.]{.flow-bridge}
+
+{{< include ../problems/lc-0085-maximal-rectangle/problem.qmd >}}
+
+**Looking back.** All five patterns fill one table of cells in an order that respects the moves. The climb was about what a cell stores: a count combined with a backward count, a summary of a large predecessor set, a requirement read from the future or a move budget, two positions at once, and finally the size of a shape. Each time the cell alone was not enough, we added the missing fact as an index, exactly as in @sec-od.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Count paths, or test whether a cell lies on one | Path counting, forward table and backward table | @sec-gd-p1 |
+| The move is anywhere in the previous row or column, and you also need the second best | Richer moves | @sec-gd-p2 |
+| The start value depends on every prefix of the path | Backward DP, filled from the target | @sec-gd-p3 |
+| Four directions, plus a budget of moves, time, or fuel | Layered DP; the counter is the outer loop | @sec-gd-p3-out |
+| A move must go to a strictly larger value | Order by value; memoised DFS or a sort | @sec-gd-p3 |
+| Two paths, and a shared cell is collected once | Two walkers on one clock | @sec-gd-p4 |
+| Go there and come back, right/down then left/up | Two forward walkers, $t = r + c$ | @sec-gd-p4-cherry |
+| Both agents drop one row per turn | Row clock, state $(r, c_1, c_2)$ | @sec-gd-p4-cherry2 |
+| Largest or number of all-ones squares | Side at the bottom-right corner, minimum of three neighbours | @sec-gd-p5-square |
+| Largest all-ones rectangle | Heights per row, histogram, monotonic stack, sentinel $0$ | @sec-gd-p5-rect |
+| Four directions and nothing on the walk increases | BFS or Dijkstra, not a table | @sec-gd-p3 |
+| Visit every free cell exactly once | The cell is not a state; backtracking | @sec-gd-p5 |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **A forward "need".** Health so far is two numbers, the lowest prefix and the balance. Neither dominates. Dungeon's first sample awards $8$ to the richest path; the answer is $7$ (@sec-gd-p3-dung).
+- **The floor of $1$, the seed, and the pad.** $need = \max(1, \min(\text{next}) - \text{cell})$. A missing clamp makes `[[0, 30, -5]]` negative. A seed of $1$ on the princess herself, or a pad of $0$, makes sample 1 return $6$. Outside is $+\infty$ except the one cell past her.
+- **The rolling row swept the wrong way.** Dungeon fills right to left, so the right neighbour is already new. Left to right reads the old neighbour. A square's rolling row has the opposite problem: the diagonal was overwritten, and `prev` is the only copy of it (@sec-gd-p5-square).
+- **A layer updated in place.** Out-of-boundary paths push every ball to a neighbour. Writing into the same array moves some balls twice in one round. Layer $t + 1$ is a different array (@sec-gd-p3-out).
+- **A memo key without the counter.** Ways to leave $(0, 0)$ with one move is $2$; with two moves it is $6$. On a cyclic grid the counter is also what makes the recursion stop.
+- **A shared cell paid twice, or impossible stored as $0$.** Cherry pickup sample 1 becomes $8$, and the thorn sample becomes $3$. $-\infty$ is impossible. $\max(0, \cdot)$ happens once, at the public answer (@sec-gd-p4-cherry).
+- **The wrong cell of the suffix.** Cherry pickup II's answer is $dp[0][0][\mathrm{cols}-1]$. The maximum of row $0$ lets the robots start anywhere and turns the unreachable $9$ into $9$ (@sec-gd-p4-cherry2).
+- **Side versus area, and a histogram with no sentinel.** Maximal square returns the square of the side. Maximal rectangle's row $3, 1, 3, 2, 2$ returns $4$ if the final bar of height $0$ is missing, and the rectangle on that matrix is $6$, not the square's $4$ (@sec-gd-p5-rect).
+:::
+
+## Exercises
+
+**1. [E]** [CF 1360E · Polygon](https://codeforces.com/problemset/problem/1360/E){rating="1300"}. A cannon left of each row and above each column fires a $1$, which flies until the next cell is the border or a $1$. Given a final board, could some shots have produced it? ($n \le 50$. The board $\begin{smallmatrix}1&0\\0&1\end{smallmatrix}$ is NO.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Read the board backwards. A $1$ that is not in the last row or the last column stopped because the next cell was a $1$, so it needs a $1$ to its right or below. That local test is the whole answer.
+
+```{python}
+def polygon(board):
+    n = len(board)
+    for r in range(n - 1):
+        for c in range(n - 1):
+            if board[r][c] == "1" and board[r + 1][c] == "0" and board[r][c + 1] == "0":
+                return "NO"
+    return "YES"
+
+assert polygon(["10", "01"]) == "NO"
+assert polygon(["11", "01"]) == "YES"
+assert polygon(["0100", "1110", "0101", "0111"]) == "NO"
+```
+:::
+
+**2. [H]** [LC 329 · Longest Increasing Path in a Matrix](https://leetcode.com/problems/longest-increasing-path-in-a-matrix/){difficulty="Hard"}. Move up, down, left, or right to a strictly larger value. Return the number of cells on the longest such path. ($[[9,9,4],[6,6,8],[2,1,1]] \to 4$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The value increases, so the cells are a DAG. $len(r, c) = 1 + \max len$ over strictly larger neighbours, or $1$ if there is none. Memoised DFS computes each cell once.
+
+```{python}
+def longest_increasing(a):
+    m, n = len(a), len(a[0])
+    memo = [[0] * n for _ in range(m)]
+
+    def dfs(r, c):
+        if memo[r][c]:
+            return memo[r][c]
+        best = 1
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < m and 0 <= nc < n and a[nr][nc] > a[r][c]:
+                best = max(best, 1 + dfs(nr, nc))
+        memo[r][c] = best
+        return best
+
+    return max(dfs(r, c) for r in range(m) for c in range(n))
+
+assert longest_increasing([[9, 9, 4], [6, 6, 8], [2, 1, 1]]) == 4
+assert longest_increasing([[1]]) == 1
+```
+:::
+
+**3. [H]** [LC 1575 · Count All Possible Routes](https://leetcode.com/problems/count-all-possible-routes/){difficulty="Hard"}. Cities sit at distinct positions. Driving from $i$ to $j \ne i$ costs the absolute difference in fuel. Count routes from `start` to `finish` that use at most `fuel`, modulo $10^9+7$. ($[2,3,6,8,4]$, start $1$, finish $3$, fuel $5 \to 4$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Fuel only goes down, so the layer is the fuel still in the tank. Whenever the route stands at `finish`, add it: it may stop, or drive on. A move of cost $0$ cannot happen, because the positions differ.
+
+```{python}
+def count_routes(locations, start, finish, fuel):
+    n = len(locations)
+    ways = [[0] * n for _ in range(fuel + 1)]
+    ways[fuel][start] = 1
+    ans = 0
+    for f in range(fuel, -1, -1):
+        for i in range(n):
+            if ways[f][i] == 0:
+                continue
+            if i == finish:
+                ans = (ans + ways[f][i]) % MOD
+            for j in range(n):
+                if j == i:
+                    continue
+                cost = abs(locations[i] - locations[j])
+                if cost <= f:
+                    ways[f - cost][j] = (ways[f - cost][j] + ways[f][i]) % MOD
+    return ans
+
+assert count_routes([2, 3, 6, 8, 4], 1, 3, 5) == 4
+```
+:::
+
+**4. [M]** [LC 688 · Knight Probability in Chessboard](https://leetcode.com/problems/knight-probability-in-chessboard/){difficulty="Medium"}. A knight starts at `(row, column)` on an $n \times n$ board and makes $k$ moves. Each of the eight moves is equally likely, and a move off the board removes the knight. Return the probability it is still on the board. ($n = 3$, $k = 2$, start $(0, 0) \to 0.0625$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The same layered grid as out-of-boundary paths, with probability instead of a count. Each move sends $1/8$ of the mass to every knight neighbour that stays on the board. The answer is the mass remaining after $k$ moves.
+
+```{python}
+def knight_prob(n, k, row, col):
+    moves = ((1, 2), (1, -2), (-1, 2), (-1, -2), (2, 1), (2, -1), (-2, 1), (-2, -1))
+    cur = [[0.0] * n for _ in range(n)]
+    cur[row][col] = 1.0
+    for _ in range(k):
+        nxt = [[0.0] * n for _ in range(n)]
+        for r in range(n):
+            for c in range(n):
+                if cur[r][c] == 0.0:
+                    continue
+                for dr, dc in moves:
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < n and 0 <= nc < n:
+                        nxt[nr][nc] += cur[r][c] / 8.0
+        cur = nxt
+    return sum(sum(line) for line in cur)
+
+assert abs(knight_prob(3, 2, 0, 0) - 0.0625) < 1e-9
+```
+:::
+
+**5. [M]** [LC 3418 · Maximum Amount of Money Robot Can Earn](https://leetcode.com/problems/maximum-amount-of-money-robot-can-earn/){difficulty="Medium"}. Move right or down. A negative cell is a robber. You may neutralise at most two robbers. ($[[0,1,-1],[1,-2,3],[2,-3,4]] \to 8$; $[[10,10,10],[10,10,10]] \to 40$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The cell is not enough: two paths can arrive with different numbers of neutralisations left. $dp[c][k]$ is the best total at the current row and column $c$ with $k$ neutralisations used. Unreachable stays $-\infty$, because a total may be negative. The counter only grows, so each layer reads itself or the previous row.
+
+```{python}
+def maximum_amount(coins):
+    m, n = len(coins), len(coins[0])
+    NEG = -10**18
+    dp = [[NEG] * 3 for _ in range(n)]
+    for r in range(m):
+        for c in range(n):
+            v = coins[r][c]
+            frm = [NEG] * 3
+            for k in range(3):
+                if r == 0 and c == 0:
+                    frm[k] = 0 if k == 0 else NEG
+                else:
+                    if r > 0:
+                        frm[k] = max(frm[k], dp[c][k])
+                    if c > 0:
+                        frm[k] = max(frm[k], dp[c - 1][k])
+            nxt = [NEG] * 3
+            for k in range(3):
+                best = frm[k] + v if frm[k] != NEG else NEG
+                if v < 0 and k > 0 and frm[k - 1] != NEG:
+                    best = max(best, frm[k - 1])
+                nxt[k] = best
+            dp[c] = nxt
+    return max(dp[n - 1])
+
+assert maximum_amount([[0, 1, -1], [1, -2, 3], [2, -3, 4]]) == 8
+assert maximum_amount([[10, 10, 10], [10, 10, 10]]) == 40
+assert maximum_amount([[9, -8, 6], [-2, 3, 4]]) == 19
+```
+:::
+
+**6. [M]** [LC 3332 · Maximum Points Tourist Can Earn](https://leetcode.com/problems/maximum-points-tourist-can-earn/){difficulty="Medium"}. Exactly $k$ days, start in any city. Stay and earn `stayScore[day][city]`, or travel and earn `travelScore[from][to]`. ($n = 2$, $k = 1$, stay $[[2,3]]$, travel $[[0,2],[1,0]] \to 3$; the second sample $\to 8$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The axes are day and city. Layer $i + 1$ reads only layer $i$. Inside a layer every city is reachable from every other, which is $O(n^2)$ per day.
+
+```{python}
+def tourist(n, k, stay, travel):
+    prev = [0] * n
+    for day in range(k):
+        cur = [0] * n
+        for dest in range(n):
+            best = prev[dest] + stay[day][dest]
+            for src in range(n):
+                if src != dest:
+                    best = max(best, prev[src] + travel[src][dest])
+            cur[dest] = best
+        prev = cur
+    return max(prev)
+
+assert tourist(2, 1, [[2, 3]], [[0, 2], [1, 0]]) == 3
+assert tourist(3, 2, [[3, 4, 2], [2, 1, 2]], [[0, 2, 1], [2, 0, 4], [3, 2, 0]]) == 8
+```
+:::
+
+**7. [M]** Dungeon, free start. Same rules as @sec-gd-p3-dung, but the knight may start in any room of the first row and still ends at the bottom-right. (Sample 1 of the dungeon $\to 2$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The backward row already holds $need(0, c)$ for every column. The answer is the minimum of that row. One run replaces one run per start.
+
+```{python}
+def dungeon_any_start(dungeon):
+    m, n = len(dungeon), len(dungeon[0])
+    INF = 10**18
+    row = [INF] * (n + 1)
+    row[n - 1] = 1
+    for r in range(m - 1, -1, -1):
+        for c in range(n - 1, -1, -1):
+            nxt = min(row[c], row[c + 1])
+            row[c] = max(1, nxt - dungeon[r][c])
+    return min(row[:n])
+
+assert dungeon_any_start([[-2, -3, 3], [-5, -10, 1], [10, 30, -5]]) == 2
+assert dungeon_any_start([[0, -1, 3], [0, 1, -3]]) == 1
+```
+:::
+
+**8. [H]** How many optimal route pairs? Two right/down walkers on an $n \times n$ grid of non-negative values, a shared cell paid once. Print the maximum total and the number of ordered pairs of paths that attain it, modulo $10^9+7$. ($[[1,1],[1,1]] \to 4,\ 2$; all ones $3\times 3 \to 8,\ 6$; $[[1,0,0],[0,1,0],[0,0,1]] \to 3,\ 32$; $[[0,3,1],[2,0,4],[1,5,0]] \to 16,\ 2$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Cherry pickup's clock, with a pair $(best, ways)$ in every cell. A strictly better predecessor replaces the count; a tie adds it. Do not fold $r_1 \le r_2$: swapping the walkers changes an ordered pair.
+
+```{python}
+def optimal_pairs(a):
+    n = len(a)
+    NEG = -10**18
+    best = [[NEG] * n for _ in range(n)]
+    ways = [[0] * n for _ in range(n)]
+    best[0][0] = a[0][0]
+    ways[0][0] = 1
+    for t in range(1, 2 * n - 1):
+        lo, hi = max(0, t - n + 1), min(n - 1, t)
+        nb = [[NEG] * n for _ in range(n)]
+        nw = [[0] * n for _ in range(n)]
+        for r1 in range(lo, hi + 1):
+            for r2 in range(lo, hi + 1):
+                b, w = NEG, 0
+                for d1 in (0, 1):
+                    for d2 in (0, 1):
+                        p1, p2 = r1 - d1, r2 - d2
+                        if p1 < 0 or p2 < 0 or best[p1][p2] == NEG:
+                            continue
+                        if best[p1][p2] > b:
+                            b, w = best[p1][p2], ways[p1][p2]
+                        elif best[p1][p2] == b:
+                            w = (w + ways[p1][p2]) % MOD
+                if b == NEG:
+                    continue
+                nb[r1][r2] = b + a[r1][t - r1] + (a[r2][t - r2] if r1 != r2 else 0)
+                nw[r1][r2] = w
+        best, ways = nb, nw
+    return best[n - 1][n - 1], ways[n - 1][n - 1]
+
+assert optimal_pairs([[1, 1], [1, 1]]) == (4, 2)
+assert optimal_pairs([[1, 1, 1], [1, 1, 1], [1, 1, 1]]) == (8, 6)
+assert optimal_pairs([[1, 0, 0], [0, 1, 0], [0, 0, 1]]) == (3, 32)
+assert optimal_pairs([[0, 3, 1], [2, 0, 4], [1, 5, 0]]) == (16, 2)
+```
+:::
+
+**9. [H]** [LC 3363 · Find the Maximum Number of Fruits Collected](https://leetcode.com/problems/find-the-maximum-number-of-fruits-collected/){difficulty="Hard"}. Three children walk to $(n - 1, n - 1)$ in exactly $n - 1$ moves, from $(0, 0)$, $(0, n - 1)$, and $(n - 1, 0)$, with the move sets in the statement. A room is collected once. ($[[1,2,3,4],[5,6,8,7],[9,10,11,12],[13,14,15,16]] \to 100$; $[[1,1],[1,1]] \to 4$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The child from $(0, 0)$ has exactly $n - 1$ moves and needs $n - 1$ steps on each axis, so it is forced down the main diagonal. The other two stay strictly on opposite sides of that diagonal until the last cell, so they never meet. Each triangle is a one-walker DP. Transpose the grid to reuse it.
+
+```{python}
+def fruits_collected(fruits):
+    n = len(fruits)
+
+    def upper(f):
+        NEG = -10**18
+        prev = [NEG] * n
+        prev[n - 1] = f[0][n - 1]
+        for r in range(1, n - 1):
+            cur = [NEG] * n
+            for c in range(r + 1, n):
+                best = prev[c]
+                if c > 0:
+                    best = max(best, prev[c - 1])
+                if c + 1 < n:
+                    best = max(best, prev[c + 1])
+                if best != NEG:
+                    cur[c] = best + f[r][c]
+            prev = cur
+        return prev[n - 1]
+
+    diag = sum(fruits[i][i] for i in range(n))
+    tr = [list(col) for col in zip(*fruits)]
+    return diag + upper(fruits) + upper(tr)
+
+assert fruits_collected([[1, 2, 3, 4], [5, 6, 8, 7], [9, 10, 11, 12], [13, 14, 15, 16]]) == 100
+assert fruits_collected([[1, 1], [1, 1]]) == 4
+```
+:::
+
+**10. [M]** Three walkers. Three right/down walkers from $(0, 0)$ to the opposite corner, each cell paid once. On $[[0,1,0,2],[3,0,1,0],[0,2,0,1],[1,0,3,0]]$, two walkers collect $12$. How many do three collect?
+
+::: {.callout-note collapse="true" title="Solution"}
+The same clock, with rows $r_1 \le r_2 \le r_3$ and eight predecessors. Sort the predecessor's rows before reading them. Equal rows are adjacent after the sort, so the gain adds a cell only when its row differs from the previous walker's. Three walkers collect $13$ of the $14$ on that grid. On the $3\times 4$ greedy grid they collect $6$, which two walkers already collect.
+
+```{python}
+def three_walkers(g):
+    m, n = len(g), len(g[0])
+    NEG = -10**18
+    prev = [[[NEG] * m for _ in range(m)] for _ in range(m)]
+    prev[0][0][0] = g[0][0]
+    for t in range(1, m + n - 1):
+        lo, hi = max(0, t - n + 1), min(m - 1, t)
+        cur = [[[NEG] * m for _ in range(m)] for _ in range(m)]
+        for a in range(lo, hi + 1):
+            for b in range(a, hi + 1):
+                for c in range(b, hi + 1):
+                    best = NEG
+                    for mask in range(8):
+                        p = [a - (mask & 1), b - ((mask >> 1) & 1), c - ((mask >> 2) & 1)]
+                        if min(p) < 0:
+                            continue
+                        p.sort()
+                        best = max(best, prev[p[0]][p[1]][p[2]])
+                    if best == NEG:
+                        continue
+                    gain = g[a][t - a]
+                    if b != a:
+                        gain += g[b][t - b]
+                    if c != b:
+                        gain += g[c][t - c]
+                    cur[a][b][c] = best + gain
+        prev = cur
+    return prev[m - 1][m - 1][m - 1]
+
+assert three_walkers([[0, 0, 1, 0], [1, 1, 1, 1], [0, 1, 0, 0]]) == 6
+assert three_walkers([[0, 1, 0, 2], [3, 0, 1, 0], [0, 2, 0, 1], [1, 0, 3, 0]]) == 13
+```
+:::
+
+**11. [H]** Paths that never touch. Count the unordered pairs of right/down paths from $(0, 0)$ to $(m - 1, n - 1)$ that share only the two corners. ($2\times 2 \to 1$, $3\times 3 \to 3$, $3\times 4 \to 6$, $4\times 4 \to 20$, $5\times 5 \to 175$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Synchronise by $t$ and keep the walkers strictly ordered, $r_1 < r_2$, on every diagonal except the first and the last. The finish of that count is the pair of cells just before the corner, $(m - 2, n - 1)$ and $(m - 1, n - 2)$.
+
+```{python}
+def disjoint_pairs(m, n):
+    if m < 2 or n < 2:
+        return 0
+    prev = [[0] * m for _ in range(m)]
+    prev[0][1] = 1
+    for t in range(2, m + n - 2):
+        lo, hi = max(0, t - n + 1), min(m - 1, t)
+        cur = [[0] * m for _ in range(m)]
+        for r1 in range(lo, hi + 1):
+            for r2 in range(r1 + 1, hi + 1):
+                for d1 in (0, 1):
+                    for d2 in (0, 1):
+                        p1, p2 = r1 - d1, r2 - d2
+                        if p1 >= 0 and p1 < p2:
+                            cur[r1][r2] += prev[p1][p2]
+        prev = cur
+    return prev[m - 2][m - 1]
+
+assert [disjoint_pairs(2, 2), disjoint_pairs(3, 3), disjoint_pairs(3, 4), disjoint_pairs(4, 4), disjoint_pairs(5, 5)] == [1, 3, 6, 20, 175]
+```
+:::
+
+**12. [E]** [LC 1277 · Count Square Submatrices with All Ones](https://leetcode.com/problems/count-square-submatrices-with-all-ones/){difficulty="Medium"}. Count the all-ones squares. ($[[0,1,1,1],[1,1,1,1],[0,1,1,1]] \to 15$; $[[1,0,1],[1,1,0],[1,1,0]] \to 7$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Fill $sq$ exactly as in maximal square. A corner of side $k$ is the corner of $k$ squares, so the answer is the sum of the table.
+
+```{python}
+def count_squares(a):
+    m, n = len(a), len(a[0])
+    total = 0
+    for r in range(m):
+        for c in range(n):
+            if a[r][c] and r and c:
+                a[r][c] = 1 + min(a[r - 1][c], a[r][c - 1], a[r - 1][c - 1])
+            total += a[r][c]
+    return total
+
+assert count_squares([[0, 1, 1, 1], [1, 1, 1, 1], [0, 1, 1, 1]]) == 15
+assert count_squares([[1, 0, 1], [1, 1, 0], [1, 1, 0]]) == 7
+```
+:::
+
+**13. [M]** [LC 764 · Largest Plus Sign](https://leetcode.com/problems/largest-plus-sign/){difficulty="Medium"}. An $n \times n$ grid of ones, except the mines. A plus of order $k$ has four arms of length $k - 1$. Return the largest order. ($n = 5$, mines $[[4,2]] \to 2$; $n = 1$ with its only cell mined $\to 0$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The order at a cell is the shortest of the four runs of ones that end there. One table, initialised to $n$ and zeroed on mines, takes the minimum with each run as a sweep computes it. A mine stays $0$. A one-cell's run is at least $1$, so reading the table as "is this a one?" stays valid.
+
+```{python}
+def plus_sign(n, mines):
+    best = [[n] * n for _ in range(n)]
+    for r, c in mines:
+        best[r][c] = 0
+    for i in range(n):
+        left = right = up = down = 0
+        for j in range(n):
+            k = n - 1 - j
+            left = left + 1 if best[i][j] else 0
+            best[i][j] = min(best[i][j], left)
+            right = right + 1 if best[i][k] else 0
+            best[i][k] = min(best[i][k], right)
+            up = up + 1 if best[j][i] else 0
+            best[j][i] = min(best[j][i], up)
+            down = down + 1 if best[k][i] else 0
+            best[k][i] = min(best[k][i], down)
+    return max(max(row) for row in best)
+
+assert plus_sign(5, [[4, 2]]) == 2
+assert plus_sign(1, [[0, 0]]) == 0
+```
+:::
+
+**14. [M]** [LC 1139 · Largest 1-Bordered Square](https://leetcode.com/problems/largest-1-bordered-square/){difficulty="Medium"}. Largest square whose border is all ones; the inside may be anything. Return the number of cells, or $0$. ($[[1,1,1],[1,0,1],[1,1,1]] \to 9$; $[[1,1,0,0]] \to 1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+`up` and `left` are the runs ending at the cell. For a bottom-right corner, the bottom and right edges allow sides up to the minimum of those two runs. Try sides downward and accept the first whose top edge and left edge are long enough. A bordered square of side $k$ need not contain one of side $k - 1$.
+
+```{python}
+def bordered_square(g):
+    m, n = len(g), len(g[0])
+    up = [[0] * (n + 1) for _ in range(m + 1)]
+    left = [[0] * (n + 1) for _ in range(m + 1)]
+    for r in range(1, m + 1):
+        for c in range(1, n + 1):
+            if g[r - 1][c - 1]:
+                up[r][c] = up[r - 1][c] + 1
+                left[r][c] = left[r][c - 1] + 1
+    best = 0
+    for r in range(1, m + 1):
+        for c in range(1, n + 1):
+            k = min(up[r][c], left[r][c])
+            while k > best:
+                if left[r - k + 1][c] >= k and up[r][c - k + 1] >= k:
+                    best = k
+                    break
+                k -= 1
+    return best * best
+
+assert bordered_square([[1, 1, 1], [1, 0, 1], [1, 1, 1]]) == 9
+assert bordered_square([[1, 1, 0, 0]]) == 1
+```
+:::
+
+**15. [M]** [LC 1504 · Count Submatrices With All Ones](https://leetcode.com/problems/count-submatrices-with-all-ones/){difficulty="Medium"}. Count the all-ones rectangles. ($[[1,0,1],[1,1,0],[1,1,0]] \to 13$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Heights as in maximal rectangle. For each bar, $p$ is the nearest strictly shorter bar on the left. Every rectangle with bottom-right corner $(r, c)$ is either already counted at $p$, or has height exactly $h[c]$ and a left edge in $(p, c]$. That is $cnt[p] + h[c]\cdot(c - p)$.
+
+```{python}
+def count_submat(mat):
+    n = len(mat[0])
+    h = [0] * n
+    total = 0
+    for row in mat:
+        for c in range(n):
+            h[c] = h[c] + 1 if row[c] else 0
+        cnt = [0] * n
+        st = []
+        for c in range(n):
+            while st and h[st[-1]] >= h[c]:
+                st.pop()
+            p = st[-1] if st else -1
+            cnt[c] = (cnt[p] if p >= 0 else 0) + h[c] * (c - p)
+            st.append(c)
+            total += cnt[c]
+    return total
+
+assert count_submat([[1, 0, 1], [1, 1, 0], [1, 1, 0]]) == 13
+```
+:::
+
+**16. [M]** [CSES 1652 · Forest Queries](https://cses.fi/problemset/task/1652). An $n \times n$ map of `.` and `*`. Answer rectangle tree-counts. On the map `.*..`, `*.**`, `**..`, `****`, the three sample rectangles answer $3$, $1$, $2$.
+
+::: {.callout-note collapse="true" title="Solution"}
+One 2D prefix sum. A query is four lookups. The input is 1-indexed, which is the padding of the table.
+
+```{python}
+def forest_queries(lines, queries):
+    n = len(lines)
+    P = [[0] * (n + 1) for _ in range(n + 1)]
+    for y in range(1, n + 1):
+        for x in range(1, n + 1):
+            P[y][x] = (lines[y - 1][x - 1] == "*") + P[y - 1][x] + P[y][x - 1] - P[y - 1][x - 1]
+    out = []
+    for y1, x1, y2, x2 in queries:
+        out.append(P[y2][x2] - P[y1 - 1][x2] - P[y2][x1 - 1] + P[y1 - 1][x1 - 1])
+    return out
+
+assert forest_queries([".*..", "*.**", "**..", "****"], [(2, 2, 3, 4), (3, 1, 3, 1), (1, 1, 2, 2)]) == [3, 1, 2]
+```
+:::
+
+**17. [M]** Largest square with at most $k$ zeros. Why does $1 + \min$ of three neighbours fail, and what is the side on the maximal-square sample for $k = 0, 1, 2, 3$? (`"10"` / `"01"` with $k = 1 \to 1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Three squares with one zero each can frame a square with more than one zero, so the minimum does not add. "Some $s\times s$ square has at most $k$ zeros" is monotone in $s$. Binary-search the side and test every position with a prefix sum of the zeros. The sample gives sides $2, 2, 3, 3$.
+
+```{python}
+def square_at_most_k(g, k):
+    m, n = len(g), len(g[0])
+    Z = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m):
+        for j in range(n):
+            Z[i + 1][j + 1] = (g[i][j] == "0") + Z[i][j + 1] + Z[i + 1][j] - Z[i][j]
+
+    def ok(s):
+        if s == 0:
+            return True
+        for r in range(s, m + 1):
+            for c in range(s, n + 1):
+                zeros = Z[r][c] - Z[r - s][c] - Z[r][c - s] + Z[r - s][c - s]
+                if zeros <= k:
+                    return True
+        return False
+
+    lo, hi = 0, min(m, n)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if ok(mid):
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+_G = ["10100", "10111", "11111", "10010"]
+assert [square_at_most_k(_G, k) for k in range(4)] == [2, 2, 3, 3]
+assert square_at_most_k(["10", "01"], 1) == 1
+```
+:::
+
+## Interview questions
+
+**1. Why does a forward DP fail on Dungeon Game, and why is the backward value clamped at $1$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A prefix has two numbers that do not dominate: the lowest health so far, and the health you hold now. "Most health left" on sample 1 follows down, down, right, right, gains $28$, and needs $8$. The answer is $7$. A suffix has one number, the least health on entering it. After the room you must cover the cheaper successor, and you must be alive on entry, so $need = \max(1, \min(\text{next}) - \text{cell})$. Without the floor, `[[0, 30, -5]]` returns a negative (@sec-gd-p3-dung).
+:::
+
+**2. What is wrong with a pad of $0$, and with seeding the princess's own cell with $1$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Zero is smaller than every real need, so the minimum walks off the board and skips the rest of the dungeon. Sample 1 returns $6$. The princess's room has a value too: seeding her cell with $1$ ignores the $-5$, and sample 1 again returns $6$. Outside cells are $+\infty$, except the single seed past her room.
+:::
+
+**3. Why does the rolling dungeon row run right to left?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`row[c]` still holds the value from the row below, and `row[c + 1]` must already hold the new value to the right. A left-to-right sweep reads the old right neighbour. The square's rolling row is the mirror image of the same idea: you overwrite left to right, and one variable remembers the diagonal you just destroyed (@sec-gd-p5-square).
+:::
+
+**4. When do you add a layer instead of reversing the fill?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Reverse the fill when the suffix has a one-number summary and the moves still go only right and down. Add a layer when the moves can go backward, so the cells have a cycle, but some counter — moves, time, fuel, a strictly larger value — increases on every step. The counter, not the cell, is the fill order. If nothing increases, the search is BFS or Dijkstra (@sec-gd-p3-out).
+:::
+
+**5. Why is a memo on $(r, c)$ wrong for out-of-boundary paths?**
+
+::: {.callout-note collapse="true" title="Answer"}
+"Ways to leave $(0, 0)$" is $2$ with one move left and $6$ with two, on the $2\times 2$ sample. A key without the budget returns whichever value was stored first. On a cyclic grid that key also fails to terminate, because a cell calls its neighbour and the neighbour calls it back.
+:::
+
+**6. Why are two arrays required for one layer of a four-direction walk?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Cells in the same layer do not depend on each other. Every arrow goes to the next value of the counter. Writing the push into the array you are reading lets one ball take several steps in a single round. Sample 2 of out-of-boundary paths stops being $12$.
+:::
+
+**7. Why is a round trip two forward walkers, and why is $t = r + c$ enough?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Read the return trip backwards and it is a right/down walk on the same cells. The score is the set of cells, so the direction of the second walk does not matter. Every right or down step increases $r + c$ by one, so after $t$ steps both walkers are on that anti-diagonal and the column is $t - r$. The state is $(t, r_1, r_2)$, not four coordinates (@sec-gd-p4-cherry).
+:::
+
+**8. When do two walkers share a cell, and what goes wrong if you add it twice?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A cell $(r, c)$ is visited only at tick $r + c$. Both walkers are there at that tick exactly when their rows match. The gain adds the second cell only when $r_1 \ne r_2$. Adding it always makes sample 1 return $8$: both walkers take the same route and its cherries are paid twice. A $1\times 1$ grid must score its only cell once.
+:::
+
+**9. Why is $-\infty$ not $0$, and why does the public answer clamp at $0$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A thorn is unreachable. If that state holds $0$ and is extended like any other state, sample 2 of cherry pickup returns $3$: the walkers cross the thorn diagonal. Keep $-\infty$, and apply $\max(0, \cdot)$ once at the corner, because "no route" is reported as $0$. Do not clamp the intermediate cells: a later cherry cannot rescue a walk that already hit a thorn, and a zero cherry is a real total.
+:::
+
+**10. Why is cherry pickup II's answer one entry, not the max of the first row?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The suffix $dp[r][c_1][c_2]$ is "best from here downward", and "here" for the problem is the two starting corners. $dp[0][0][\mathrm{cols}-1]$ is that state. The maximum over row $0$ lets the robots start in any columns. Both official samples still return $24$ and $28$. The grid with a single $9$ that neither robot can reach returns $9$ instead of $0$ (@sec-gd-p4-cherry2).
+:::
+
+**11. What does $sq[r][c]$ mean, and why the minimum of three neighbours?**
+
+::: {.callout-note collapse="true" title="Answer"}
+It is the side of the largest all-ones square whose bottom-right corner is $(r, c)$. A square of side $k$ leaves three squares of side $k - 1$ when you delete its last row, its last column, or both, so the side is one more than the shortest of those three, and only if $(r, c)$ is a one. Up and left are the edges. The diagonal is the interior. The problem asks for the area, $(\max sq)^2$ (@sec-gd-p5-square).
+:::
+
+**12. Why does the histogram need a bar of height $0$ at the end?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Bars still on the stack have not been measured. Row 2 of the sample is $3, 1, 3, 2, 2$. Without the sentinel the stack still holds the bar of height $1$ and the bar of height $2$, and the area $6$ is never written; the routine returns $4$. The sentinel pops every remaining bar. The width is $i - left - 1$, with $left = -1$ when the stack becomes empty (@sec-gd-p5-rect).
+:::
+
+**13. Why is the largest rectangle not the square recurrence?**
+
+::: {.callout-note collapse="true" title="Answer"}
+One number at a corner cannot name every rectangle that uses that corner: the rectangle's height and width are independent. The square on the sample matrix is $4$. The rectangle is $6$, a $2\times 3$ whose floor is row 2. Fix the bottom row, turn the columns into histogram bars, and solve the histogram.
+:::
+
+**14. When is a grid problem not a DP?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When no quantity strictly increases along a move, the cells can contain a cycle and no fill order exists. Path With Minimum Effort is a shortest path. Unique Paths III visits every free cell exactly once, so the state would be the set of visited cells; with at most $20$ cells the intended search is backtracking. A closed walk of odd length on a grid is impossible for a cheaper reason: every edge flips the colour of $r + c$.
+:::
+
+## Summary
+
+::: {.callout-important title="Five templates"}
+- **Path counting.** A forward table from the start and a backward table to the goal. Through one cell the counts multiply, and the cell itself is counted once.
+- **Richer moves.** $dp[r][c] = v + \mathrm{opt}$ over a whole previous row or column. Keep the best and the second best so one cell is $O(1)$.
+- **Backward and layered.** A requirement decided by the future is filled from the goal, and it is clamped at $1$. A budget of moves, time, or fuel is a layer $(t, r, c)$; layer $t + 1$ is a different array (@sec-gd-p3).
+- **Two walkers.** One clock, both free coordinates. A shared cell, $r_1 = r_2$ or $c_1 = c_2$, is collected once. A round trip is two forward walks (@sec-gd-p4).
+- **Shape DP.** $sq[r][c] = 1 + \min(\mathrm{up}, \mathrm{left}, \mathrm{diag})$ on a one, and the area is the square of the max. A rectangle is a histogram per row, closed by a bar of height $0$ (@sec-gd-p5).
+:::
+
+The first question on any grid is which arrow leaves the cell, and which quantity that arrow increases. That quantity is the fill order. If nothing increases, the algorithm is a search.
+
+A dungeon rolling row runs right to left. A square rolling row runs left to right and keeps the overwritten diagonal in one variable. Two walkers share a cell only on the same tick of the clock, which is why one comparison pays it once. The square on the running matrix is $4$. The rectangle is $6$.
+
+The next chapter leaves the grid. The state becomes a position in a sequence and the value of the last element taken, which is the LIS family, and the first real speed-up is a data structure rather than a shorter table.
+
+## Practice ladder
+
+The 30 problems are the practice set of `dp_book` ch. 3, in the topic groups of that set. None of the links below is a solved problem of this chapter. A problem that the index lists under two headings appears in both groups.
+
+**2D prefix sums**
+
+::: {.practice}
+- [LC 1314 · Matrix Block Sum](https://leetcode.com/problems/matrix-block-sum/){difficulty="Medium"}
+- [CF 22B · Bargaining Table](https://codeforces.com/problemset/problem/22/B){rating="1500"}
+- [LC 2245 · Maximum Trailing Zeros in a Cornered Path](https://leetcode.com/problems/maximum-trailing-zeros-in-a-cornered-path/){difficulty="Medium"}
+- [CF 611C · New Year and Domino](https://codeforces.com/problemset/problem/611/C){rating="1500"}
+- [CF 1722E · Counting Rectangles](https://codeforces.com/problemset/problem/1722/E){rating="1600"}
+- [LC 1074 · Number of Submatrices That Sum to Target](https://leetcode.com/problems/number-of-submatrices-that-sum-to-target/){difficulty="Hard"}
+:::
+
+**Path DP, two rows**
+
+::: {.practice}
+- [CF 1937B · Binary Path](https://codeforces.com/problemset/problem/1937/B){rating="1300"}
+- [CF 1766C · Hamiltonian Wall](https://codeforces.com/problemset/problem/1766/C){rating="1300"}
+- [CF 1234C · Pipes](https://codeforces.com/problemset/problem/1234/C){rating="1500"}
+- [CF 1716C · Robot in a Hallway](https://codeforces.com/problemset/problem/1716/C){rating="2000"}
+:::
+
+**Layered, or an extra dimension**
+
+::: {.practice}
+- [LC 688 · Knight Probability in Chessboard](https://leetcode.com/problems/knight-probability-in-chessboard/){difficulty="Medium"}
+- [CF 1391D · 505](https://codeforces.com/problemset/problem/1391/D){rating="2000"}
+- [CF 1225E · Rock Is Push](https://codeforces.com/problemset/problem/1225/E){rating="2200"}
+- [LC 3459 · Length of Longest V-Shaped Diagonal Segment](https://leetcode.com/problems/length-of-longest-v-shaped-diagonal-segment/){difficulty="Hard"}
+:::
+
+**Combining tables**
+
+::: {.practice}
+- [LC 2556 · Disconnect Path in a Binary Matrix by at Most One Flip](https://leetcode.com/problems/disconnect-path-in-a-binary-matrix-by-at-most-one-flip/){difficulty="Medium"}
+- [CF 1393D · Rarity and New Dress](https://codeforces.com/problemset/problem/1393/D){rating="2100"}
+:::
+
+**Shape DP**
+
+::: {.practice}
+- [LC 1727 · Largest Submatrix With Rearrangements](https://leetcode.com/problems/largest-submatrix-with-rearrangements/){difficulty="Medium"}
+- [CF 1461B · Find the Spruce](https://codeforces.com/problemset/problem/1461/B){rating="1400"}
+- [CF 375B · Maximum Submatrix 2](https://codeforces.com/problemset/problem/375/B){rating="1600"}
+- [CF 1393D · Rarity and New Dress](https://codeforces.com/problemset/problem/1393/D){rating="2100"}
+:::
+
+**Rectangle-shaped state**
+
+::: {.practice}
+- [LC 1444 · Number of Ways of Cutting a Pizza](https://leetcode.com/problems/number-of-ways-of-cutting-a-pizza/){difficulty="Hard"}
+- [CSES 1744 · Rectangle Cutting](https://cses.fi/problemset/task/1744)
+- [LC 2312 · Selling Pieces of Wood](https://leetcode.com/problems/selling-pieces-of-wood/){difficulty="Hard"}
+:::
+
+**Counting colourings**
+
+::: {.practice}
+- [LC 1411 · Number of Ways to Paint N×3 Grid](https://leetcode.com/problems/number-of-ways-to-paint-n-3-grid/){difficulty="Hard"}
+- [CF 1239A · Ivan the Fool and the Probability Theory](https://codeforces.com/problemset/problem/1239/A){rating="1700"}
+:::
+
+**Faster transitions**
+
+::: {.practice}
+- [CF 1941E · Rudolf and k Bridges](https://codeforces.com/problemset/problem/1941/E){rating="1600"}
+- [CF 1225E · Rock Is Push](https://codeforces.com/problemset/problem/1225/E){rating="2200"}
+- [LC 2617 · Minimum Number of Visited Cells in a Grid](https://leetcode.com/problems/minimum-number-of-visited-cells-in-a-grid/){difficulty="Hard"}
+:::
+
+**greedy string on a grid**
+
+::: {.practice}
+- [CF 1031D · Minimum path](https://codeforces.com/problemset/problem/1031/D){rating="1900"}
+:::
+
+**Not a DP**
+
+::: {.practice}
+- [LC 2087 · Minimum Cost Homecoming of a Robot in a Grid](https://leetcode.com/problems/minimum-cost-homecoming-of-a-robot-in-a-grid/){difficulty="Medium"}
+- [LC 1631 · Path With Minimum Effort](https://leetcode.com/problems/path-with-minimum-effort/){difficulty="Medium"}
+- [LC 980 · Unique Paths III](https://leetcode.com/problems/unique-paths-iii/){difficulty="Hard"}
+:::
+
+| Problem | Idea it adds |
+|---|---|
+| Matrix Block Sum | one 2D prefix sum, then clamp the window to the board |
+| Largest Submatrix With Rearrangements | heights of ones, then sort one row |
+| Knight Probability in Chessboard | a layer per move, mass divided by $8$ |
+| Minimum Cost Homecoming of a Robot in a Grid | not a DP: a monotone walk pays each crossed row and column once |
+| Binary Path | the path is fixed by the column where it drops |
+| Hamiltonian Wall | the row in which you leave the column |
+| Find the Spruce | the spruce at an apex rests on three spruces one row lower |
+| Bargaining Table | every rectangle, tested with a prefix sum |
+| Maximum Trailing Zeros in a Cornered Path | factors $2$ and $5$, then the four L-shapes |
+| Number of Ways to Paint N×3 Grid | two classes of rows, ABA and ABC |
+| Number of Ways of Cutting a Pizza | cuts left, and the top-left of the piece that remains |
+| Rectangle Cutting | the state is the shape $(a, b)$, not a position |
+| Pipes | a curved pipe forces a curved partner in the other row |
+| New Year and Domino | separate prefix sums for horizontal and vertical slots |
+| Counting Rectangles | add the area at cell $(h, w)$, then a 2D prefix sum |
+| Maximum Submatrix 2 | fix the left column, sort rows by the run of ones |
+| Rudolf and k Bridges | a sliding-window minimum on each row, then $k$ consecutive rows |
+| Number of Submatrices That Sum to Target | fix two rows; the columns are a 1D subarray-sum |
+| Path With Minimum Effort | four directions, so Dijkstra or binary search plus BFS |
+| Unique Paths III | not a cell DP: every free cell once, so backtracking |
+| Disconnect Path in a Binary Matrix by at Most One Flip | forward reachability and backward reachability |
+| Ivan the Fool and the Probability Theory | one repeated row forces every other row |
+| Minimum path | fewest changes to each cell, then the string by anti-diagonals |
+| Robot in a Hallway | a zigzag, then one hook; the hook's cost is a suffix maximum |
+| 505 | two or three rows make a column a bitmask |
+| Rarity and New Dress | four directional runs, then left and right sweeps |
+| Rock Is Push | the state remembers the direction of the current run |
+| Length of Longest V-Shaped Diagonal Segment | cell, diagonal direction, and whether the turn is used |
+| Selling Pieces of Wood | sell the rectangle, or cut once and solve both pieces |
+| Minimum Number of Visited Cells in a Grid | a jump is a range; a heap per row and per column |
+
+## Further reading
+
+The next chapter, @sec-lis, goes back to one array and lets the chosen elements skip.
+
+- [CP-Algorithms: Finding the largest zero submatrix](https://cp-algorithms.com/dynamic_programming/zero_matrix.html): the row-by-row histogram method of the maximal-rectangle problem.
+- [CP-Algorithms: Dynamic programming on broken profile](https://cp-algorithms.com/dynamic_programming/profile-dynamics.html): the grid DP whose state is a whole row boundary, a later chapter.
+- [Wikipedia: Prefix sum](https://en.wikipedia.org/wiki/Prefix_sum): 2D prefix sums (summed-area tables) for counting rectangles in $O(1)$.
+- [Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf), ch. 7: dynamic programming for contests, including LIS, grid paths and edit distance.
+- [CP-Algorithms: Introduction to dynamic programming](https://cp-algorithms.com/dynamic_programming/intro-to-dp.html): memoisation vs tabulation, and a list of classic DP problems to practise on.
+- [Wikipedia: Dynamic programming](https://en.wikipedia.org/wiki/Dynamic_programming): the general method, with grid and sequence examples and its history.

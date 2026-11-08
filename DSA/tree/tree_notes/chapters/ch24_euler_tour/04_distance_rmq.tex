@@ -1,0 +1,656 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  5.4  Euler Tour for Distance and an RMQ Preview          sec:c24-dist
+%  Exports: def:c24-tour  thm:c24-dist  prop:c24-rmqpreview
+%           lst:c24-tour-build  ex:c24-dist-run
+%           prob:c24-pathdir  lst:c24-pathdir
+%           prob:c24-leafpairs lst:c24-leafpairs  practice: LC 1522 (N-ary diameter)
+%  NOTE: LCA-by-Euler+RMQ is only PREVIEWED here; the proof and the
+%  binary-lifting machinery live in the LCA chapter (\chref{c11}).
+% =====================================================================
+\section{Euler Tour for Distance and an RMQ Preview}\label{sec:c24-dist}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item On the 2-tick clock, why does $u$ being an ancestor of $v$ read as
+        $[\tin(v),\tout(v)) \subseteq [\tin(u),\tout(u))$? (\thmref{c24-anc})
+  \item What is $\depth(v)$ for every node of $G$, and the root-path sums to nodes $4$ and
+        $6$? (\secref{c24-path}, \figref{c24-running})
+  \item Why did \secref{c24-flatten} hand off range \emph{answering} to the query chapters --
+        and what does an RMQ have to do with LCA? (\chref{c13}, \chref{c11})
+  \item State $\dist(u,v)$ in a tree as a count of edges on the unique $u$--$v$ path.
+        (\chref{c01} unique-path property)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+The tour's final superpower: \emph{distance}. Record the DFS walk that revisits a node every
+time it returns from a child -- a sequence $\mathcal{T}$ of length $2n-1$ -- and index it by
+each node's \emph{first} appearance. The magic identity
+$\dist(u,v) = \depth(u) + \depth(v) - 2\,\depth{\lca(u,v)}$ reduces distance to a lowest
+common ancestor, and, astonishingly, $\lca(u,v)$ is just the \emph{shallowest} node in
+$\mathcal{T}$ between the two first-appearances -- a \term{range minimum query} on the depth
+array. That turns ``distance between two nodes'' into ``preprocess an array, answer RMQ in
+$O(1)$''. We build the tour and the distance formula here; the RMQ-as-LCA \emph{equivalence},
+its proof, and the faster binary-lifting alternative are the LCA chapter's to own
+(\chref{c11}) -- this is the preview that motivates it.
+\textbf{Prerequisites.} \secref{c24-times} ($\tin/\tout$, the 2-tick clock);
+\secref{c24-path} (depth, root-paths); $\depth$ from \secref{c04-rooting}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item build the $2n{-}1$ Euler tour and its first-occurrence array;      \hfill\lv{4}
+  \item state and apply $\dist(u,v)=\depth u+\depth v-2\depth{\lca}$;          \hfill\lv{3}--\lv{4}
+  \item see that $\lca$ $=$ an RMQ over the tour's depth array (the preview);   \hfill\lv{4}--\lv{5}
+  \item solve root-path and leaf-pair distance problems by stitching downward paths. \hfill\lv{3}--\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- distance, LCA, and the tour]
+\reckey{the question is about the \emph{path between two named nodes} -- their
+\emph{distance}, the \emph{directions} to walk from one to the other, or a count over
+\emph{leaf pairs within distance $d$} -- typically with many such pairs/queries.}
+\recuse{
+  \item ``distance between $u$ and $v$'' / ``is this pair of leaves close enough'' -- the
+        $\dist$ formula via LCA (\thmref{c24-dist});
+  \item ``print the moves $L/R/U$ from node $A$ to node $B$'' -- root-paths to their LCA
+        (\probref{c24-pathdir});
+  \item ``count pairs at a given distance'' -- combine leaf-depth lists at each common
+        ancestor (\probref{c24-leafpairs});
+  \item \emph{many} online distance/LCA queries -- reduce to RMQ on the tour
+        (\propref{c24-rmqpreview}) and go build the structure in \chref{c11}.
+}
+\recnotuse{
+  \item root-path-only aggregates -- \secref{c24-path}, no second endpoint;
+  \item the LCA \emph{machinery} proved and coded -- that is \chref{c11}, not this preview;
+  \item subtree ranges -- \secref{c24-flatten}.
+}
+One-line test: \emph{two arbitrary endpoints and a path between them? Distance is a LCA in
+disguise -- tour $+$ $\dist$ formula, this section.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Do the DFS, but \emph{log the current node every time you stand on it} -- on entry and again
+each time you climb back from a child. For $G$ (order $0,1,4,5,2,3,6$) the walk of the
+\emph{cursor} is
+\[
+  \mathcal{T} = [\,0,\,1,\,4,\,1,\,5,\,1,\,0,\,2,\,0,\,3,\,6,\,3,\,0\,],
+\]
+length $13 = 2\cdot 7 - 1$. Each node appears once per incident edge-plus-one, and the
+\emph{first} time a node appears records when the DFS met it. Now look at the segment of
+$\mathcal{T}$ between the first appearances of any two nodes $u, v$: the walk must climb from
+$u$ up to their common ancestor and back down to $v$, and the \emph{shallowest} node it
+touches in that window is exactly their lowest common ancestor.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, x=11mm, y=8mm]
+  % tour as a polyline of depths
+  \foreach \i/\dep in {0/0,1/1,2/2,3/1,4/2,5/1,6/0,7/1,8/0,9/1,10/2,11/1,12/0} {
+     \node[circle, inner sep=1.6pt, fill=primaryblue!40] (p\i) at (\i,-\dep) {};
+  }
+  \draw[primaryblue, line join=round] (p0)--(p1)--(p2)--(p3)--(p4)--(p5)--(p6)--(p7)--(p8)--(p9)--(p10)--(p11)--(p12);
+  % labels: node ids at each step
+  \foreach \i/\lab in {0/0,1/1,2/4,3/1,4/5,5/1,6/0,7/2,8/0,9/3,10/6,11/3,12/0} {
+     \node[annot, font=\tiny, below=0.5mm] at (\i,-0.05) {\lab};
+  }
+  % window first(4)=2 .. first(6)=10
+  \draw[accentorange, line width=1.2pt, dashed] (1.6,0.6) -- (1.6,-2.6);
+  \draw[accentorange, line width=1.2pt, dashed] (10.4,0.6) -- (10.4,-2.6);
+  \node[annot, text=accentorange, font=\scriptsize, align=center] at (6,0.9)
+    {window $[\mathrm{first}(4),\mathrm{first}(6)]$};
+  \fill[warningred] (p6) circle (2.4pt);
+  \node[annot, font=\scriptsize, text=warningred, align=left] at (6,-2.9)
+    {shallowest node in the window $=0=\lca(4,6)$};
+\end{tikzpicture}
+\caption{The Euler tour of $G$ drawn as its depth profile (numbers under the dots are node
+ids; the vertical position is $\depth$). Between the first appearances of $4$ and $6$
+(dashed) the walk dips up to node $0$ -- the unique \emph{minimum depth} in that window --
+which is $\lca(4,6)$. Distance is then $\depth(4)+\depth(6)-2\depth(0)$.}\label{fig:c24-tour}
+\end{figure}
+
+Read the depths of that window; its minimum (an RMQ) is the LCA. So \emph{one} $O(n)$ tour
+plus \emph{any} RMQ structure (sparse table $\bigO{n\log n}$ preprocess, $O(1)$ query, or
+the segment tree of \chref{c13}) answers distances in $O(1)$ -- the equivalence the LCA
+chapter proves (\chref{c11}).
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Euler tour and first occurrence}{c24-tour}
+The \term{Euler tour} (contour, $2n{-}1$ walk) of a rooted tree is the sequence
+$\mathcal{T}$ obtained by recording the current node each time the DFS \emph{arrives} at it
+and each time it \emph{returns} to it from a child. $|\mathcal{T}| = 2n-1$. The
+\term{first-occurrence} array $\mathrm{first}[v]$ is the index of the earliest copy of $v$
+in $\mathcal{T}$ (this is $\tin(v)$ under the entry-only preorder rank). The depth sequence
+along the tour is $d[i] = \depth(\mathcal{T}[i])$.
+\end{definition}
+
+\noindent\textbf{In plain words.} Walk the outline of the tree with a pencil, jotting the
+node every time the pencil is on it. Between two nodes' first jottings, the pencil necessarily
+passes over their lowest shared point -- and that point is the shallowest jot in between.
+
+\begin{theorem}{Distance via the LCA}{c24-dist}
+For any nodes $u, v$ in a tree with a fixed root,
+\[
+   \dist(u, v) \;=\; \depth(u) + \depth(v) - 2\,\depth\!\big(\lca(u,v)\big).
+\]
+\end{theorem}
+\begin{proofbox}
+The unique $u$--$v$ path (Ch.~1) goes up from $u$ to $\ell = \lca(u,v)$ and down from $\ell$
+to $v$, sharing only $\ell$. The $u$--$\ell$ segment has $\depth(u)-\depth(\ell)$ edges, the
+$\ell$--$v$ segment $\depth(v)-\depth(\ell)$, and these are edge-disjoint, so
+$\dist(u,v) = (\depth u - \depth \ell) + (\depth v - \depth \ell) = \depth u + \depth v -
+2\depth\ell$.
+\end{proofbox}
+
+\begin{proposition}{LCA is a range minimum on the tour (preview)}{c24-rmqpreview}
+$\lca(u,v)$ is the node of \emph{minimum} depth among
+$\mathcal{T}[\min(\mathrm{first}\,u, \mathrm{first}\,v) \,..\, \max(\mathrm{first}\,u, \mathrm{first}\,v)]$.
+Hence, with an RMQ structure over $d[\,]$, LCA -- and by \thmref{c24-dist} distance -- answers
+in $O(1)$ after $\bigO{n}$ or $\bigO{n\log n}$ preprocessing.
+\end{proposition}
+\begin{proofbox}[Proof deferred to the LCA chapter]
+Between first meeting $u$ and first meeting $v$, the DFS cursor must climb from $u$ up to
+their common ancestors and back down to $v$; the set of nodes it visits in that window is
+exactly the union of the two root-paths from $\ell$ to $u$ and $v$, so the shallowest is
+$\ell$, and $\ell$ is strictly shallower than any node below it on either branch -- giving
+uniqueness of the minimum \emph{node} (ties in depth never straddle two different nodes at the
+same minimum here). A rigorous proof, the tie-handling, and the RMQ implementation (sparse
+table / segment tree / $\pm$1-Cartesian $O(n)$) are the subject of \chref{c11}.
+\end{proofbox}
+\begin{notebox}[This is a preview, not the whole story]
+We \emph{reduce} distance to LCA and LCA to RMQ here because it is the natural culmination of
+the flattening idea. We deliberately do \textbf{not} implement an RMQ or binary lifting in
+this chapter -- doing LCA \emph{well} (online, memory-tight, $\bigO{\log n}$ per query via
+lifting) is the LCA chapter's job (\chref{c11}); range-minimum \emph{structures} are
+\chref{c13}. Take the identity and the tour; the machinery is elsewhere.
+\end{notebox}
+
+\subsection{The Algorithm: build the tour and first-occurrence array}
+
+\begin{lstlisting}[caption={The 2n-1 Euler tour, first-occurrence, and distance via LCA}, label={lst:c24-tour-build}]
+#include <bits/stdc++.h>
+using namespace std;
+
+vector<vector<int>> adj;
+vector<int> depth_, first_;
+vector<int> tour_;                 // node ids, length 2n-1
+vector<int> tourDepth_;            // parallel depths, for the RMQ
+
+void buildTour(int u, int p, int d) {
+    first_[u] = (int)tour_.size();  // FIRST time we see u => its index
+    depth_[u] = d;
+    tour_.push_back(u); tourDepth_.push_back(d);
+    for (int v : adj[u]) if (v != p) {
+        buildTour(v, u, d + 1);
+        tour_.push_back(u); tourDepth_.push_back(d);            // return to u after each child
+    }
+}
+// lca(u,v) = argmin depth over tourDepth in [first[u], first[v]]  -- needs an RMQ (Ch.11/13)
+int lcaNaive(int u, int v) {        // O(h) scan, for understanding only
+    int l = min(first_[u], first_[v]), r = max(first_[u], first_[v]);
+    int best = l;
+    for (int i = l; i <= r; ++i) if (tourDepth_[i] < tourDepth_[best]) best = i;
+    return tour_[best];
+}
+long long distUV(int u, int v) {
+    int w = lcaNaive(u, v);
+    return (long long)depth_[u] + depth_[v] - 2LL * depth_[w];
+}
+\end{lstlisting}
+\begin{complexitybox}
+Building $\mathcal{T}$ and first-occurrence is one DFS, $\bigO{n}$ (the tour has $2n-1$
+entries). With the $\bigO{h}$ scan above, a query is $\bigO{n}$ worst case -- replace the
+scan with a sparse table ($\bigO{n\log n}$ pre, $O(1)$ query) or a segment tree
+(\chref{c13}) to make distance queries $O(1)$/$\bigO{\log n}$. Binary lifting
+(\chref{c11}) gives $\bigO{\log n}$ LCA \emph{without} the tour. Recursion is $\bigO{h}$
+deep -- iterate on a chain.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Distance on $G$ via the tour}{c24-dist-run}
+$\mathcal{T}=[0,1,4,1,5,1,0,2,0,3,6,3,0]$, so
+$\mathrm{first}=[0,1,7,9,2,4,10]$ (by node id) and
+$\depth=[0,1,1,1,2,2,2]$. Query $\dist(4,6)$: window
+$[\mathrm{first}(4),\mathrm{first}(6)]=[2,10]$, whose minimum-depth entry is node $0$ at
+position $6$ (depth $0$) $\Rightarrow \lca(4,6)=0$. Then $\dist(4,6)=\depth4+\depth6-
+2\depth0 = 2+2-0 = 4$ (the path $4$--$1$--$0$--$3$--$6$). Query $\dist(1,5)$: window $[1,4]$,
+min is node $1$ (depth $1$) $\Rightarrow \lca=1$, $\dist=1+2-2\cdot1=1$.
+\end{example}
+\begin{tracebox}[Reading $\mathcal{T}$ between first-appearances]
+Positions $2..10$ of $\mathcal{T}$ are $[4,1,5,1,0,2,0,3,6]$ with depths
+$[2,1,2,1,0,1,0,1,2]$. The smallest depth is $0$, first attained at position $6$ where
+$\mathcal{T}[6]=0$; no node deeper than $0$ sits between, and $0$ is the shared ancestor of
+$4$ and $6$. Hence $\lca(4,6)=0$, $\dist=4$. \checkmark\ \figref{c24-tour}.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{$k$-th node on a path}: walk up from the deeper endpoint to the LCA, then
+        down -- $\bigO{\log n}$ with lifting (\chref{c11}).                     \hfill\lv{5}
+  \item \textbf{Edge-weighted distance}: replace $\depth$ by root-path \emph{weight}; the
+        same $\dist = D_u + D_v - 2D_{\ell}$ holds.                          \hfill\lv{4}
+  \item \textbf{Path max/min edge}: stitch two root-paths and combine -- the heavy-light
+        add-on (\chref{c16}).                                                  \hfill\lv{5}
+  \item \textbf{Diameter via two BFS}: for \emph{unrooted} longest-path, no LCA needed -- but
+        leaf-pair counting (LC 1530) uses exactly this combine-at-LCA shape.     \hfill\lv{4}
+  \item \textbf{Count pairs within $d$}: DFS returning leaf-distance lists and merging
+        (the shape of \probref{c24-leafpairs}).                                 \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c24-dist-pitfalls}
+
+\begin{warningbox}[Trap 1 -- tour built with the entry-only clock (length $n$, not $2n-1$)]
+The depth-minimum LCA property needs the tour that \emph{revisits} a node on every return
+from a child. Using the preorder-only array (length $n$) has no re-visits, so the window
+between two nodes may not contain their LCA.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: no return steps, too short to hold the LCA}, language=C++, basicstyle=\ttfamily\small]
+void walk(int u,int p){ tour_.push_back(u); for(int v:adj[u])if(v!=p)walk(v,u); } // len n
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: push the parent again after each child}, language=C++, basicstyle=\ttfamily\small]
+void walk(int u,int p){ tour_.push_back(u);
+    for(int v:adj[u])if(v!=p){ walk(v,u); tour_.push_back(u);} }   // len 2n-1
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- $\min$/$\max$ on first-occurrence before the LCA window]
+The window endpoints must be ordered: $[\min(\mathrm{first}\,u,\mathrm{first}\,v),
+\max(\dots)]$. Sweeping $[\mathrm{first}\,u, \mathrm{first}\,v]$ blindly is empty (and wrong)
+when $u$ is met after $v$.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: window can invert}, language=C++, basicstyle=\ttfamily\small]
+int l=first_[u], r=first_[v];          // r may be < l -> loop never runs
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: normalise the endpoints}, language=C++, basicstyle=\ttfamily\small]
+int l=min(first_[u],first_[v]), r=max(first_[u],first_[v]);
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- treating $\mathrm{first}$ as a full LCA implementation]
+$O(h)$ window scans are $\bigO{n}$ per query; a batch of $10^5$ distance queries TLEs. The
+\emph{scan} is for understanding -- swap in a sparse table / segment tree / binary lifting
+(\chref{c11}, \chref{c13}) before using it at scale.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: naive scan under a query load}, language=C++, basicstyle=\ttfamily\small]
+for each query: lcaNaive(u,v);        // O(n) each -> O(nq) total, TLE at q,n ~ 1e5
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: answer LCA in O(1)/O(log n)}, language=C++, basicstyle=\ttfamily\small]
+// RMQ over tourDepth (sparse table / segtree) or binary lifting -- Ch.11/13
+\end{lstlisting}
+
+\subsection{Problem Lab}
+
+Two distance problems that avoid needing the RMQ structure (small trees) but lean on the
+root-path / LCA \emph{shape}. LC 2096 \emph{Step-By-Step Directions} asks for the moves
+between two nodes -- found by comparing their root-paths down to the LCA. LC 1530 \emph{Number
+of Good Leaf-Pairs} counts leaf pairs within a distance -- combining leaf depths at their
+common ancestor. Both are \thmref{c24-dist} with the LCA located by paths rather than a tour.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c24-pathdir}{Step-By-Step Directions From a Binary Tree Node to Another}{LeetCode 2096}
+  {https://leetcode.com/problems/step-by-step-directions-from-a-binary-tree-node-to-another/}{LC Medium L3}
+  {root-to-node paths, LCA by trimming common prefix, U/L/R stitching}
+
+\begin{problemstatement}[Step-By-Step Directions]
+A \textbf{binary} tree with $n$ nodes valued $1 \dots n$ (each value distinct), given by
+\code{root}. Given \code{startValue} and \code{destValue}, find the shortest path from the
+node valued \code{startValue} to the node valued \code{destValue} and return it as a string of
+moves: \code{'L'} (to left child), \code{'R'} (to right child), \code{'U'} (to parent).
+$2 \le n \le 10^5$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+A fair first attempt: find the root-to-node path for each endpoint, then look at where they
+diverge.
+\peek{the path from $A$ to $B$ goes up to their lowest common ancestor then down -- how do you
+find that LCA from the two root-paths?}
+\nudge{compute root$\to$start and root$\to$dest as move-strings; strip the shared prefix (the
+part to the LCA); the leftover on the start side becomes \code{'U'}s, the leftover on the dest
+side is already \code{'L'}/\code{'R'}.}
+\fullhint{DFS to record \code{pathStart} and \code{pathDest} (from root, in L/R). Let $i$ be
+the first index they differ; LCA is at depth $i$. Answer $=$
+\code{string(len(pathStart)}$-i,\text{'U')}$ pathDest.substr($i$). Two DFS passes, no explicit
+parent map. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The unique path from $A$ to $B$ in a tree is: from $A$ up to $\ell=\lca(A,B)$, then down to
+$B$. If we know the root-path \emph{move strings} to $A$ and to $B$, their shared prefix is
+exactly the root-path to $\ell$; the part of $A$'s path \emph{after} the shared prefix must be
+traversed \emph{upward} (one \code{'U'} per edge), and the part of $B$'s path after the prefix
+is traversed \emph{downward} (as-is, \code{'L'}/\code{'R'}). This is \thmref{c24-dist}'s
+``meet at the LCA'' in move-string form.
+
+\solstep{Key Observations}
+\begin{observation}
+Root-to-node move strings locate the LCA as the length of the \emph{longest common prefix} --
+no parent pointers needed, just two DFS descents that record directions.
+\end{observation}
+\begin{observation}
+$\ell$ at depth $i$ means the start side contributes $(\text{startLen}-i)$ \code{'U'}s and the
+dest side contributes its remaining $(\text{destLen}-i)$ moves verbatim.
+\end{observation}
+\begin{observation}
+Recording both paths in one DFS pass (stop when both found) is $\bigO{n}$; the string splice is
+$\bigO{h}$.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Build a parent map, then walk $A$ and $B$ up until equal.}{Correct, but a
+\code{unordered\_map} of parents plus two upward walks is more state than two root-down DFS
+paths; and on a skewed $10^5$ tree the upward walks are fine, but the map is pure overhead.}
+\deadend{Do a full BFS from $A$ to $B$ over the tree with \code{U/L/R} edges.}{You must model
+the parent as an explicit edge (turning the binary tree into an undirected graph) -- heavier
+than exploiting the tree's unique-path / LCA structure directly.}
+\aha{DFS for the two root-path move strings; trim their common prefix; \code{'U'} the rest of
+the start side, append the rest of the dest side. That \emph{is} the $A$-up-to-LCA-down-to-$B$
+path.}
+\end{thinkbox}
+
+\solstep{Solution}
+Two DFS (or one) that record the direction string from the root to the node with value
+\code{startValue} and to \code{destValue}. Advance $i$ while both strings agree. Return
+\code{string(start.size()-i, 'U') + dest.substr(i)}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+The root-to-node direction string is unique per node (a tree has one root-path, each step
+left/right by \chref{c01} uniqueness). Its length is $\depth$. Two such strings agree for
+exactly the first $\depth(\ell)$ characters, where $\ell=\lca(A,B)$, because the root-paths
+coincide precisely down to their lowest shared node and then diverge; so the first differing
+index is $i=\depth(\ell)$. From $A$ the path to $\ell$ reverses $A$'s last
+$\depth(A)-\depth(\ell)=|start|-i$ moves, each a \code{'U'}. From $\ell$ to $B$ follows $B$'s
+last $|dest|-i$ moves unchanged. Concatenation is the unique simple $A$--$B$ path, hence the
+shortest. \thmref{c24-dist} is consistent: the returned length
+$(|start|-i)+(|dest|-i)$ equals $\depth A + \depth B - 2\depth\ell$.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Step-By-Step Directions via root-path LCA (LeetCode 2096)}, label={lst:c24-pathdir}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode { int val; TreeNode *left, *right;
+    TreeNode(int v):val(v),left(nullptr),right(nullptr){} };
+
+class Solution {
+public:
+    // find direction string from u down to target, accumulating into path
+    bool dfs(TreeNode* u, int target, string& path) {
+        if (!u) return false;
+        if (u->val == target) return true;
+        path.push_back('L');
+        if (dfs(u->left, target, path)) return true;
+        path.pop_back();
+        path.push_back('R');
+        if (dfs(u->right, target, path)) return true;
+        path.pop_back();
+        return false;
+    }
+    string getDirections(TreeNode* root, int startValue, int destValue) {
+        string s, d;
+        dfs(root, startValue, s);
+        dfs(root, destValue, d);
+        int i = 0;
+        while (i < (int)s.size() && i < (int)d.size() && s[i] == d[i]) ++i;  // common prefix
+        return string(s.size() - i, 'U') + d.substr(i);
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$, \figref{c03-running}: start$=5$, dest$=3$]
+Root$\to$5 path $=$ \code{"LR"} ($1$'s left $2$, then right $5$). Root$\to$3 path $=$
+\code{"R"}. Common prefix length $i=0$ (\code{L}$\ne\ $\code{R}), so $\ell=$ root $=1$.
+Result $=$ \code{"UU"} (two ups from $5$ to $1$) $+$ \code{"R"} (down to $3$) $=$
+\code{"UUR"}. Length $2+1=3=\depth5+\depth3-2\depth1=2+1-0$ \checkmark\
+\probref{c24-pathdir}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Two DFS descents worst $\bigO{n}$ each; splice $\bigO{h}$. Time $\bigO{n}$, space
+$\bigO{h}$ for the recursion plus the path strings. On a $10^5$ skewed tree the DFS is
+$\bigO{n}$ deep -- make it iterative. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+When $\ell$ \emph{is} $A$ or $B$ the common prefix can consume one entire string; the loop
+guards both bounds so $i$ stops correctly. Also do not forget to \code{pop\_back} on the
+failed \code{'R'} branch -- an un-popped tail corrupts the dest string. Variant: with parent
+pointers this becomes the two-upward-walk method; equivalent, more state.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item The LCA $=$ longest common prefix of two root-path direction strings -- locating it
+        \emph{is} the ``meet at LCA'' of \thmref{c24-dist}.
+  \item Any ``path between two nodes'' answer is up-to-LCA (as \code{U}) then down-from-LCA
+        (as recorded).
+  \item Backtracking must undo \emph{every} push; a leaked branch corrupts the result.
+\end{enumerate}
+\end{insightbox}
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c24-leafpairs}{Number of Good Leaf Nodes Pairs}{LeetCode 1530}
+  {https://leetcode.com/problems/number-of-good-leaf-nodes-pairs/}{LC Medium L4}
+  {combine leaf-depth lists at LCA, count pairs within d, small n}
+
+\begin{problemstatement}[Number of Good Leaf Nodes Pairs]
+Given a \textbf{binary} tree \code{root} and an integer \code{distance}. A leaf is a node with
+no children. Count \textbf{pairs of different leaf nodes} whose shortest path between them has
+length $\le$ \code{distance}. $2 \le n \le 2000$, $1 \le \text{distance} \le 10$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+A fair first attempt: think about where the path between two leaves ``bends'' -- their LCA --
+and what you would want each subtree to report.
+\peek{at a node $u$, a leaf-pair whose LCA is $u$ has one leaf in $u$'s left and one in its
+right; what distances should the children hand back?}
+\nudge{each DFS returns the multiset of \emph{distances from $u$ down to the leaves of
+$\subtree(u)$}; at $u$, pair every left distance $a$ with every right distance $b$ and count
+those with $a+b \le$ \code{distance}; then return the child distances, each $+1$.}
+\fullhint{Bottom-up: \code{dfs(u)} returns a list of distances from $u$ to leaves in its
+subtree (leaf $\Rightarrow$ empty list handled as the node itself). For internal $u$:
+$\mathit{lst}=\text{left}{+}1$ merged with $\text{right}{+}1$; before merging, cross-count
+pairs $(a\in\text{left}, b\in\text{right})$ with $a+b\le d$. $n\le2000$, distance$\le10$, so
+$O(n\cdot \text{leaves})$ or a small array of size $d$ is fine. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Every leaf pair has a unique LCA $\ell$; the path length is $\dist(\text{leaf}_1,
+\text{leaf}_2) = a + b$ where $a, b$ are the two leaves' distances to $\ell$. So if we
+process \emph{at} each node the leaves reachable within $\le d$ below it, partitioned by which
+child they descend from, and count left$\times$right pairs summing to $\le d$, we count every
+good pair \emph{exactly once} (at its LCA). A bottom-up DFS returns, per node, the distances to
+its descendant leaves.
+
+\solstep{Key Observations}
+\begin{observation}
+A leaf pair is counted at its LCA, splitting into one leaf strictly in the left subtree and one
+in the right (if both are on the same side, their LCA is lower). This gives exact-once counting.
+\end{observation}
+\begin{observation}
+Because $\text{distance} \le 10$, we only ever need to propagate distances $\le d$; anything
+deeper can be pruned -- a per-node array \code{cnt[1..d]} (leaves at each distance) keeps
+merges cheap.
+\end{observation}
+\begin{observation}
+With $n \le 2000$, even the plain ``return a vector of leaf distances, cross-multiply $O(
+\mathit{left}\cdot\mathit{right})$'' version passes; the $\bigO{n\cdot d}$ histogram is the
+polished form.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Enumerate all leaf pairs and run a BFS/LCA for each distance.}{$\binom{L}{2}$ leaf
+pairs, each needing an LCA -- with $L$ up to $\sim1000$ that's $\sim5\cdot10^5$ queries; fine
+at $n\le2000$ but it re-derives distances without structure. The bottom-up combine counts the
+same thing with one DFS.}
+\deadend{Count pairs whose path passes through $u$ using \emph{all} leaves in
+$\subtree(u)$.}{That double-counts: a pair whose LCA is \emph{below} $u$ also lies in $u$'s
+subtree. Only pairs split across $u$'s \emph{two different children} have LCA exactly $u$.}
+\aha{At each node cross-count left-leaves $\times$ right-leaves with $a+b\le d$ (LCA $=u$),
+return the merged $+1$ distance list -- each pair counted once, at its true LCA.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} enumerate leaf pairs + LCA & dist formula per pair & $O(L^2\log n)$ & \ac \\
+2 & \lv{4} bottom-up distance lists & cross-count at each LCA & $O(n\cdot L)$ & \ac \\
+3 & \lv{4} histogram capped at $d$ & \code{cnt[1..d]} merge & $O(n\cdot d)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 3 exploits distance $\le 10$; rungs 1--2 are conceptually simpler and pass at $n\le2000$.
+
+\solstep{Solution}
+Bottom-up DFS returning \code{vector<int>} of distances to descendant leaves $\le d$. For a
+leaf, return $\{0\}$ at itself (handled by parent). For an internal node: get
+\code{left}, \code{right} (already $+1$-ed by the caller or here), cross-count all
+$(a,b)$ with $a+b \le d$ into the answer, then return the concatenation. Incremental $+1$
+as we ascend.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\emph{Claim:} the DFS returns, at node $u$, the multiset of distances $\dist(u, \text{leaf})$
+for leaves in $\subtree(u)$ (those $> d$ discarded safely since they can form no good pair with
+any non-negative partner). A leaf trivially has distance $0$ to itself; ascending adds $1$ per
+edge. \emph{Counting:} a good pair $(x,y)$ of distinct leaves has a unique LCA $\ell$; $x$
+lies strictly in one child subtree of $\ell$ and $y$ in the other (else $\ell$ was not lowest).
+At $\ell$ the algorithm forms all cross pairs $(a\in\text{left}, b\in\text{right})$ and counts
+exactly those with $a+b \le d$; but $a+b = \dist(\ell,x)+\dist(\ell,y) = \dist(x,y)$
+(\thmref{c24-dist} with $\depth\ell$ cancelling). Thus $(x,y)$ is counted at $\ell$ iff good,
+and at no other node (the same-side pairs are excluded). Hence each good pair contributes
+exactly $1$ and each counted pair is good.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Good Leaf Pairs by cross-counting at the LCA (LeetCode 1530)}, label={lst:c24-leafpairs}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode { int val; TreeNode *left, *right;
+    TreeNode(int v):val(v),left(nullptr),right(nullptr){} };
+
+class Solution {
+public:
+    int ans = 0;
+    int D;
+    // returns distances from u to leaves in subtree(u), capped at D
+    vector<int> dfs(TreeNode* u) {
+        if (!u) return {};
+        if (!u->left && !u->right) return {0};          // leaf: distance 0 to itself
+        vector<int> L = dfs(u->left),  R = dfs(u->right);
+        for (int& a : L) ++a;                            // child's leaves are one deeper
+        for (int& b : R) ++b;
+        for (int a : L) for (int b : R) if (a + b <= D) ++ans;   // cross pairs: LCA = u
+        vector<int> out;
+        for (int a : L) if (a <= D) out.push_back(a);    // propagate upward
+        for (int b : R) if (b <= D) out.push_back(b);
+        return out;
+    }
+    int countPairs(TreeNode* root, int distance) {
+        D = distance; ans = 0; dfs(root); return ans;
+    }
+};
+\end{lstlisting}
+\noindent The two \code{++} loops bind by \textbf{reference} (\code{int\&}); a by-value
+range-\code{for} would be a silent no-op (Pitfalls, trap (i)).
+
+\solstep{Trace}
+\begin{tracebox}[$R$, \figref{c03-running}: leaves $4,5,6$, distance $=3$]
+Node $2$: children $4,5$ (leaves, return $\{0\}$ each); $+1$ $\Rightarrow$ $L=\{1\},R=\{1\}$;
+cross pair $1+1=2\le3$ $\Rightarrow$ count $1$ (pair $4,5$); return $\{1,1\}$.
+Node $3$: child $6$ leaf; after $+1$, one side $\{1\}$, other empty; count $0$; return $\{1\}$.
+Node $1$: $L$ (from $2$) $=\{1,1\}+1=\{2,2\}$, $R$ (from $3$) $=\{1\}+1=\{2\}$; cross pairs:
+$2+2=4>3$ twice $\Rightarrow$ add $0$; total stays $\mathbf{1}$. \checkmark\
+\probref{c24-leafpairs}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Each node merges its two children's (capped) distance lists: the naive cross product is
+$\bigO{L^2}$ at a node worst case, total $\bigO{n\cdot L}$ with the $d$-cap since lists
+hold $\le d$ distinct entries ($\bigO{n\cdot d^2}$ worst). At $n\le2000$, $d\le10$ this is
+trivially fast; the histogram form is $\bigO{n\cdot d}$. Space $\bigO{h\cdot d}$. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Two real bugs: (i) the copy-vs-reference increment above (a range-\code{for (int a : L)} does
+not modify $L$); (ii) counting \emph{all} pairs in $\subtree(u)$ rather than only
+left$\times$right cross pairs, which double-counts pairs whose LCA is below $u$. Variant:
+swap the list for a size-$d$ histogram \code{cnt[]} and merge in $\bigO{d}$ with a convolution
+for the cross count.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Count leaf pairs within $d$'' $=$ combine at the \emph{LCA}, counting only
+        cross-child pairs -- the exact-once trick \thmref{c24-dist} underwrites.
+  \item Returning a (capped) distance multiset bottom-up is the distance-indexed DP pattern
+        the DP chapters generalise.
+  \item Range-\code{for} over a value (not \code{\&}) is a silent no-op -- a whole class of
+        WA.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Big $n$, small $d$}: use the $\bigO{d}$ histogram merge; the list-of-leaves
+        version is $\bigO{L}$ per node and can $\bigO{n^2}$ if $d$ were large.
+  \item \textbf{Depth}: recursion $\bigO{h}$ -- at $n=2000$ fine; generalise with an explicit
+        stack if $n$ grows.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Does your tour push the parent back \emph{after each child} (length $2n-1$)? (Trap 1.)
+  \item Are the RMQ window endpoints $\min/\max$ of first-occurrences? (Trap 2.)
+  \item Is the LCA-locating \emph{scan} a stand-in you would replace by a real structure at
+        query load? (Trap 3, \chref{c11}.)
+  \item In a pair count, are you only pairing \emph{across} children (LCA $=u$), not within one
+        side? (\probref{c24-leafpairs}.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Diameter of N-Ary Tree}{LeetCode 1522}
+    {https://leetcode.com/problems/diameter-of-n-ary-tree/}{LC Medium L3}
+    {The \emph{length} of the longest path between any two nodes (in edges) -- the maximum of
+    $\dist(u,v)$ over all pairs. The path's top is some node $a$ (its LCA), and its length is
+    the two tallest downward chains hanging below $a$. Return, from each node bottom-up, the
+    tallest child height; the best path through $a$ is the sum of its \emph{two} tallest child
+    chains (\thmref{c24-dist} with the common ancestor fixed at $a$). Track the global max while
+    returning $1+\max$ child height upward.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 5.4 Distance \& RMQ Preview]
+The $2n{-}1$ tour $\mathcal{T}$ records the node on every arrival \emph{and} return; index it by
+$\mathrm{first}[v]=\tin(v)$. Then $\dist(u,v)=\depth u+\depth v-2\depth{\lca}$
+(\thmref{c24-dist}), and $\lca$ is the \emph{min-depth} node in $\mathcal{T}$ between the two
+firsts -- an RMQ (\propref{c24-rmqpreview}), \emph{proved and built} in \chref{c11}. Paths to
+the LCA also answer directions (\probref{c24-pathdir}) and leaf-pairs-by-distance
+(\probref{c24-leafpairs}).
+\selftest{
+  \item Write the DFS that emits the $2n{-}1$ tour and the first-occurrence array
+        (\coderef{c24-tour-build}).
+  \item State and prove $\dist(u,v)=\depth u+\depth v-2\depth{\lca}$.
+  \item Explain why the min-depth node between two firsts is the LCA (and where the full proof
+        lives).
+  \item On $G$, compute $\dist(4,6)$ from the tour window and $\depth$.
+  \item For \probref{c24-leafpairs}, say why a pair is counted at its LCA and only across
+        children.
+}
+\end{recallbox}

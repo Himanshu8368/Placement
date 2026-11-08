@@ -1,0 +1,517 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  5.2  Subtree as Interval: Flattening to a Line          sec:c24-flatten
+%  Exports: def:c24-flatten  thm:c24-range  prop:c24-prefix
+%           lst:c24-flatten-build  ex:c24-flat-run
+%           prob:c24-fuel  lst:c24-fuel  prob:c24-reach (practice)
+% =====================================================================
+\section{Subtree as Interval: Flattening to a Line}\label{sec:c24-flatten}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Give $\tin$ and $\size$ for node $1$ of $G$, and say which preorder slots
+        $\subtree(1)$ occupies. (\secref{c24-times}, \figref{c24-running})
+  \item Why is $\tout(v) = \tin(v) + \size[v]$, and why does a leaf's interval have length
+        one? (\defref{c24-times})
+  \item State the bottom-up return that computes a per-subtree aggregate without any
+        timestamps -- what does flattening add on top? (\secref{c02-bottomup},
+        \secref{c04-rooting})
+  \item Which single loop turns a \code{parent[]} array into \code{children[]} lists?
+        (\coderef{c04-reps})
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Here is the payoff of \secref{c24-times}. Sort the nodes by entry time and lay them into an
+array $\flat[\,]$ indexed by $\tin$: because $\subtree(v)$ occupies the contiguous block
+$[\tin(v), \tout(v))$, \textbf{every question about a subtree becomes a question about a
+range of an ordinary array}. ``Sum of my subtree'' is a range sum; ``how many red nodes under
+me'' is a range count; ``add $5$ to everyone below me'' is a range \emph{update}. And
+range-sum / range-min / range-add on an array is a \emph{solved} problem -- Fenwick and
+segment trees, which this book hands you in \chref{c14} and \chref{c13}. This section does
+not build those structures; it builds the \emph{reduction} that lets you use them, and
+shows the reduction paying rent on a real problem (LC 2477) where the subtree size
+$\tout-\tin$ is the whole answer.
+\textbf{Prerequisites.} \secref{c24-times} ($\tin/\tout$, the containment test);
+\secref{c04-rooting} ($\size$, rooting). The range structures themselves are
+\emph{referenced}, not taught here.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item build the flattened array $\flat[\tin[v]] = w[v]$ in one DFS;        \hfill\lv{3}
+  \item answer a subtree aggregate as a range query $[\tin(v), \tin(v){+}\size(v))$; \hfill\lv{3}
+  \item see that a subtree \emph{update} is a range update, ready for \chref{c14}/\chref{c13}; \hfill\lv{4}
+  \item recognise ``sum over each subtree'' problems where the span $\tout-\tin$ directly
+        counts members.                                                       \hfill\lv{3}--\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- the subtree-as-range reduction]
+\reckey{a rooted tree with a per-node value, and a request to \emph{aggregate over a
+subtree} (sum, count, max, distinct) or to \emph{modify a whole subtree}, asked for
+\emph{many} nodes or interleaved with \emph{updates} -- i.e.\ more than one bottom-up pass
+can answer cheaply.}
+\recuse{
+  \item ``for each $v$, the sum/count/max of $\subtree(v)$'' computed repeatedly or under
+        point updates -- flatten, then a range structure;
+  \item ``add $x$ to all nodes in $\subtree(v)$'' then ``read node $u$'' -- range add /
+        point query on the flat array (\chref{c14});
+  \item ``how many members travel this edge'' -- the span $\tout-\tin$ (LC 2477 below);
+  \item any subtree statistic you are tempted to DFS-from-$v$ for \emph{every} $v$ (that is
+        the $\bigO{n^2}$ trap the reduction dodges).
+}
+\recnotuse{
+  \item a \emph{single} offline aggregate per node, no updates, no query batch -- plain
+        bottom-up DFS (\secref{c02-bottomup}) needs no array;
+  \item the range structure's internals -- Fenwick is \chref{c14}, segment is \chref{c13};
+        you only \emph{feed} them a range here;
+  \item path (not subtree) ranges -- that is the heavy-light add-on, \chref{c16}.
+}
+One-line test: \emph{is the unit of work ``an entire subtree, queried or updated many
+times''? Flatten by $\tin$ so the subtree is a range, then call a range structure.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Look at $G$'s preorder $0,1,4,5,2,3,6$. Write the nodes in that order as a flat array, and
+put each node's value at its $\tin$ slot. Now colour the run belonging to $\subtree(1)$:
+it is positions $1,2,3$ -- the block $[\tin(1), \tout(1)) = [1,4)$ -- \emph{contiguous} and
+holding exactly the nodes $\{1,4,5\}$. There is no gaps, no branching left -- a subtree, the
+recursive shape, has become a \emph{slice}. Prefix sums (or a Fenwick tree, or a segment
+tree) answer a slice sum in $O(1)$ or $O(\log n)$, and that is the entire trick this chapter
+is built around.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, x=13mm, y=11mm]
+  % tree (small) on the left
+  \node[troot] (g0) at (0,0) {$0$};
+  \node[tnode] (g1) at (-1.3,-1.2) {$1$};
+  \node[tnode] (g2) at (0.2,-1.2) {$2$};
+  \node[tnode] (g3) at (1.6,-1.2) {$3$};
+  \node[tleaf] (g4) at (-1.9,-2.2) {$4$};
+  \node[tleaf] (g5) at (-0.8,-2.2) {$5$};
+  \node[tleaf] (g6) at (1.6,-2.2) {$6$};
+  \foreach \x/\y in {g0/g1,g0/g2,g0/g3,g1/g4,g1/g5,g3/g6} \draw[tedge] (\x)--(\y);
+  \draw[accentorange, line width=1.4pt, rounded corners] (-2.2,-2.45) rectangle (-0.5,0.25);
+  \node[annot, font=\scriptsize, text=accentorange] at (-1.35,-2.75) {$\subtree(1)$};
+  % arrow
+  \draw[-Stealth, line width=1.2pt, primaryblue] (2.4,-1.1) -- (3.5,-1.1)
+     node[midway, above, font=\scriptsize, text=primaryblue, align=center] {sort by $\tin$};
+  % flat array on the right
+  \foreach \i/\val in {0/0,1/1,2/4,3/5,4/2,5/3,6/6} {
+     \node[boxnode, minimum width=9mm, minimum height=8mm, font=\small] (c\i) at (3.9+\i*0.92,-1.1) {\val};
+     \node[annot, font=\tiny] at (3.9+\i*0.92,-1.75) {$\tin{\i}$};
+  }
+  \draw[accentorange, line width=1.6pt] (3.9+0.92*0.5,-0.7) -- (3.9+0.92*3.5,-0.7)
+      node[midway, above, font=\scriptsize, text=accentorange] {$[1,4)$};
+  \node[annot, align=left, font=\scriptsize] at (3.9+2.7,-2.4)
+     {a subtree $=$ a contiguous range\\$\sum\subtree(1)=10=\text{pref}[4]{-}\text{pref}[1]$};
+\end{tikzpicture}
+\caption{Flattening $G$ by $\tin$: the preorder array $\flat$ (values equal ids here) puts
+node $v$ at slot $\tin(v)$; $\subtree(1)$ is the block $[1,4)$, so a
+subtree sum is a range sum (prefix sums if static, a Fenwick or segment tree with updates).
+The branching has become a bar chart.}\label{fig:c24-flatten}
+\end{figure}
+
+The half-open interval $[\tin(v), \tin(v){+}\size[v])$ has length $\size[v]$, so
+\emph{counting members of a subtree} is ``subtract'' -- and that observation alone cracks a
+surprising share of contest problems (LC 2477 counts the representatives forced over each
+edge as $\size$, nothing more).
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Flattening a tree to an array}{c24-flatten}
+Let $w[v]$ be a value attached to node $v$. The \term{flattened array} of the (rooted,
+ordered) tree is $\flat[\,]$ defined by $\flat[\tin(v)] = w[v]$ for every node, where $\tin$
+is the preorder-rank entry time of \secref{c24-times} (so $\tin$ ranges over $[0,n)$). The
+\term{interval of $v$} is $I(v) = [\tin(v), \tin(v)+\size[v])$, a contiguous block of
+$\size[v]$ slots containing exactly the $\flat$-entries of the nodes of $\subtree(v)$.
+\end{definition}
+
+\noindent\textbf{In plain words.} Rearrange the node values into the order a preorder DFS
+meets them. A node and all its descendants then sit side-by-side, starting at $\tin(v)$ and
+running for $\size[v]$ cells. Any operation over ``the subtree'' is an operation over ``that
+run of cells'' -- an array operation.
+
+\begin{theorem}{Subtree queries reduce to range queries}{c24-range}
+For any associative, invertible aggregate $\bigoplus$ (sum, xor, count) and any node $v$,
+\[
+   \bigoplus_{x \in \subtree(v)} w[x] \;=\; \bigoplus_{i\,=\,\tin(v)}^{\tout(v)-1} \flat[i],
+   \qquad \tout(v)=\tin(v)+\size[v].
+\]
+Hence a static subtree aggregate is one range query on a prefix structure ($O(1)$ for
+sum/count), and under subtree/point updates it is a range query on a Fenwick or segment tree
+($\bigO{\log n}$). Likewise, adding a constant to every node of $\subtree(v)$ is exactly a
+range add on $I(v)$.
+\end{theorem}
+\begin{proofbox}
+By \thmref{c24-anc} the set $\subtree(v)$ is precisely $\{x : \tin(v) \le \tin(x) <
+\tout(v)\}$, and the map $x \mapsto \tin(x)$ is a bijection onto $[0,n)$ (each node has a
+unique preorder rank; every rank is taken). Therefore $\bigoplus$ over $\subtree(v)$ equals
+$\bigoplus$ over $\flat[\tin(x)]$ for those ranks, i.e.\ over the index range
+$[\tin(v), \tout(v))$. Associativity lets a prefix/Fenwick/segment structure evaluate that
+range; invertibility (for sum/xor) lets a prefix array answer it with two lookups. A subtree
+add touches exactly those same ranks, so it is a range add.
+\end{proofbox}
+\begin{insightbox}
+The reduction moves \emph{all} the difficulty into a structure you already own from the query
+chapters. This section's job stops at ``subtree $\to$ range $[\tin, \tout)$''; whether you
+answer that range with a prefix array (static), a Fenwick tree (point/subtree updates,
+\chref{c14}), or a segment tree with lazy propagation (range add + range max, \chref{c13},
+\chref{c15}) is a \emph{separate} choice. Do not rebuild a segment tree inside a flattening
+solution -- call the tool.
+\end{insightbox}
+
+\begin{proposition}{Static subtree sums by prefix array}{c24-prefix}
+For a tree with \emph{no} updates, one DFS builds $\flat$, and one running-sum pass builds
+$\mathit{pref}[k]=\sum_{i<k}\flat[i]$; then $\sum_{x\in\subtree(v)} w[x]=\mathit{pref}[\tout(v)]-\mathit{pref}[\tin(v)]$
+in $O(1)$ per query, after $\bigO{n}$ preprocessing.
+\end{proposition}
+\begin{proofbox}
+$\sum_{i=a}^{b-1}\flat[i] = \mathit{pref}[b]-\mathit{pref}[a]$ is the telescoping definition
+of a prefix array; substituting $a=\tin(v)$, $b=\tout(v)$ and applying \thmref{c24-range}
+gives the subtree sum. Preprocessing is one DFS to fill $\flat$ and one linear sweep for
+$\mathit{pref}$.
+\end{proofbox}
+
+\subsection{The Algorithm: DFS to flatten, then slice}
+
+\begin{lstlisting}[caption={Build tin/size and the flattened array; answer a subtree sum by prefix}, label={lst:c24-flatten-build}]
+#include <bits/stdc++.h>
+using namespace std;
+
+vector<vector<int>> adj;
+vector<int> tin_, sz_, flat_, pref_;
+int timer_;
+
+void flatten(int u, int p, const vector<int>& w) {
+    tin_[u] = timer_++;                       // preorder rank in [0,n)
+    sz_[u]  = 1;                              // count yourself (Ch.4 Trap 2)
+    flat_[tin_[u]] = w[u];                     // value at its tin slot
+    for (int v : adj[u]) if (v != p) {         // parent guard
+        flatten(v, u, w);
+        sz_[u] += sz_[v];                      // absorb child subtree size
+    }
+}
+
+int main_flatten(int n, int root, const vector<int>& w) {
+    tin_.assign(n,0); sz_.assign(n,0); flat_.assign(n,0);
+    timer_ = 0;
+    flatten(root, -1, w);
+    pref_.assign(n+1,0);
+    for (int i = 0; i < n; ++i) pref_[i+1] = pref_[i] + flat_[i];   // running sum
+    return 0;
+}
+// subtree sum of v, O(1):  tout(v) = tin(v)+size(v)
+long long subtreeSum(int v) {
+    int l = tin_[v], r = tin_[v] + sz_[v];
+    return (long long)pref_[r] - pref_[l];
+}
+\end{lstlisting}
+\begin{complexitybox}
+Building $\tin/\size/\flat$ is one DFS, $\bigO{n}$; the prefix array is $\bigO{n}$; each
+static subtree sum is $O(1)$. With updates, replace the prefix array by a \textbf{Fenwick
+tree} for point-update + range-sum ($\bigO{\log n}$, \chref{c14}), or a \textbf{segment tree
+with lazy} for range-add + range-query ($\bigO{\log n}$, \chref{c13}, \chref{c15}) -- the
+$\tin/\tout$ endpoints are the same regardless. Recursion is $\bigO{h}$ deep -- iterate on a
+chain.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Flattening $G$ with $w[v]=v$}{c24-flat-run}
+Preorder (children ascending) is $0,1,4,5,2,3,6$, so
+$\tin=[0,1,4,5,2,3,6]$ and with $\size=[7,3,1,2,1,1,1]$, $\tout=[7,4,5,7,3,4,7]$.
+The flattened array is $\flat=[0,1,4,5,2,3,6]$ (values equal ids here) and the prefix sums
+are $\mathit{pref}=[0,0,1,5,10,12,15,21]$. Then
+\[
+ \begin{aligned}
+ \sum\subtree(1)&=\mathit{pref}[4]-\mathit{pref}[1]=10-0=10\ (=1{+}4{+}5),\\
+ \sum\subtree(3)&=\mathit{pref}[7]-\mathit{pref}[5]=21-12=9\ (=3{+}6).
+ \end{aligned}
+\]
+Each is a single subtraction -- no re-walk of the tree.
+\end{example}
+\begin{tracebox}[Where each node's value lands, and one range sum]
+$\flat$: slot $\tin(4)=2$ holds $w[4]=4$; slot $\tin(5)=3$ holds $5$; so $\subtree(1)$
+$=$ slots $[1,4)=\{1,4,5\}$, sum $10$. $\subtree(2)=[4,5)=\{2\}$ sum $2$. $\subtree(0)=[0,7)$
+$=0{+}1{+}4{+}5{+}2{+}3{+}6=21=\mathit{pref}[7]$. All consistent with \thmref{c24-range}.
+\checkmark\ \figref{c24-flatten}.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Subtree max / gcd / distinct-count}: same range, a different $\bigoplus$;
+        non-invertible aggregates (max, gcd) need a segment/sparse table, not a prefix array. \hfill\lv{4}
+  \item \textbf{Range add over a subtree, then read a node}: lazy segment tree over $I(v)$
+        (\chref{c15}); the endpoints $\tin/\tout$ are what you pass to it. \hfill\lv{4}
+  \item \textbf{``Enter/leave'' flatten with the 2-tick clock}: mark $+w$ at $\tin$, $-w$ at
+        $\tout$; a prefix scan reconstructs path-to-root sums instead of subtree sums
+        (this direction is \secref{c24-path}). \hfill\lv{4}
+  \item \textbf{Edge values}: attach the edge's value to the child node, then a subtree
+        range covers exactly the edges inside the subtree. \hfill\lv{3}--\lv{4}
+  \item \textbf{Mo on trees}: answer many arbitrary subtree/path queries offline by
+        sweeping $\tin$-ordered blocks -- the full technique is \chref{c21}. \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c24-flatten-pitfalls}
+
+\begin{warningbox}[Trap 1 -- off-by-one on the interval endpoint]
+$\subtree(v)$ is the \emph{half-open} $[\tin(v), \tout(v))$ with $\tout=\tin+\size$. Using the
+closed $[\tin, \tout]$ double-counts the next node; using $\tin+\size-1$ as the exclusive end
+drops the last member.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: closed interval, one too many}, language=C++, basicstyle=\ttfamily\small]
+long long s = pref_[tin_[v] + sz_[v]] - pref_[tin_[v]] ; // only RIGHT if pref is half-open
+// tempting mistake:
+long long t = pref_[tin_[v] + sz_[v]+1] - pref_[tin_[v]]; // off by one: grabs a cousin
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: exclusive end $=\tin+\size$}, language=C++, basicstyle=\ttfamily\small]
+long long l = tin_[v], r = tin_[v] + sz_[v];             // [l, r)
+long long s = pref_[r] - pref_[l];
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- re-DFS-ing per query (the reduction you skipped)]
+Answering ``subtree sum of $v$'' by walking $\subtree(v)$ every time is $\bigO{\size[v]}$ per
+query, $\bigO{n^2}$ over all $v$. Once you own $\tin/\size$ and a prefix/Fenwick array, each
+is $O(1)$/$\bigO{\log n}$ -- \thmref{c24-range}.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: DFS the subtree for each query}, language=C++, basicstyle=\ttfamily\small]
+long long slow(int u,int p){ long long s=w[u]; for(int v:adj[u])if(v!=p)s+=slow(v,u); return s;}
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: one flatten, then range reads}, language=C++, basicstyle=\ttfamily\small]
+// build once (lst:c24-flatten-build); per query: pref[tin+size]-pref[tin]
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- indexing the flat array by node id]
+$\flat$ is indexed by $\tin$, \emph{not} by node number; slot $k$ holds the node whose
+preorder rank is $k$. Mixing the two indexings is the classic wrong-answer source.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: indexing the flat array by node id}, language=C++, basicstyle=\ttfamily\small]
+long long s = pref_[v + sz_[v]] - pref_[v];   // v is an id, not a position!
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: positions come from $\tin$}, language=C++, basicstyle=\ttfamily\small]
+long long s = pref_[tin_[v]+sz_[v]] - pref_[tin_[v]];
+\end{lstlisting}
+
+\subsection{Problem Lab}
+
+The flagship here is LC 2477 \emph{Minimum Fuel Cost to Report to the Capital} -- a tree of
+cities where every representative drives to node $0$, and the number of cars forced over an
+edge is exactly the size of the child subtree, i.e.\ the \emph{span} $\tout-\tin$ of
+\secref{c24-times}. It rewards a single rooted-size pass and shows the interval span doing
+all the arithmetic.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c24-fuel}{Minimum Fuel Cost to Report to the Capital}{LeetCode 2477}
+  {https://leetcode.com/problems/minimum-fuel-cost-to-report-to-the-capital/}{LC Medium L3}
+  {root subtree sizes / interval span, ceil-division per edge, long long}
+
+\begin{problemstatement}[Minimum Fuel Cost to Report to the Capital]
+$n$ cities labelled $0 \dots n{-}1$ forming a tree, given by \code{roads[i] = [a,b]}
+(bidirectional). Every city has exactly \textbf{one} representative, and all $n$
+representatives must travel to city $0$ (the capital). There are unlimited cars, each holds
+at most \code{seats} people; a driver pays $1$ litre of fuel to move \emph{their car} along
+\emph{one} road, regardless of how many people are inside. Representatives may split and
+merge between cars freely at any city. Return the \textbf{minimum} total fuel.
+$1 \le n \le 10^5$, $1 \le \texttt{seats} \le n$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+A fair first attempt: root at the capital $0$ and ask, for each road, how many people must
+cross it.
+\peek{a road from parent $p$ to child $c$ must carry exactly the representatives of which set
+of cities -- how many, in terms of $\size[c]$?}
+\nudge{if $\size[c]$ people cross edge $p$--$c$, and a car holds \code{seats}, how many cars
+does that force, and what is the fuel on that edge?}
+\fullhint{Root at $0$, one DFS for $\size[c]$. Each edge $p$--$c$ carries
+$\ceil{\size[c]/\texttt{seats}}$ cars, contributing that many litres. Sum over all
+non-root nodes. Use \code{long long}. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Root at the capital $0$. Consider the road joining a node $c$ to its parent. The only way for
+$\subtree(c)$'s representatives to reach $0$ is \emph{through} $c$ then that road, so exactly
+$\size[c]$ people cross it (no one from outside $\subtree(c)$ needs to). $\size[c]$ is the
+length of $c$'s interval, $\tout(c)-\tin(c)$ (\defref{c24-flatten}) -- the same bottom-up size
+you would flatten to read. With $\code{seats}$ per car, the road forces
+$\ceil{\size[c]/\texttt{seats}}$ cars, each burning one litre to cross. Total fuel is the sum
+over the $n-1$ roads. Merging between cities never helps a \emph{specific edge}'s count, so
+the greedy per-edge minimum is globally optimal.
+
+\solstep{Key Observations}
+\begin{observation}
+For the edge above $c$, the crossing population is exactly $\size[c]$ -- the subtree size,
+equivalently the interval span. No other set of people uses that road.
+\end{observation}
+\begin{observation}
+Cars needed on that edge $=\ceil{\size[c]/\texttt{seats}}$; fuel per edge equals that many
+litres (one per car, one edge). Independent across edges, so sum them.
+\end{observation}
+\begin{observation}
+$10^5$ cities with subtree sizes up to $10^5$ and $\sim n$ edges summed can exceed
+$2^{31}$ -- accumulate in \code{long long}.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Simulate sending cars from leaves, merging counts at cities with a BFS.}{Correct
+but you are just recomputing subtree sizes bottom-up; the closed form $\ceil{\size[c]/
+\texttt{seats}}$ per edge skips the simulation entirely.}
+\deadend{Use $\floor{\size[c]/\texttt{seats}}$ cars.}{Off-by-one: a partially-filled car
+still crosses and still burns a litre -- it is the \textbf{ceiling}, not the floor. A subtree
+of size $3$ with $\texttt{seats}=2$ needs $2$ cars, not $1$.}
+\aha{Root at $0$, DFS for $\size$, and $\text{ans}=\sum_{c\neq 0}
+\ceil{\size[c]/\texttt{seats}}$ -- one pass, one ceiling per edge.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} simulate car convoys & BFS merging counts & $O(n)$ & \ac \\
+2 & \lv{3} per-edge subtree size & $\sum \ceil{\size[c]/\text{seats}}$ & $O(n)$ & \ac \\
+3 & \lv{3} same, but floor not ceil & forget a partial car's litre & $O(n)$ & \textbf{WA} \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 3 is the seductive wrong answer; rungs 1 and 2 agree, and 2 is the clean formula.
+
+\solstep{Solution}
+Build \code{adj}. Root at $0$ with a parent-guarded DFS that returns $\size[u]$; when a child
+$v$'s size is known, add $\ceil{\size[v]/\texttt{seats}} = (\size[v]+\texttt{seats}-1) /
+\texttt{seats}$ to a running \code{long long} total. The sum over all children of all nodes
+$=$ sum over all $n-1$ edges $=$ the answer.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Root the tree at $0$ (\thmref{c04-dfs-orient}). For an edge $(p,c)$ with $p=\parent(c)$, the
+set of representatives that must traverse it is exactly $\subtree(c)$: those inside need to
+reach $0\notin\subtree(c)$ and the unique path leaves through $(p,c)$; those outside never
+need to enter $\subtree(c)$. Hence $|\subtree(c)|=\size[c]$ people cross, which requires at
+least $\ceil{\size[c]/\texttt{seats}}$ cars (each holds $\le$ \texttt{seats}) and that many
+litres. This lower bound is achievable per edge (load the $\size[c]$ people into
+$\ceil{\size[c]/\texttt{seats}}$ cars at $c$), and edges are independent since fuel is charged
+per car per edge and free re-grouping at cities means no coupling -- so the sum of the
+per-edge minima is the global minimum. The DFS visits every edge exactly once as the
+parent-edge of its child, accumulating each $\ceil{\size[c]/\texttt{seats}}$ term, thus
+computing the sum.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Minimum Fuel Cost via subtree sizes (LeetCode 2477)}, label={lst:c24-fuel}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+public:
+    long long minimumFuelCost(vector<vector<int>>& roads, int seats) {
+        int n = (int)roads.size() + 1;
+        vector<vector<int>> adj(n);
+        for (auto& e : roads) { adj[e[0]].push_back(e[1]); adj[e[1]].push_back(e[0]); }
+
+        long long fuel = 0;
+        function<int(int,int)> dfs = [&](int u, int p) -> int {
+            int sz = 1;                              // count yourself (u's own rep)
+            for (int v : adj[u]) if (v != p) {       // parent guard
+                int cs = dfs(v, u);
+                sz += cs;
+                fuel += (cs + seats - 1) / seats;    // ceil(cs/seats) cars over edge u-v
+            }
+            return sz;
+        };
+        dfs(0, -1);                                  // root at the capital; its edge adds 0
+        return fuel;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$G$ rooted at $0$, \code{seats}$=2$]
+$\size=[7,3,1,2,1,1,1]$ (spans $[\tin,\tout)$ from \secref{c24-times}). Per non-root node
+$\ceil{\size[c]/2}$: $c{=}1$: $\ceil{3/2}=2$; $c{=}2$: $\ceil{1/2}=1$; $c{=}3$:
+$\ceil{2/2}=1$; $c{=}4,5,6$: each $\ceil{1/2}=1$. Sum $=2+1+1+1+1+1=\mathbf{7}$ litres.
+(Each edge's cars $=$ that edge's subtree span over capacity, exactly the interval lengths.)
+\checkmark\ \probref{c24-fuel}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ -- one DFS, $O(1)$ arithmetic per edge. Space $\bigO{n}$ adjacency plus
+$\bigO{h}$ recursion. On a $10^5$ chain the DFS is $\bigO{n}$ deep -- convert to iterative
+post-order (reverse BFS order to accumulate $\size$, then a second sweep for the sum), or
+raise the stack. \code{long long} for the total is essential. Verdict: \ac (mind depth).
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+The three traps: (i) \textbf{floor instead of ceiling} on cars -- always
+$(\size + \text{seats} - 1)/\text{seats}$; (ii) counting the capital's own ``above'' term
+(root $0$ has no parent edge -- do not add for it); (iii) \code{int} overflow on the sum of
+up to $\sim n$ terms each up to $n$. Variant: if each city had \code{people[i]}
+representatives instead of one, replace $\size[c]$ by $\sum_{x\in\subtree(c)}\text{people}[x]$
+-- a flattened subtree \emph{sum} (\thmref{c24-range}), not just a size.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``How many cross the edge above $c$'' $=$ $\size[c]$ $=$ the interval span
+        $\tout-\tin$ -- the flattened view and the bottom-up size are the same number.
+  \item Per-edge greedy $=$ global optimum when edges are independent; the fuel is such a
+        sum.
+  \item Partial loads still move a car: ceilings, not floors.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Depth}: iterative post-order (or reverse-BFS accumulation) for $n=10^5$
+        chains -- the formula is unchanged.
+  \item \textbf{Weighted people}: if the problem generalises to $\text{people}[i]$ per city,
+        the crossing count is a subtree \emph{sum}; read it from the prefix/Fenwick array of
+        \coderef{c24-flatten-build} rather than a bare size.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you index the flat array by $\tin$, not by node id? (Trap 3.)
+  \item Is your subtree range half-open $[\tin, \tin{+}\size)$? (Trap 1.)
+  \item Are you re-DFS-ing per query instead of reading one range? (Trap 2,
+        \thmref{c24-range}.)
+  \item Does the per-edge count use a \emph{ceiling} of the span over capacity?
+        (\probref{c24-fuel}.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Reachable Nodes With Restrictions}{LeetCode 2368}
+    {https://leetcode.com/problems/reachable-nodes-with-restrictions/}{LC Medium L3}
+    {Root the tree at $0$ over \code{adj}, skipping a subtree the moment you hit a
+    \code{restricted} node, and count visited nodes. Framed as flattening: the answer is
+    $n$ minus the sizes of the (disjoint) subtrees hanging under restricted nodes --
+    $\sum \size[r]$ over minimal restricted subtrees, each a contiguous span. DFS with a
+    visited/restricted guard is simplest; iterative to survive $n=10^5$ depth.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 5.2 Subtree as Interval]
+Lay values into $\flat[\tin[v]]=w[v]$. Then $\subtree(v)$ is the block
+$[\tin(v),\tin(v){+}\size(v))$ (\thmref{c24-range}): a subtree sum/count/max is a range
+query -- static via a prefix array (\propref{c24-prefix}), dynamic via Fenwick (\chref{c14})
+or a lazy segment tree (\chref{c13}, \chref{c15}). The edge above $c$ carries $\size[c]=
+\tout-\tin$ members (LC 2477). Flatten once, then slice -- never re-DFS per query.
+\selftest{
+  \item Write the DFS that fills $\tin$, $\size$ and $\flat$ in one pass (\coderef{c24-flatten-build}).
+  \item State $\sum_{x\in\subtree(v)} w[x]$ as a prefix difference and justify it with
+        \thmref{c24-range}.
+  \item On $G$ with $w[v]=v$, give $\flat$, $\mathit{pref}$, and $\sum\subtree(3)$ in $O(1)$.
+  \item For LC 2477 with $\texttt{seats}=2$, compute the fuel from the $\size$ spans.
+  \item Explain why a subtree \emph{add} is a range \emph{add} and which chapter supplies the
+        structure.
+}
+\end{recallbox}

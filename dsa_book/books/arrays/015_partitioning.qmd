@@ -1,0 +1,1650 @@
+# Partitioning & In-Place Rearrangement {#sec-part}
+
+<!--
+Author-facing provenance (not rendered): Chapter 15 of the arrays volume, per outline.yml
+("Partitioning & In-Place Rearrangement"; covers: three-way partition, rearrange by a property,
+next permutation, wiggle orders, rotations and block swaps). Lessons A1-A5, patterns P1-P5.
+Registry problems live under books/problems/, story boards in books/traces/arr015_traces.py.
+Owned elsewhere and reused here as cards or links: LC 75 Sort Colors (@sec-pf-p1-colors),
+LC 189 Rotate Array and rotation by reversal / juggling (@sec-arr-p3), read/write compaction
+(@sec-arr-p2), Lomuto / Hoare inside quicksort and quickselect (@sec-salgo-a4).
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** §7.1 (Lomuto's partition), Problem 7-1 (Hoare's partition), §9.2–9.3 (selection) · **Dijkstra**, *A Discipline of Programming* (1976), the Dutch national flag problem · **Sedgewick & Wayne**, *Algorithms* §2.3 (three-way partitioning) · **Knuth**, *TAOCP* Vol. 4A §7.2.1.2 (Algorithm L, lexicographic permutation generation) · **Bentley**, *Programming Pearls* Column 2 (rotation by reversal and by juggling) · **Gries & Mills** (1981), rotation by block swaps · **Jain** (2004), in-place in-shuffle · the LeetCode and Codeforces problems of Part B.
+
+**Coverage:** partition invariants (Lomuto, Hoare, Dutch national flag) and their swap counts · stable versus in-place rearrangement and what each costs · rearranging by sign, parity or slot; interleaving halves · next and previous permutation with proof; rank and unrank · weak and strict wiggle orders, the median plus virtual-index partition · block-swap rotation, the cost of the three rotation methods, stable partition by rotations, the in-place perfect shuffle.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- State the invariant of a partition walk (two regions for Lomuto and Hoare, four for the Dutch national flag) and use it to prove the walk correct and to count its swaps.
+- Decide in one sentence whether a rearrangement must be **stable**, and pick the matching tool: an output buffer with write cursors, or an in-place swap walk.
+- Rearrange by a property (sign, parity, slot) with one read pass and a write cursor per class.
+- Compute the next and previous permutation in $O(n)$, prove it, and reduce digit problems to it.
+- Build a strict wiggle order with duplicates, either by sorting and dealing reversed halves or with a median and a virtual-index three-way partition in $O(1)$ extra memory.
+- Rotate a range with block swaps, compare the three rotation methods by the writes they make, and use rotation as a building block (stable partition in place, selection by rotations).
+:::
+
+```{python}
+#| include: false
+import itertools
+import math
+import random
+import sys
+from collections import Counter
+from math import gcd
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr015_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-part-why}
+
+::: {.callout-note title="In plain words"}
+To **partition** an array is to sort it only roughly: decide for each element which group it belongs to ("smaller than 10", "negative", "even") and move the groups into place, without ordering anything inside a group. It is the inner step of quicksort, and most "rearrange this array" problems are a partition in disguise: the groups and their destinations change, the walk does not. This chapter is about that walk, what it can do with no extra memory, and what it costs to also keep the original order inside each group.
+:::
+
+You have met the pieces already. @sec-arr-p2 rewrote an array in place with a reader and a writer, and @sec-arr-p3 rotated one with three reversals. @sec-tp moved two fingers towards each other, and @sec-salgo-a4 used Lomuto's and Hoare's partitions inside quicksort and quickselect. @sec-int, just before this chapter, sorted intervals and swept them. Here the partition step becomes the subject, and the chapter pushes it in five directions, one lesson each:
+
+- **A1. Partition invariants.** Lomuto, Hoare and Dijkstra's three-way partition (the Dutch national flag) are three promises about what lies left and right of the cursors; the promise is the proof.
+- **A2. Stability.** What it means for a rearrangement to keep the order inside each group, why the in-place walks do not, and what it costs to have both.
+- **A3. Rearranging by a property.** The group can be any predicate, and the destination can be a pattern of slots (even indices, odd indices) instead of a block.
+- **A4. Next and previous permutation.** The arrangement that comes right after this one in sorted order: a suffix, a swap, a reversal.
+- **A5. Wiggle orders.** Peaks and valleys: a partition around the median, read through an index map.
+
+Part B turns each lesson into a pattern with fully solved problems, and the last pattern, rotations and block swaps, moves whole blocks and reuses everything before it. After this chapter, @sec-idx treats an array of values $1..n$ as a function and walks its cycles, the same cycles that rotations and the perfect shuffle walk here.
+
+## Part A — Lessons
+
+## A1. Partition invariants: Lomuto, Hoare, Dutch national flag {#sec-part-a1}
+
+::: {.callout-note title="In plain words"}
+A partition walk keeps the array split into **regions**: cells already known to be small, cells already known to be large, and cells not looked at yet. Each step looks at one unknown cell and grows a known region by one. What makes a walk correct is a promise, the **invariant**, about those regions that holds before every step; when the unknown region is empty, the promise *is* the answer.
+:::
+
+Fix a pivot value $p$. A **two-way partition** rearranges `a` so that a prefix holds elements $\le p$ and the rest holds elements $\ge p$. A **three-way partition** produces three consecutive blocks, $< p$, $= p$ and $> p$. The three classic walks differ in their regions:
+
+::: {#fig-part-schemes}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def schemes_snapshots():
+    """Run each walk part of the way and return (values, regions, pointers) for the picture."""
+    out = []
+    a = [2, 8, 7, 1, 3, 5, 6, 4]                     # Lomuto, pivot x = a[-1], stopped at j = 5
+    x, i = a[-1], -1
+    for j in range(5):
+        if a[j] <= x:
+            i += 1
+            a[i], a[j] = a[j], a[i]
+    out.append(("Lomuto", a, [(0, i + 1, "green", "<= x"), (i + 1, 5, "amber", "> x"),
+                              (5, 7, "muted", "unseen"), (7, 8, "violet", "x")],
+                [(i, "i", "green", "top"), (5, "j", "indigo", "top")]))
+    b = [5, 3, 8, 6, 1, 9, 2, 7]                     # Hoare, pivot x = b[0], after its first swap
+    x, i, j = b[0], -1, len(b)
+    while True:
+        i += 1
+        while b[i] < x:
+            i += 1
+        j -= 1
+        while b[j] > x:
+            j -= 1
+        b[i], b[j] = b[j], b[i]
+        break
+    out.append(("Hoare", b, [(0, i + 1, "green", "<= x"), (i + 1, j, "muted", "unseen"),
+                             (j, len(b), "amber", ">= x")],
+                [(i, "i", "green", "top"), (j, "j", "amber", "top")]))
+    c, p = [4, 3, 2, 4, 1, 3, 4, 2], 3               # Dutch national flag, pivot 3, four steps
+    lo = mid = 0
+    hi = len(c) - 1
+    for _ in range(4):
+        if c[mid] < p:
+            c[lo], c[mid] = c[mid], c[lo]
+            lo += 1
+            mid += 1
+        elif c[mid] == p:
+            mid += 1
+        else:
+            c[mid], c[hi] = c[hi], c[mid]
+            hi -= 1
+    out.append(("DNF", c, [(0, lo, "green", "< p"), (lo, mid, "indigo", "= p"),
+                           (mid, hi + 1, "muted", "unknown"), (hi + 1, len(c), "amber", "> p")],
+                [(lo, "lo", "green", "top"), (mid, "mid", "indigo", "top"), (hi, "hi", "amber", "top")]))
+    return out
+
+
+schemes = schemes_snapshots()
+assert schemes[0][1] == [2, 1, 3, 8, 7, 5, 6, 4] and schemes[2][1] == [2, 2, 3, 4, 1, 3, 4, 4]
+
+
+def draw(ax, p):
+    for r, (name, vals, regions, ptrs) in enumerate(schemes):
+        V.array(ax, p, vals, y=-3.6 * r, regions=regions, pointers=ptrs, label=name)
+V.show(draw)
+```
+
+The three walks stopped half-way, each computed by running it. **Lomuto** keeps "$\le x$ | $> x$ | unseen | pivot" and one cursor $j$ reads left to right. **Hoare** keeps "$\le x$ | unseen | $\ge x$", and the unseen middle shrinks from both ends. The **Dutch national flag** keeps four regions, "$< p$ | $= p$ | unknown | $> p$", with the unknown region in the middle.
+
+:::
+
+### Lomuto's scheme {#sec-part-lomuto}
+
+The pivot is the last element $x$. A boundary $i$ marks the end of the "$\le x$" region; the reader $j$ walks left to right, and when `a[j]` $\le x$ it is swapped to position $i + 1$. A final swap puts $x$ between the two regions, at its sorted index. The invariant and proof are in @sec-salgo-a4-lomuto. What matters here: one reader, $n - 1$ comparisons, and a swap for every element $\le x$, so about $n/2$ swaps on random input. On all-equal input every element is $\le x$, so the "$> x$" region stays empty and the split is maximally unbalanced, which is what makes Lomuto-based quicksort quadratic on equal keys.
+
+### Hoare's scheme {#sec-part-hoare}
+
+Two fingers move towards each other: $i$ stops at an element $\ge x$, $j$ stops at an element $\le x$, and if they have not crossed the two are swapped (@sec-salgo-a4-hoare). The result is `a[lo..j]` $\le x \le$ `a[j+1..hi]`, but the pivot is *not* necessarily at index $j$. Each swap fixes two misplaced elements at once, so Hoare does about a third as many swaps as Lomuto, and because both fingers stop on elements *equal* to $x$, an all-equal array is split in the middle. It is the same opposite-ends walk as @sec-tp.
+
+### The Dutch national flag (three-way partition) {#sec-part-dnf}
+
+Dijkstra's three-way partition keeps four regions with three cursors `lo`, `mid`, `hi`:
+
+$$\underbrace{a[0..\text{lo})}_{< p} \;\; \underbrace{a[\text{lo}..\text{mid})}_{= p} \;\; \underbrace{a[\text{mid}..\text{hi}]}_{\text{unknown}} \;\; \underbrace{a(\text{hi}..n)}_{> p}$$
+
+Each step classifies `a[mid]`, the first unknown cell:
+
+- `a[mid] < p`: swap it with `a[lo]` (the first "$= p$" cell, or itself if that region is empty); `lo += 1`, `mid += 1`.
+- `a[mid] == p`: it is already in place; `mid += 1`.
+- `a[mid] > p`: swap it with `a[hi]`, the last unknown cell; `hi -= 1`, and **do not** advance `mid`, because the value that just arrived at `mid` is unknown.
+
+**Proof.** Initially `lo = mid = 0` and `hi = n - 1`: three empty regions and everything unknown, so the invariant holds. In the first case the swap brings an element equal to $p$ (or `a[mid]` itself) from `lo` to `mid`, so both the "$< p$" and the "$= p$" region keep their promise after the two cursors move. The other two cases are immediate. Every step shrinks the unknown region by exactly one cell, so the loop stops after $n$ steps with the unknown region empty, and the four regions are the answer. $\blacksquare$
+
+**Cost.** Exactly $n$ classifications and at most one swap each, so $O(n)$ time and $O(1)$ extra memory. On distinct keys almost every element triggers a swap (about $n$); with only three distinct values, about $2n/3$. The swaps are cheap, and the payoff is that every copy of $p$ ends up in one finished block: quicksort with this partition never recurses into it, which is what saves it on inputs with many duplicates.
+
+::: {#fig-part-dnf-anim}
+
+```{python}
+#| echo: false
+def dnf_frames(a0, p):
+    a = list(a0)
+    lo, mid, hi = 0, 0, len(a) - 1
+    frames = [(list(a), lo, mid, hi)]
+    caps = [f"start: everything is unknown; pivot p = {p}"]
+    while mid <= hi:
+        x = a[mid]
+        if x < p:
+            a[lo], a[mid] = a[mid], a[lo]
+            caps.append(f"a[mid] = {x} < {p}: swap a[{lo}] and a[{mid}]; lo and mid move right")
+            lo += 1
+            mid += 1
+        elif x == p:
+            caps.append(f"a[mid] = {x} = {p}: already in place; mid moves right")
+            mid += 1
+        else:
+            a[mid], a[hi] = a[hi], a[mid]
+            caps.append(f"a[mid] = {x} > {p}: swap a[{mid}] and a[{hi}]; hi moves left, mid stays")
+            hi -= 1
+        frames.append((list(a), lo, mid, hi))
+    caps[-1] += "; the unknown region is empty"
+    return frames, caps
+
+
+dnf_f, dnf_caps = dnf_frames([4, 3, 2, 4, 1, 3, 4, 2], 3)
+assert dnf_f[-1] == ([2, 2, 1, 3, 3, 4, 4, 4], 3, 5, 4) and len(dnf_f) == 9
+
+
+def dnf_frame(ax, p, k):
+    a, lo, mid, hi = dnf_f[k]
+    n = len(a)
+    regions = [(0, lo, "green", "< 3"), (lo, mid, "indigo", "= 3"),
+               (mid, hi + 1, "muted", "unknown"), (hi + 1, n, "amber", "> 3")]
+    ptrs = [(lo, "lo", "green", "top"), (mid, "mid", "indigo")]
+    if hi >= 0:
+        ptrs.append((hi, "hi", "amber", "top"))
+    V.array(ax, p, a, regions=regions, pointers=ptrs)
+
+
+V.animate(dnf_frame, len(dnf_f), captions=dnf_caps, interval=1100)
+```
+
+The Dutch national flag on $[4, 3, 2, 4, 1, 3, 4, 2]$ with $p = 3$. Green is "$< 3$", indigo "$= 3$", grey the unknown region, amber "$> 3$". Watch the grey region: every step removes exactly one cell from it, and after a swap with `hi` the cursor `mid` stays, because the value that arrived is unknown.
+
+:::
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-part-dnf
+def dnf(a, p):
+    """Three-way partition into [< p | == p | > p] in place (on a copy here). Unstable."""
+    a = list(a)
+    lo, mid, hi = 0, 0, len(a) - 1
+    while mid <= hi:
+        if a[mid] < p:
+            a[lo], a[mid] = a[mid], a[lo]
+            lo += 1
+            mid += 1
+        elif a[mid] == p:
+            mid += 1
+        else:
+            a[mid], a[hi] = a[hi], a[mid]
+            hi -= 1
+    return a
+
+
+for _ in range(2000):
+    arr = [random.randint(0, 5) for _ in range(random.randint(0, 12))]
+    p = random.randint(-1, 6)
+    out = dnf(arr, p)
+    assert sorted(out) == sorted(arr)
+    assert out == [x for x in out if x < p] + [x for x in out if x == p] + [x for x in out if x > p]
+assert dnf([4, 3, 2, 4, 1, 3, 4, 2], 3) == [2, 2, 1, 3, 3, 4, 4, 4]
+assert dnf([2, 0, 2, 1, 1, 0], 1) == [0, 0, 1, 1, 2, 2]       # Sort Colors
+print("dnf OK")
+```
+
+#### C++
+
+```cpp
+#include <vector>
+#include <algorithm>
+using namespace std;
+void dnf(vector<int>& a, int p) {
+    int lo = 0, mid = 0, hi = (int)a.size() - 1;
+    while (mid <= hi) {
+        if (a[mid] < p)       swap(a[lo++], a[mid++]);
+        else if (a[mid] == p) ++mid;
+        else                  swap(a[mid], a[hi--]);
+    }
+}
+
+int main() {
+    vector<int> v{4, 3, 2, 4, 1, 3, 4, 2};
+    dnf(v, 3);                                   // {2, 2, 1, 3, 3, 4, 4, 4}
+    return (v[3] == 3 && v[5] == 4) ? 0 : 1;
+}
+```
+:::
+
+**Reading it line by line.** The third branch is the one to remember: `hi -= 1` without `mid += 1`. Advancing `mid` there would skip the value just brought from `hi` without looking at it. The same branch is why the walk is unstable: it carries a value from far right to `mid`, past others of its own group.
+
+The canonical use is sorting an array of $0$s, $1$s and $2$s in one pass, with $p = 1$:
+
+{{< include ../problems/lc-0075-sort-colors/card.qmd >}}
+
+### Comparing the three walks {#sec-part-a1-compare}
+
+The swap counts quoted above are easy to get wrong from memory, so the cell below measures them on random permutations of $1000$ distinct keys (pivot: the last element for Lomuto and the Dutch flag, the first for Hoare) and on $1000$ keys drawn from $\{0, 1, 2\}$ with $p = 1$.
+
+```{python}
+#| label: arr-part-compare
+def lomuto_swaps(a):
+    a, hi = list(a), len(a) - 1
+    x, i, s = a[hi], -1, 0
+    for j in range(hi):
+        if a[j] <= x:
+            i += 1
+            a[i], a[j] = a[j], a[i]
+            s += 1
+    a[i + 1], a[hi] = a[hi], a[i + 1]
+    return s + 1
+
+
+def hoare_swaps(a):
+    a = list(a)
+    x, i, j, s = a[0], -1, len(a), 0
+    while True:
+        i += 1
+        while a[i] < x:
+            i += 1
+        j -= 1
+        while a[j] > x:
+            j -= 1
+        if i >= j:
+            return s
+        a[i], a[j] = a[j], a[i]
+        s += 1
+
+
+def dnf_swaps(a, p):
+    a, lo, mid, hi, s = list(a), 0, 0, len(a) - 1, 0
+    while mid <= hi:
+        if a[mid] < p:
+            a[lo], a[mid] = a[mid], a[lo]
+            lo, mid, s = lo + 1, mid + 1, s + 1
+        elif a[mid] == p:
+            mid += 1
+        else:
+            a[mid], a[hi] = a[hi], a[mid]
+            hi, s = hi - 1, s + 1
+    return s
+
+
+n_cmp, trials = 1000, 60
+tot = Counter()
+for _ in range(trials):
+    perm = random.sample(range(n_cmp), n_cmp)
+    tot["Lomuto"] += lomuto_swaps(perm)
+    tot["Hoare"] += hoare_swaps(perm)
+    tot["DNF, distinct keys"] += dnf_swaps(perm, perm[-1])
+    tot["DNF, keys in {0,1,2}"] += dnf_swaps([random.randint(0, 2) for _ in range(n_cmp)], 1)
+ratio = {k: v / (trials * n_cmp) for k, v in tot.items()}
+for k, v in ratio.items():
+    print(f"{k:22s} {v:.3f} n swaps")
+assert 0.45 < ratio["Lomuto"] < 0.55 and 0.13 < ratio["Hoare"] < 0.21
+assert 0.95 < ratio["DNF, distinct keys"] <= 1.0 and 0.62 < ratio["DNF, keys in {0,1,2}"] < 0.72
+```
+
+| Walk | Cursors | Regions kept | Swaps (random input) | Pivot ends at | Equal keys | Stable |
+|---|---|---|---|---|---|---|
+| Lomuto | 2 ($i$, $j$) | $\le x$, $> x$, unseen | about $n/2$ | its sorted index | all go left: unbalanced | no |
+| Hoare | 2 ($i$, $j$) | $\le x$, unseen, $\ge x$ | about $n/6$ | not determined | split in the middle | no |
+| Dutch national flag | 3 (lo, mid, hi) | $< p$, $= p$, unknown, $> p$ | up to $n$ (about $n$ on distinct keys) | anywhere in the $= p$ block | one finished block | no |
+
+All three are in place and none is stable. The next lesson says what stability costs.
+
+## A2. Stable versus unstable rearrangement {#sec-part-stable}
+
+::: {.callout-note title="In plain words"}
+A rearrangement is **stable** if two elements of the same group come out in the order they went in. Sorting a list of people by city is stable if, inside each city, the people keep their original order. A walk that only *appends* to the end of each group is stable automatically; a walk that *swaps* across the array usually is not, because a swap can carry an element past others of its own group.
+:::
+
+Formally, a rearrangement into groups is stable when, for any $i < j$ with $a_i$ and $a_j$ in the same group, $a_i$ is placed before $a_j$. @fig-part-stable shows what goes wrong with the Dutch national flag. The values are tagged with letters so that equal values can be told apart.
+
+::: {#fig-part-stable}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+stab_in = [(5, "a"), (2, "a"), (7, "a"), (2, "b"), (5, "b"), (7, "b"), (2, "c")]
+stab_p = 5
+stab_ok = ([t for t in stab_in if t[0] < stab_p] + [t for t in stab_in if t[0] == stab_p]
+           + [t for t in stab_in if t[0] > stab_p])
+stab_dnf = list(stab_in)
+s_lo, s_mid, s_hi = 0, 0, len(stab_dnf) - 1
+while s_mid <= s_hi:
+    if stab_dnf[s_mid][0] < stab_p:
+        stab_dnf[s_lo], stab_dnf[s_mid] = stab_dnf[s_mid], stab_dnf[s_lo]
+        s_lo, s_mid = s_lo + 1, s_mid + 1
+    elif stab_dnf[s_mid][0] == stab_p:
+        s_mid += 1
+    else:
+        stab_dnf[s_mid], stab_dnf[s_hi] = stab_dnf[s_hi], stab_dnf[s_mid]
+        s_hi -= 1
+assert [v for v, _ in stab_dnf] == [v for v, _ in stab_ok] and stab_dnf != stab_ok
+
+
+def draw(ax, p):
+    hue = {2: "green", 5: "indigo", 7: "amber"}
+    for r, (name, row) in enumerate((("input", stab_in), ("stable", stab_ok), ("DNF", stab_dnf))):
+        V.array(ax, p, [f"{v}{t}" for v, t in row], y=-2.6 * r,
+                colors={i: hue[v] for i, (v, _) in enumerate(row)}, label=name)
+V.show(draw)
+```
+
+Partitioning around $p = 5$; the letters record input order. The stable result keeps $2a, 2b, 2c$ and $7a, 7b$ in input order. The Dutch national flag, computed here by running it, gets the groups right but not the order inside them: its swaps with the right end carried $2c$ ahead of $2b$ and reversed the two $7$s.
+
+:::
+
+**What a buffer buys.** Read the input once, left to right, and *append* each element to its group's output (three lists, or one output array with a write cursor per group, as in @sec-part-p1-a). Each group's output is then the subsequence of the input in that group, which is stability by definition. The price is $O(n)$ extra memory. This is the "append, never swap" rule of @sec-arr-inplace.
+
+**What in place costs.** Stability and $O(1)$ extra memory are not incompatible, but the simple walks above do not give both, and the alternatives are slower or harder:
+
+- adjacent swaps (insertion-sort style) never carry an element past an equal one, so they are stable and in place, but take $\Theta(n^2)$ time in the worst case;
+- divide and conquer with rotations is stable and in place in $O(n\log n)$ time (@sec-part-stable-rot);
+- linear-time, constant-space stable partitioning is known from the research literature (Katajainen and Pasanen, 1992), but it is intricate and not used in practice.
+
+Library functions follow the same trade-off: C++ `std::stable_partition` uses a buffer when it can get one (linear time) and falls back to an $O(n\log n)$ rotation scheme otherwise, while `std::partition` is in place and unstable.
+
+| Property | In-place walk (Lomuto, Hoare, DNF) | Buffer with write cursors | Rotations (@sec-part-stable-rot) |
+|---|---|---|---|
+| Time | $O(n)$ | $O(n)$ | $O(n\log n)$ |
+| Extra memory | $O(1)$ | $O(n)$ | $O(\log n)$ recursion |
+| Order inside each group | lost | kept | kept |
+| Right for LC 75 / LC 922 (any order accepted) | yes | yes | yes |
+| Right for LC 2161 / LC 2149 (order required) | **no** | yes | yes |
+
+So the design question for every rearrangement problem is the same: *does the statement accept any arrangement of each group, or does it require the input order?* Sort Colors and Sort Array by Parity II accept any; Partition Array According to Given Pivot and Rearrange Array Elements by Sign require the input order.
+
+## A3. Rearranging by sign, parity or slot {#sec-part-props}
+
+::: {.callout-note title="In plain words"}
+Once you can partition, the comparison with a pivot is just one possible test. Any yes/no question about an element, called a **predicate** ("is it negative?", "is it even?"), splits the array into two groups. And the groups need not go into two blocks: the destination can be a pattern of positions, such as "positives on even indices, negatives on odd indices". Classify first, then place: the classifying part never changes, only the placing does.
+:::
+
+The predicates that come up again and again:
+
+| Predicate | Typical destination | Stability required? | Tool |
+|---|---|---|---|
+| `x < 0` (sign) | negatives first, or alternate signs | often (LC 2149) | read once, a write cursor per class |
+| `x % 2 == 0` (parity) | evens first (LC 905), or evens on even slots (LC 922) | usually not | two cursors that swap misplaced pairs |
+| `x < p` / `== p` / `> p` | three blocks | sometimes (LC 2161) | Dutch flag, or a buffer |
+| "index $i$ is in the first half" | interleave the halves | n/a | slot map, or the perfect shuffle |
+
+**Two-group partition by a predicate in place.** With a predicate instead of a pivot, Hoare's walk becomes: `lo` stops on an element that belongs on the right, `hi` stops on one that belongs on the left, swap. That is `std::partition`, and it is LC 905 Sort Array By Parity. The read/write compaction of @sec-arr-p2 is the *stable* one-sided version: a writer collects the "yes" elements in order, but the "no" elements are overwritten or scrambled.
+
+**Slot patterns.** When the destination is "class A on even slots, class B on odd slots", each class gets its own write cursor that steps by $2$ (@sec-part-p2-a); if order does not matter, two cursors, one on the even slots and one on the odd slots, find misplaced pairs and swap them (@sec-part-p2-b).
+
+### Interleaving two halves {#sec-part-interleave}
+
+The purest slot pattern ignores values altogether: given $[a_1, \ldots, a_k, b_1, \ldots, b_k]$, produce $[a_1, b_1, a_2, b_2, \ldots, a_k, b_k]$. With a second array it is one line per slot: `res[2i] = a[i]`, `res[2i+1] = a[k+i]`.
+
+::: {#fig-part-interleave}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+il_src = [1, 2, 3, 4, 5, 6]
+il_k = len(il_src) // 2
+il_res = [None] * len(il_src)
+for il_i in range(il_k):
+    il_res[2 * il_i], il_res[2 * il_i + 1] = il_src[il_i], il_src[il_k + il_i]
+assert il_res == [1, 4, 2, 5, 3, 6]
+
+
+def draw(ax, p):
+    V.array(ax, p, il_src, colors={i: "green" if i < il_k else "indigo" for i in range(6)},
+            label="halves")
+    V.array(ax, p, il_res, y=-2.6, colors={i: "green" if i % 2 == 0 else "indigo" for i in range(6)},
+            label="zipped")
+V.show(draw)
+```
+
+The first half (green) goes to the even slots and the second half (indigo) to the odd slots. With a result array this costs $O(n)$ time and $O(n)$ memory.
+
+:::
+
+Doing it *in place* is harder than it looks, because each element must move to a slot that depends on its index. In 1-based positions the element at position $q$ goes to $2q \bmod (n+1)$ (the in-shuffle, which starts with $b_1$; the version above, starting with $a_1$, is the same map on the inner $n - 2$ elements). The map splits the positions into cycles, and walking each cycle with one spare variable moves every element once. The difficulty is knowing where the cycles start without marking every cell; @sec-part-shuffle walks the cycles and explains the known $O(n)$-time, $O(1)$-space solution.
+
+## A4. Next and previous permutation {#sec-part-perm}
+
+::: {.callout-note title="In plain words"}
+List all arrangements of some values in dictionary order: compare two arrangements at the first position where they differ, and the one with the smaller value there comes first. The **next permutation** of an arrangement is the one right after it in that list. Think of the array as a number: the next permutation is the smallest change that makes the number larger, so change it as far to the right as possible.
+:::
+
+Formally, $a <_{\text{lex}} b$ if $a_i < b_i$ at the first index $i$ where they differ; this is **lexicographic order**. The next permutation is the smallest arrangement of the same values that is $>_{\text{lex}} a$, and if $a$ is the largest arrangement (non-increasing), we wrap around to the smallest (non-decreasing).
+
+### The four steps
+
+1. **Pivot.** Find the largest $i$ with `a[i] < a[i+1]`. The suffix after it, `a[i+1..n)`, is non-increasing, already its own largest arrangement, so nothing can change to the right of $i$ alone. If there is no such $i$, reverse the whole array and stop.
+2. **Successor.** Find the largest $j > i$ with `a[j] > a[i]`: because the suffix is non-increasing, that is the smallest suffix value larger than `a[i]`.
+3. **Swap** `a[i]` and `a[j]`.
+4. **Reverse** `a[i+1..n)`.
+
+Step 4 sorts the suffix, because after the swap the suffix is still non-increasing: the value placed at $j$ is smaller than its left neighbour and at least its right neighbour. The full proof, and why both scans must use non-strict comparisons, is part of the solved problem @sec-part-p3-a. @fig-part-nperm-anim plays the four steps.
+
+::: {#fig-part-nperm-anim}
+
+```{python}
+#| echo: false
+def nperm_frames(a0):
+    a, n = list(a0), len(a0)
+    frames = [(list(a), None, None, None, f"input {a}: find the rightmost i with a[i] < a[i+1]")]
+    i = n - 2
+    while i >= 0 and a[i] >= a[i + 1]:
+        frames.append((list(a), i, None, (i + 1, n), f"a[{i}] = {a[i]} >= a[{i + 1}] = {a[i + 1]}: keep scanning left"))
+        i -= 1
+    frames.append((list(a), i, None, (i + 1, n), f"a[{i}] = {a[i]} < a[{i + 1}] = {a[i + 1]}: pivot i = {i}; the suffix after it is non-increasing"))
+    j = n - 1
+    while a[j] <= a[i]:
+        frames.append((list(a), i, j, (i + 1, n), f"a[{j}] = {a[j]} <= {a[i]}: too small, keep scanning left"))
+        j -= 1
+    frames.append((list(a), i, j, (i + 1, n), f"a[{j}] = {a[j]} > {a[i]}: successor j = {j}, the smallest larger value in the suffix"))
+    a[i], a[j] = a[j], a[i]
+    frames.append((list(a), i, j, (i + 1, n), f"swap a[{i}] and a[{j}]: {a}; the suffix is still non-increasing"))
+    lo, hi = i + 1, n - 1
+    while lo < hi:
+        a[lo], a[hi] = a[hi], a[lo]
+        frames.append((list(a), i, None, (i + 1, n), f"reverse the suffix: swap a[{lo}] and a[{hi}] -> {a}"))
+        lo, hi = lo + 1, hi - 1
+    frames.append((list(a), None, None, None, f"done: next permutation {a}"))
+    return frames
+
+
+np_f = nperm_frames([1, 3, 5, 4, 2])
+assert np_f[-1][0] == [1, 4, 2, 3, 5] and 2 <= len(np_f) <= 15
+
+
+def nperm_frame(ax, p, k):
+    a, i, j, suf, _ = np_f[k]
+    regions = [(suf[0], suf[1], "amber", "suffix")] if suf else []
+    colors = {}
+    ptrs = []
+    if i is not None:
+        colors[i] = "green"
+        ptrs.append((i, "i", "green", "top"))
+    if j is not None:
+        colors[j] = "indigo"
+        ptrs.append((j, "j", "indigo"))
+    V.array(ax, p, a, regions=regions, colors=colors, pointers=ptrs)
+
+
+V.animate(nperm_frame, len(np_f), captions=[c for *_, c in np_f], interval=1300)
+```
+
+Next permutation of $[1, 3, 5, 4, 2]$. The pivot scan walks left through the non-increasing suffix (amber) and stops at $i = 1$; the successor scan walks left from the end past values $\le 3$ and stops at the $4$; one swap and one reversal of the suffix give $[1, 4, 2, 3, 5]$.
+
+:::
+
+### Previous permutation {#sec-part-prevperm}
+
+Mirror every comparison: the pivot is the largest $i$ with `a[i] > a[i+1]`, the successor the largest $j > i$ with `a[j] < a[i]`, then swap and reverse the suffix. If there is no pivot, the array is non-decreasing, the smallest arrangement, and reversing it wraps to the largest. C++ has both as `std::next_permutation` and `std::prev_permutation`; each returns `false` when it wraps.
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-part-prevperm
+def prev_permutation(a):
+    """Previous permutation in lexicographic order, wrapping to the largest. O(n)."""
+    a, n = list(a), len(a)
+    i = n - 2
+    while i >= 0 and a[i] <= a[i + 1]:
+        i -= 1
+    if i < 0:
+        return a[::-1]
+    j = n - 1
+    while a[j] >= a[i]:
+        j -= 1
+    a[i], a[j] = a[j], a[i]
+    a[i + 1:] = a[i + 1:][::-1]
+    return a
+
+
+for _ in range(400):
+    base = [random.randint(0, 3) for _ in range(random.randint(1, 6))]
+    perms = sorted(set(itertools.permutations(base)))
+    k = perms.index(tuple(base))
+    assert prev_permutation(base) == list(perms[k - 1])          # k - 1 = -1 wraps to the last
+assert prev_permutation([1, 3, 2]) == [1, 2, 3] and prev_permutation([1, 2, 3]) == [3, 2, 1]
+print("prev_permutation OK")
+```
+
+#### C++
+
+```cpp
+#include <vector>
+#include <algorithm>
+using namespace std;
+void prevPermutation(vector<int>& a) {
+    int n = (int)a.size(), i = n - 2;
+    while (i >= 0 && a[i] <= a[i + 1]) --i;
+    if (i < 0) { reverse(a.begin(), a.end()); return; }
+    int j = n - 1;
+    while (a[j] >= a[i]) --j;
+    swap(a[i], a[j]);
+    reverse(a.begin() + i + 1, a.end());
+}
+
+int main() {
+    vector<int> v{1, 3, 2};
+    prevPermutation(v);                          // {1, 2, 3}
+    vector<int> w{1, 3, 2};
+    prev_permutation(w.begin(), w.end());        // the library agrees
+    return v == w ? 0 : 1;
+}
+```
+:::
+
+### Rank and unrank {#sec-part-rank}
+
+The **rank** of a permutation of distinct values is its index (from $0$) in the lexicographic list; **unranking** goes back from an index to the permutation. Both follow from counting: the permutations that start with a smaller first value all come before $a$, and there are $(n-1)!$ of them for each such value. Recursing on the rest gives
+
+$$\text{rank}(a) = \sum_{i=0}^{n-1} c_i \,(n-1-i)!, \qquad c_i = \#\{\text{values not yet used that are smaller than } a_i\}.$$ {#eq-rank}
+
+The sequence $(c_0, c_1, \ldots)$ is the permutation's *Lehmer code*. Computing each $c_i$ by scanning the unused values is $O(n)$, so $O(n^2)$ in total; a Fenwick tree over the unused values, a later chapter's tool, brings it to $O(n\log n)$. Unranking reads @eq-rank backwards: $c_0 = \lfloor k / (n-1)! \rfloor$ picks the first value, and so on with the remainder.
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-part-rank
+def perm_rank(a):
+    """0-based lexicographic rank of a permutation of distinct values. O(n^2)."""
+    pool, n, r = sorted(a), len(a), 0
+    for i, x in enumerate(a):
+        c = pool.index(x)                    # unused values smaller than x
+        r += c * math.factorial(n - 1 - i)
+        pool.pop(c)
+    return r
+
+
+def perm_unrank(k, n):
+    """The permutation of 1..n with lexicographic rank k. O(n^2)."""
+    pool, out = list(range(1, n + 1)), []
+    for i in range(n):
+        f = math.factorial(n - 1 - i)
+        out.append(pool.pop(k // f))
+        k %= f
+    return out
+
+
+for r, p in enumerate(itertools.permutations(range(1, 6))):    # the list itself is the oracle
+    assert perm_rank(list(p)) == r and perm_unrank(r, 5) == list(p)
+assert perm_rank([3, 2, 1]) == 5 and perm_unrank(5, 3) == [3, 2, 1]
+print("perm_rank / perm_unrank OK")
+```
+
+#### C++
+
+```cpp
+#include <vector>
+#include <algorithm>
+using namespace std;
+long long permRank(const vector<int>& a) {            // distinct values, O(n^2)
+    int n = (int)a.size();
+    vector<int> pool(a);
+    sort(pool.begin(), pool.end());
+    vector<long long> fact(n + 1, 1);
+    for (int i = 1; i <= n; ++i) fact[i] = fact[i - 1] * i;
+    long long r = 0;
+    for (int i = 0; i < n; ++i) {
+        int c = (int)(lower_bound(pool.begin(), pool.end(), a[i]) - pool.begin());
+        r += c * fact[n - 1 - i];
+        pool.erase(pool.begin() + c);                  // remove exactly one value
+    }
+    return r;
+}
+
+vector<int> permUnrank(long long k, int n) {          // permutation of 1..n with rank k
+    vector<int> pool, out;
+    vector<long long> fact(n + 1, 1);
+    for (int i = 1; i <= n; ++i) { fact[i] = fact[i - 1] * i; pool.push_back(i); }
+    for (int i = 0; i < n; ++i) {
+        long long f = fact[n - 1 - i];
+        out.push_back(pool[k / f]);
+        pool.erase(pool.begin() + k / f);
+        k %= f;
+    }
+    return out;
+}
+
+int main() {
+    vector<int> p{2, 1, 3};
+    return (permRank(p) == 2 && permUnrank(2, 3) == p) ? 0 : 1;
+}
+```
+:::
+
+**Worked example.** For $a = [3, 2, 1]$: two unused values are below $3$, so $c_0 = 2$ and the first term is $2 \cdot 2! = 4$; then one unused value is below $2$, $1 \cdot 1! = 1$; then $c_2 = 0$. The rank is $5$, the last of $3! = 6$. Unranking $5$: $5 / 2! = 2$ picks the third smallest unused value, $3$; the remainder $1 / 1! = 1$ picks $2$; then $1$. Jumping straight to the $k$-th permutation this way is LC 60 Permutation Sequence; stepping $k$ times with next permutation would cost $O(kn)$.
+
+## A5. Wiggle and zig-zag orders {#sec-part-wiggle}
+
+::: {.callout-note title="In plain words"}
+An array **wiggles** if it goes up, down, up, down: $a_0 < a_1 > a_2 < a_3 > \cdots$. Every odd index is a peak, every even index a valley. With $\le$ and $\ge$ instead (the **weak** version) a single left-to-right pass of neighbour swaps does it. With strict signs and repeated values it is harder, because two equal values must never be neighbours.
+:::
+
+### Weak wiggle in one pass
+
+For $a_0 \le a_1 \ge a_2 \le a_3 \ge \cdots$, walk $i = 0, 1, \ldots, n-2$ and swap $a_i$ and $a_{i+1}$ whenever their pair is the wrong way round (for even $i$ when $a_i > a_{i+1}$, for odd $i$ when $a_i < a_{i+1}$).
+
+**Proof.** After step $i$ the pair $(i, i+1)$ is right. The swap can only spoil the previous pair $(i-1, i)$, and it does not: for even $i$, the swap makes $a_i$ *smaller*, and the previous pair (odd $i-1$) asks for $a_{i-1} \ge a_i$, which a smaller $a_i$ keeps; for odd $i$ it makes $a_i$ *larger*, and the previous pair asks for $a_{i-1} \le a_i$. So after the pass every pair is right. $\blacksquare$
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-part-wiggle-weak
+def wiggle_weak(a):
+    """a[0] <= a[1] >= a[2] <= ... with one pass of neighbour swaps (LC 280)."""
+    a = list(a)
+    for i in range(len(a) - 1):
+        if (a[i] > a[i + 1]) if i % 2 == 0 else (a[i] < a[i + 1]):
+            a[i], a[i + 1] = a[i + 1], a[i]
+    return a
+
+
+def is_weak_wiggle(a):
+    return all((a[i] <= a[i + 1]) if i % 2 == 0 else (a[i] >= a[i + 1]) for i in range(len(a) - 1))
+
+
+for _ in range(2000):
+    arr = [random.randint(0, 6) for _ in range(random.randint(0, 12))]
+    out = wiggle_weak(arr)
+    assert is_weak_wiggle(out) and sorted(out) == sorted(arr)
+assert wiggle_weak([3, 5, 2, 1, 6, 4]) == [3, 5, 1, 6, 2, 4]
+print("wiggle_weak OK")
+```
+
+#### C++
+
+```cpp
+#include <vector>
+#include <algorithm>
+using namespace std;
+void wiggleWeak(vector<int>& a) {
+    for (int i = 0; i + 1 < (int)a.size(); ++i)
+        if (i % 2 == 0 ? a[i] > a[i + 1] : a[i] < a[i + 1]) swap(a[i], a[i + 1]);
+}
+
+int main() {
+    vector<int> v{3, 5, 2, 1, 6, 4};
+    wiggleWeak(v);                               // {3, 5, 1, 6, 2, 4}
+    return v[2] == 1 ? 0 : 1;
+}
+```
+:::
+
+The pass does not work for the strict version: it cannot separate two equal neighbours, because swapping them changes nothing. $[1, 1, 2, 2]$ has the strict answer $[1, 2, 1, 2]$, but the pass leaves the first pair $1, 1$ alone.
+
+### Strict wiggle: median, three-way partition, virtual index {#sec-part-virtual}
+
+For the strict order, put the larger half of the values on the peaks and the smaller half in the valleys. Every peak–valley comparison then holds with $\ge$, and it can fail only where copies of the **median** value $m$ meet. The solved problem @sec-part-p4-a proves that pushing the copies of $m$ to opposite ends (to the *right end* of the peaks and the *left end* of the valleys) keeps them apart whenever an answer exists. One three-way partition does exactly that, if it runs in the order `[> m | == m | < m]` over the cells in the order "peaks left to right, then valleys left to right".
+
+That order of cells is a single formula. With $w = n \mid 1$ (that is $n$ for odd $n$ and $n + 1$ for even $n$, always odd), the **virtual index**
+
+$$A(t) = (1 + 2t) \bmod w, \qquad t = 0, 1, \ldots, n-1,$$ {#eq-vi-map}
+
+visits $1, 3, 5, \ldots$ and then $0, 2, 4, \ldots$. It is a bijection on $\{0, \ldots, n-1\}$: $t \mapsto 1 + 2t$ is invertible modulo an odd $w$ because $\gcd(2, w) = 1$, and for even $n$ the only cell value outside the array, $w - 1 = n$, would need $1 + 2t \equiv n \pmod{n+1}$, i.e. $t = n$, which is out of range. Running the three-way partition on "virtual slot $t$ = real cell $A(t)$" is the $O(n)$-time, $O(1)$-space answer.
+
+::: {#fig-part-virtual}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+vi_rows = []
+for vi_n in (6, 7):
+    vi_w = vi_n | 1
+    vi_seq = [(1 + 2 * t) % vi_w for t in range(vi_n)]
+    assert sorted(vi_seq) == list(range(vi_n))
+    assert all(c % 2 == 1 for c in vi_seq[:vi_n // 2]) and all(c % 2 == 0 for c in vi_seq[vi_n // 2:])
+    vi_rows.append((vi_n, vi_seq))
+
+
+def draw(ax, p):
+    for r, (n, seq) in enumerate(vi_rows):
+        V.array(ax, p, seq, y=-2.8 * r, colors={t: "indigo" if c % 2 else "green" for t, c in enumerate(seq)},
+                label=f"n = {n}: A(t)")
+V.show(draw)
+```
+
+The virtual index $A(t) = (1+2t) \bmod (n \mid 1)$ for $n = 6$ (modulus $7$) and $n = 7$ (modulus $7$). The cell under $t$ is the real index $A(t)$: indigo cells are peaks (odd indices), green cells are valleys. The first $\lfloor n/2 \rfloor$ virtual slots are always the peaks.
+
+:::
+
+The median comes from quickselect (@sec-salgo-a4-select) in expected linear time. Sorting is the simpler alternative at $O(n\log n)$: sort, then deal the small half into the valleys and the large half onto the peaks, both in *decreasing* order, which is the same shape. @sec-part-p4-a writes all three forms.
+
+## Part B — Patterns
+
+## Pattern 1: Three-way partition {#sec-part-p1}
+
+**Where we are.** The five patterns climb one idea at a time. Pattern 1 classifies each element against a pivot into three groups and places the groups as blocks, either stably with a buffer or in place without order. Pattern 2 keeps the classify step but lets the classifier be any predicate and the destination a pattern of slots. Pattern 3 changes the target from a shape to an *order among all arrangements*: the next permutation, found with a suffix, a swap and a reversal. Pattern 4 combines the first two: a three-way partition around the median, placed through a slot map, gives a strict wiggle. Pattern 5 moves whole blocks at once, rotations and block swaps, and uses them to make the earlier rearrangements stable or in place.
+
+**Recognise it.** "Elements less than $x$ before elements equal to $x$ before elements greater than $x$"; "sort an array with only two or three distinct values"; "move all zeros/negatives/odds to one side"; an operation that splits an array by a threshold. Then ask the stability question of @sec-part-stable.
+
+::: {.callout-important title="Template"}
+Three groups by comparison with a pivot $p$.
+
+- **Order inside groups not required:** the Dutch national flag. Regions `[< p | = p | unknown | > p]`, cursors `lo, mid, hi`; classify `a[mid]`: less → swap with `lo`, both advance; equal → `mid += 1`; greater → swap with `hi`, `hi -= 1` only. $O(n)$ time, $O(1)$ extra.
+- **Order required:** read once and append. With one output array: small values from a front scan to `res[lo++]`, large values from a back scan to `res[hi--]`, the pivot's copies in the gap. $O(n)$ time, $O(n)$ for the output.
+
+**Invariant.** Every cell outside the unknown region (or every cell already written) is in its final group, in input order for the stable form.
+:::
+
+**Complexity.** $O(n)$ time for both forms; $O(1)$ or $O(n)$ extra memory, the price of stability.
+
+{{< include ../problems/lc-2161-partition-array-according-to-given-pivot/problem.qmd >}}
+
+[**From one split to many.** LC 2161 performs a single stable split. Split Sort allows only stable splits by a threshold and asks how many are needed to sort a permutation; the answer is a count of pairs of consecutive values that sit in the wrong order.]{.flow-bridge}
+
+{{< include ../problems/cf-1863b-split-sort/problem.qmd >}}
+
+[**From blocks to slots.** Both problems so far send each group to one contiguous block. The next pattern keeps the classify step but sends each class to a pattern of positions, such as the even indices.]{.flow-bridge}
+
+## Pattern 2: Rearrange by a property {#sec-part-p2}
+
+**From blocks to slots.** Pattern 1 compared with a pivot and produced blocks. Here the classifier is any predicate (sign, parity) and the destination is a slot pattern: "positives on even indices, negatives on odd indices". The one new idea is a **write cursor per class that steps by two**, or, when order does not matter, two read cursors that walk the even and the odd slots and swap misplaced pairs.
+
+**Recognise it.** "Alternate positive and negative", "even values at even indices", "rearrange so that the $i$-th element has property $P(i)$", with equal numbers of elements and slots in each class.
+
+::: {.callout-important title="Template"}
+Classify by a predicate, place by slot.
+
+- **Order required:** one read pass; class $c$ writes to `res[w_c]` and `w_c += step`. Each class's slots receive its elements in input order. $O(n)$ time, $O(n)$ output.
+- **Order not required:** cursor `i` on the slots of class A skips correct cells, cursor `j` on the slots of class B skips correct cells; when both stop, swap and advance both. $O(n)$ time, $O(1)$ extra.
+
+**Invariant.** The misplaced cells of the two slot classes are equal in number, so they pair up: each swap fixes one of each.
+:::
+
+**Complexity.** $O(n)$ time in both forms.
+
+{{< include ../problems/lc-2149-rearrange-array-elements-by-sign/problem.qmd >}}
+
+[**From kept order to any order.** Rearrange by Sign has to keep the input order inside each sign, so it needs the output buffer. Sort Array by Parity II accepts any arrangement, and that one relaxation lets two cursors fix the array in place.]{.flow-bridge}
+
+{{< include ../problems/lc-0922-sort-array-by-parity-ii/problem.qmd >}}
+
+[**From a target shape to a target order.** So far the goal was a shape: groups in blocks or in slots. The next pattern asks for one specific arrangement, the next one in sorted order among all arrangements.]{.flow-bridge}
+
+## Pattern 3: Next permutation {#sec-part-p3}
+
+**From a target shape to a target order.** Patterns 1 and 2 accepted any arrangement with the right shape. Next permutation asks for exactly one arrangement: the smallest one that is lexicographically larger. The new idea is to split the array into a **fixed prefix and a free suffix**: the longest non-increasing suffix is already as large as it can be, so the change happens just before it, and the suffix is then made as small as possible.
+
+**Recognise it.** "Next lexicographically greater arrangement", "smallest number larger than $n$ with the same digits", "the $k$-th permutation", "list all arrangements in order"; also any problem where you step through permutations one at a time.
+
+::: {.callout-important title="Template"}
+1. Pivot: the rightmost $i$ with `a[i] < a[i+1]`. None: reverse everything (wrap), stop.
+2. Successor: the rightmost $j > i$ with `a[j] > a[i]`.
+3. Swap `a[i]`, `a[j]`.
+4. Reverse `a[i+1..n)`.
+
+**Invariant.** `a[i+1..n)` is non-increasing before and after the swap, so the reversal sorts it. Both scans use non-strict comparisons ($\ge$ and $\le$) so that equal values are walked through.
+:::
+
+**Complexity.** $O(n)$ time, $O(1)$ extra; previous permutation is the mirror image (@sec-part-prevperm).
+
+{{< include ../problems/lc-0031-next-permutation/problem.qmd >}}
+
+[**From an array to the digits of a number.** Next Permutation works on an array. Next Greater Element III hides the same algorithm in an integer: read it as a string of digits, take its next permutation, and add the two checks that integers need, no wrap-around and no overflow.]{.flow-bridge}
+
+{{< include ../problems/lc-0556-next-greater-element-iii/problem.qmd >}}
+
+[**From order back to shape.** The next pattern returns to shapes, with alternating comparisons between neighbours, and combines Pattern 1's three-way partition with Pattern 2's slots.]{.flow-bridge}
+
+## Pattern 4: Wiggle orders {#sec-part-p4}
+
+**From one comparison to alternating comparisons.** Pattern 1 placed groups in blocks and Pattern 2 placed classes in slots. A wiggle order does both at once: the "large" group goes onto the peaks (odd slots) and the "small" group into the valleys (even slots), so every neighbour comparison holds. The new idea is the **one place where it can fail**, the copies of the middle value, and the fact that a reversed deal (or the virtual index of @sec-part-virtual) keeps them apart.
+
+**Recognise it.** "$a_0 < a_1 > a_2 < \cdots$", "zig-zag", "maximise the number of local minima", or any condition on *neighbour pairs* that a partition into two groups can satisfy everywhere except where the groups touch.
+
+::: {.callout-important title="Template"}
+Strict wiggle with duplicates:
+
+1. Find the median value $m$ (quickselect; or sort).
+2. Three-way partition in the order `[> m | == m | < m]` over virtual slots, slot $t$ being the real cell $A(t) = (1 + 2t) \bmod (n \mid 1)$: peaks first, valleys last.
+
+Sorting alternative: deal `s[:h]` reversed into the even slots and `s[h:]` reversed into the odd slots, $h = \lceil n/2 \rceil$.
+
+**Invariant.** Peaks hold values $\ge m$ with the copies of $m$ at their right end; valleys hold values $\le m$ with the copies of $m$ at their left end. The copies touch only if $m$ occurs more than $\lfloor n/2 \rfloor$ times, which rules out any answer.
+
+Weak wiggle ($\le$, $\ge$): one pass of neighbour swaps.
+:::
+
+**Complexity.** Expected $O(n)$ time and $O(1)$ extra with quickselect; $O(n\log n)$ with the sort.
+
+::: {#fig-part-wiggle-anim}
+
+```{python}
+#| echo: false
+def wiggle_frames(a0):
+    a, n = list(a0), len(a0)
+    m = sorted(a)[(n - 1) // 2]
+    w = n | 1
+
+    def A(t):
+        return (1 + 2 * t) % w
+
+    i, j, k = 0, 0, n - 1
+    frames = [(list(a), i, j, k)]
+    caps = [f"median m = {m}; virtual slots 0..{n - 1} are the real cells {[A(t) for t in range(n)]}"]
+    while j <= k:
+        x = a[A(j)]
+        if x > m:
+            a[A(i)], a[A(j)] = a[A(j)], a[A(i)]
+            caps.append(f"cell {A(j)} holds {x} > {m}: swap real cells {A(i)} and {A(j)}; i and j advance")
+            i, j = i + 1, j + 1
+        elif x < m:
+            a[A(j)], a[A(k)] = a[A(k)], a[A(j)]
+            caps.append(f"cell {A(j)} holds {x} < {m}: swap real cells {A(j)} and {A(k)}; k retreats")
+            k -= 1
+        else:
+            caps.append(f"cell {A(j)} holds {x} = {m}: j advances")
+            j += 1
+        frames.append((list(a), i, j, k))
+    caps[-1] += f"; result {a}"
+    return frames, caps, m, A
+
+
+wg_f, wg_caps, wg_m, wg_A = wiggle_frames([4, 5, 5, 6, 4, 5, 6])
+wg_final = wg_f[-1][0]
+assert wg_final == [5, 6, 5, 6, 4, 5, 4] and 2 <= len(wg_f) <= 15
+assert all((wg_final[t] < wg_final[t + 1]) if t % 2 == 0 else (wg_final[t] > wg_final[t + 1])
+           for t in range(len(wg_final) - 1))
+
+
+def wiggle_frame(ax, p, s):
+    a, i, j, k = wg_f[s]
+    n = len(a)
+    hue = {}
+    for c in range(n):
+        hue[c] = "green" if a[c] > wg_m else ("indigo" if a[c] == wg_m else "amber")
+    ptrs = []
+    if i < n:
+        ptrs.append((wg_A(i), "i", "green", "top"))
+    if j < n and j <= k:
+        ptrs.append((wg_A(j), "j", "indigo"))
+    if 0 <= k and j <= k:
+        ptrs.append((wg_A(k), "k", "violet", "top"))
+    V.array(ax, p, a, colors=hue, pointers=ptrs)
+
+
+V.animate(wiggle_frame, len(wg_f), captions=wg_caps, interval=1300)
+```
+
+The virtual-index three-way partition on $[4, 5, 5, 6, 4, 5, 6]$, median $m = 5$, drawn on the *real* array. Green cells hold values $> 5$, indigo $= 5$, amber $< 5$; the pointers mark the real cells of the virtual cursors. The result $[5, 6, 5, 6, 4, 5, 4]$ has the larger values on the odd cells with the extra $5$ at their right end, and the $5$s among the even cells at their left end, so no two $5$s touch.
+
+:::
+
+{{< include ../problems/lc-0324-wiggle-sort-ii/problem.qmd >}}
+
+[**From comparisons to sums.** Wiggle Sort II made every neighbour *comparison* safe with a partition and had to guard the place where the two groups meet. Superultra's Favorite Permutation makes every neighbour *sum* composite with a partition by parity, and again only the one seam between the groups needs care.]{.flow-bridge}
+
+{{< include ../problems/cf-2037c-superultra-s-favorite-permutation/problem.qmd >}}
+
+[**From moving elements to moving blocks.** Every pattern so far moved single elements. The last pattern moves whole blocks, and rotation turns out to be the tool that makes stable rearrangement possible in place.]{.flow-bridge}
+
+## Pattern 5: Rotations and block swaps {#sec-part-p5}
+
+**From moving elements to moving blocks.** A **rotation** of a range swaps two adjacent blocks while keeping the order inside each: $AB \to BA$. The patterns so far moved one element at a time; this one moves blocks, and the new idea is that block moves preserve order, so they give **stable** rearrangements without a buffer.
+
+**Recognise it.** "Rotate", "cyclic shift of a segment", "move the last $k$ elements to the front", two blocks that must swap places, an operation defined as a cyclic shift (and a cost or count of such operations), or a stable rearrangement required in $O(1)$ extra memory.
+
+::: {.callout-important title="Template"}
+Left-rotate `a[lo:hi]` by $k$ (blocks $A$ = first $k$, $B$ = rest):
+
+- **Three reversals:** reverse $A$, reverse $B$, reverse all (@sec-arr-p3). About $n$ swaps.
+- **Juggling:** follow the $\gcd(n, k)$ cycles of $i \mapsto i + k \bmod n$ with one spare variable. Exactly $n$ writes, strided access.
+- **Block swap:** swap the shorter block with the far end of the longer one; that part is final; repeat on the rest. Exactly $n - \gcd(n, k)$ swaps.
+
+Rotation as a tool: stable partition in place by divide and conquer plus one rotation per merge, $O(n\log n)$.
+:::
+
+**Complexity.** All three rotations are $O(n)$ time and $O(1)$ extra memory.
+
+### Reversal and juggling, recalled {#sec-part-rotate-recap}
+
+@sec-arr-p3 rotates by three reversals, using $(A^R B^R)^R = BA$, and by following cycles: the value at $i$ moves to $(i + k) \bmod n$, and these moves form exactly $\gcd(n, k)$ cycles of length $n/\gcd(n, k)$. Its solved problem is the basic one:
+
+{{< include ../problems/lc-0189-rotate-array/card.qmd >}}
+
+This pattern adds the third method, the block swap, measures the three against each other, and then uses rotation as a primitive.
+
+### Block swap {#sec-part-rotate-blockswap}
+
+To left-rotate a range of length $L$ by $k$, with $A$ the first $k$ elements and $B$ the remaining $m = L - k$:
+
+- if $k < m$, write $B = B_1 B_2$ with $|B_1| = k$ and swap $A$ with $B_1$ element by element: $A B_1 B_2 \to B_1 A B_2$. Now $B_1$ is final, and what is left is to rotate $A B_2$ left by $k$;
+- if $k \ge m$, write $A = A_1 A_2$ with $|A_2| = m$ and swap $A_2$ with $B$: $A_1 A_2 B \to A_1 B A_2$. Now $A_2$ is final, and what is left is to rotate $A_1 B$ (length $k$) left by $k - m$.
+
+Each round swaps two equal-length blocks and fixes one of them. The pairs $(L, k)$ follow the subtraction form of Euclid's algorithm, and the loop ends when one block is empty, which is when the last round swapped two blocks of length $\gcd(n, k)$ and fixed both. So the swaps total $n - \gcd(n, k)$: every round fixes as many elements as it swaps, except the last, which fixes twice as many. This algorithm is usually credited to Gries and Mills (1981).
+
+::: {#fig-part-blockswap-anim}
+
+```{python}
+#| echo: false
+def blockswap_frames(a0, k):
+    a = list(a0)
+    lo, length = 0, len(a)
+    frames = [(list(a), lo, length, None, None)]
+    caps = [f"rotate {a} left by k = {k}: A = first {k}, B = the other {len(a) - k}"]
+    while 0 < k < length:
+        m = length - k
+        if k >= m:
+            s1, s2, size = lo + k - m, lo + k, m
+            for t in range(m):
+                a[s1 + t], a[s2 + t] = a[s2 + t], a[s1 + t]
+            caps.append(f"B (length {m}) is shorter: swap it with the last {m} of A -> {a}; cells {s2}..{s2 + m - 1} are final")
+            length, k = k, k - m
+        else:
+            s1, s2, size = lo, lo + k, k
+            for t in range(k):
+                a[s1 + t], a[s2 + t] = a[s2 + t], a[s1 + t]
+            caps.append(f"A (length {k}) is shorter: swap it with the first {k} of B -> {a}; cells {lo}..{lo + k - 1} are final")
+            lo, length = lo + k, m
+        frames.append((list(a), lo, length, (s1, size), (s2, size)))
+    caps[-1] += "; done"
+    return frames, caps
+
+
+bs_f, bs_caps = blockswap_frames([1, 2, 3, 4, 5, 6, 7], 3)
+assert bs_f[-1][0] == [4, 5, 6, 7, 1, 2, 3] and len(bs_f) == 5
+
+
+def blockswap_frame(ax, p, s):
+    a, lo, length, b1, b2 = bs_f[s]
+    regions = [(lo, lo + length, "muted", "still to rotate")] if length > 1 else []
+    colors = {}
+    if b1:
+        for t in range(b1[1]):
+            colors[b1[0] + t] = "green"
+            colors[b2[0] + t] = "indigo"
+    V.array(ax, p, a, regions=regions, colors=colors)
+
+
+V.animate(blockswap_frame, len(bs_f), captions=bs_caps, interval=1500)
+```
+
+Block-swap rotation of $[1, \ldots, 7]$ left by $3$. Each frame swaps the green block with the indigo block of the same length; the grey bracket marks the part still to rotate. The rounds swap $3$, $1$, $1$ and $1$ elements: $6 = 7 - \gcd(7, 3)$ swaps in total.
+
+:::
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-part-blockswap
+def block_rotate(a, lo, hi, k):
+    """Left-rotate a[lo:hi] by k in place with equal-block swaps; returns the number of swaps."""
+    length = hi - lo
+    if length == 0:
+        return 0
+    k %= length
+    swaps = 0
+    while 0 < k < length:
+        m = length - k
+        if k >= m:                                   # B shorter: B <-> tail of A, A's tail is final
+            for t in range(m):
+                a[lo + k - m + t], a[lo + k + t] = a[lo + k + t], a[lo + k - m + t]
+            swaps += m
+            length, k = k, k - m
+        else:                                        # A shorter: A <-> head of B, B's head is final
+            for t in range(k):
+                a[lo + t], a[lo + k + t] = a[lo + k + t], a[lo + t]
+            swaps += k
+            lo, length = lo + k, m
+    return swaps
+
+
+for _ in range(2000):
+    n = random.randint(1, 30)
+    k = random.randint(0, 40)
+    a = list(range(n))
+    s = block_rotate(a, 0, n, k)
+    assert a == list(range(n))[k % n:] + list(range(n))[:k % n]
+    assert s == (0 if k % n == 0 else n - gcd(n, k % n))
+print("block_rotate OK")
+```
+
+#### C++
+
+```cpp
+#include <vector>
+#include <algorithm>
+using namespace std;
+// Left-rotate a[lo, hi) by k with equal-block swaps; returns the number of swaps.
+int blockRotate(vector<int>& a, int lo, int hi, int k) {
+    int length = hi - lo, swaps = 0;
+    if (length == 0) return 0;
+    k %= length;
+    while (k > 0 && k < length) {
+        int m = length - k;
+        if (k >= m) {
+            for (int t = 0; t < m; ++t) swap(a[lo + k - m + t], a[lo + k + t]);
+            swaps += m; length = k; k -= m;
+        } else {
+            for (int t = 0; t < k; ++t) swap(a[lo + t], a[lo + k + t]);
+            swaps += k; lo += k; length = m;
+        }
+    }
+    return swaps;
+}
+
+int main() {
+    vector<int> v{1, 2, 3, 4, 5, 6, 7};
+    int s = blockRotate(v, 0, 7, 3);             // {4, 5, 6, 7, 1, 2, 3}, 6 swaps
+    return (v[0] == 4 && v[6] == 3 && s == 6) ? 0 : 1;
+}
+```
+:::
+
+### Which rotation, and what each costs {#sec-part-rotate-costs}
+
+All three methods are linear; they differ in how many cells they write and in what order. The cell counts array writes (a swap writes two cells) for every $k$ with $n = 12$ and compares them with the formulas.
+
+```{python}
+#| label: arr-part-rotate-costs
+def writes_reversal(n, k):
+    a, w = list(range(n)), 0
+    for lo, hi in ((0, k), (k, n), (0, n)):
+        i, j = lo, hi - 1
+        while i < j:
+            a[i], a[j] = a[j], a[i]
+            w += 2
+            i, j = i + 1, j - 1
+    assert a == list(range(n))[k:] + list(range(n))[:k]
+    return w
+
+
+def writes_juggling(n, k):
+    a, w = list(range(n)), 0
+    for start in range(gcd(n, k)):
+        cur, idx = a[start], start
+        while True:
+            nxt = (idx + k) % n
+            if nxt == start:
+                a[idx] = cur
+                w += 1
+                break
+            a[idx] = a[nxt]
+            w += 1
+            idx = nxt
+    assert a == list(range(n))[k:] + list(range(n))[:k]
+    return w
+
+
+n_rot = 12
+for k in range(1, n_rot):
+    assert writes_reversal(n_rot, k) == 2 * (k // 2 + (n_rot - k) // 2 + n_rot // 2)
+    assert writes_juggling(n_rot, k) == n_rot
+    b = list(range(n_rot))
+    assert 2 * block_rotate(b, 0, n_rot, k) == 2 * (n_rot - gcd(n_rot, k))
+print("k  reversal  juggling  block swap")
+for k in (1, 3, 4, 6):
+    b = list(range(n_rot))
+    print(f"{k:<2} {writes_reversal(n_rot, k):>8} {writes_juggling(n_rot, k):>9} {2 * block_rotate(b, 0, n_rot, k):>11}")
+```
+
+| Method | Array writes | Access pattern | Notes |
+|---|---|---|---|
+| Three reversals | $2(\lfloor k/2\rfloor + \lfloor (n-k)/2\rfloor + \lfloor n/2\rfloor) \approx 2n$ | sequential, from both ends | simplest to get right; the default |
+| Juggling | exactly $n$ (plus $\gcd(n, k)$ saves to a spare variable) | jumps by $k$ | fewest writes, but strided, so cache-unfriendly for large arrays |
+| Block swap | $2(n - \gcd(n, k))$ | sequential runs | no number theory needed to code it; adapts to a range |
+
+C++'s `std::rotate(first, middle, last)` rotates left so that `middle` becomes the first element and returns the new position of the old first element; library implementations pick among these methods depending on the iterator kind, so treat its cost as linear and do not rely on a particular one.
+
+### Rotation as a building block: stable partition in place {#sec-part-stable-rot}
+
+@sec-part-stable promised a stable partition with $O(1)$ extra memory besides recursion. Divide and conquer gives it. Partition each half stably; the array then reads $T_1 F_1 T_2 F_2$ (T for elements that satisfy the predicate, F for the others). The middle $F_1 T_2$ is two adjacent blocks in the wrong order, and one rotation turns it into $T_2 F_1$, giving $T_1 T_2 F_1 F_2$, with every block still in input order.
+
+::: {#fig-part-stable-rot}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+sr_in = [7, 2, 9, 4, 1, 6, 3, 8]                   # predicate: even
+sr_half = len(sr_in) // 2
+sr_left = [x for x in sr_in[:sr_half] if x % 2 == 0] + [x for x in sr_in[:sr_half] if x % 2]
+sr_right = [x for x in sr_in[sr_half:] if x % 2 == 0] + [x for x in sr_in[sr_half:] if x % 2]
+sr_mid = sr_left + sr_right
+sr_out = [x for x in sr_in if x % 2 == 0] + [x for x in sr_in if x % 2]
+
+
+sr_tl = sum(1 for x in sr_left if x % 2 == 0)
+sr_tr = sum(1 for x in sr_right if x % 2 == 0)
+sr_rot = sr_mid[:sr_tl] + sr_mid[sr_half:sr_half + sr_tr] + sr_mid[sr_tl:sr_half] + sr_mid[sr_half + sr_tr:]
+assert sr_rot == sr_out
+
+
+def draw(ax, p):
+    rows = (("input", sr_in, []), ("halves done", sr_mid, [(sr_tl, sr_half + sr_tr, "violet", "rotate this block")]),
+            ("after rotate", sr_rot, []))
+    for r, (name, row, regs) in enumerate(rows):
+        hue = {i: "green" if x % 2 == 0 else "amber" for i, x in enumerate(row)}
+        V.array(ax, p, row, y=-3.0 * r, colors=hue, regions=regs, label=name)
+V.show(draw)
+```
+
+Stable partition of $[7, 2, 9, 4, 1, 6, 3, 8]$ with "even first". After both halves are partitioned (green: even, amber: odd), the bracketed middle is "odd part of the left half, even part of the right half"; one rotation of that block finishes the job, and every colour keeps its input order.
+
+:::
+
+The recursion has $\log_2 n$ levels and the rotations on one level touch each cell $O(1)$ times, so the total is $O(n\log n)$ time; the extra memory is the recursion stack. This is the usual way library implementations of `std::stable_partition` proceed when no buffer is available.
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-part-stable-rot
+def stable_partition_rot(a, pred, lo=0, hi=None):
+    """Stable in-place partition of a[lo:hi]: pred-true first. Returns the boundary index."""
+    if hi is None:
+        hi = len(a)
+    if hi - lo <= 1:
+        return lo + (1 if hi > lo and pred(a[lo]) else 0)
+    mid = (lo + hi) // 2
+    left = stable_partition_rot(a, pred, lo, mid)          # a[lo:left] true, a[left:mid] false
+    right = stable_partition_rot(a, pred, mid, hi)         # a[mid:right] true, a[right:hi] false
+    block_rotate(a, left, right, mid - left)               # [F1 T2] -> [T2 F1]
+    return left + (right - mid)
+
+
+for _ in range(2000):
+    arr = [(random.randint(0, 9), i) for i in range(random.randint(0, 20))]
+    want = [x for x in arr if x[0] % 2 == 0] + [x for x in arr if x[0] % 2]
+    b = list(arr)
+    cut = stable_partition_rot(b, lambda x: x[0] % 2 == 0)
+    assert b == want and cut == sum(1 for x in arr if x[0] % 2 == 0)
+c = list(sr_in)
+stable_partition_rot(c, lambda x: x % 2 == 0)
+assert c == sr_out == [2, 4, 6, 8, 7, 9, 1, 3]
+print("stable_partition_rot OK")
+```
+
+#### C++
+
+```cpp
+#include <vector>
+#include <algorithm>
+using namespace std;
+// Stable in-place partition of a[lo, hi): elements with pred true first. Returns the boundary.
+template <class Pred>
+int stablePartitionRot(vector<int>& a, int lo, int hi, Pred pred) {
+    if (hi - lo <= 1) return lo + ((hi > lo && pred(a[lo])) ? 1 : 0);
+    int mid = (lo + hi) / 2;
+    int left = stablePartitionRot(a, lo, mid, pred);
+    int right = stablePartitionRot(a, mid, hi, pred);
+    rotate(a.begin() + left, a.begin() + mid, a.begin() + right);   // [F1 T2] -> [T2 F1]
+    return left + (right - mid);
+}
+
+int main() {
+    vector<int> v{7, 2, 9, 4, 1, 6, 3, 8};
+    int cut = stablePartitionRot(v, 0, 8, [](int x) { return x % 2 == 0; });
+    return (cut == 4 && v[0] == 2 && v[4] == 7) ? 0 : 1;          // {2, 4, 6, 8, 7, 9, 1, 3}
+}
+```
+:::
+
+### The perfect shuffle, walked in place {#sec-part-shuffle}
+
+The interleave of @sec-part-interleave is a fixed permutation of positions, so it can be done by walking its cycles, like juggling. Take the **in-shuffle** $[a_1, \ldots, a_k, b_1, \ldots, b_k] \to [b_1, a_1, b_2, a_2, \ldots, b_k, a_k]$ on $n = 2k$ elements. In 0-based indices the element at $j$ moves to $\pi(j) = (2j + 1) \bmod (n + 1)$; in 1-based positions that is $q \mapsto 2q \bmod (n+1)$. It is also the virtual-index map @eq-vi-map for even $n$: Wiggle Sort II's scatter *is* a perfect shuffle.
+
+::: {#fig-part-shuffle}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def shuffle_orbits(n):
+    seen, orbits = [False] * n, []
+    for s in range(n):
+        if not seen[s]:
+            cyc, j = [], s
+            while not seen[j]:
+                seen[j] = True
+                cyc.append(j)
+                j = (2 * j + 1) % (n + 1)
+            orbits.append(cyc)
+    return orbits
+
+
+sh_orbits = {n: shuffle_orbits(n) for n in (6, 10)}
+assert sh_orbits[6] == [[0, 1, 3], [2, 5, 4]] and len(sh_orbits[10]) == 1
+
+
+def draw(ax, p):
+    hues = ("green", "indigo")
+    for r, n in enumerate((6, 10)):
+        dest = [(2 * j + 1) % (n + 1) for j in range(n)]
+        owner = {j: c for c, cyc in enumerate(sh_orbits[n]) for j in cyc}
+        V.array(ax, p, dest, y=-2.8 * r, colors={j: hues[owner[j] % 2] for j in range(n)},
+                label=f"n = {n}: pi(j)")
+V.show(draw)
+```
+
+The destination $\pi(j) = (2j+1) \bmod (n+1)$ under each index $j$, coloured by cycle. For $n = 6$ there are two cycles, $(0\,1\,3)$ and $(2\,5\,4)$, so two walks shuffle the array. For $n = 10$ all ten indices lie on one cycle: one walk, starting anywhere, does it all.
+
+:::
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-part-shuffle
+def interleave_in(a):
+    """In-shuffle with a second array: [A | B] -> [b1, a1, b2, a2, ...]."""
+    k = len(a) // 2
+    return [x for i in range(k) for x in (a[k + i], a[i])]
+
+
+def perfect_shuffle(a):
+    """In-shuffle by walking the cycles of pi(j) = (2j + 1) mod (n + 1); n marks for visited cells."""
+    a, n = list(a), len(a)
+    done = [False] * n
+    for s in range(n):
+        if done[s]:
+            continue
+        cur, j = a[s], (2 * s + 1) % (n + 1)
+        while j != s:
+            a[j], cur = cur, a[j]                 # drop the carried value, pick up the next
+            done[j] = True
+            j = (2 * j + 1) % (n + 1)
+        a[s] = cur
+        done[s] = True
+    return a
+
+
+for _ in range(500):
+    arr = random.sample(range(100), 2 * random.randint(1, 15))
+    assert perfect_shuffle(arr) == interleave_in(arr)
+assert perfect_shuffle([0, 1, 2, 3, 4, 5]) == [3, 0, 4, 1, 5, 2]
+assert [len(shuffle_orbits(n)) for n in (2, 4, 6, 8, 10, 12)] == [1, 1, 2, 2, 1, 1]
+print("perfect_shuffle OK")
+```
+
+#### C++
+
+```cpp
+#include <vector>
+#include <algorithm>
+using namespace std;
+// In-shuffle: walk the cycles of pi(j) = (2j + 1) mod (n + 1), marking visited cells.
+void perfectShuffle(vector<int>& a) {
+    int n = (int)a.size();
+    vector<char> done(n, 0);
+    for (int s = 0; s < n; ++s) {
+        if (done[s]) continue;
+        int cur = a[s], j = (2 * s + 1) % (n + 1);
+        while (j != s) {
+            swap(a[j], cur);
+            done[j] = 1;
+            j = (2 * j + 1) % (n + 1);
+        }
+        a[s] = cur;
+        done[s] = 1;
+    }
+}
+
+int main() {
+    vector<int> v{0, 1, 2, 3, 4, 5};
+    perfectShuffle(v);                           // {3, 0, 4, 1, 5, 2}
+    return (v[0] == 3 && v[5] == 2) ? 0 : 1;
+}
+```
+:::
+
+**Counting the cycles.** The cycles of $q \mapsto 2q \bmod (n+1)$ are the same as the cycles of multiplying by $2$ modulo $n + 1$. When $n + 1$ is prime, every cycle has the same length, the multiplicative order of $2$ modulo $n + 1$, so there are $n / \operatorname{ord}_{n+1}(2)$ of them: for $n = 6$, $\operatorname{ord}_7(2) = 3$ and two cycles; for $n = 10$, $\operatorname{ord}_{11}(2) = 10$ and one cycle. This is the shuffle's version of the $\gcd(n, k)$ cycle count of juggling. The code above marks visited cells, which costs $n$ flags. **Jain's algorithm** removes them: modulo $3^j$ the number $2$ has order $2 \cdot 3^{j-1}$, so for $n = 3^j - 1$ the cycles are known in advance (they start at $1, 3, 9, \ldots$ in 1-based positions). For other $n$ it rotates a prefix of the right length into place, shuffles that part with the known cycle starts, and repeats on the rest, for $O(n)$ time and $O(1)$ extra memory in total (see Further reading).
+
+[**From moving blocks to operations defined as rotations.** The rest of the pattern uses rotation as the *operation* a problem allows. Shifting Sort lets you rotate any segment and asks for a short sequence that sorts; Shifts and Sorting charges each rotation by its length; Rotation Matching asks which rotation lines two arrays up best.]{.flow-bridge}
+
+{{< include ../problems/cf-1579b-shifting-sort/problem.qmd >}}
+
+[**From counting operations to pricing them.** Shifting Sort only had to stay under $n$ operations. Shifts and Sorting rotates a binary string and charges every rotation its length, so the question becomes which character each operation should carry, and the answer is a count of ones before each misplaced zero.]{.flow-bridge}
+
+{{< include ../problems/cf-1969b-shifts-and-sorting/problem.qmd >}}
+
+[**From what a rotation costs to which rotation is right.** The last problem does not move anything. Two permutations may each be rotated, and only the relative offset matters; every value votes for the offset that lines it up, and the answer is the largest vote.]{.flow-bridge}
+
+{{< include ../problems/cf-1365c-rotation-matching/problem.qmd >}}
+
+[**From rotations back to the whole chapter.** Rotation Matching reads positions through the inverse permutation, the move that also solved Split Sort; the next paragraph collects the threads.]{.flow-bridge}
+
+**Looking back.** Every pattern in this chapter was the same two steps, *classify, then place*, with one new idea each time: a pivot and three blocks (Pattern 1), a predicate and a slot pattern (Pattern 2), a fixed prefix and a free suffix (Pattern 3), a median and an index map (Pattern 4), and blocks moved whole (Pattern 5). Two questions decided the tool every time. Does the statement require the input order inside a group? Then append into a buffer, or rotate; otherwise swap in place. And where can the arrangement fail? Usually in exactly one place, where two groups touch (the seam in Superultra, the copies of the median in Wiggle Sort II), so the proof is about that place only. The other thread was the inverse permutation, $\text{pos}[v]$: Split Sort and Rotation Matching both became counts once each value was asked where it stands, which is where @sec-idx starts.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "values $< x$, then $= x$, then $> x$"; two or three distinct values, any order inside a group | Dutch national flag | @sec-part-dnf, @sec-part-p1 |
+| "… and keep the relative order inside each group" | read once, write cursors into a buffer | @sec-part-stable, @sec-part-p1-a |
+| an operation that splits by a threshold; minimum number of such operations | count consecutive values out of order (inverse permutation) | @sec-part-p1-b |
+| "alternate positive and negative", keep order | one read pass, a write cursor per class stepping by 2 | @sec-part-props, @sec-part-p2-a |
+| "evens at even indices", any valid answer | two cursors on the two slot classes, swap misplaced pairs | @sec-part-p2-b |
+| "next lexicographically greater arrangement" | pivot, successor, swap, reverse suffix | @sec-part-perm, @sec-part-p3-a |
+| "smallest larger number with the same digits" | next permutation on the digit string, plus overflow check | @sec-part-p3-b |
+| "the $k$-th permutation", "index of this permutation" | rank and unrank by factorials | @sec-part-rank |
+| "$a_0 < a_1 > a_2 < \cdots$" with repeated values | median, three-way partition through the virtual index | @sec-part-virtual, @sec-part-p4-a |
+| "$a_0 \le a_1 \ge a_2 \le \cdots$" | one pass of neighbour swaps | @sec-part-wiggle |
+| a condition on every neighbour pair that a two-group split satisfies inside each group | partition, then guard the single seam | @sec-part-p4-b |
+| "rotate by $k$ in $O(1)$ extra memory" | three reversals, juggling, or block swap | @sec-part-p5, @sec-arr-p3 |
+| "stable, but $O(1)$ extra memory" | divide and conquer with rotations | @sec-part-stable-rot |
+| "interleave the two halves in place" | walk the cycles of $j \mapsto (2j+1) \bmod (n+1)$ | @sec-part-shuffle |
+| "sort with at most $n$ cyclic shifts of segments" | selection sort, one rotation per placement | @sec-part-p5-shiftsort |
+| rotations with a price per operation | charge each carried character | @sec-part-p5-a |
+| "best rotation to make two arrays agree" | each value votes for an offset; histogram | @sec-part-p5-b |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Using an in-place walk when order is required.** The Dutch national flag and Hoare-style swaps get the groups right and the order inside them wrong; on LC 2161's own sample the "greater" group comes out as $14, 21, 12$ (@sec-part-p1-a). Read the statement for "relative order" before choosing.
+- **Advancing `mid` after the swap with `hi`.** The value that arrived at `mid` has not been classified; skipping it leaves a wrong element in place (@sec-part-dnf).
+- **Expecting Lomuto to handle equal keys.** Every element equal to the pivot goes left, so quicksort with Lomuto is quadratic on all-equal input; use Hoare or the three-way partition (@sec-part-a1-compare).
+- **Strict comparisons in the next-permutation scans.** The pivot scan needs `a[i] >= a[i+1]` and the successor scan `a[j] <= a[i]`; with `<` in the second, $[1, 5, 1]$ swaps two equal $1$s and returns a *smaller* array (@sec-part-p3-a).
+- **Forgetting the wrap-around**, or wrapping when the problem says not to: LC 31 wants the smallest permutation after the largest, LC 556 wants $-1$.
+- **Overflow in digit problems.** The next permutation of a 10-digit number can exceed $2^{31} - 1$; parse into a 64-bit integer before comparing (@sec-part-p3-b).
+- **Dealing the sorted halves in increasing order for a strict wiggle.** It fails on $[1, 2, 2, 3]$ (the two $2$s meet in the middle) and passes every odd-length test, which is why the bug survives small test suites. Deal both halves in decreasing order (@sec-part-p4-a).
+- **Using $n$ instead of $n \mid 1$ as the virtual-index modulus.** For even $n$, $t \mapsto (1 + 2t) \bmod n$ visits only odd cells, twice each; the modulus must be odd (@sec-part-virtual).
+- **Rotating by $k \ge n$ or by a negative $k$.** Reduce `k %= n` first (and in C++ lift negatives with `((k % n) + n) % n`); every rotation method assumes $0 \le k < n$.
+- **Mixing left and right rotation.** `std::rotate(first, middle, last)` is a *left* rotation by `middle - first`; right rotation by $k$ is left rotation by $n - k$.
+- **Charging a cost model per run instead of per carried element.** In Shifts and Sorting every zero pays for all the ones before it: `11000` costs $9$, not $3$ (@sec-part-p5-a).
+:::
+
+## Exercises
+
+**1. [E] Trace the Dutch national flag on $a = [2, 1, 0, 2, 1, 0]$ with $p = 1$. Give the array and `(lo, mid, hi)` after every step.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Start `(0, 0, 5)`. `a[0] = 2 > 1`: swap with `a[5]` → $[0,1,0,2,1,2]$, `(0, 0, 4)`. `a[0] = 0 < 1`: swap with itself → `(1, 1, 4)`. `a[1] = 1`: `(1, 2, 4)`. `a[2] = 0 < 1`: swap `a[1]`, `a[2]` → $[0,0,1,2,1,2]$, `(2, 3, 4)`. `a[3] = 2 > 1`: swap with `a[4]` → $[0,0,1,1,2,2]$, `(2, 3, 3)`. `a[3] = 1`: `(2, 4, 3)`. Now `mid > hi`: done, $[0,0,1,1,2,2]$ with `lo = 2`, `mid = 4`, `hi = 3`. Six steps for six elements, as the proof says.
+:::
+
+**2. [E] Show that Lomuto's partition is not stable on $[3_a, 1, 3_b, 2]$ (pivot: the last element, $2$).**
+
+::: {.callout-note collapse="true" title="Solution"}
+$j = 0$: $3_a > 2$, nothing. $j = 1$: $1 \le 2$, so $i = 0$ and swap positions $0, 1$: $[1, 3_a, 3_b, 2]$. $j = 2$: $3_b > 2$, nothing. Final swap of position $i + 1 = 1$ with the pivot: $[1, 2, 3_b, 3_a]$. The two $3$s came out in the opposite order: the final swap carried $3_a$ past $3_b$.
+:::
+
+**3. [E] Run the block-swap rotation on $[1, 2, 3, 4, 5, 6, 7, 8]$ left by $k = 6$. List the rounds and check the swap count against $n - \gcd(n, k)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$L = 8$, $k = 6$, $m = 2$: $k \ge m$, so swap $B = [7, 8]$ with the last two of $A$, $[5, 6]$: $[1,2,3,4,7,8,5,6]$; $5, 6$ are final; now $L = 6$, $k = 4$. $m = 2$: swap $[7, 8]$ with $[3, 4]$: $[1,2,7,8,3,4,5,6]$; $L = 4$, $k = 2$. $m = 2$: swap $[7, 8]$ with $[1, 2]$: $[7,8,1,2,3,4,5,6]$; $L = 2$, $k = 0$: stop. Swaps $2 + 2 + 2 = 6 = 8 - \gcd(8, 6)$.
+:::
+
+**4. [E] Compute the previous permutation of $[1, 3, 2]$, of $[2, 1, 3]$ and of $[1, 2, 3]$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[1, 3, 2]$: the rightmost $i$ with $a_i > a_{i+1}$ is $i = 1$; the rightmost $j > 1$ with $a_j < 3$ is $j = 2$; swap: $[1, 2, 3]$; the suffix after $i$ has length one. $[2, 1, 3]$: $i = 0$, $j = 1$, swap: $[1, 2, 3]$, reverse the suffix $[2, 3] \to [3, 2]$: $[1, 3, 2]$. $[1, 2, 3]$ has no pivot, so it wraps to $[3, 2, 1]$.
+:::
+
+**5. [E] For Split Sort, find the answer for $[2, 1, 3]$, $[3, 1, 2]$ and $[3, 2, 1]$, and give one optimal sequence of thresholds for each.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Count values $v$ with $\text{pos}[v+1] < \text{pos}[v]$. $[2, 1, 3]$: pos $= (1{:}1, 2{:}0, 3{:}2)$; only $v = 1$ is backwards, answer $1$, split at $x = 2$: $[1] + [2, 3]$. $[3, 1, 2]$: pos $= (1{:}1, 2{:}2, 3{:}0)$; only $v = 2$, answer $1$, split at $x = 3$: $[1, 2] + [3]$. $[3, 2, 1]$: both $v = 1$ and $v = 2$, answer $2$, splits at $x = 2$ ($[1, 3, 2]$) and then $x = 3$ ($[1, 2, 3]$).
+:::
+
+**6. [E] For Superultra's Favorite Permutation with $n = 5$, build the residue construction and list the adjacent sums. Why must the odd block start with $5$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Evens $2, 4$, so $E = 4$, and the head $o$ needs $4 + o \equiv 0 \pmod 3$, i.e. $o \equiv 2 \pmod 3$: among $1, 3, 5$ only $5$. The permutation is $[2, 4, 5, 1, 3]$ with sums $6, 9, 6, 4$, all composite. Head $1$ gives the seam $5$ and head $3$ gives $7$, both prime.
+:::
+
+**7. [M] Give an input where dealing the sorted halves in *increasing* order breaks a strict wiggle, and show the decreasing deal and the virtual-index partition on it.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[1, 2, 2, 3]$, $h = 2$: small half $[1, 2]$, large half $[2, 3]$. Increasing deal: $[1, 2, 2, 3]$, and slots $1, 2$ both hold $2$. Decreasing deal: valleys get $2, 1$, peaks get $3, 2$: $[2, 3, 1, 2]$, valid. Virtual index: median $m = 2$, modulus $5$, virtual slots are cells $1, 3, 0, 2$. The partition `[> 2 | = 2 | < 2]` over them puts $3$ in cell $1$, the two $2$s in cells $3$ and $0$, and $1$ in cell $2$: $[2, 3, 1, 2]$.
+:::
+
+**8. [M] The measured swap counts were about $n/2$ for Lomuto and about $n$ for the Dutch flag on distinct keys. Explain both numbers, and why the Dutch flag still wins on inputs with few distinct values.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Lomuto swaps once for every element $\le x$ (plus the final swap). With a random pivot, the number of such elements is uniform on $0..n-1$, so the expected count is about $n/2$. The Dutch flag swaps for every element that is not equal to $p$, in either the "less" or the "greater" branch; with distinct keys that is $n - 1$ elements. With three equally likely values only two thirds of the elements differ from $p$, so about $2n/3$ swaps. The win is not in this pass but in the recursion: all copies of the pivot form one finished block, so quicksort never touches them again, while Lomuto puts them all on one side and degrades to $\Theta(n^2)$ on all-equal input.
+:::
+
+**9. [M] For Rotation Matching with $a = [1, 3, 2, 4]$ and $b = [4, 2, 3, 1]$, compute every value's vote and the answer, and check by rotating.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\text{pos}_a = (1{:}0, 2{:}2, 3{:}1, 4{:}3)$, $\text{pos}_b = (1{:}3, 2{:}1, 3{:}2, 4{:}0)$. Votes $(\text{pos}_a - \text{pos}_b) \bmod 4$: value $1$ → $1$, value $2$ → $1$, value $3$ → $3$, value $4$ → $3$. The best count is $2$. Rotating $b$ right by $1$ gives $[1, 4, 2, 3]$, which agrees with $a$ at indices $0$ and $2$: exactly the values $1$ and $2$ that voted for $1$.
+:::
+
+**10. [M] Write out the three rotations that sort `11000` in Shifts and Sorting, with each window and cost. Which zero does each one carry?**
+
+::: {.callout-note collapse="true" title="Solution"}
+1-based windows: $[1, 3]$ turns `110` into `011`, giving `01100`, cost $3$; $[2, 4]$ gives `00110`, cost $3$; $[3, 5]$ gives `00011`, cost $3$. Total $9$. Each operation carries one zero (the last character of its window) over both ones, which is the formula's $2 + 1$ per zero.
+:::
+
+**11. [M] Change the cost model of Shifts and Sorting: every rotation costs $1$, whatever its length. What is the minimum now? Prove it.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The number $z$ of zeros that have at least one $1$ before them. *Lower bound:* the order of a one and a zero changes only when one of them is the carried character and jumps over the other; carrying a one left over a zero only creates a new pair to undo, so each such zero must be carried at least once, and each operation carries one character. *Upper bound:* process the zeros left to right; carry each one with a single rotation from the first $1$ of the string to its own position. So the answer is $z$. The real problem's answer is the same argument with each carry priced by its window.
+:::
+
+**12. [M] Which C++ library calls give a stable two-way partition and which an unstable one? What do they cost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+`std::partition` is unstable, linear, in place (a two-finger walk like Hoare's for bidirectional iterators). `std::stable_partition` is stable: linear time if it can allocate a buffer, otherwise $O(n\log n)$ swaps by divide and conquer with rotations (@sec-part-stable-rot). `std::stable_sort` on the predicate's value also works but costs $O(n\log n)$ comparisons. Split Sort's operation is exactly `stable_partition` with the predicate "less than $x$" (@sec-part-p1-b).
+:::
+
+**13. [M] Write out the virtual index $A(t)$ for $n = 7$ and $n = 8$, and explain why the first $\lfloor n/2 \rfloor$ values are exactly the odd cells.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$n = 7$, modulus $7$: $1, 3, 5, 0, 2, 4, 6$. $n = 8$, modulus $9$: $1, 3, 5, 7, 0, 2, 4, 6$. For $t < \lfloor n/2 \rfloor$, $1 + 2t \le 2\lfloor n/2\rfloor - 1 < w$, so no reduction happens and the value is odd. For larger $t$, $1 + 2t$ lies between $w$ and $2w$, so $A(t) = 1 + 2t - w$, and since $w$ is odd this is even.
+:::
+
+**14. [M] Trace the stable partition by rotations on $[5, 2, 8, 3]$ with "even first". What does each level do?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Left half $[5, 2]$: halves $[5]$ (boundary $0$) and $[2]$ (boundary $2$); rotate cells $[0, 2)$ by $1$: $[2, 5]$, boundary $1$. Right half $[8, 3]$: already $[8 \mid 3]$, boundary $3$. Top level: $[2 \mid 5 \mid 8 \mid 3]$ with $F_1 = [5]$ and $T_2 = [8]$; rotate cells $[1, 3)$ by $1$: $[2, 8, 5, 3]$, boundary $2$. Evens $2, 8$ and odds $5, 3$ keep their input order.
+:::
+
+**15. [H] Prove that calling next permutation $n!$ times, starting from the sorted array of $n$ distinct values, does $O(n!)$ total work, that is $O(1)$ per call on average.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A call's work is proportional to the length $\ell$ of the longest non-increasing suffix plus one (the two scans and the reversal stay inside it). The suffix of length $\ell$ is decreasing in exactly those permutations whose last $\ell$ values are in decreasing order: a $1/\ell!$ fraction of all permutations. So the number of calls with suffix length at least $\ell$ is at most $n!/\ell!$, and the total work is $O\left(\sum_{\ell \ge 0} n!/\ell!\right) = O(e \cdot n!)$. Hence the average is a constant, and listing all permutations costs $O(n \cdot n!)$ only because each must be printed.
+:::
+
+**16. [H] Prove that the block-swap rotation does exactly $n - \gcd(n, k)$ swaps for $0 < k < n$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Each round with lengths $(L, k)$, $m = L - k$, swaps $\min(k, m)$ pairs and continues with $(L - k, k)$ if $k < m$, or with $(k, k - m)$ if $k \ge m$. In both cases the pair of block lengths $(k, m)$ becomes $(k, m - k)$ or $(k - m, m)$: the subtraction form of Euclid's algorithm on $(k, m)$, which keeps $\gcd(k, m) = \gcd(n, k)$ and stops when one length is $0$. Just before that, $k = m = g$, and the round swaps $g$ pairs and fixes $2g$ elements; every earlier round fixes exactly as many elements as it swaps. All $n$ elements are fixed at the end, so the swaps total $n - g$.
+:::
+
+**17. [H] Prove that a permutation of $1..n$ with every adjacent sum composite exists if and only if $n \ge 5$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$n = 2$: the only sum is $3$. $n = 3$: the sums are $3, 4, 5$ for the three pairs; only $\{1, 3\}$ is composite, but a path through three values needs two composite pairs. $n = 4$: the composite pair sums are $1 + 3 = 4$ and $2 + 4 = 6$ only (the others are $3, 5, 5, 7$); two disjoint pairs cannot form a path through four values. $n \ge 5$: evens first, then the odds headed by $o \in \{1, 3, 5\}$ with $E + o \equiv 0 \pmod 3$. Sums inside each block are even and at least $4$, and the seam is a multiple of $3$ that is at least $9$ (@sec-part-p4-b).
+:::
+
+**18. [H] After two in-shuffles of $6$ cards, where has the card at index $3$ gone? Answer from the cycle structure, and say after how many shuffles the deck first returns to its starting order.**
+
+::: {.callout-note collapse="true" title="Solution"}
+One in-shuffle sends $j$ to $(2j + 1) \bmod 7$. Index $3$ is on the cycle $3 \to 0 \to 1 \to 3$, so two shuffles take it to $1$. The other cycle is $2 \to 5 \to 4 \to 2$. Both cycles have length $3$, so after $3$ shuffles every card is home, and not before: the deck's order is the least common multiple of the cycle lengths, $\operatorname{ord}_7(2) = 3$.
+:::
+
+## Interview questions
+
+**1. Sort an array of $0$s, $1$s and $2$s in one pass with $O(1)$ extra memory. What is the invariant, and why does the cursor `mid` not move after a swap with `hi`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The Dutch national flag (@sec-part-dnf): regions $[0..\text{lo})$ all $0$, $[\text{lo}..\text{mid})$ all $1$, $[\text{mid}..\text{hi}]$ unknown, $(\text{hi}..n)$ all $2$. Each step shrinks the unknown region by one, so $n$ steps. After `swap(a[mid], a[hi])` the value at `mid` came from the unknown region and has not been classified, so `mid` must look at it again.
+:::
+
+**2. Lomuto or Hoare? Name one input where the choice matters.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Hoare does about a third of Lomuto's swaps and splits an all-equal array in the middle, because both fingers stop on keys equal to the pivot; Lomuto sends all equal keys to one side, so quicksort with Lomuto is $\Theta(n^2)$ on all-equal input (@sec-part-a1-compare). Lomuto is simpler and leaves the pivot at its final index, which quickselect likes. With many duplicates, use the three-way partition.
+:::
+
+**3. Can you partition stably in $O(n)$ time and $O(1)$ extra memory?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Not with the simple walks: Lomuto, Hoare and the Dutch flag all lose the order inside groups. The practical options are an $O(n)$ buffer (append each element to its group) or divide and conquer with rotations, $O(n\log n)$ time in place (@sec-part-stable-rot). Linear-time constant-space stable partitioning exists in the research literature but is far too intricate to write in an interview; naming the trade-off is the expected answer.
+:::
+
+**4. Rearrange an array with equal numbers of positives and negatives so that signs alternate, keeping the order inside each sign. What is the simplest $O(n)$ solution?**
+
+::: {.callout-note collapse="true" title="Answer"}
+One read pass with two write cursors: a positive goes to `res[pw]`, `pw += 2`, starting at $0$; a negative to `res[nw]`, `nw += 2`, starting at $1$ (@sec-part-p2-a). Each class's slots receive its elements in input order, so it is stable. An in-place swap partition would lose that order.
+:::
+
+**5. In Sort Array by Parity II, why does one cursor running off the end mean nothing is left to fix?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The array has as many even values as even slots, so the number of even slots holding an odd value equals the number of odd slots holding an even value. Each swap removes one of each, so the two counts stay equal; when one cursor finds no more misplaced cells, the other has none either (@sec-part-p2-b).
+:::
+
+**6. Find the next permutation in place. Why is reversing the suffix enough, and what goes wrong with duplicates?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Pivot: rightmost $i$ with $a_i < a_{i+1}$; successor: rightmost $j > i$ with $a_j > a_i$; swap; reverse $a[i+1..n)$ (@sec-part-perm). The suffix is non-increasing before the swap, and the value placed at $j$ is below its left neighbour and at least its right neighbour, so it stays non-increasing and the reversal sorts it. With duplicates both scans must be non-strict; otherwise $[1, 5, 1]$ swaps two equal values and the result is smaller than the input.
+:::
+
+**7. Given an integer, find the smallest larger integer with the same digits. What are the traps?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Next permutation on the digit string, $O(d)$ for $d$ digits (@sec-part-p3-b). The traps: no pivot means "no answer" (no wrap-around), and the result can overflow 32 bits (parse into 64 bits, then compare with $2^{31} - 1$). Leading zeros cannot appear, because the result is larger and has as many digits.
+:::
+
+**8. How do you get the $k$-th permutation of $1..n$ without stepping $k$ times?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Unrank with factorials (@eq-rank): the first value is the $\lfloor k / (n-1)! \rfloor$-th smallest unused one, then continue with $k \bmod (n-1)!$. $O(n^2)$ with a list, $O(n\log n)$ with a Fenwick tree over the unused values (@sec-part-rank).
+:::
+
+**9. Wiggle Sort II: why does "sort and interleave" sometimes fail, and how do you fix it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Interleaving the sorted halves in increasing order puts copies of the middle value side by side in the middle of the array: $[1, 2, 2, 3] \to [1, 2, 2, 3]$. Dealing both halves in decreasing order sends those copies to opposite ends, and they can then meet only if the value occurs more than $\lfloor n/2 \rfloor$ times, in which case no answer exists (@sec-part-p4-a). For $O(n)$ time and $O(1)$ space: quickselect the median and run a three-way partition through the virtual index $(1 + 2t) \bmod (n \mid 1)$.
+:::
+
+**10. Why is the virtual-index modulus $n \mid 1$ rather than $n$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$t \mapsto 1 + 2t$ must hit every cell once, which needs an odd modulus ($\gcd(2, w) = 1$). For even $n$, the modulus $n$ would visit only odd cells, each twice. $n \mid 1$ is $n + 1$ for even $n$ and $n$ for odd $n$; with $n + 1$, the one extra residue, $n$, is never reached for $t < n$ (@sec-part-virtual).
+:::
+
+**11. Compare the three ways to rotate in $O(n)$ time and $O(1)$ space. Which do you write in an interview?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Three reversals: about $2n$ writes, sequential, almost impossible to get wrong; the default. Juggling: exactly $n$ writes, but jumps by $k$ and needs the $\gcd(n, k)$ cycle count. Block swap: $2(n - \gcd(n, k))$ writes in sequential runs, Euclid-shaped (@sec-part-rotate-costs). Write the reversals; mention juggling if the interviewer asks for the fewest writes.
+:::
+
+**12. A split by threshold $x$ (all values $< x$ first, both sides keeping their order) is the only operation allowed. How many are needed to sort a permutation?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The number of values $v$ with $\text{pos}[v+1] < \text{pos}[v]$. A split changes the relative order of $v$ and $v+1$ only when $x = v + 1$, so each backwards pair needs its own split, and splitting at each of them once sorts the array (@sec-part-p1-b). $O(n)$ with the inverse permutation.
+:::
+
+**13. You may cyclically shift either of two permutations. Why is it enough to try rotations of one of them, and how do you avoid trying all $n$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Shifting $a$ by $s_1$ and $b$ by $s_2$ aligns the same pairs as shifting only $b$ by $s_2 - s_1$, so only the relative offset matters. Each value $v$ matches under exactly one offset, $(\text{pos}_a(v) - \text{pos}_b(v)) \bmod n$; count the votes and take the maximum, $O(n)$ (@sec-part-p5-b).
+:::
+
+**14. Make a stable partition with no buffer. What does rotation have to do with it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Divide and conquer: partition both halves stably, giving $T_1 F_1 T_2 F_2$, then rotate the middle $F_1 T_2$ into $T_2 F_1$. Rotations move blocks without changing the order inside them, so the result is stable; the total is $O(n\log n)$ time (@sec-part-stable-rot). This is what `std::stable_partition` does when it cannot allocate memory.
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Dutch national flag:** `[< p | = p | unknown | > p]`; less → swap with `lo`, both advance; equal → `mid++`; greater → swap with `hi`, `hi--` only. $O(n)$, $O(1)$, unstable.
+- **Stable partition:** read once, append to each group (or one buffer with a write cursor per group). $O(n)$ time, $O(n)$ memory.
+- **Slot pattern:** a write cursor per class stepping by $2$ (stable); or two cursors on the two slot classes swapping misplaced pairs (in place).
+- **Next permutation:** rightmost $a_i < a_{i+1}$; rightmost $a_j > a_i$; swap; reverse $a[i+1..)$. Previous: mirror the comparisons.
+- **Rank:** $\sum c_i (n-1-i)!$ with $c_i$ the unused values below $a_i$; unrank by dividing by factorials.
+- **Strict wiggle:** median $m$; three-way `[> m | = m | < m]` over cells $A(t) = (1+2t) \bmod (n \mid 1)$. Or sort and deal both halves reversed.
+- **Rotation:** three reversals; juggling over $\gcd(n, k)$ cycles; block swap with $n - \gcd(n, k)$ swaps.
+- **Stable in place:** partition the halves, rotate the middle block; $O(n\log n)$.
+:::
+
+- Partitioning is *classify, then place*. The classify step is a comparison or a predicate; the place step is blocks, slots, a suffix, or an index map.
+- Every partition walk is proved by its invariant: name the regions before writing the cursors.
+- Stability is a price, not a free property: the in-place walks lose it; a buffer or rotations buy it back (@sec-part-stable).
+- "Any valid arrangement" in a statement is the licence to swap in place; "relative order" is the order to append.
+- Next permutation is "change as far right as possible": the non-increasing suffix is the part that cannot change on its own.
+- A two-group placement can fail only where the groups touch; find that seam (the median's copies, the even/odd boundary) and the proof is about it alone.
+- Rotations move blocks without disturbing their insides, which is why they make stable rearrangement possible without a buffer.
+- In-place permutations are cycles: juggling, the perfect shuffle and the virtual index all walk the cycles of an index map, the subject of @sec-idx.
+
+## Practice ladder
+
+Ordered by concept, following the patterns; each solved problem has at least one problem here that takes its idea one step further.
+
+::: {.practice}
+- [LC 905 · Sort Array By Parity](https://leetcode.com/problems/sort-array-by-parity/){difficulty="Easy"} — the two-group partition by a predicate, in place, order not required.
+- [LC 75 · Sort Colors](https://leetcode.com/problems/sort-colors/){difficulty="Medium"} — the Dutch national flag itself (@sec-pf-p1-colors).
+- [CF 1851B · Parity Sort](https://codeforces.com/problemset/problem/1851/B){rating="800"} — swaps only inside a parity class: each class keeps its slots, so classify, sort each class, compare.
+- [CF 1365B · Trouble Sort](https://codeforces.com/problemset/problem/1365/B){rating="1300"} — swaps only between two types: when does the partition into types block sorting?
+- [CF 1792C · Min Max Sort](https://codeforces.com/problemset/problem/1792/C){rating="1500"} — after Split Sort: read the middle values' positions through the inverse permutation and count.
+- [CF 1367B · Even Array](https://codeforces.com/problemset/problem/1367/B){rating="800"} — after Sort Array by Parity II: misplaced evens and odds must pair up.
+- [CF 1144B · Parity Alternated Deletions](https://codeforces.com/problemset/problem/1144/B){rating="900"} — after Rearrange by Sign: alternate two classes for as long as possible.
+- [LC 2460 · Apply Operations to an Array](https://leetcode.com/problems/apply-operations-to-an-array/){difficulty="Easy"} — a stable "non-zeros first" pass with one write cursor.
+- [CSES 1622 · Creating Strings](https://cses.fi/problemset/task/1622) — after Next Permutation: list all distinct arrangements in order.
+- [LC 60 · Permutation Sequence](https://leetcode.com/problems/permutation-sequence/){difficulty="Hard"} — unrank instead of stepping (@sec-part-rank).
+- [LC 1850 · Minimum Adjacent Swaps to Reach the Kth Smallest Number](https://leetcode.com/problems/minimum-adjacent-swaps-to-reach-the-kth-smallest-number/){difficulty="Medium"} — after Next Greater Element III: step $k$ times, then count adjacent swaps.
+- [CF 1091D · New Year and the Permutation Concatenation](https://codeforces.com/problemset/problem/1091/D){rating="1700"} — how the suffix changes between consecutive permutations, summed over all of them.
+- [CF 652B · z-sort](https://codeforces.com/problemset/problem/652/B){rating="1000"} — the weak wiggle: any sorted deal works.
+- [CF 1419D1 · Sage's Birthday (easy version)](https://codeforces.com/problemset/problem/1419/D1){rating="1000"} — maximise strict valleys with distinct values: sort, small half into the valleys.
+- [CF 1419D2 · Sage's Birthday (hard version)](https://codeforces.com/problemset/problem/1419/D2){rating="1500"} — after Wiggle Sort II: the same with repeated values, where the middle copies decide.
+- [CF 1352G · Special Permutation](https://codeforces.com/problemset/problem/1352/G){rating="1600"} — after Superultra: parity blocks and one hand-picked seam.
+- [LC 189 · Rotate Array](https://leetcode.com/problems/rotate-array/){difficulty="Medium"} — one rotation in place (@sec-arr-p3-a).
+- [CF 1672D · Cyclic Rotation](https://codeforces.com/problemset/problem/1672/D){rating="1700"} — after Shifting Sort: which arrays can rotations of a special kind reach?
+- [CF 1605B · Reverse Sort](https://codeforces.com/problemset/problem/1605/B){rating="1000"} — after Shifts and Sorting: misplaced ones and zeros pair up under subsequence reversals.
+- [CF 229A · Shifts](https://codeforces.com/problemset/problem/229/A){rating="1500"} — after Rotation Matching: each row's best shift towards a column, summed over rows.
+- [CF 1660E · Matrix and Shifts](https://codeforces.com/problemset/problem/1660/E){rating="1600"} — cyclic shifts of rows and columns only move diagonals; count per wrapped diagonal.
+:::
+
+## Further reading
+
+- [Wikipedia — Dutch national flag problem](https://en.wikipedia.org/wiki/Dutch_national_flag_problem) — Dijkstra's problem, the four-region invariant and pseudocode for the three-pointer walk.
+- [Wikipedia — Quicksort](https://en.wikipedia.org/wiki/Quicksort) — Lomuto's and Hoare's partition schemes side by side, with their behaviour on repeated keys.
+- [Sedgewick & Wayne, *Algorithms*, §2.3 Quicksort](https://algs4.cs.princeton.edu/23quicksort/) — three-way partitioning in quicksort and why it makes duplicate-heavy inputs fast.
+- [Nayuki — Next lexicographical permutation algorithm](https://www.nayuki.io/page/next-lexicographical-permutation-algorithm) — the four steps with a worked picture and code in several languages.
+- [Wikipedia — Lehmer code](https://en.wikipedia.org/wiki/Lehmer_code) — the digits $c_i$ of @eq-rank and the factorial number system behind rank and unrank.
+- [cppreference — std::stable_partition](https://en.cppreference.com/w/cpp/algorithm/stable_partition) — the library's stable split and its complexity with and without extra memory.
+- [P. Jain, *A Simple In-Place Algorithm for In-Shuffle* (arXiv:0805.1598)](https://arxiv.org/abs/0805.1598) — the $O(n)$-time, $O(1)$-space perfect shuffle via cycle leaders at powers of $3$.

@@ -1,0 +1,510 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  6.1  Reconstruct from a Parent Array or Edge List    sec:c25-parent
+%  Exports: def:c25-rebuild  thm:c25-cert  thm:c25-degsum  prop:c25-root
+%           lst:c25-build  ex:c25-parent-run
+%           prob:c25-rc2  lst:c25-rc2  (practice: LC 399)
+% =====================================================================
+\section{Reconstruct from a Parent Array or an Edge List}\label{sec:c25-parent}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item How do you pour an undirected edge list into an \code{adj} list, and why does the DFS
+        need a \emph{parent guard}? (\secref{c04-rooting}, \coderef{c04-root})
+  \item For a rooted tree, what single number per node is $0$ for the root and $\ge 1$ for every
+        other node, and how do you read it from an array? (\secref{c04-rooting})
+  \item How many edges does any tree on $n$ nodes have, and why? (\chref{c01}, \chref{c24})
+  \item What is $\sum_v \degop(v)$ for the running tree $T$ of \figref{c25-running}?
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Almost every tree problem \emph{begs the question in code first}: \code{vector<vector<int>> edges}
+or \code{vector<int> parent}. Before any algorithm runs, you must turn that data back into the
+object -- an adjacency structure with a distinguished root -- and then \emph{prove the data really
+describes a tree}. Chapter~4 showed you how to \emph{store} a tree you already trust; here the
+trust must be \emph{earned}. Two objects do all the work. The \term{tree certificate} is the trio
+``$n-1$ edges, connected, acyclic'': any two of the three \emph{force} the third, so checking two
+is enough. The \term{degree sum} $\sum_v\degop(v)=2(n-1)$ is a cheap arithmetic canary that
+instantly rejects corrupt input. Read the parent array's zeros, or an edge list's in-degrees, and
+the root falls out. Everything in this section is bookkeeping with one theorem behind it -- and one
+Hard problem (LC 685) where the bookkeeping \emph{is} the difficulty.
+\textbf{Prerequisites.} \secref{c04-rooting} (adjacency build, parent-guarded rooting,
+$\parent/\depth/\size$); \chref{c01} ($n-1$ edges). This section adds \emph{verification and
+root detection from raw data}; it does not re-teach traversal.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item rebuild \code{adj} from an edge list \emph{or} a parent array in one $\bigO{n}$ pass; \hfill\lv{2}
+  \item find the unique root from in-degrees or the parent array without any DFS;          \hfill\lv{2}--\lv{3}
+  \item certify ``is this data a tree?'' by checking any two of the certificate's three legs; \hfill\lv{3}
+  \item repair an \emph{over}-full edge set into a tree by deleting the one redundant edge.  \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- rebuild the tree from its data]
+\reckey{the input is \emph{not} pointers or a drawing but a pile of \emph{pairs}: \code{edges[i]=[u,v]},
+a \code{parent[i]} array, an \code{ancestor[i]} list, or a table of node attributes you must link
+into a tree before solving anything else.}
+\recuse{
+  \item the statement hands you \code{edges} / \code{parent} and the real question (rooting,
+        subtree sizes, a repair) needs the \code{adj} built first;
+  \item ``is the input a valid tree?'' / ``which edge is extra?'' -- certificate + degree sum;
+  \item ``rebuild so a stated rule holds'' (every ancestor pair, every degree) -- \secref{c25-degree}
+        and the Summit continue this idea;
+  \item the data is \emph{nearly} a tree (one edge too many) -- \probref{c25-rc2}.
+}
+\recnotuse{
+  \item you are given \code{TreeNode*} / \code{root} already -- skip straight to \chref{c03};
+  \item you must rebuild from two \emph{traversal orders} -- that is \chref{c03}, not arbitrary data;
+  \item the tree is trusted and the work is answering subtree ranges -- \chref{c24}.
+}
+One-line test: \emph{is there a tree \textbf{hiding inside an array of pairs}? Build it, then
+certify it -- this section.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+An edge list is a tree \emph{in disguise}: $n$ nodes, and a pair $[u,v]$ is a single connection.
+To see the object, put every pair into both endpoints' neighbour lists -- exactly the \code{adj}
+build of \secref{c04-rooting} -- and, if the tree is \emph{rooted}, orient it with one DFS. The
+only \emph{new} questions are: \textbf{which node is the root, and is this even a tree?}
+
+Root detection needs no DFS at all. In a rooted tree exactly one node has no parent. So: from a
+\emph{parent array} the root is the index $v$ with $\parent[v]=0$ (or $-1$, or $\parent[v]=v$);
+from a directed \emph{edge list} $[u,v]$ meaning ``$u$ is $v$'s parent,'' the root is the node that
+never appears as a $v$ (in-degree $0$); from an \emph{undirected} list there is no root until you
+\emph{choose} one and root it (\secref{c04-rooting}). Validity is a counting game: $n$ nodes demand
+$n-1$ edges, and every node except the root must have exactly one parent.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram]
+  % highlight the root's slot (label 1) in both rows -- no conditionals needed
+  \fill[accentorange!22] (0.62,-0.38) rectangle (1.38,0.38);
+  \fill[accentorange!22] (0.62,-1.78) rectangle (1.38,-1.02);
+  % parent array row (slots 1..8)
+  \node[annot, anchor=east] at (0.4,0) {\small parent};
+  \foreach \x/\val in {1/0,2/1,3/1,4/2,5/2,6/3,7/3,8/7} {
+    \node[cellnode] at (\x,0) {\val};
+  }
+  % in-degree row (rooted edge list)
+  \node[annot, anchor=east] at (0.4,-1.4) {\small in-deg};
+  \foreach \x/\val in {1/0,2/1,3/1,4/1,5/1,6/1,7/1,8/1} {
+    \node[cellnode] at (\x,-1.4) {\val};
+  }
+  \node[annot, align=center] at (4.5,-2.7)
+    {slot/label $1$ (orange) is the only $0$ $\Rightarrow$ root $=1$;\\
+     in-degrees are a permutation of $\{0,1,\dots,1\}$ -- a $2$ breaks \propref{c25-root}};
+\end{tikzpicture}
+\caption{Root detection is \emph{arithmetic}, not traversal. Read the parent array: the single $0$
+marks node~$1$. Or read the directed edge list's in-degrees: the unique $0$ (node~$1$) is the root
+and every other node is exactly~$1$ -- if any node shows in-degree~$2$, the data is \emph{not} a rooted
+tree (that is exactly LC 685's alarm, \probref{c25-rc2}).}\label{fig:c25-rootdetect}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Reconstruction from pairs}{c25-rebuild}
+Given a set $\mathcal{E}$ of $n-1$ undirected pairs on nodes $\{1,\dots,n\}$, the
+\term{reconstruction} is the adjacency structure $\mathit{adj}$ with $v\in\mathit{adj}[u]$ and
+$u\in\mathit{adj}[v]$ for every $\{u,v\}\in\mathcal{E}$. A \term{parent array} $\parent[\cdot]$
+with $\parent[\mathit{root}]=0$ is reconstructed by adding the directed edge
+$\parent[v]\!\to\!v$ for every $v\ne\mathit{root}$. The reconstruction is \emph{valid} if the
+result is a tree (rooted, if directed).
+\end{definition}
+
+\noindent\textbf{In plain words.} Reconstruction just means ``fill the neighbour lists from the
+pairs, and read the root from the array.'' The data can be a lie -- two parents for one node, a
+cycle, a disconnected piece -- and validity is what we test next.
+
+\begin{theorem}{The tree certificate}{c25-cert}
+For a graph $G$ on $n$ nodes, any \textbf{two} of the following three conditions imply the third,
+and all three are equivalent to ``$G$ is a tree'':
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item $G$ has exactly $n-1$ edges;
+  \item $G$ is connected;
+  \item $G$ is acyclic.
+\end{enumerate}
+\end{theorem}
+\begin{proofbox}
+A tree (connected + acyclic) has $n-1$ edges by the classical count (each of the $n-1$ merges in a
+spanning process adds one edge). If (1) $n-1$ edges and (2) connected hold but a cycle existed,
+breaking one cycle edge keeps connectivity and drops the count to $n-2$, contradicting that a
+connected graph needs $\ge n-1$ edges -- so (3). If (1) and (3) hold but $G$ is disconnected with
+$k\ge2$ components, each acyclic component on $n_i$ nodes has $n_i-1$ edges, totalling
+$n-k<n-1$ edges, contradicting (1) -- so (2). If (2) and (3) hold, a DFS tree uses all $n$ nodes and
+every non-tree edge would close a cycle, so exactly $n-1$ edges: (1). Hence any two legs force the
+third. \end{proofbox}
+\begin{insightbox}
+You never check all three -- checking two is the whole certificate, and each check is one cheap
+$\bigO{n}$ pass: count the edges ($=n-1$?), and run one DFS or union-find to test connectedness
+\emph{or} acyclicity. Pick the two legs your representation makes easiest: an edge list gives
+(i) for free; a union-find gives (iii) directly (\secref{c25-identify}).
+\end{insightbox}
+
+\begin{theorem}{Handshaking / degree sum for trees}{c25-degsum}
+For any tree on $n$ nodes, $\displaystyle\sum_{v} \degop(v) = 2(n-1)$. Consequently the number of
+\emph{leaves} (degree~$1$) equals $2+\sum_{v:\degop(v)\ge 2}(\degop(v)-2)$, and a positive-integer
+list is a candidate tree degree sequence only if it sums to $2(n-1)$.
+\end{theorem}
+\begin{proofbox}
+Each edge touches exactly two nodes, so counting ``$+1$ per endpoint'' over all edges gives $2$ times
+the edge count $=2(n-1)$, which is the sum of degrees. Writing $d-2$ for each node's \emph{excess}
+over~$2$ and separating the $\sum(1)=n$ baseline: $\sum_v\degop(v)=n+\sum_v(\degop(v)-1)$, so
+$\sum_v(\degop(v)-1)=2(n-1)-n=n-2$; splitting into leaves ($\degop=1$, term $0$) and the rest gives
+the leaf identity. \end{proofbox}
+
+\begin{proposition}{Reading the root}{c25-root}
+In a rooted tree on $n$ nodes given by a directed edge list $[u,v]$ (``$u$ is $v$'s parent'') or a
+parent array: the root is \emph{unique} and is the sole node of in-degree~$0$ (equivalently the sole
+index with $\parent[v]=0$), and every other node has in-degree~$1$. A data set with zero or two or
+more in-degree-$0$ nodes, or any node of in-degree $\ge2$, is \textbf{not} a rooted tree.
+\end{proposition}
+\begin{proofbox}
+The root has no parent (in-degree $0$); every other node has exactly one parent (in-degree $1$), so
+in-degrees are a permutation of $\{0,1,\dots,1\}$ summing to $n-1$. If the root were not unique, two
+nodes with no parent would have no common ancestor to connect them (contradicts connectivity), and if
+some node had two parents the in-degree sum would exceed $n-1$, breaking \thmref{c25-cert}'s edge
+count. Hence exactly one root, and the in-degree histogram certifies the orientation.
+\end{proofbox}
+
+\subsection{The algorithm: build \texorpdfstring{$\mathit{adj}$}{adj}, find the root, certify}
+
+\begin{lstlisting}[caption={Rebuild adjacency from an edge list or parent array, find the root, certify validity}, label={lst:c25-build}]
+#include <bits/stdc++.h>
+using namespace std;
+
+// (A) undirected edge list -> adjacency; root chosen by caller.
+vector<vector<int>> buildFromEdges(int n, const vector<vector<int>>& edges) {
+    vector<vector<int>> adj(n + 1);
+    for (auto& e : edges) { adj[e[0]].push_back(e[1]); adj[e[1]].push_back(e[0]); }
+    return adj;
+}
+
+// (B) parent array (1-indexed, parent[root]=0) -> children adj + root + validity.
+vector<vector<int>> buildFromParent(const vector<int>& par, int& root, bool& ok) {
+    int n = (int)par.size() - 1;               // par[0] unused
+    vector<vector<int>> adj(n + 1);
+    vector<int> indeg(n + 1, 0);
+    root = 0; int zeros = 0; ok = true;
+    for (int v = 1; v <= n; ++v) {
+        int p = par[v];
+        if (p == 0) { root = v; ++zeros; }     // candidate root(s)
+        else if (p >= 1 && p <= n) { adj[p].push_back(v); ++indeg[v]; }
+        else ok = false;                        // parent out of range
+    }
+    if (zeros != 1) ok = false;                 // need exactly one root
+    for (int v = 1; v <= n; ++v)
+        if (v != root && indeg[v] != 1) ok = false;   // every other node: one parent
+    // optional full check: DFS from root must visit all n nodes (connectivity)
+    return adj;
+}
+\end{lstlisting}
+\begin{complexitybox}
+Time $\bigO{n}$ -- one pass per edge / array slot, plus (optionally) one DFS for connectivity.
+Memory $\bigO{n}$ for \code{adj} and the in-degree histogram. This is the cheapest possible
+reconstruction: you never rebuild what a single scan already gives. On a corrupt input the
+\code{ok} flag or an in-degree $\ge 2$ is the early warning; \secref{c25-identify} turns that
+warning into a full cycle test.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Rebuilding $T$ from its two data shadows}{c25-parent-run}
+Take the running tree $T$ (\figref{c25-running}), $n=8$.
+\emph{From the parent array} $\parent=[0,1,1,2,2,3,3,7]$ (index~$0$ unused): the only $0$ is at
+slot~$1$, so $\mathit{root}=1$ and $\mathit{zeros}=1$ (\checkmark). Every other slot has one
+parent, so each $v\ne1$ is appended to $\mathit{adj}[\parent[v]]$ and gets in-degree $1$
+(\checkmark). \emph{From the edge list} $[1,2],[1,3],[2,4],[2,5],[3,6],[3,7],[7,8]$: seven edges
+$=n-1$ (\checkmark), each added to both endpoints. Degree check:
+$\degop=[2,3,3,1,1,1,2,1]$, sum $=14=2(n-1)$ (\checkmark). One DFS from $1$ visits all $8$ nodes
+(connected). Two legs of \thmref{c25-cert} hold $\Rightarrow$ it \emph{is} a tree, and $1$ is its
+root -- reconstructed, not assumed.
+\end{example}
+\begin{tracebox}[The degree-sum canary rejects two corrupt inputs instantly]
+\emph{Corrupt A:} add edge $[4,5]$ to $T$'s edge list. Now $8$ edges for $8$ nodes: count leg (1)
+fails ($8\ne n-1$), $\sum_v\degop(v)=16\ne14$ -- reject before any traversal.
+\emph{Corrupt B:} set $\parent[7]=2$ (so node $7$ has parents $2$ \emph{and}, via a stray edge,
+another). In-degree of $7$ becomes $2$: \propref{c25-root} fires -- no valid root assignment --
+reject. This is exactly the shape LC 685 must repair (\probref{c25-rc2}).
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Root from a directed edge list}: mark every $v$ that appears as a child; the root
+        is the node never marked. $\bigO{n}$ with a boolean array, no histogram needed. \hfill\lv{2}
+  \item \textbf{Undirected, root free}: no in-degree tells you the root -- root at \emph{any} node
+        (\secref{c04-rooting}) or, if the problem wants the ``true'' root, look for extra clues
+        (an \code{isRoot} flag, or node $0$/$1$ by convention). \hfill\lv{2}--\lv{3}
+  \item \textbf{Reconstruct-then-query}: build once, store children in \emph{given} order, and
+        answer many descendants/subtree questions on the rebuilt tree (\chref{c24} takes over). \hfill\lv{3}
+  \item \textbf{Weighted pairs}: the edge $[u,v]$ carries a value; build \code{adj} of
+        \code{(to, w)} pairs -- the reconstruction logic is identical (the LC 399 practice below
+        is exactly this). \hfill\lv{3}--\lv{4}
+  \item \textbf{Near-trees}: $n$ edges (one too many) or a lone in-degree-$2$ node -- do not reject,
+        \emph{repair} by deleting the offending edge (\probref{c25-rc2}). \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c25-parent-pitfalls}
+
+\begin{warningbox}[Trap 1 -- trusting that the input is a tree]
+Statements say ``it is a tree'' but corrupt or off-by-one input is a classic WA source. At minimum
+check $|\mathcal{E}|=n-1$ and one root (\propref{c25-root}); \secref{c25-identify} adds the full
+cycle test. Never run your elegant subtree DP on a graph with a cycle -- the DFS loops forever.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: assume the array is a valid tree, root hard-coded}, language=C++, basicstyle=\ttfamily\small]
+int root = 1;                       // what if node 1 isn't the root?
+for (int v = 2; v <= n; ++v) adj[par[v]].push_back(v);
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: detect the root and validate}, language=C++, basicstyle=\ttfamily\small]
+int root = 0, zeros = 0;
+for (int v = 1; v <= n; ++v) if (par[v] == 0) { root = v; ++zeros; }
+if (zeros != 1) { /* not a valid rooted tree: reject / handle */ }
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- mixing 1-indexed data with 0-indexed arrays]
+LeetCode tree-input problems label nodes $1..n$ (684, 685) while your \code{adj}/\code{vector}
+indices start at $0$. Size arrays $n+1$ and keep the intended index, or translate \emph{consistently}
+everywhere -- a half-translation drops node $n$ or reads slot $0$ as a real node.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: $n$-sized array on $1..n$ labels -- index $n$ out of range}, language=C++, basicstyle=\ttfamily\small]
+vector<int> indeg(n);       // labels run 1..n but slots are 0..n-1
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: size $n+1$, ignore slot $0$}, language=C++, basicstyle=\ttfamily\small]
+vector<int> indeg(n + 1, 0);        // one slot per real label
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- forgetting the parent guard when treating edges as a tree]
+If you rebuild \emph{undirected} \code{adj} and then DFS without a parent guard, the first step back
+to the parent re-visits the node you came from and, in a graph that \emph{isn't} yet certified, may
+loop. Always pass \code{parent} down the DFS (\coderef{c04-root}) \emph{and} run the certificate.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's anchor is LC 685 -- reconstruct/repair a \emph{rooted} tree given $n$ directed edges
+(one too many). It forces every idea above at once: the in-degree histogram, the unique-root
+proposition, and the union-find cycle test you meet properly in \secref{c25-identify}.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c25-rc2}{Redundant Connection II}{LeetCode 685}
+  {https://leetcode.com/problems/redundant-connection-ii/}{LC Hard L4}
+  {directed rooted tree, in-degree (parent) analysis, union-find cycle test, case split}
+
+\begin{problemstatement}[Redundant Connection II]
+A \textbf{rooted tree} on $n$ nodes (labels $1\dots n$) had exactly \textbf{one} extra directed edge
+added, so the input \code{edges} has $n$ edges (each \code{[u,v]} means ``$u$ is $v$'s parent''). The
+extra edge makes either (a) some node have \textbf{two parents}, or (b) a \textbf{cycle}, or both.
+Return \emph{one} edge to remove so the rest is a valid rooted tree; if several answers exist,
+return the one that appears \textbf{last} in \code{edges}. $3\le n\le 1000$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 35 minutes]
+A fair first attempt: a rooted tree has $n-1$ edges and every non-root node one parent, so \emph{one}
+edge is wrong. Enumerate which edge to delete and test validity each time.
+\peek{Look at \textbf{in-degrees}. If some node has in-degree~$2$, one of its two incoming edges is
+the culprit -- which one? If \emph{no} node has in-degree~$2$, what does $n$ edges guarantee?}
+\nudge{In-degree~$2$ gives two candidate edges. \emph{Temporarily drop the later one} and run a
+union-find over the rest: if the rest is still cyclic, the culprit is the \emph{earlier} edge;
+otherwise the dropped later edge is the answer. No in-degree~$2$? Just find the edge that closes a
+cycle.}
+\fullhint{Compute in-degrees. Find a node with in-degree~$2$; label its two incoming edges
+\code{first} (earlier index) and \code{banned} (later index). Union-find over all edges, \emph{skipping}
+\code{banned}: the first edge whose endpoints are already connected is a cycle -- if a two-parent node
+existed return \code{first}, else return that cycle edge. If no cycle remains, return \code{banned}.
+Full build and proof below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+A valid rooted tree has $n-1$ edges with exactly one node of in-degree $0$ (the root) and $n-1$ nodes
+of in-degree $1$. One extra edge pushes the count to $n$ edges and breaks the picture in one of three
+\emph{overlapping} ways: a node gains a \textbf{second parent} (in-degree~$2$); or the new edge points
+\emph{into} an ancestor, creating a \textbf{cycle}; or it does both at once (the second parent is also
+on a cycle). The removal must leave a legal rooted tree, and ties go to the \textbf{last} edge in the
+input -- a tie-break you honour by scanning in order and only \emph{proposing} later edges.
+
+\solstep{Key Observations}
+\begin{observation}
+In-degree~$2$ is \emph{local} evidence: if node $c$ has parents $p_1,p_2$ (edges at indices
+$i_1<i_2$), the redundant edge is one of those two -- no other edge can create the second parent. So
+the search space collapses from $n$ edges to \textbf{two}.
+\end{observation}
+\begin{observation}
+To choose between the two, \emph{assume} the later edge $i_2$ is the intruder and test whether the
+remaining $n-1$ edges (including $i_1$) are \emph{acyclic}. If they are, $i_2$ was indeed safe to
+drop. If a cycle survives, the cycle must use $i_1$, so $i_1$ is the true intruder.
+\end{observation}
+\begin{observation}
+With \emph{no} in-degree~$2$ node, $n$ edges on $n$ nodes force exactly one cycle
+(\thmref{c25-cert}: edges $>$ $n-1$ $\Rightarrow$ cyclic). A union-find that processes edges in input
+order reports the edge that \emph{closes} the cycle -- automatically the last such edge.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Try deleting every edge and re-checking ``is it a rooted tree'' with a fresh DFS.}
+{$O(n)$ candidates $\times$ $O(n)$ validity $=O(n^{2})$ \emph{tests}, each with fiddly
+reachability -- correct, but you reinvent the cycle check $n$ times and still need the
+``last edge'' tie-break. A single union-find pass subsumes all of it.}
+\deadend{Treat a two-parent node and a cycle with one rule.}{They interact: the extra edge can
+\emph{both} give a second parent \emph{and} sit on a cycle. Ignoring the second parent (just chasing
+any cycle) returns the wrong edge when the fix is to cut the \emph{earlier} of the two parent edges.}
+\aha{Two facts, one scan. In-degree~$2$ names the \emph{only} two candidate edges; a union-find that
+\emph{skips the later} candidate tells you which of the two survives the cycle test. No two-parent
+node means the cycle edge itself is the answer.}
+\end{thinkbox}
+
+\solstep{Solution}
+Compute in-degrees. If a node $c$ has two incoming edges at input indices $i_1<i_2$, set
+\code{banned}$=i_2$ and \code{first}$=i_1$. Run union-find over $1..n$ processing every edge
+\emph{except} \code{banned} in input order: on the first edge whose endpoints are already in one set,
+a cycle exists -- return edges[\code{first}] if a two-parent node was found (dropping the later edge
+did \emph{not} kill the cycle), otherwise return that closing edge. If the scan finishes with no
+cycle, return edges[\code{banned}] (the later parent edge was the redundant one) -- or an empty
+answer in the degenerate no-cycle-no-two-parent case, which cannot occur for valid input.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\emph{Case 1: some node has in-degree~$2$.} Let its parent edges be $e_1$ (earlier) and $e_2$ (later).
+Any valid tree must drop at least one of them, since no node may have two parents.
+If removing $e_2$ yields an acyclic edge set, those $n-1$ edges with the surviving single-parent
+structure are a rooted tree, so $e_2$ is a correct removal; $e_2$ is later than $e_1$, matching the
+tie-break, so we return $e_2$.
+If removing $e_2$ still leaves a cycle, then $e_1$ lies on a cycle (the union-find reports a cycle
+among the edges excluding $e_2$), so removing $e_2$ alone cannot work -- the redundant edge must be
+$e_1$, which also resolves the double parent. Hence $e_1$ is returned.
+\emph{Case 2: no node has in-degree~$2$} and $n$ edges exist: exactly one cycle ($\thmref{c25-cert}$
+contrapositive). The union-find returns the last edge closing that cycle. Removing it breaks the only
+cycle and keeps every in-degree $\le1$, so the rest is a rooted tree; it is the latest valid answer
+because we scan in order and any earlier cycle edge is not chosen. In both cases the returned edge is
+exactly the one whose removal restores a valid rooted tree, chosen to appear last among ties.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Redundant Connection II -- in-degree scan + union-find with one edge banned (LeetCode 685)}, label={lst:c25-rc2}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+    vector<int> p;
+    int find(int x) { return p[x] == x ? x : p[x] = find(p[x]); }
+    bool uni(int a, int b) {                    // false == already connected (cycle)
+        a = find(a); b = find(b);
+        if (a == b) return false;
+        p[b] = a; return true;
+    }
+public:
+    vector<int> findRedundantDirectedConnection(vector<vector<int>>& edges) {
+        int n = (int)edges.size();              // n nodes, n edges
+        p.assign(n + 1, 0);
+        for (int i = 0; i <= n; ++i) p[i] = i;
+        vector<int> indeg(n + 1, 0);
+        for (auto& e : edges) ++indeg[e[1]];
+
+        int banned = -1, first = -1;            // the two edges into an in-degree-2 node
+        for (int i = 0; i < n; ++i) if (indeg[edges[i][1]] == 2) {
+            if (first == -1) first = i;         // earlier incoming edge
+            else             banned = i;        // later incoming edge -> skip it first
+        }
+        for (int i = 0; i < n; ++i) {
+            if (i == banned) continue;          // pretend e_later is already removed
+            if (!uni(edges[i][0], edges[i][1])) // cycle closes here
+                return (banned != -1) ? edges[first] : edges[i];
+        }
+        return (banned != -1) ? edges[banned] : vector<int>{};
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Two official inputs, one per case]
+\emph{Ex.~1} \code{edges=[[1,2],[1,3],[2,3]]}. In-degrees: node~$3$ has $2$ (from~$1$ and~$2$). So
+\code{first=1} ($[1,3]$), \code{banned=2} ($[2,3]$). Union-find skipping index~$2$: union $1,2$;
+union $1,3$; no cycle. Loop ends clean $\Rightarrow$ return edges[\code{banned}]$=[2,3]$. \checkmark\\
+\emph{Ex.~2} \code{edges=[[1,2],[2,3],[3,4],[4,1],[1,5]]}. All in-degrees $\le1$ (node~$1$ from~$4$),
+so \code{banned=first=-1}. Union in order: $1\text{–}2$, $2\text{–}3$, $3\text{–}4$ merge $\{1,2,3,4\}$;
+edge $[4,1]$: $4,1$ already connected $\Rightarrow$ cycle, \code{banned=-1} so return $[4,1]$.
+\checkmark (matches the expected $[4,1]$).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n\,\alpha(n)}$ -- one in-degree pass and one union-find pass; $\alpha$ is the inverse
+Ackermann ($\le 4$ for all realistic $n$). Space $\bigO{n}$. At $n\le1000$ the $\bigO{n^{2}}$ brute
+force also passes, but this is the clean linear solution. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Three ways to break it: (i) skipping the \emph{earlier} parent edge instead of the later one -- the
+tie-break and the cycle logic both want the \emph{later} edge banned first. (ii) Running the
+union-find \emph{including} the banned edge -- then the two-parent node always looks cyclic and you
+return the wrong parent. (iii) Forgetting $1$-indexing: nodes are $1..n$, so \code{p}/\code{indeg}
+are sized $n+1$. \emph{Variant:} LC 684 is the undirected, single-cycle special case (just
+Case~2) -- \probref{c25-rc1}.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \textbf{In-degree is evidence.} A second parent pins the culprit to two edges -- the whole
+        search space -- because the degree sum \thmref{c25-degsum} and \propref{c25-root} leave no
+        room for a third possibility.
+  \item \textbf{One union-find pass replaces $n$ validity tests} and hands you the
+        ``appears last'' edge for free, because edges are consumed in input order.
+  \item \textbf{Reconstruction and repair are the same skill:} read structure out of degrees and
+        pairs, then \emph{test} it -- exactly the certificate of \thmref{c25-cert}.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Both defects at once}: if a two-parent node is \emph{also} on the cycle, banning the
+        later edge still leaves a cycle, and the code correctly returns the \emph{earlier} parent edge
+        -- worth an explicit test input like \code{[[2,1],[3,1],[4,2],[1,4]]}.
+  \item \textbf{Larger $n$}: the path-compressed union-find keeps it near-linear; avoid a per-candidate
+        DFS re-check (the $O(n^2)$ trap). Full DSU theory (rank, compression) is \chref{c28}.
+  \item \textbf{Generalisation}: ``delete $k$ edges to make a forest'' needs the component count of
+        \secref{c25-identify}; this problem is the $k=1$, rooted, tie-broken special case.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you detect the root by \emph{counting} (one in-degree-$0$ node), not by hard-coding?
+        (Trap 1, \propref{c25-root}.)
+  \item Are your arrays sized for $1$-indexed labels? (Trap 2.)
+  \item When choosing between two parent edges, did you \emph{ban the later} one first and test for a
+        surviving cycle? (\probref{c25-rc2}.)
+  \item Did you use the $n-1$ / degree-sum canary before trusting the data? (\thmref{c25-degsum}.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Evaluate Division}{LeetCode 399}
+    {https://leetcode.com/problems/evaluate-division/}{LC Medium L3}
+    {You are handed raw \emph{pairs} \code{equations[i]=[a,b]} with a value $a/b$, and must answer
+    queries $x/y$. There is no tree given -- you must \emph{reconstruct} a structure from the pairs:
+    build an adjacency list where $a\!\to\!b$ carries weight $w$ and $b\!\to\!a$ carries $1/w$, then
+    each query is a weighted path product through that rebuilt graph (DFS/BFS, or a weighted
+    union-find). Recognise it as ``build \code{adj} from pairs, then answer'' -- \secref{c25-parent}
+    in weighted clothing, with connectivity deciding ``answerable vs $-1$''.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 6.1 Reconstruct from Parent Array / Edge List]
+Turn pairs into \code{adj} in one pass; find the root as the sole in-degree-$0$ node
+(\propref{c25-root}); certify with any \emph{two} of ``$n-1$ edges, connected, acyclic''
+(\thmref{c25-cert}); reject bad input with $\sum_v\degop(v)=2(n-1)$ (\thmref{c25-degsum}). To \emph{repair}
+one extra edge (LC 685), let the in-degree-$2$ node pin two candidates and a union-find (skipping the
+later) choose (\probref{c25-rc2}).
+\selftest{
+  \item Rebuild $T$ from its parent array $[0,1,1,2,2,3,3,7]$: name the root and the leaves.
+  \item State the tree certificate and prove that ``$n-1$ edges $+$ acyclic'' forces connectedness.
+  \item Why must a rooted tree's in-degrees be a permutation of $\{0,1,\dots,1\}$?
+  \item In LC 685, why do you ban the \emph{later} parent edge, not the earlier, before the cycle test?
+  \item Give the degree-sum of any tree on $n$ nodes and explain the leaf formula.
+}
+\end{recallbox}

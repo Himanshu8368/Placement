@@ -1,0 +1,411 @@
+% =====================================================================
+%  31.3  The Kruskal-reconstruction tree.
+%  Exports: sec:c17-krt  thm:c17-krtmax  def:c17-krt  lem:c17-krtheight
+%  lst:c17-krt  fig:c17-krt
+%  WORKED: build the reconstruction tree of the running graph G during
+%  Kruskal (internal nodes 6,7,8,9 with union weights 1,2,3,6), then answer
+%  minimax / bottleneck path queries as LCA weights: maxEdge(2,5)=6,
+%  maxEdge(1,4)=3, maxEdge(3,4)=2 -- all hand-verified against the MST of
+%  G.  LCA is used as a black box from Ch.16 (c11).
+%  Solved CF 1081D "Maximum Distance" (1800, L4), live-verified against the CF
+%  problem page (title "D. Maximum Distance", 1s TL, 256 MB, 2<=k<=n<=1e5,
+%  n-1<=m<=1e5, 1<=w<=1e9; k special vertices; for each special vertex the
+%  bottleneck distance to its farthest special vertex).  Key: that distance is
+%  the value of the topmost KRT node still splitting specials on both sides =
+%  the max weight among Kruskal unions that merge two special-containing DSU
+%  components, and it is the SAME for every special vertex.  Both official
+%  samples replayed: 2 3 2 -> "2 2"; 4 5 3 -> "3 3 3".
+%  Extra exports: prob:c17-maxdist  fig:c17-maxdist  lst:c17-maxdist
+% =====================================================================
+\section{The Kruskal-Reconstruction Tree}\label{sec:c17-krt}
+
+\begin{previouslybox}[Ch.31.1 merged components and threw the history away]
+Kruskal keeps a DSU and discards \emph{how} components merged.  Several problems
+ask a question that needs that history: "what is the lightest threshold \(t\) so
+that \(u\) and \(v\) are connected using only edges of weight \(\le t\)?"  Record
+each union as a node and the whole merge sequence becomes a tree you can query.
+\end{previouslybox}
+
+\begin{topicintro}
+Run Kruskal, but whenever it unions two components, create a fresh node labelled
+by the current edge's weight and make the two components' representatives its
+children.  The result is the \term{Kruskal-reconstruction tree} (KRT): a binary
+tree whose leaves are the original vertices and whose internal nodes carry
+nondecreasing weights up the spine.  The headline theorem (\(\thmref{c17-krtmax}\))
+is that the maximum edge weight on the path between two leaves \emph{in the MST}
+equals the weight stored at their lowest common ancestor -- so a bottleneck
+(minimax) query becomes one LCA call (\chref{c11}).
+
+This section is a WORKED construction: we build the KRT of the running graph
+\(G\) edge by edge and then read three bottleneck values off it, cross-checking
+each against the MST directly.
+
+\textbf{Prerequisites.} \(\secref{c17-kruskal}\) -- Kruskal and the DSU.
+Chapter~16 (\chref{c11}) -- lowest common ancestor, used as a black box for the
+queries; we do not rebuild the LCA engine here.  Chapter~5 (\chref{c24}) -- the
+Euler tour that an LCA structure is fed, cited only.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item build the reconstruction tree alongside Kruskal in \(\bigO{m\log m}\); \hfill\lv{4}
+  \item answer minimax (bottleneck) path queries as an LCA weight; \hfill\lv{4}
+  \item explain why the connectivity threshold of \(u,v\) is that same value. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{Building the merge tree}
+% ---------------------------------------------------------------
+
+\begin{definition}{Kruskal-reconstruction tree}{c17-krt}
+Process the edges in nondecreasing weight as Kruskal does.  Each DSU component is
+represented by a node: initially vertex \(i\) is its own node.  When an edge of
+weight \(w\) unions components with representative nodes \(r_1, r_2\), allocate a
+new node \(z\) with \(\mathrm{val}(z)=w\), make \(r_1\) and \(r_2\) its children,
+and set \(z\) as the merged component's representative.  After \(n-1\) successful
+unions there is one root; the resulting tree on nodes \(1,\dots,2n-1\) is the
+\term{Kruskal-reconstruction tree}.
+\end{definition}
+
+\begin{lemma}{Weights increase upward}{c17-krtheight}
+Every internal node's value is \(\ge\) the value of each of its children.  Edges
+are processed in nondecreasing order, so the merge that creates a parent happens
+at (or after) the weight of the merges that built its two children -- weights
+strictly climb as you move up toward the root.
+\end{lemma}
+
+\begin{theorem}{Bottleneck equals LCA weight}{c17-krtmax}
+For leaves \(u\ne v\), the maximum edge weight on the \(u\)-\(v\) path in the MST
+equals \(\mathrm{val}(\lca(u,v))\) in the reconstruction tree.  Equivalently, the
+smallest threshold \(t\) for which \(u,v\) are connected using only edges of
+weight \(\le t\) is \(\mathrm{val}(\lca(u,v))\).
+\end{theorem}
+
+\begin{proofbox}
+\(u\) and \(v\) first land in a common DSU component exactly at the union that
+creates their LCA node \(z=\lca(u,v)\), triggered by the edge of weight
+\(\mathrm{val}(z)\).  Before that edge they were in different components, so no
+lighter set of edges connected them -- giving the threshold statement.  In the
+MST, the \(u\)-\(v\) path is precisely the sequence of merge edges on the
+\(u\)-to-\(v\) route in the KRT; by \(\lemref{c17-krtheight}\) the highest among
+them is the one at \(z\), so the path maximum is \(\mathrm{val}(z)\). \(\Box\)
+\end{proofbox}
+
+\begin{lstlisting}[caption={Kruskal-reconstruction tree. On every successful union, allocate a new node weighted by the edge and adopt the two component representatives as its children. The up array doubles as the DSU and the KRT parent pointer (find walks it). Queries then reduce to LCA on the KRT (Ch.16)}, label={lst:c17-krt}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+struct Edge { int u, v; ll w; };
+const int MAXN = 400005;             // up to 2n nodes
+int up[MAXN];                        // DSU + KRT parent pointer
+ll val[MAXN];                        // node weight (leaves: 0)
+int findSet(int x){ return up[x]==x ? x : up[x]=findSet(up[x]); }
+int tot;                             // next free node id
+void buildKRT(int n, vector<Edge>& edges){
+  for(int i=1;i<=n;i++){ up[i]=i; val[i]=0; }
+  tot=n;
+  sort(edges.begin(), edges.end(),
+       [](const Edge& a, const Edge& b){ return a.w < b.w; });
+  for(const Edge& e : edges){
+    int r1=findSet(e.u), r2=findSet(e.v);
+    if(r1==r2) continue;
+    ++tot; val[tot]=e.w;             // fresh internal node
+    up[tot]=tot;                     // its own DSU root before adoption
+    up[r1]=tot; up[r2]=tot;          // children point to the new parent
+  }
+}
+// After buildKRT, root=findSet(1)==tot. To answer maxEdge(u,v) run an LCA
+// structure (binary lifting, Ch.16) over the KRT parent pointers and read
+// val[lca(u,v)].
+\end{lstlisting}
+
+% ---------------------------------------------------------------
+\subsection{WORKED: the reconstruction tree of the running graph}
+% ---------------------------------------------------------------
+
+Running \(\coderef{c17-krt}\) on \(G\)'s edges in sorted order
+(\(1\!-\!2{:}1,\ 3\!-\!4{:}2,\ 1\!-\!3{:}3,\ 2\!-\!3{:}4,\ 2\!-\!4{:}5,\
+4\!-\!5{:}6,\ 3\!-\!5{:}7\)) with new nodes \(6,7,8,9\):
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \(1\!-\!2{:}1\): new node \(6\), val 1, children \(1,2\).
+  \item \(3\!-\!4{:}2\): new node \(7\), val 2, children \(3,4\).
+  \item \(1\!-\!3{:}3\): reps are \(6\) and \(7\); new node \(8\), val 3, children
+        \(6,7\).
+  \item \(2\!-\!3{:}4\): both under \(8\) -- cycle, skip (no node).
+  \item \(2\!-\!4{:}5\): both under \(8\) -- skip.
+  \item \(4\!-\!5{:}6\): reps \(8\) and \(5\); new node \(9\), val 6, children
+        \(8,5\).  Root \(=9\).
+\end{itemize}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.85, transform shape,
+   leaf/.style={circle, draw=primaryblue!70, fill=primaryblue!10, line width=0.8pt,
+                minimum size=6.5mm, font=\scriptsize\bfseries, inner sep=1pt},
+   inn/.style={circle, draw=softpurple!80, fill=softpurple!12, line width=0.9pt,
+               minimum size=8mm, font=\scriptsize\bfseries, inner sep=1pt},
+   every edge/.style={draw=darkgray, line width=0.9pt}]
+  \node[inn] (n9) at (0,0) {\(9\)};
+  \node[annot, font=\tiny,text=softpurple!70!black] at (0.85,0.4) {\(w6\)};
+  \node[inn] (n8) at (-3,-1.6) {\(8\)};
+  \node[annot, font=\tiny,text=softpurple!70!black] at (-2.1,-1.2) {\(w3\)};
+  \node[leaf] (n5) at (3,-1.6) {\(5\)};
+  \node[inn] (n6) at (-4.4,-3.2) {\(6\)};
+  \node[annot, font=\tiny,text=softpurple!70!black] at (-3.6,-2.85) {\(w1\)};
+  \node[inn] (n7) at (-1.6,-3.2) {\(7\)};
+  \node[annot, font=\tiny,text=softpurple!70!black] at (-0.8,-2.85) {\(w2\)};
+  \node[leaf] (v1) at (-5.2,-4.6) {\(1\)};
+  \node[leaf] (v2) at (-3.6,-4.6) {\(2\)};
+  \node[leaf] (v3) at (-2.2,-4.6) {\(3\)};
+  \node[leaf] (v4) at (-0.8,-4.6) {\(4\)};
+  \draw (n9)--(n8) (n9)--(n5);
+  \draw (n8)--(n6) (n8)--(n7);
+  \draw (n6)--(v1) (n6)--(v2);
+  \draw (n7)--(v3) (n7)--(v4);
+\end{tikzpicture}
+\caption{The reconstruction tree of \(G\).  Internal nodes \(6,7,8,9\) carry the
+union weights \(1,2,3,6\); leaves are the original vertices.  Reading
+\(\lca(2,5)=9\) (weight \(6\)), \(\lca(1,4)=8\) (weight \(3\)),
+\(\lca(3,4)=7\) (weight \(2\)) gives the three bottleneck values below.}
+\label{fig:c17-krt}
+\end{figure}
+
+\begin{tracebox}[Three bottleneck queries, cross-checked against the MST]
+Recall the MST \(T^{*}=\{1\!-\!2,\ 3\!-\!4,\ 1\!-\!3,\ 4\!-\!5\}\).
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \(\mathrm{maxw}(2,5)\): MST path \(2\!-\!1\!-\!3\!-\!4\!-\!5\) has edge weights
+        \(\{1,3,2,6\}\), maximum \(6\).  KRT: \(\lca(2,5)=9\), \(\mathrm{val}=6\).
+        \(\checkmark\)
+  \item \(\mathrm{maxw}(1,4)\): MST path \(1\!-\!3\!-\!4\), weights \(\{3,2\}\), max \(3\).
+        KRT: \(\lca(1,4)=8\), \(\mathrm{val}=3\).  \(\checkmark\)
+  \item \(\mathrm{maxw}(3,4)\): MST path \(3\!-\!4\), weight \(2\), max \(2\).
+        KRT: \(\lca(3,4)=7\), \(\mathrm{val}=2\).  \(\checkmark\)
+\end{itemize}
+Each threshold is also the answer to "lightest \(t\) so edges \(\le t\) connect
+the pair": to link \(2\) and \(5\) you must include the weight-\(6\) edge
+\(4\!-\!5\); no smaller cut does.
+\end{tracebox}
+
+\begin{notebox}[Why the KRT is worth the extra nodes]
+You paid \(n-1\) new nodes and one sorted pass to convert every bottleneck query
+from "walk the MST path, take the max -- \(\bigO{n}\)" into "one LCA --
+\(\bigO{\log n}\)" after \(\bigO{n\log n}\) preprocessing (\chref{c11}).  When a
+problem asks many minimax or connectivity-threshold questions on an MST, the
+reconstruction tree is the intended data structure.
+\end{notebox}
+
+% ---------------------------------------------------------------
+\subsection{Solved: CF 1081D -- Maximum Distance (1800, L4)}
+% ---------------------------------------------------------------
+
+\solvedproblem{c17-maxdist}{Maximum Distance}{CF 1081D}{https://codeforces.com/problemset/problem/1081/D}{CF 1800 L4}{bottleneck (minimax) distance, Kruskal-reconstruction tree, DSU with a per-component special count}
+
+\begin{problemstatement}[CF 1081D, verified against the live CF problem page]
+A connected undirected graph on \(n\) vertices and \(m\) weighted edges is given,
+together with \(k\) \emph{special} vertices \(x_1,\dots,x_k\).  The \term{cost} of a
+path is the \emph{maximum} edge weight on it, and the \term{distance} between two
+vertices is the minimum possible cost over all paths joining them (the bottleneck
+/ minimax distance).  For each special vertex, output the distance to its
+\emph{farthest} special vertex.  Constraints: \(2\le k\le n\le 10^5\),
+\(n-1\le m\le 10^5\), \(1\le w\le 10^9\); the graph may have multiple edges and
+self-loops and is guaranteed connected.  Output \(k\) integers on one line, the
+\(i\)-th being the farthest-special distance of \(x_i\).  Time limit 1 second,
+memory 256 MB.  Samples: \(n{=}2,m{=}3,k{=}2\), specials \(2,1\), edges
+\((1,2,3),(1,2,2),(2,2,1)\) \(\to\) ``\(2\ 2\)''; \(n{=}4,m{=}5,k{=}3\), specials
+\(1,2,3\), edges \((1,2,5),(4,2,1),(2,3,2),(1,4,4),(1,3,3)\) \(\to\) ``\(3\ 3\ 3\)''.
+\end{problemstatement}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.85, transform shape,
+   leaf/.style={circle, draw=primaryblue!70, fill=primaryblue!10, line width=0.8pt,
+                minimum size=6.5mm, font=\scriptsize\bfseries, inner sep=1pt},
+   spec/.style={circle, draw=successgreen!80!black, fill=successgreen!14, line width=1pt,
+                minimum size=6.5mm, font=\scriptsize\bfseries, inner sep=1pt},
+   inn/.style={circle, draw=softpurple!80, fill=softpurple!12, line width=0.9pt,
+               minimum size=8mm, font=\scriptsize\bfseries, inner sep=1pt},
+   top/.style={circle, draw=difforange, fill=difforange!22, line width=1.3pt,
+               minimum size=8mm, font=\scriptsize\bfseries, inner sep=1pt},
+   every edge/.style={draw=darkgray, line width=0.9pt}]
+  \node[top] (n8) at (0,0) {\(8\)};
+  \node[annot, font=\tiny,text=difforange] at (1.0,0.35) {\(w3\)};
+  \node[leaf] (v1) at (-1.6,-1.7) {\(1\)};
+  \node[inn] (n7) at (1.6,-1.7) {\(7\)};
+  \node[annot, font=\tiny,text=softpurple!70!black] at (2.5,-1.35) {\(w2\)};
+  \node[inn] (n6) at (0.7,-3.2) {\(6\)};
+  \node[annot, font=\tiny,text=softpurple!70!black] at (1.6,-2.85) {\(w1\)};
+  \node[spec] (v2) at (-0.1,-4.6) {\(2\)};
+  \node[spec] (v3) at (1.4,-4.6) {\(3\)};
+  \node[leaf] (v4) at (2.9,-4.6) {\(4\)};
+  \draw (n8)--(v1) (n8)--(n7);
+  \draw (n7)--(n6) (n7)--(v3);
+  \draw (n6)--(v2) (n6)--(v4);
+  \node[annot, font=\scriptsize,text width=7cm, align=center] at (0.4,1.5)
+    {green = special; the orange node 8 is the topmost merge with specials on both sides};
+\end{tikzpicture}
+\caption{The KRT of Sample 2's MST \(\{4\!-\!2{:}1,\ 2\!-\!3{:}2,\ 1\!-\!3{:}3\}\).
+Node \(8\) (weight \(3\)) is the highest node whose two child subtrees each hold a
+special vertex (\(1\) versus \(\{2,3\}\)), so every special vertex's farthest-special
+bottleneck distance equals \(3\).  This is \(\thmref{c17-krtmax}\) read at the topmost
+special-splitting node.}
+\label{fig:c17-maxdist}
+\end{figure}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+The distance is a \emph{bottleneck}, not a sum -- Dijkstra and shortest-path trees
+are the wrong tool.  You already know bottleneck equals an LCA weight in the KRT
+(\(\secref{c17-krt}\)).  What single number, read off the merge sequence, answers
+the farthest-special question for \emph{all} special vertices at once?
+\peek{Build the MST with Kruskal and record the merge tree.  The farthest-special
+distance from \(x_i\) is \(\max_j \mathrm{val}(\lca(x_i,x_j))\).  Reason about which
+merge node dominates that maximum for every special leaf.
+(\(\thmref{c17-krtmax}\).)}
+\nudge{Track, for each DSU component during Kruskal, whether it contains a special
+vertex.  A merge that joins two special-containing components is exactly a KRT
+node splitting specials on both sides.  Because edge weights climb upward
+(\(\lemref{c17-krtheight}\)), the \emph{largest} such merge weight is the topmost
+special-splitting node.}
+\fullhint{Answer \(=\max\{w : \text{a weight-}w\text{ Kruskal union joins two components each holding a special}\}\),
+and that same value is printed \(k\) times.  Proof it is uniform over \(i\): for any
+special \(x_i\), pair it with a special from the opposite child subtree of the
+topmost special-split node -- their \(\lca\) is that node, giving the maximum
+possible bottleneck, and no special pair can exceed it.  Run \(\coderef{c17-kruskal}\)
+with a \texttt{spec[]} counter; the full build and both sample replays are below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Every query is a minimax distance, which the section just taught is a KRT LCA
+weight.  Answering \(k\) farthest-special questions pairwise by walking the MST
+would be \(\bigO{k n}\).  The saving insight is that the bottleneck metric here is
+an \emph{ultrametric} induced by the merge tree: the deepest special-splitting
+node sets one common value for all special vertices, collapsing \(k\) queries into
+a single running maximum during Kruskal.
+
+\solstep{Key Observations}
+\begin{observation}
+By \(\thmref{c17-krtmax}\), the distance between two vertices is
+\(\mathrm{val}(\lca)\) in the KRT, so the farthest-special distance from \(x_i\) is
+\(\max_j \mathrm{val}(\lca(x_i,x_j))\) over special \(x_j\).
+\end{observation}
+\begin{observation}
+Let \(z^{*}\) be the highest KRT node whose two children each contain a special
+vertex.  For \emph{every} special \(x_i\) there is a special \(x_j\) in the sibling
+subtree of \(z^{*}\) with \(\lca(x_i,x_j)=z^{*}\), and no special pair has a higher
+LCA.  Hence the answer is the same for all \(i\), equal to \(\mathrm{val}(z^{*})\).
+\end{observation}
+\begin{observation}
+\(\mathrm{val}(z^{*})\) is exactly the maximum weight of a Kruskal union that
+merges two components which both already contain a special vertex -- so one DSU
+array counting specials per component, run inside \(\coderef{c17-kruskal}\), reads
+the answer directly.
+\end{observation}
+
+\solstep{Think It With Me}
+\begin{thinkbox}
+\deadend{Run a BFS/Dijkstra per special vertex to find its farthest special}{The
+metric is a bottleneck, not a path length, and \(k n\) with \(k,n\le 10^5\) is
+\(\sim 10^{10}\) -- far past 1 second.}
+\deadend{Compute all-pairs minimax on the MST with an \(n\times n\) table}{Floyd-style
+minimax is \(\bigO{n^3}\) time and memory: \emph{MLE} at \(n=10^5\).}
+\aha{The farthest-special distance is a single shared value: the weight of the
+topmost merge splitting specials.  Track a per-component special count through
+Kruskal and take the max weight over special-with-special unions.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.28\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ all-pairs minimax & \(n\times n\) bottleneck table & \(\bigO{n^3}\) & \mle\\
+2 & \lv{3}\ BFS per special & walk MST for each \(x_i\) & \(\bigO{kn}\) & \tle\\
+3 & \lv{4}\ \textbf{Kruskal + special count} & max special-both merge & \(\bigO{m\log m}\) & \ac\\
+\bottomrule
+\end{tabular}\end{center}
+Rungs 1--2 treat the queries as \(k\) independent searches.  Rung 3 exploits the
+ultrametric: one shared value, read off the merge order.
+
+\solstep{Solution}
+Sort the edges and run Kruskal with a DSU that also stores \(\mathrm{spec}[r]\), the
+number of special vertices in component \(r\) (seeded to \(1\) on the given specials,
+which are distinct).  When an edge of weight \(w\) has roots \(a\ne b\) with
+\(\mathrm{spec}[a]>0\) and \(\mathrm{spec}[b]>0\), update \(\mathrm{ans}=\max(\mathrm{ans},w)\),
+then union and add the counts.  Print \(\mathrm{ans}\) \(k\) times.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1081D. Kruskal with a per-component special count; answer = the largest weight of a union joining two special-bearing components, printed k times. Self-loops and duplicate edges are skipped by the a==b test}, label={lst:c17-maxdist}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Edge { int u, v; long long w; };
+const int MAXN = 100005;
+int par[MAXN], specCnt[MAXN];        // specCnt[root] = #specials in component
+int findSet(int x){ return par[x]==x ? x : par[x]=findSet(par[x]); }
+int main(){
+  int n, m, k; scanf("%d %d %d", &n, &m, &k);
+  vector<int> isSpec(n+1, 0);
+  for(int t=0;t<k;t++){ int x; scanf("%d", &x); isSpec[x]=1; }
+  vector<Edge> edges(m);
+  for(int i=0;i<m;i++) scanf("%d %d %lld", &edges[i].u, &edges[i].v, &edges[i].w);
+  for(int i=1;i<=n;i++){ par[i]=i; specCnt[i]=isSpec[i]; }
+  sort(edges.begin(), edges.end(),
+       [](const Edge& a, const Edge& b){ return a.w < b.w; });
+  long long ans=0;
+  for(int i=0;i<m;i++){
+    int a=findSet(edges[i].u), b=findSet(edges[i].v);
+    if(a==b) continue;                               // self-loop / cycle: skip
+    if(specCnt[a]>0 && specCnt[b]>0) ans=max(ans, edges[i].w);
+    par[a]=b; specCnt[b]+=specCnt[a];                // merge, sum special counts
+  }
+  for(int t=0;t<k;t++) printf("%lld ", ans); printf("\n");
+  return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Samples}
+\begin{tracebox}[Sample 1: \, \(n{=}2, m{=}3, k{=}2\), specials \(2,1\), edges \((1,2,3),(1,2,2),(2,2,1)\)]
+Sorted: \((2,2){:}1,\ (1,2){:}2,\ (1,2){:}3\).  The self-loop \((2,2){:}1\) has
+\(a=b\) -- skip.  Edge \(1\!-\!2{:}2\): roots \(\{1\}\) (spec 1) and \(\{2\}\) (spec 1),
+both special -- \(\mathrm{ans}=\max(0,2)=2\); union.  Edge \(1\!-\!2{:}3\): now same
+component -- skip.  Print \(\mathbf{2\ 2}\).
+\end{tracebox}
+\begin{tracebox}[Sample 2: \, \(n{=}4, m{=}5, k{=}3\), specials \(1,2,3\), edges sorted \(4\!-\!2{:}1,\ 2\!-\!3{:}2,\ 1\!-\!3{:}3,\ 1\!-\!4{:}4,\ 1\!-\!2{:}5\)]
+\(4\!-\!2{:}1\): \(\{4\}\)(spec 0) with \(\{2\}\)(spec 1) -- not both special, no update;
+union \(\{2,4\}\) spec 1.  \(2\!-\!3{:}2\): \(\{2,4\}\)(1) with \(\{3\}\)(1) -- both,
+\(\mathrm{ans}=2\); union \(\{2,3,4\}\) spec 2.  \(1\!-\!3{:}3\): \(\{1\}\)(1) with
+\(\{2,3,4\}\)(2) -- both, \(\mathrm{ans}=\max(2,3)=3\); union all.  The last two edges
+close cycles -- skip.  Print \(\mathbf{3\ 3\ 3}\).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+The Kruskal sort is \(\bigO{m\log m}\); the DSU pass with path compression is
+\(\bigO{m\,\alpha(n)}\), and printing \(k\) copies is \(\bigO{k}\).  Total
+\(\bigO{m\log m}\) time, \(\bigO{n+m}\) space -- well inside 1 second for
+\(n,m\le 10^5\).  Weights reach \(10^9\) so the answer and the comparison use
+\texttt{long long}.
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+\item \textbf{The value is shared.}  Do not try to compute a per-vertex farthest;
+      all \(k\) outputs equal \(\mathrm{val}(z^{*})\).  Per-source searches are the TLE trap.
+\item \textbf{Self-loops and parallel edges} (Sample 1 has both) are handled only if
+      you skip \(a=b\); unioning a self-loop would corrupt the special count.
+\item \textbf{Seed specials before any union.}  The \(x_i\) are distinct, so
+      \(\mathrm{specCnt}[x_i]=1\) exactly once each; summing counts on merge keeps the
+      both-special test correct.
+\item \(k\ge 2\) guarantees at least one both-special union exists, so
+      \(\mathrm{ans}\) is well-defined (a positive edge weight).
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[Recall -- what \(\secref{c17-krt}\) gave you]
+\selftest{
+  \item What value does a KRT internal node store, and what are its children?
+  \item State \(\thmref{c17-krtmax}\) in one line (the query it answers).
+  \item Why is a parent's weight always \(\ge\) its children's (\(\lemref{c17-krtheight}\))?
+  \item On \(G\), read \(\mathrm{maxw}(2,5)\) from the KRT and confirm it on the MST path.
+  \item In CF 1081D, why is the farthest-special distance the same for every special vertex?
+}
+\end{recallbox}

@@ -1,0 +1,484 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  11.2  Dictionary Applications               sec:c08-applications
+%  Exports: def:c08-wildcard  def:c08-prefixcount
+%           fig:c08-wordsearch  lst:c08-autocomplete
+%           prob:c08-wordsearch  lst:c08-wordsearch-soln   (practices: LC 211, LC 1268, LC 720)
+% =====================================================================
+\section{Dictionary Applications}\label{sec:c08-applications}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item In \secref{c08-triebasics}, a $\mathit{end}$ flag told a full word from a mere prefix. When a
+        node has $\mathit{child}[c]$ for every letter, what does ``there is no such edge'' mean during a
+        walk? (the query string is absent as a word/prefix -- \thmref{c08-searchcost})
+  \item A DFS visits a node then recurses into \emph{all} children; summing a subtree is a DFS that
+        accumulates. What quantity lives \emph{below} a trie node that we might want to aggregate? (the
+        number of stored words sharing that prefix)
+  \item Chapter~10 kept the ``top $k$'' of a stream in a size-$k$ heap -- push, and pop when the heap
+        exceeds $k$. Why is that heap the right tool for ``suggest $k$ completions''? (you want the $k$
+        best-ranked words under a prefix, not all of them -- \chref{c07})
+  \item On a letter grid a DFS marks a cell visited, explores, and unmarks. How is that like walking a
+        trie where the \emph{path} is the word being built? (the current cell's letter must extend the
+        trie edge from the node you are standing on)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+The plain trie of \secref{c08-triebasics} answers ``is this here?'' This section answers the richer
+questions a \emph{dictionary} invites, all of them the same walk with one extra idea bolted on.
+\textbf{(a) Wildcard search}: a query may contain '.' meaning ``any letter,'' so at a '.' node you no
+longer pick one edge -- you DFS over \emph{every} child (\defref{c08-wildcard}). \textbf{(b) Prefix
+counting and aggregation}: attach a number to each node and you can say ``how many stored words begin
+with \texttt{car}?'' or ``sum the values under \texttt{app}'' -- one walk plus a subtree count
+(\defref{c08-prefixcount}). \textbf{(c) Autocomplete}: collect the words under a prefix and keep the best
+$k$ with the size-$k$ heap of Chapter~10 (\chref{c07}) -- \coderef{c08-autocomplete}.
+
+The granddaddy of them all, and this section's solved anchor, is \probref{c08-wordsearch}: Word Search
+II. You are handed a letter \emph{grid} and a \emph{list} of target words, and must find every word that
+can be traced through adjacent cells. The genius move is to build a trie of the words and then DFS the
+\emph{grid}, carrying a pointer \emph{into the trie}: a partial grid path that is not any word's prefix
+dies immediately, and one shared trie prunes all the words at once. That single insight -- \textbf{use a
+trie as a live filter over a search} -- is the reusable idea, and it is why these four applications
+belong in one section.
+\textbf{Prerequisites.} \secref{c08-triebasics} (the node, the walk, the end flag); grid DFS and the
+visited/unvisited discipline from Chapters~1--4; the size-$k$ heap cited from Chapter~10 (\chref{c07}).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item extend a trie node to answer wildcard queries and prefix aggregations without a full scan;
+        \hfill\lv{3}
+  \item drive top-$k$ autocomplete by combining a trie subtree walk with a size-$k$ heap; \hfill\lv{4}
+  \item solve Word Search II by pruning a grid DFS against a trie of the target words; \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- a dictionary you query structurally]
+\reckey{the data is a \emph{set of strings} and a query inspects them \emph{by shape} -- with a wildcard,
+by prefix, asking for a count/sum over everything sharing a prefix, or asking to \emph{match many words
+at once} against another search space.}
+\recuse{
+  \item ``support '.' as any character'' -- branch over all children at a '.' (\defref{c08-wildcard},
+        the LC~211 practice);
+  \item ``how many keys start with $p$?'' / ``sum their values'' -- subtree count or the per-node
+        subtotal you built in the LC~677 warm-up (\defref{c08-prefixcount});
+  \item ``suggest up to $k$ completions for a typed prefix'' -- subtree words through a size-$k$ heap
+        (\coderef{c08-autocomplete}, LC~1268);
+  \item ``find which of many words appear in a grid / board'' -- trie as a live filter over a DFS
+        (\probref{c08-wordsearch}).
+}
+\recnotuse{
+  \item the query is a plain single-key membership -- the base trie already did it in \secref{c08-triebasics},
+        nothing here adds speed;
+  \item words may overlap as \emph{substrings} of a long text -- that is multi-pattern matching,
+        Aho--Corasick, previewed in \secref{c08-variants};
+  \item the goal is a numeric extremum over integer keys -- you want the \emph{bitwise} trie of
+        \secref{c08-binary}, not these letter applications.
+}
+One-line test: \emph{does the question touch \emph{all strings of a certain shape} (a prefix, a wildcard
+mask, a set of candidates)? Then the trie's subtree is your work area, and one of the four tricks below fits.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Every application here keeps the node of \secref{c08-triebasics} intact and only changes \emph{what
+you do at a node}. Recall \figref{c08-wordstrie}: the subtree hanging under the $c$-$a$-$r$ spine
+\emph{is} the set of words beginning with ``car''. Two consequences fall out immediately.
+
+First, \textbf{a prefix query becomes a ``visit this subtree'' query}: to count words starting with
+``ca'', walk to the $a$ node and read how many terminals live below it -- one walk plus an aggregate you
+maintained on the way in (\defref{c08-prefixcount}). Second, \textbf{a wildcard is ``fork over all
+edges''}: at a node whose query character is '.', you cannot choose one child, so you recursively try
+every child that exists -- a DFS whose branching is bounded by the alphabet, and only the letters actually
+present (\defref{c08-wildcard}).
+
+Word Search II (\figref{c08-wordsearch}) marries these to a grid. Stand on cell $(i,j)$ with a pointer at
+some trie node $u$. The cell's letter must label an edge $u\to v$; if it does not, the path spelled so far
+is \emph{not a prefix of any target word} and you cut the whole branch instantly. Because the trie holds
+\emph{all} words' prefixes compactly, that one test discards exponentially many grid walks at once --
+this is why searching four words together with a trie is far cheaper than running four independent
+per-word grid searches. When the pointer lands on a terminal, you have found a word.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.92, transform shape,
+  cell/.style={boxnode, minimum size=8mm, font=\small},
+  path/.style={fill=successgreen!25, draw=successgreen, minimum size=8mm, font=\small},
+  edge/.style={-{Stealth[length=2mm]}, warningred, thick, shorten >=1mm, shorten <=1mm},
+  level distance=10mm, sibling distance=11mm,
+  tend/.style={tnode, fill=successgreen!20, draw=successgreen, thick}]
+  % ---- grid ----
+  
+\node[path] (o) at (0,0) {o}; 
+\node[path] (a) at (1,0) {a}; 
+\node[cell] (a2) at (2,0) {a}; 
+\node[cell] (n) at (3,0) {n};
+  
+\node[cell] (e) at (0,-1) {e}; 
+\node[path] (t) at (1,-1) {t}; 
+\node[cell] (ae) at (2,-1) {a}; 
+\node[cell] (ee) at (3,-1) {e};
+  
+\node[cell] (i) at (0,-2) {i}; 
+\node[path] (h) at (1,-2) {h}; 
+\node[cell] (k) at (2,-2) {k}; 
+\node[cell] (r) at (3,-2) {r};
+  
+\node[cell] (i2) at (0,-3) {i}; 
+\node[cell] (s) at (1,-3) {s}; 
+\node[cell] (s2) at (2,-3) {s}; 
+\node[cell] (c) at (3,-3) {c};
+  \draw[edge] (o) -- (a); \draw[edge] (a) -- (t); \draw[edge] (t) -- (h);
+  \node[annot, font=\scriptsize, align=left] at (1.5,0.9) {tracing \textbf{oath}:\\ o-a-t-h through adjacent cells};
+  % ---- trie (to the right) ----
+  \begin{scope}[xshift=5.7cm, yshift=0.4cm]
+    \node[troot] {$\cdot$}
+      child { node[tnode] {o}
+        child { node[tnode] {a}
+          child { node[tnode] {t}
+            child { node[tend] {h} } } } }
+      child { node[tnode] {e}
+        child { node[tnode] {a}
+          child { node[tend] {t} } } };
+  \end{scope}
+\end{tikzpicture}
+\caption{Word Search II on the official board with words \{oath, pea, eat, rain\}. Left: the green cells
+trace \textbf{oath} (o-a-t-h) across adjacent squares; right: a trie of the four words doubles as the
+live filter -- a grid path that cannot extend a trie edge is abandoned, and reaching a green terminal
+node reports the word. \textbf{eat} and \textbf{oath} are found; \textbf{pea} and \textbf{rain} are not
+traceable.}\label{fig:c08-wordsearch}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Wildcard search as an all-edges DFS}{c08-wildcard}
+A \term{wildcard} query contains symbols (conventionally '.') that match \emph{any} single character. To
+answer \code{searchWithDots(word)} on a trie, walk it recursively with index $i$: at position $i$ a real
+letter follows the one edge $\mathit{child}[\text{letter}]$; a '.' recurses into \emph{every} non-null
+child. The query succeeds iff some branch consumes the whole word at an $\mathit{end}$ node. Cost is
+$\bigO{L}$ with no dots, but a run of $d$ dots costs up to $|\Sigma|^{d}$ in the worst case -- bounded
+in practice by the (finite) branching actually present in the trie.
+\end{definition}
+
+\noindent\textbf{In plain words.} A fixed letter = one pointer hop; a '.' = ``fork over all children and
+recursively test.'' Nothing about the node layout changes; only the walk's branching rule does.
+
+\begin{definition}{Prefix counting and aggregation}{c08-prefixcount}
+Attach to each node an integer $\mathit{cnt}$ equal to the number of stored words in the subtree rooted
+there (equivalently, ``words having this node's prefix''). \textbf{Maintaining} it is free on insert:
+increment $\mathit{cnt}$ on every node the inserted word steps through, and set the terminal flag at the
+end. Then \code{countPrefix(p)} is a single $\bigO{L}$ walk returning $\mathit{cnt}$ at the node $p$
+lands on -- no DFS. The same field, generalised to a value sum (as in the LC~677 warm-up) or a list of
+words, answers \emph{any} ``aggregate over everything with this prefix'' query in $\bigO{L}$.
+\end{definition}
+
+\begin{insightbox}
+\defref{c08-wildcard} and \defref{c08-prefixcount} are duals: the first \emph{broadens} a walk (a '.'
+turns one edge into many), the second \emph{collapses} a subtree into one stored number (a count you
+precomputed so you never pay the DFS). A trie's real superpower is that both are cheap \emph{because the
+subtree literally is the set of matching words} -- you are either walking into it or reading a summary
+of it, and never enumerating the whole dictionary.
+\end{insightbox}
+
+\subsection{The Algorithm: Autocomplete, One Walk and a Size-$k$ Heap}
+
+The template application is ``type a prefix, get the $k$ best completions.'' Walk the prefix to its node
+$\bigO{L}$; the completions are exactly the words in that subtree; and you only want $k$ of them, ranked.
+That is the size-$k$ frontier of Chapter~10 (\chref{c07}) dropped onto a trie DFS: enumerate the subtree
+collecting terminal words, keeping a heap that never exceeds $k$ entries.
+
+\begin{lstlisting}[caption={Top-k autocomplete: walk the prefix, DFS the subtree, hold a size-k heap}, label={lst:c08-autocomplete}]
+Node* prefix = walk(p, /*make=*/false);           // O(L): the node whose subtree holds all completions
+if (!prefix) return {};                            // no word has this prefix
+// Compare ranks so that the WORST of the current top-k sits at the heap top (min on rank).
+auto worse = [](const string& a, const string& b){ return rank(a) > rank(b); };
+priority_queue<Item, vector<Item>, decltype(worse)> topk;  // size-k frontier (the Chapter-10 heap)
+dfsCollect(prefix, "", [&](const string& w){
+    topk.push(w);
+    if ((int)topk.size() > k) topk.pop();          // drop the current worst -> keep best k
+});
+vector<string> res;                                // unwind -> best k words
+while (!topk.empty()) { res.push_back(topk.top()); topk.pop(); }
+// dfsCollect(u, acc, visit): if u->end, visit(acc); for each non-null child (letter c):
+//   dfsCollect(u->child[c], acc + c, visit).  Enumerates every terminal word in u's subtree.
+\end{lstlisting}
+
+\begin{complexitybox}
+Time: $\bigO{L}$ to reach the prefix node, then $\bigO{m\log k}$ to sift the $m$ subtree words through
+the size-$k$ heap; the DFS touches only real edges, so it never visits the parts of the dictionary
+\emph{outside} the prefix. Memory: $\bigO{k}$ for the heap plus $\bigO{H}$ recursion depth ($H$ the
+subtree height). For ``top $k$ lexicographic'' (LC~1268) a plain in-order DFS already yields sorted
+words, so you can stop after $k$ without a heap -- but the general ranked version above is the one worth
+memorising.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{countPrefix and one wildcard query on $\mathcal{W}$ (the \secref{c08-triebasics} set)}{c08-apps-run}
+Take $\mathcal{W}=\{$car, cares, care, cat, dog$\}$. Maintain $\mathit{cnt}$ on every insert. The
+$c$-$a$ node has $\mathit{cnt}=4$ (\emph{all} of car/care/cares/cat pass through it); the $c$-$a$-$r$
+node has $\mathit{cnt}=3$; the $c$-$a$-$t$ node $\mathit{cnt}=1$; the $d$ node $\mathit{cnt}=1$. So
+\code{countPrefix("ca")}$=4$, \code{countPrefix("car")}$=3$, \code{countPrefix("do")}$=1$,
+\code{countPrefix("z")}$=0$ (no $z$ edge). Each is a single walk, not a scan. Wildcard on the same
+trie with LC~211's rule: \code{search("c.r")} -- $c$ then '.' (fork to the only child $a$) then $r$
+lands on the flagged $r$ node $\Rightarrow$ true; \code{search(".at")} -- '.' at root forks to $c$ and
+$d$; $c$-then-$a$... $t$? $a$ has child $t$ (cat) which is flagged $\Rightarrow$ true.
+\end{example}
+\begin{tracebox}[Wildcard DFS branching on \texttt{search(".ar")}]
+Position 0 '.': fork over ALL children of the root that exist -> c, d.\\
+  branch c: position 1 'a' -> node ca exists. position 2 'r' -> node car, terminal -> TRUE.\\
+  branch d: position 1 'a' -> node d has only an 'o' child, no 'a' -> this branch dies.\\
+First surviving branch returns true, so \texttt{search(".ar")} = true (it matches \emph{car}).\\
+Contrast \texttt{countPrefix(".ar")}: undefined -- a count walk has a \emph{fixed} prefix, dots only make
+\emph{sense} for the existence test of \defref{c08-wildcard}.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Longest / shortest prefix stop}: \probref{c08-wordsearch} reports a word the instant a
+        terminal is reached; Replace Words (LC~648) instead wants the \emph{first} terminal on a walk --
+        identical machinery, different stop condition. \hfill\lv{3}
+  \item \textbf{De-duplication}: on finding a word in a grid DFS, \emph{clear} its terminal flag so the
+        same word is not reported twice from different paths -- cheaper than a visited-set of results.
+        \hfill\lv{4}
+  \item \textbf{Subtree size vs value}: swap $\mathit{cnt}$ for a running \emph{sum} of key values to get
+        Map Sum Pairs; swap it for a \emph{list} of words to get autocomplete -- the field's type is the
+        only change. \hfill\lv{3}
+  \item \textbf{Pruning for speed}: keep a per-node child count and delete child links when a subtree's
+        $\mathit{cnt}$ drops to zero (all its words consumed) -- Word Search II gets dramatically faster
+        once found words are pruned out of the trie. \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- enumerating the whole dictionary for a prefix]
+Answering ``words starting with \texttt{ca}'' by iterating every key and testing \code{startswith} is
+$\bigO{N L}$ and defeats the point. Walk to the prefix node ($\bigO{L}$) and DFS \emph{only its subtree}
+(\defref{c08-prefixcount}) -- or read a maintained $\mathit{cnt}$ if you only need the number.
+\end{warningbox}
+\begin{warningbox}[Trap 2 -- re-adding the grid cell to the visited set wrongly]
+In Word Search II you mark a cell visited for the \emph{current path only}, then \emph{restore} it on the
+way back out. Using one global visited set (never unmarking) blocks legitimate reuse of a cell by a
+different word and under-reports; forgetting to unmark even for the same path makes the DFS miss words.
+The mark/unmark pair is the recursion's bookkeeping, not a global structure.
+\end{warningbox}
+\begin{warningbox}[Trap 3 -- wildcard cost surprises]
+A wildcard '.' recurses over \emph{all} children (\defref{c08-wildcard}). A query of all dots, or a node
+with high branching, makes the search explode toward $|\Sigma|^{d}$. It is correct, but know the worst
+case; contest LC~211 inputs stay small precisely because of this.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's anchor is LeetCode~212, \probref{c08-wordsearch}: given a letter grid and a list of words,
+return every word traceable through adjacent (up/down/left/right) cells without reusing a cell within one
+word. Building a trie of the words and DFS-ing the grid against it -- pruning on any cell that fails to
+extend a trie edge -- is \probref{c08-wordsearch}, and the canonical demonstration that a trie is a
+\emph{filter over a search}, not just a lookup table.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c08-wordsearch}{Word Search II}{LeetCode 212}
+  {https://leetcode.com/problems/word-search-ii/}{LC Hard · L4}
+  {trie as live filter, grid DFS with mark/unmark, terminal pruning, subtree = candidate set}
+
+\begin{problemstatement}[Word Search II]
+Given an $m\times n$ \texttt{board} of characters and a list \texttt{words}, return \emph{all} words that
+can be constructed from sequentially adjacent cells (adjacent = up/down/left/right; a cell may not be used
+twice \emph{within one word}). Constraints (official): $1\le m,n\le 12$, $1\le|\texttt{words}|\le 3\cdot
+10^{4}$, $1\le|\texttt{words}[i]|\le 10$, all lowercase; all words distinct.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 25 minutes]
+Naively searching the grid once per word is far too slow. The winning idea inverts it: build a trie of
+the words and DFS the grid \emph{once from every cell}, using the trie to kill hopeless branches.
+\peek{What structure makes ``is the string so far a prefix of \emph{any} target word?'' a single pointer hop?}
+\nudge{Insert all words into a trie, storing the word at each terminal. From every cell, DFS carrying a
+trie-node pointer; move to the child matching the cell's letter or return. Clear the terminal when you
+report, so words are not reported twice.}
+\fullhint{At cell $(i,j)$ with trie node $u$: if $u\to\mathit{child}[\text{board}[i][j]]$ is null,
+prune. Else recurse to that child after marking $(i,j)$ visited (write a sentinel), and unmark on return.
+If the child is terminal, append its word and de-terminalise it. Start DFS from all $m\cdot n$ cells.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Each word is a path on the grid; many words share prefixes, and most grid walks are not prefixes of
+\emph{any} target word. Testing every word independently means $O(|W|\cdot mn\cdot 4^{L})$ -- hopeless for
+$|\texttt{words}|=3\cdot 10^{4}$. Instead we want a single search that, the moment the letters so far fail
+to spell \emph{any} target's prefix, abandons the branch. That predicate -- ``is this a prefix of some
+word?'' -- is exactly a trie walk, so a trie of the words becomes the pruning oracle for a grid DFS.
+
+\solstep{Key Observations}
+\begin{observation}
+A grid path spells a string; that string is worth extending \emph{iff} it is a prefix of a target word --
+which the trie answers in one child-pointer test, pruning the branch otherwise.
+\end{observation}
+\begin{observation}
+Storing the full word at each terminal node lets a DFS that reaches an $\mathit{end}$ report the word
+directly; clearing $\mathit{end}$ right after reporting prevents duplicates without an output visited-set.
+\end{observation}
+\begin{observation}
+No cell may be reused \emph{within one word}, so mark $(i,j)$ before recursing and restore it after --
+the mark is path-scoped, never global (\probref{c08-wordsearch} Trap 2 above).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Run a per-word DFS over the grid for every word in the list.}
+{Correct but $O(|W|\cdot mn\cdot 4^{L})$; with $3\cdot 10^{4}$ words it times out. You are paying the
+shared-prefix cost over and over.}
+\deadend{Hash the words and check each grid string by enumeration.}
+{Enumerating all grid strings up to length $10$ is itself exponential and ignores the prefix structure;
+no early termination on impossible prefixes.}
+\aha{One trie holds every word's prefixes; DFS the grid with a trie pointer and prune the instant the
+cell's letter has no matching edge. Found words are reported at terminals and pruned so later searches
+skip dead subtrees.}
+\end{thinkbox}
+
+\solstep{Solution}
+Build a trie from \texttt{words}, storing the string (or an index) at each terminal. For every cell
+$(i,j)$ start \code{dfs(i,j, root)}: let $c=\text{board}[i][j]$; if $c$ is the visited sentinel or the
+current node has no child for $c$, return; advance to child $v$; if $v$ is terminal, record its word and
+clear the terminal. Mark $(i,j)$ visited, recurse into the four neighbours with node $v$, then restore
+$(i,j)$. Return the collected distinct words. \coderef{c08-wordsearch-soln} implements exactly this.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The grid DFS reports precisely the constructible words, once each]
+\emph{(Soundness.)} A word is appended only at a trie terminal reached along cells $c_1c_2\cdots c_L$ that
+are pairwise grid-adjacent with no cell reused (the sentinel forbids reuse on the active path). The trie
+terminal guarantees $c_1\cdots c_L$ is an inserted target word, so every reported string is valid.
+\emph{(Completeness.)} Any constructible word $w$ has a valid adjacent path; at each step the DFS is at
+the trie node for the prefix consumed so far, which exists because $w$'s prefixes are in the trie, so no
+step is pruned; the final node is terminal and $w$ is reported -- unless already reported, in which case
+its terminal was cleared, so it was reported once. \emph{(Once.)} Clearing $\mathit{end}$ on report makes
+each word's terminal fire at most over the whole run. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Word Search II -- grid DFS pruned by a trie of the words (LeetCode 212)}, label={lst:c08-wordsearch-soln}]
+class Solution {
+    struct Node { Node* ch[26]{}; string word; };   // word non-empty iff this node is a terminal
+    Node* rt = new Node();
+    void add(const string& w){ Node* u=rt; for(char c:w){int k=c-'a'; if(!u->ch[k])u->ch[k]=new Node(); u=u->ch[k];} u->word=w; }
+    void dfs(vector<vector<char>>& b, int i, int j, Node* u) {
+        char c = b[i][j];
+        if (c=='.' || !u->ch[c-'a']) return;              // visited, or no trie edge: prune
+        u = u->ch[c-'a'];
+        if (!u->word.empty()) { res.push_back(u->word); u->word.clear(); }  // found; de-dup
+        b[i][j] = '.';                                      // mark on the active path
+        if(i+1<(int)b.size()) dfs(b,i+1,j,u);
+        if(i-1>=0)            dfs(b,i-1,j,u);
+        if(j+1<(int)b[0].size()) dfs(b,i,j+1,u);
+        if(j-1>=0)            dfs(b,i,j-1,u);
+        b[i][j] = c;                                       // restore (path-scoped mark only)
+    }
+    vector<string> res;
+public:
+    vector<string> findWords(vector<vector<char>>& board, vector<string>& words) {
+        for (auto& w : words) add(w);
+        for (int i=0;i<(int)board.size();++i)
+            for (int j=0;j<(int)board[0].size();++j) dfs(board,i,j,rt);
+        return res;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample: board (o a a n / e t a e / i h k r / i s s c), words (oath,pea,eat,rain)]
+oath: DFS from o(0,0) takes edge o->a(0,1)->t(1,1)->h(2,1); reaches oath's terminal -> report, clear it.\\
+eat: DFS from e(1,3) takes e->a(1,2)->t(1,1); reaches eat's terminal -> report.\\
+pea: no cell holds 'p', so the root has no matching edge from any start -> never explored, not found.\\
+rain: r(2,3) matches the trie edge r, but r's grid neighbours are e(1,3), c(3,3), k(2,2) -- none is 'a',
+so the branch prunes one step in -> not found. Result = (oath, eat). \checkmark\ matches official output.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time: building the trie is $O(\sum|\text{word}|)$; the DFS explores grid cells with a \emph{depth
+bounded by the longest word} and prunes hard against the trie, so worst-case $O(mn\cdot 4^{L})$ with
+$L\le 10$, but the trie cuts the constant enormously (in practice a small fraction of that). Memory:
+$O(\sum|\text{word}|)$ nodes plus $O(L)$ recursion depth. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Live slips: (i) a \emph{global} visited array never unmarked -- blocks a cell for other words, under
+reporting; always mark/restore on the active path. (ii) forgetting to \code{clear()} the found word so a
+word reachable by two paths is reported twice. (iii) indexing \code{ch[c-'a']} before checking $c$ is a
+lowercase letter and not the sentinel. \emph{Variant:} store $\mathit{cnt}$/child-counts and physically
+drop a terminal's subtree once found -- the ``prune consumed words'' trick that turns a passing solution
+into a top-ranked one.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A trie is not just a lookup -- its subtree \emph{is} the set of matching words, so prefix
+        counts, wildcard branch-outs, and top-$k$ suggestions are all ``walk, then work on one subtree''
+        (\defref{c08-wildcard}, \defref{c08-prefixcount}, \coderef{c08-autocomplete}).
+  \item The killer pattern is \textbf{trie as a live filter over a search}: Word Search II prunes a grid
+        DFS the instant the letters stop matching any target's prefix (\probref{c08-wordsearch}).
+  \item Richer queries are one field away: a per-node $\mathit{cnt}$, sum, or word-string turns the plain
+        node into a counting / autocomplete / dedup engine.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Cold-write \coderef{c08-wordsearch-soln}} and re-derive the \{oath, eat\} output on the
+        official board by hand (\figref{c08-wordsearch}).
+  \item \textbf{Add a \code{cnt} field} and answer \code{countPrefix("ca")}$=4$ on $\mathcal{W}$ without
+        any DFS, matching \exref{c08-apps-run} above.
+  \item \textbf{Read ahead}: replace the $26$ letters by $2$ bits and the same subtree-walk becomes the
+        max-XOR greedy of \secref{c08-binary} -- and the top-$k$ heap here is Chapter~10's (\chref{c07})
+        reused verbatim.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you turn the query into ``walk to a node, then operate on its subtree'' rather than a scan?
+  \item In a grid/DFS filter, is the visited mark restored so other words may reuse the cell?
+  \item Does a found word get de-duplicated at the terminal, not via an output set?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Design Add and Search Words Data Structure}{LeetCode 211}
+    {https://leetcode.com/problems/design-add-and-search-words-data-structure/}{LC Medium · L4}
+    {Support \texttt{addWord} and \texttt{search(word)} where \texttt{word} may contain '.' matching any
+    letter. Insert is the plain trie insert; search walks letters, and \emph{at a '.' recurses into every
+    non-null child} (a small DFS, \defref{c08-wildcard}), succeeding if any branch consumes the rest of the
+    word at an $\mathit{end}$ node. Keep the search bounded by returning early on the first success; the
+    worst case is all-dots but real inputs stay cheap because dots only branch over edges that exist.}
+  \practice{Search Suggestions System}{LeetCode 1268}
+    {https://leetcode.com/problems/search-suggestions-system/}{LC Medium · L3}
+    {After each typed character, return up to three lexicographically smallest product words sharing the
+    current prefix. Build a trie of the products; walk the typed prefix to its node, then run an
+    \emph{in-order} (a--z) DFS of its subtree collecting at most three terminal words -- lexicographic
+    order falls out of visiting children in letter order, so you stop at three with no heap. This is
+    \coderef{c08-autocomplete} specialised to $k=3$ and rank $=$ lexicographic.}
+  \practice{Longest Word in Dictionary}{LeetCode 720}
+    {https://leetcode.com/problems/longest-word-in-dictionary/}{LC Easy · L3}
+    {Return the longest word all of whose prefixes are themselves in the dictionary (ties: lexicographically
+    smallest). Insert all words into a trie, then DFS the trie: a node is ``buildable'' only if every
+    ancestor back to the root is reachable and the word so far is complete -- so prune any child whose
+    own path contains a non-terminal gap. Track the longest (and lex-smallest on ties) terminal word seen
+    during that DFS; the trie makes the ``all prefixes present'' test a walk you already performed.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 11.2 Dictionary Applications]
+One node layout, four applications. \textbf{Wildcard}: '.' branches into every child (\defref{c08-wildcard}).
+\textbf{Prefix count/sum}: maintain a per-node $\mathit{cnt}$ on insert, answer with one walk
+(\defref{c08-prefixcount}). \textbf{Autocomplete top-$k$}: subtree DFS through a size-$k$ heap
+(\coderef{c08-autocomplete}, heap from \chref{c07}). \textbf{Word Search II}: build a trie of the words,
+DFS the grid carrying a trie pointer, prune when a letter has no edge, report and clear at terminals
+(\probref{c08-wordsearch}). The unifying idea: \emph{a subtree is the set of matching words}.
+\selftest{
+  \item Why does \code{countPrefix} with a maintained $\mathit{cnt}$ avoid a DFS?
+  \item At a wildcard '.', what exactly does the search do differently?
+  \item State the ``trie as a live filter'' idea and name the solved problem that uses it.
+  \item How do you report each found word exactly once without an output visited-set?
+  \item Which prior chapter's tool supplies the autocomplete top-$k$ frontier?
+}
+\end{recallbox}

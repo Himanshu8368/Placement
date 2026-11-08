@@ -1,0 +1,546 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  8.2  AVL Trees                                sec:c06-avl
+%  Exports: def:c06-bal  thm:c06-avlbound  lem:c06-onerot  thm:c06-fixheight
+%           fig:c06-avlfig  lst:c06-avlrot  lst:c06-avlins  ex:c06-avl-run
+%           prob:c06-avl  lst:c06-avl-soln   (practice: GFG AVL deletion)
+% =====================================================================
+\section{AVL Trees}\label{sec:c06-avl}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item State the one legal local move on a BST and what it provably preserves. (The rotation; the
+        sorted inorder line is unchanged -- \thmref{c06-rotation}, \chref{c05}.)
+  \item A node is a \emph{zig-zig} (single rotation) or \emph{zig-zag} (double rotation) violation --
+        how do you tell which, from the heavy child's lean? (\defref{c06-rotcases},
+        \figref{c06-zigzag})
+  \item Every Chapter-7 routine costs $\bigO{h}$; if we force $h=\bigO{\log n}$, what do all of them
+        become? ($\bigO{\log n}$ -- \defref{c06-heightcost}.)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Section 8.1 gave you the rotation and the licence to reshape for free (\thmref{c06-rotation}); what it
+did \emph{not} give you is a rule for \emph{when} to rotate so that the tree can never rot into the
+chain $C$. The oldest such rule is due to Adelson-Velsky and Landis -- the \term{AVL tree} -- and it is
+the most honest of the four strategies in this chapter: it \emph{demands} that every node be within
+one level of balance, and it \emph{pays} for that demand with a rotation on the spot where any edit
+breaks the promise. The reward is a hard worst-case bound: an AVL tree of $n$ keys has height at most
+$1.44\,\lg(n+2)$ -- provably, for every input order (\thmref{c06-avlbound}). This section derives that
+bound from a Fibonacci-style counting argument, shows the exact bookkeeping (a height field and a
+balance factor carried up the single access path), and proves the elegant stopping rule: after one
+insertion \emph{at most two rotations} are ever needed, and you stop at the first ancestor whose height
+did not change (\thmref{c06-fixheight}). We end by implementing insertion cold on GeeksforGeeks'
+AVL-insertion judge, which asks for the preorder of the tree you build.
+\textbf{Prerequisites.} Sections 8.1 (rotations, \secref{c06-rotations}) and all of Chapter~7
+(\chref{c05}); preorder is used only as an output format, defined in \chref{c03}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item carry a per-node height and balance factor and update them on the way back up an insertion; \hfill\lv{3}
+  \item classify a violation at the lowest unbalanced ancestor and apply the right one/two rotation; \hfill\lv{3}--\lv{4}
+  \item prove the $\le 1.44\lg(n+2)$ height bound from the minimum-node recurrence; \hfill\lv{4}--\lv{5}
+  \item implement AVL insertion (and reason about deletion) so the tree never degenerates. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- must stay short, worst case]
+\reckey{a keyed set/map that must answer \emph{every} operation in guaranteed $\bigO{\log n}$, with no
+randomness and no amortisation -- you own the balance and refuse to let a bad input order hurt you.}
+\recuse{
+  \item ``insert/delete these keys, keep it fast, print a traversal'' -- AVL insertion, the GFG judge
+        (\probref{c06-avl});
+  \item database / filesystem indexes where worst-case latency matters -- the strict AVL rule beats a
+        lazy one;
+  \item you need rank/select on a \emph{keyed} set and can augment each node -- add a size field to the
+        exact same machinery (\secref{c06-treaps} reuses it).
+}
+\recnotuse{
+  \item you are happy with the library -- \code{std::set}/\code{map} already balance (red-black,
+        \secref{c06-redblack}); reach for AVL only when you must customise the node;
+  \item the keys arrive adversarially but you just want \emph{expected} $\bigO{\log n}$ with less case
+        work -- a treap (\secref{c06-treaps}) trades the four cases for a coin flip;
+  \item the tree models a \emph{sequence}, not a set of keys -- implicit treap (\secref{c06-treaps}),
+        not AVL.
+}
+One-line test: \emph{do you need to \textbf{own} the height, exactly, on every single edit? Then pay
+AVL's strict tax and rotate on the spot.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+The chain $C$ of \figref{c06-chain} is what happens when nobody is watching the height. To keep a BST
+short, pick a property that (i) is \emph{local} -- checkable at one node from its two children -- so you
+never scan the tree, and (ii) is \emph{strong enough} to force global logarithmic height. AVL's property
+is blunt and perfect: at every node, the heights of the left and right subtrees differ by at most one.
+Call that difference the \term{balance factor}. Enforce $|\text{BF}|\le 1$ everywhere and the tree
+cannot grow a long spine: every time a descent goes two levels in one direction, a rotation kicks in and
+bends it back.
+
+Because the check is local, the \emph{only} place a rotation can be needed is along the single
+root-to-leaf path you just walked to insert (or delete) a key -- the one path whose subtree heights
+changed. You climb back up that path, and at the first node whose balance factor is now $\pm 2$, you fix
+it with the one- or two-rotation recipe of \defref{c06-rotcases} and \emph{stop}: \thmref{c06-fixheight}
+shows that the repaired subtree is exactly as tall as it was before your edit, so every higher ancestor
+is untouched. This is why AVL is cheap -- a single descent, a single climb, and never more than two
+rotations -- despite its fearsome reputation.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape]
+  % before: 1 -> 2 -> 3 chain, BF(1)=+2 violation (RR from node 1's perspective using BF=H(L)-H(R))
+  \node[troot]  (b1) at (0,0)     {$1$};
+  \node[tnode]  (b2) at (1.5,-1.2) {$2$};
+  \node[tleaf]  (b3) at (3.0,-2.4) {$3$};
+  \draw (b1) -- (b2); \draw (b2) -- (b3);
+  \node[annot, font=\scriptsize,text=warningred] at (0.9,0.55) {$\bal=-2$};
+  \node[annot, font=\scriptsize] at (-1.1,-1.2) {$\bal=-1$? no:\\ node $1$ heavy RIGHT};
+  \node[annot, align=left, font=\scriptsize] at (1.5,-3.7) {insert $1,2,3$: node $1$ now at
+    $\bal=-2$ (the RR case)};
+  % arrow
+  \draw[flow, double] (4.3,-1.4) -- (5.7,-1.4) node[midway, above, font=\scriptsize] {rotateLeft(1)};
+  % after: 2(1,3)
+  \node[troot]  (a2) at (7.2,0)     {$2$};
+  \node[tleaf]  (a1) at (6.0,-1.2) {$1$};
+  \node[tleaf]  (a3) at (8.4,-1.2) {$3$};
+  \draw (a2) -- (a1); \draw (a2) -- (a3);
+  \node[annot, font=\scriptsize,text=successgreen] at (7.2,0.6) {all $\bal\in\{-1,0,1\}$};
+  \node[annot, align=left, font=\scriptsize] at (7.2,-2.6) {height $1$, inorder $1,2,3$\\ \emph{identical}
+    -- \thmref{c06-rotation}};
+\end{tikzpicture}
+\caption{AVL's whole job in one picture. Inserting $1,2,3$ (a mini chain $C$) pushes node $1$'s balance
+factor to $-2$: its two subtrees now differ in height by two, violating $|\bal|\le 1$. That is the RR
+case, cured by a single \texttt{rotateLeft(1)} that lifts $2$ to the root: $2\to(1,3)$, every balance
+factor legal, height back to $1$, inorder untouched. The same repair, run on the full $1,\dots,7$, yields
+the balanced twin of \figref{c06-chain}.}\label{fig:c06-avlfig}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{The balance factor and the AVL invariant}{c06-bal}
+Store at each node $v$ the height $\height(v)$ of its subtree (with $\height(\nil)=-1$) and the
+\term{balance factor} $\bal(v)=\height(v.\mathit{left})-\height(v.\mathit{right})$. A tree is
+\term{AVL} if for \emph{every} node, $\bal(v)\in\{-1,0,+1\}$ -- the \term{AVL invariant}. The set of
+nodes with $\bal(v)=\pm 2$ after an edit are exactly the ones needing repair.
+\end{definition}
+
+\noindent\textbf{In plain words.} Every node keeps a tiny integer that says ``how lopsided am I?'' AVL
+forbids any node from being more than one level lopsided, and each node \emph{reports} its own lopsidedness
+in $\bigO{1}$, so checking the whole tree is only checking the nodes you actually touched.
+
+\begin{theorem}{An AVL tree has height $\le 1.44\,\lg(n+2)$}{c06-avlbound}
+If $T$ is AVL with $n$ nodes and height $h$, then $h \le 1.44\,\lg(n+2)$ (all logs base $2$). Equivalently
+$n \ge N(h)$ where $N(h)$ is the fewest nodes an AVL tree of height $h$ can have.
+\end{theorem}
+\begin{proofbox}[$N(h)$ is a shifted Fibonacci number]
+Count the \emph{smallest} AVL tree of height $h$. Its two children must be AVL; to minimise nodes one
+child has height $h-1$ and, because $|\bal|\le 1$, the other has height at least $h-2$. Making both as
+small as possible gives the recurrence $N(h)=N(h-1)+N(h-2)+1$ with $N(0)=1$, $N(1)=2$. Subtracting $1$
+throughout, $M(h)=N(h)+1$ satisfies $M(h)=M(h-1)+M(h-2)$, the Fibonacci recurrence, so
+$N(h)=F_{h+3}-1$, where $F$ is the Fibonacci sequence. Fibonacci grows like $\varphi^k$ with
+$\varphi=\tfrac{1+\sqrt5}{2}\approx 1.618$, so any AVL tree with $n$ nodes obeys
+$n \ge F_{h+3}-1 > \varphi^{\,h+1}-1$, i.e.\ $\varphi^{\,h+1} < n+2$. Taking $\lg$,
+$(h+1)\lg\varphi < \lg(n+2)$, hence $h < \lg(n+2)/\lg\varphi - 1 \le 1.4404\,\lg(n+2)$. The constant
+$\lg\varphi\approx 0.694$ is exactly why $1.44=1/0.694$ appears. \end{proofbox}
+\begin{insightbox}
+The worst AVL shape -- the one that hides the most height behind the fewest nodes -- is a
+Fibonacci-spiral of minimal subtrees, not a chain. AVL is strong enough to make the chain impossible but
+does \emph{not} insist on a perfect binary tree; the gap between $1.44\lg n$ and the ideal $\lg n$ is the
+price of the local, cheap rule. Red-black (\secref{c06-redblack}) pays a slightly bigger constant
+($2\lg(n+1)$) for fewer rotations; treaps (\secref{c06-treaps}) hit $\bigO{\log n}$ only \emph{in
+expectation} but need no case analysis at all.
+\end{insightbox}
+
+\begin{lemma}{A rotation makes the restructured subtree legal in one/two turns}{c06-onerot}
+At a lowest unbalanced node $w$ (so $|\bal(w)|=2$) whose children are themselves balanced, the repair of
+\defref{c06-rotcases} -- a single rotation for a zig-zig (LL, RR) and two for a zig-zag (LR, RL) --
+produces a subtree rooted at the middle node of $\{w,\text{child},\text{grandchild}\}$ in which all
+three top balance factors lie in $\{-1,0,+1\}$, preserving the inorder of $w$'s subtree.
+\end{lemma}
+\begin{proofbox}
+By \thmref{c06-rotation} the rotation preserves inorder, so the three keys keep their relative order; the
+new root is the median. In a zig-zig the three nodes were collinear on one side, so after the single
+rotation they form a height-$1$ balanced triple (the two off-path subtrees were, by the choice of $w$ as
+\emph{lowest} violator, already within one level, and the promotion evens them out). In a zig-zag the
+child sits \emph{between} $w$ and the grandchild; the first rotation straightens that child into a
+zig-zig, and the second is the zig-zig case just handled. Either way the three involved nodes end legal
+and every off-path subtree $A,B,C$ keeps its exact contents. \end{proofbox}
+
+\begin{theorem}{After one insertion, $\le 2$ rotations suffice and you stop early}{c06-fixheight}
+Insert a key into an AVL tree. Walking from the insertion point up to the root, let $w$ be the first node
+with $\bal(w)=\pm 2$. Then: (i) every node strictly below $w$ on the path is already balanced; (ii) the
+\defref{c06-rotcases} repair at $w$ makes $w$'s restructured subtree exactly as tall as it was
+\emph{before} the insertion; and (iii) consequently all of $w$'s ancestors keep their old balance factors
+-- a single repair suffices and the walk may stop. Deletion can require more than one repair (a
+shortened subtree propagates upward), but still $\bigO{\log n}$ rotations total.
+\end{theorem}
+\begin{proofbox}
+Only the path to the inserted leaf changed height, so the first $\pm2$ node encountered going up is the
+\emph{lowest} violator -- its children are balanced, exactly \lemref{c06-onerot}'s hypothesis. That
+lemma's repair turns the offending collinear/zig-zag triple into a balanced triple whose height equals
+the pre-insertion height of $w$'s subtree: before the insertion, $w$'s heavy side had height one more
+than its light side (differing by at most $1$); the inserted key lengthened the heavy side by one (making
+$\bal=\pm2$); re-rooting the triple at the median redistributes so the subtree is exactly the old heavy
+height again. Since the height $w$'s parent sees is unchanged, the parent's balance factor is unchanged,
+and by induction none of the ancestors becomes unbalanced -- so we stop. For deletion the subtree can
+\emph{shrink} by one at the first violator, and a shrink does propagate, which is why deletion may need
+several repairs up the path -- but each is $\bigO{1}$ and the path has length $\bigO{h}=\bigO{\log n}$ by
+\thmref{c06-avlbound}. \end{proofbox}
+
+\subsection{The algorithm: rotate, then re-ascend only until heights stop changing}
+
+The whole structure fits in three small helpers: a height accessor, an update that recomputes one node,
+and a \texttt{balance} routine that applies \lemref{c06-onerot}. Insertion is Chapter~7's recursive
+insert (\secref{c05-insert-delete}) with one extra line -- call \texttt{balance} on the way back up. That
+line is the entire difference between a rotting BST and a guaranteed $\bigO{\log n}$ one.
+
+\begin{lstlisting}[caption={Balance factors and the four-case repair -- the reuse of Section 8.1's rotations with height upkeep}, label={lst:c06-avlrot}]
+int H(Node* n)        { return n ? n->ht : -1; }            // height, null = -1
+void upd(Node* n)     { n->ht = 1 + max(H(n->left), H(n->right)); }
+int  BF(Node* n)      { return H(n->left) - H(n->right); }  // balance factor
+
+Node* rotateLeft(Node* x){ Node* y = x->right;              // x->right = B, y->left = x
+    x->right = y->left; y->left = x; upd(x); upd(y); return y; }
+Node* rotateRight(Node* y){ Node* x = y->left;              // mirror image
+    y->left = x->right; x->right = y; upd(y); upd(x); return x; }
+
+// Assumes n's children are already AVL; returns the (possibly rotated) subtree root.
+Node* balance(Node* n){
+    upd(n);
+    if (BF(n) == 2) {                                   // heavy LEFT
+        if (BF(n->left) < 0) n->left = rotateLeft(n->left);   // LR -> LL
+        return rotateRight(n);                                // then fix LL
+    }
+    if (BF(n) == -2) {                                  // heavy RIGHT
+        if (BF(n->right) > 0) n->right = rotateRight(n->right); // RL -> RR
+        return rotateLeft(n);                                   // then fix RR
+    }
+    return n;                                           // already balanced
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={AVL insertion -- Chapter 7's insert plus one balance call on the return path}, label={lst:c06-avlins}]
+Node* insert(Node* n, int key){
+    if (n == nullptr) return new Node(key);            // plant the leaf (as in Ch 7)
+    if (key < n->key)      n->left  = insert(n->left,  key);
+    else if (key > n->key) n->right = insert(n->right, key);
+    else                   return n;                   // distinct keys: no re-insert
+    return balance(n);                                  // fix THIS node on the way back up
+}
+\end{lstlisting}
+
+\begin{complexitybox}
+Time $\bigO{\log n}$: the recursion is a single root-to-leaf descent of length $\bigO{h}$, and
+\thmref{c06-avlbound} is what makes $h=\bigO{\log n}$ instead of $n$; the work per level is a constant
+$\bigO{1}$ \texttt{balance} (at most two rotations by \thmref{c06-fixheight}). Memory $\bigO{\log n}$ for
+the recursion stack. Verdict: every one-descent operation is \emph{guaranteed} $\bigO{\log n}$, worst
+case -- the promise the chain $C$ kept breaking.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{AVL insertions on the running examples $C$ and $Z$}{c06-avl-run}
+\emph{Chain $C$ ($1,2,\dots,7$), eagerly balanced.} Insert $1,2$ -- fine. Insert $3$: the path
+$1\!\to\!2\!\to\!3$ leaves node $1$ at $\bal=-2$ (an RR), so \texttt{balance(1)} does one
+\texttt{rotateLeft(1)} giving $2\to(1,3)$ (\figref{c06-avlfig}). Insert $4$: tree $2\to(1,3\to(\_,4))$,
+legal. Insert $5$: node $3$ hits $\bal=-2$, \texttt{rotateLeft(3)} $\Rightarrow$ $2\to(1,4\to(3,5))$.
+Insert $6$: node $2$ hits $\bal=-2$ (RR), \texttt{rotateLeft(2)} $\Rightarrow$
+$4\to(2\to(1,3),\,5\to(\_,6))$. Insert $7$: node $5$ hits $\bal=-2$, \texttt{rotateLeft(5)}
+$\Rightarrow$ the \emph{balanced twin} $4\to(2\to(1,3),\,6\to(5,7))$ of \figref{c06-chain}, height $2$,
+preorder $4,2,1,3,6,5,7$. Four single rotations, each at the lowest violator; the tree never grew past
+height $2$.\\
+\emph{Zig-zag order $30,10,40,20,25$.} Here eager balancing reveals a subtlety: by the time $25$ is
+added, the path is $30\!\to\!10\!\to\!20\!\to\!25$, and the \emph{lowest} node that goes illegal is $10$
+($\bal(10)=-2$, a right-right triple $10\!\to\!20\!\to\!25$), \emph{not} $30$. \texttt{balance} does one
+\texttt{rotateLeft(10)} $\Rightarrow$ $20\to(10,25)$, so the whole tree becomes
+$30\to(20\to(10,25),\,40)$ -- height $2$, and node $30$'s balance factor never even reached $\pm2$.
+Section 8.1 froze this sequence as the plain-BST shape violating at $30$ to \emph{illustrate} the LR case
+(\figref{c06-zigzag}); \thmref{c06-fixheight} is exactly why a running AVL repairs the lower node first
+and stops. A genuine LR during insertion needs the zig-zag to be the \emph{lowest} violation, e.g.\
+$30,10,20$: node $30$ hits $\bal=+2$ with child $10$ leaning right, so we \texttt{rotateLeft(10)} then
+\texttt{rotateRight(30)} $\Rightarrow$ $20\to(10,30)$. Inorder $10,20,25,30,40$ is preserved throughout
+all these edits, honouring \thmref{c06-rotation}.
+\end{example}
+
+\begin{tracebox}[Eager $1,2,3$ and a real LR at $30,10,20$, pointer by pointer]
+\textbf{$1,2,3$:} after inserting $3$, $\text{BF}(1)=\height(\_)-\height(2\!\to\!3)=-1-1=-2$ (RR).
+\texttt{rotateLeft(1)}: $y:=2$; $1\to$right $:=2$'s left (null); $2\to$left $:=1$; \texttt{upd(1)},
+\texttt{upd(2)}. Root $=2\to(1,3)$, all $\bal\in\{-1,0,1\}$. \checkmark\\
+\textbf{$30,10,20$:} insert $30$, then $10$ (left), then $20$ ($<\!30$ go left, $>\!10$ go right).
+Going up: $\text{BF}(10)=-1$ (ok), $\text{BF}(30)=\height(10)-\height(\_)=1-(-1)=+2$ (heavy LEFT, child
+$10$ leans right: LR). \texttt{n->left=rotateLeft(10)}: $20$ up, $10$ left, giving $30\to(20\to(10,\_),\_)$;
+then \texttt{rotateRight(30)}: $20$ up, $30$ right, $20$'s right (null) to $30$'s left $\Rightarrow$
+$20\to(10,30)$. Two rotations, inorder $10,20,30$ intact. \checkmark
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Deletion is the hard half}: after splicing a node (\thmref{c05-delete}), a subtree can
+        \emph{shrink}, and \thmref{c06-fixheight} only guarantees early stopping for \emph{heights that
+        do not change}. You must re-balance every ancestor on the path -- still $\bigO{\log n}$ total, but
+        the case split is nastier (a null balance factor needs care). \hfill\lv{5}
+  \item \textbf{Size augmentation} turns AVL into an order-statistic tree (rank, kth) -- the same
+        \texttt{upd} just also sums children's sizes; the rotations are unchanged. \hfill\lv{4}
+  \item \textbf{Relaxed AVL} -- AVL-like rules ($|\bal|\le 2$, or Fibonacci-weight) cut the rotation count
+        at the price of a worse constant, the ancestor of red-black's philosophy. \hfill\lv{4}--\lv{5}
+  \item \textbf{Iterative rebalance}: remember the path in a stack, then retrace it calling
+        \texttt{balance} -- the same asymptotics without deep recursion when $n$ is huge. \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c06-avl-pitfalls}
+
+\begin{warningbox}[Trap 1 -- forgetting to recompute heights on the way down, not up]
+A rotation changes \emph{two} nodes' heights. In \texttt{rotateLeft} you must \texttt{upd(x)} \emph{then}
+\texttt{upd(y)}, because $x$ moved below $y$; recomputing $y$ first reads $x$'s stale height and silently
+corrupts every balance factor above. The fix is exactly the two lines' order in \coderef{c06-avlrot}.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: recompute the promoted node before the demoted one}, basicstyle=\ttfamily\small, language=C++]
+x->right = y->left; y->left = x;
+upd(y); upd(x);   // y read x's OLD height -- corrupts BF all the way up
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: fix the lower node first, then its new parent}, basicstyle=\ttfamily\small, language=C++]
+x->right = y->left; y->left = x;
+upd(x); upd(y);   // x final, then y sees x's new height
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- rotating at the wrong ancestor, or not stopping]
+\thmref{c06-fixheight}: fix the \emph{lowest} node with $|\bal|=2$ and (for insertion) then stop -- its
+subtree returns to the old height, so ancestors are already fine. Rotating at a higher node first is
+wrong: the lowest violator's children may not be balanced, breaking \lemref{c06-onerot}'s hypothesis.
+Conversely for \emph{deletion} you must \emph{not} stop -- a shrinking subtree propagates (\secref{c06-avl-pitfalls}, Var.~1).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- the LR/RL child rotation forgets to reattach]
+In \texttt{balance}, the first rotation of a zig-zag must be written back: \texttt{n->left =
+rotateLeft(n->left)}. Drop the assignment and the promoted child is orphaned -- the tree loses a whole
+subtree and the judge prints a short traversal (a \textbf{WA} on the GFG preorder check).
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The anchor is GeeksforGeeks' AVL insertion judge: insert keys one by one into an AVL tree and print the
+preorder of the result. It is the purest possible AVL drill -- no queries, just ``build it balanced and
+show me the shape'' -- so a single misplaced rotation or stale height is instantly visible in the
+traversal.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c06-avl}{AVL Tree Insertion}{GeeksforGeeks}
+  {https://www.geeksforgeeks.org/problems/avl-tree-insertion/1}{GFG Hard · L4}
+  {per-node height and balance factor, four-case rebalancing, recursion unwinds the single access path}
+
+\begin{problemstatement}[AVL Tree Insertion]
+You are given $t$ test cases. Each gives an integer $n$ and a sequence of $n$ \textbf{distinct} keys
+inserted \emph{one by one, in order,} into an initially empty AVL tree. After each insertion the tree is
+rebalanced so the AVL invariant $|\bal(v)|\le 1$ holds everywhere. For each test case print the
+\textbf{preorder traversal} (root, left, right) of the resulting AVL tree, keys separated by spaces.
+Typical limits: $1\le n\le 10^{3}$ per case, keys fit in a 32-bit integer.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+This is \coderef{c06-avlins} and \coderef{c06-avlrot} assembled into a program with I/O and a preorder.
+Do not hand-code four separate cases -- write one \texttt{balance} and call it on the way up.
+\peek{When you recursively insert into the left or right child, the child's subtree root may change
+(rotation). Where must you re-balance, and how do you carry the returned height upward?}
+\nudge{Write \texttt{insert} so it \emph{returns} the (new) subtree root, and \texttt{balance} the current
+node right after the recursive call. \texttt{balance} recomputes the height, checks $|\bal|$, and applies
+\defref{c06-rotcases}: heavy side and that child's lean decide single vs double.}
+\fullhint{Use \texttt{H}, \texttt{upd}, \texttt{BF} and the two rotations exactly as in \coderef{c06-avlrot}.
+\texttt{balance(n)}: \texttt{upd(n)}; if \texttt{BF(n)==2} then (if \texttt{BF(n->left)<0}
+\texttt{n->left=rotateLeft(n->left)}) return \texttt{rotateRight(n)}; symmetric for $-2$; else return
+\texttt{n}. Then \texttt{insert} is Ch.7's descent with \texttt{return balance(n)} on the way up, and the
+driver reads keys, calls \texttt{root=insert(root,x)}, and prints \texttt{preorder(root)}.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+We must reproduce the AVL insertion algorithm faithfully and then emit a specific traversal, so the
+judge can compare the exact tree we built. Two things are load-bearing: (i) the tree must be balanced
+after \emph{every} key, not just at the end -- though because AVL rotations are deterministic given the
+arrival order, building balanced-on-each-insert and reading the final preorder is the same as inserting
+and rebalancing throughout; and (ii) our rotations must update heights in the correct order so balance
+factors above stay honest. There is no query to answer -- the \emph{shape is the answer} -- which makes
+this an ideal correctness drill.
+
+\solstep{Key Observations}
+\begin{observation}
+Only the recursion path from the root to the freshly-planted leaf can have changed height, so
+\thmref{c06-fixheight} says at most one node on it is illegal after an insertion -- and \texttt{balance}
+on the unwinding recursion finds and fixes it with $\le 2$ rotations.
+\end{observation}
+\begin{observation}
+The heavy child's own lean ($\texttt{BF(child)}$'s sign) separates the single-rotation zig-zig cases
+(LL, RR) from the double-rotation zig-zag cases (LR, RL): same-sign lean is zig-zig, opposite-sign needs
+the child straightened first (\defref{c06-rotcases}).
+\end{observation}
+\begin{observation}
+Preorder is produced by the standard root-left-right walk (\chref{c03}); the only AVL-specific care is
+that the \emph{tree we walk} is the balanced one, so a wrong rotation shows up as a wrong traversal.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Insert all keys into a plain BST (\secref{c05-insert-delete}) and rebalance the whole tree once
+at the end by rebuilding from the sorted inorder.}
+{That produces \emph{a} balanced BST but \emph{not the AVL tree} the judge expects -- AVL's rotations are
+order-dependent, so the final shape differs from the median-halving rebuild (\figref{c06-chain}). Wrong
+preorder, \textbf{WA}. We must run AVL's local repair after each insertion.}
+\deadend{Code four separate rebalancing routines (LL, RR, LR, RL) chosen by inspecting two levels.}
+{Reproducible and bug-prone: the child rotation's write-back (Trap~3) is easy to forget, and you duplicate
+\texttt{upd} logic. The single \texttt{balance} that composes the two rotations is strictly less code.}
+\aha{Write the two rotations once (\coderef{c06-avlrot}), a \texttt{balance} that picks one or two based on
+the child's lean, and a Ch.7-style \texttt{insert} that calls \texttt{balance} on the way up. The four cases
+emerge from \texttt{BF(n)} and \texttt{BF(n->left/right)} without a case table.}
+\end{thinkbox}
+
+\solstep{Solution}
+Maintain at each node its key, height and two children. \texttt{H}/\texttt{upd}/\texttt{BF} as in
+\coderef{c06-avlrot}. \texttt{insert(n,key)}: recurse left or right by the BST rule, \emph{reassigning}
+the child to the returned (possibly rotated) root, then return \texttt{balance(n)}. \texttt{balance(n)}:
+\texttt{upd(n)}; if $\bal(n)=+2$ (heavy left) straighten the child if $\bal(\text{left})<0$ then
+\texttt{rotateRight(n)}; if $\bal(n)=-2$ symmetric; else return $n$ unchanged. The driver builds the tree
+per test case and prints \texttt{preorder(root)}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The built tree is the AVL tree; the traversal is its preorder]
+By induction on the number of inserted keys. Base: after the first key the single node has $\bal=0$, AVL.
+Inductive step: assume the tree is AVL before inserting $x$. \texttt{insert} performs Chapter~7's BST
+descent, so the inorder (sorted order) of the tree is exactly ``old keys plus $x$''; the recursive
+reassignment keeps every subtree correctly linked. Only the path to the new leaf changed height, so by
+\thmref{c06-fixheight} at most one node $w$ on it is illegal, and it is the \emph{lowest}. The unwinding
+calls \texttt{balance} at every path node; nodes below $w$ return unchanged ($|\bal|\le1$), and at $w$ the
+heavy-side/child-lean tests select precisely the \defref{c06-rotcases} repair, whose validity is
+\lemref{c06-onerot}. That repair leaves $w$'s subtree with the same inorder but a legal root, and (for
+insertion) its height equal to the pre-insert value, so every ancestor's $\bal$ is unchanged and their
+\texttt{balance} calls are no-ops. Hence the returned tree is AVL and stores exactly the keys inserted so
+far, completing the induction. The final \texttt{preorder} walk is root-left-right (\chref{c03}), the
+definition of preorder, so it matches the judge's expected traversal of that AVL tree. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={AVL Tree Insertion -- height-carrying balance plus a preorder walk (GeeksforGeeks)}, label={lst:c06-avl-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Node { int key; int ht; Node *left, *right;
+    Node(int k) : key(k), ht(0), left(nullptr), right(nullptr) {} };
+
+int  H (Node* n) { return n ? n->ht : -1; }
+void upd(Node* n) { n->ht = 1 + max(H(n->left), H(n->right)); }
+int  BF(Node* n) { return H(n->left) - H(n->right); }
+Node* rotateLeft(Node* x){ Node* y=x->right; x->right=y->left; y->left=x; upd(x); upd(y); return y; }
+Node* rotateRight(Node* y){ Node* x=y->left;  y->left=x->right; x->right=y; upd(y); upd(x); return x; }
+
+Node* balance(Node* n){
+    upd(n);
+    if (BF(n) == 2) { if (BF(n->left) < 0) n->left = rotateLeft(n->left); return rotateRight(n); }
+    if (BF(n) == -2){ if (BF(n->right) > 0) n->right = rotateRight(n->right); return rotateLeft(n); }
+    return n;
+}
+Node* insert(Node* n, int key){
+    if (!n) return new Node(key);
+    if (key < n->key)      n->left  = insert(n->left,  key);
+    else if (key > n->key) n->right = insert(n->right, key);
+    else                   return n;
+    return balance(n);
+}
+void preorder(Node* n){ if(!n) return; cout << n->key << " "; preorder(n->left); preorder(n->right); }
+
+int main(){
+    ios::sync_with_stdio(false); cin.tie(nullptr);
+    int t; cin >> t;
+    while (t--) {
+        int n; cin >> n; Node* root = nullptr;
+        for (int i = 0; i < n; ++i) { int x; cin >> x; root = insert(root, x); }
+        preorder(root); cout << "\n";
+    }
+    return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official-style sample: keys $21,26,30$]
+$21$: root. $26$: right of $21$; $\text{BF}(21)=-1$, $\text{BF}(26)=0$ -- balanced. $30$: path
+$21\!\to\!26\!\to\!30$. Unwind: $\text{balance}(30)$ no-op; $\text{balance}(26)$: $\text{BF}(26)=-1$
+no-op; $\text{balance}(21)$: $\text{BF}(21)=\height(\_)-\height(26\!\to\!30)=-1-1=-2$ (heavy right, child
+$26$ has $\text{BF}=-1$, not $>0$ $\Rightarrow$ RR single). \texttt{rotateLeft(21)}: $26$ up, $21$ left,
+$30$ right. Final tree $26\to(21,30)$, preorder $\;26\;\;21\;\;30$. \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n\log n}$: $n$ insertions each a $\bigO{\log n}$ descent-plus-repair (\thmref{c06-avlbound}
+bounds the height; \thmref{c06-fixheight} bounds the rotations at $\le2$ per key), plus $\bigO{n}$ for the
+single preorder walk. Memory $\bigO{n}$ for nodes and $\bigO{\log n}$ recursion stack. This is exactly
+what makes the same driver, run on the sorted worst case $1,\dots,n$, finish in $\bigO{n\log n}$ where the
+plain-BST construction of \probref{c06-treecons} would have ground to $\bigO{n^2}$. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+(1) \texttt{upd} order in a rotation (Trap~1). (2) Forgetting \texttt{else return n;} on a duplicate key --
+harmless here since keys are distinct, but a re-insert that recurses forever is a real bug elsewhere. (3)
+Printing trailing/leading spaces: the judge tokenises on whitespace, but keep the walk clean. \emph{Variant:}
+swap \texttt{preorder} for \texttt{inorder} and you should always read the sorted keys -- a fast
+sanity check that no rotation lost a subtree. \emph{Extension to deletion} needs the re-balance to run up
+the \emph{whole} path (Var.~1), not stop early.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \textbf{A local rule buys a global bound.} Keeping $|\bal|\le1$ at every node forces height
+        $\le 1.44\,\lg(n+2)$ (\thmref{c06-avlbound}) -- the chain $C$ becomes impossible.
+  \item \textbf{Balance is cheap because the fix is local.} Only the access path changed; one
+        \texttt{balance} call per level with $\le2$ rotations total (\thmref{c06-fixheight}) and you stop.
+  \item \textbf{Case work collapses into two tests.} $\texttt{BF}(n)$ picks the heavy side, and
+        $\texttt{BF}(\text{child})$ picks single-vs-double -- no four-branch table (\coderef{c06-avlrot}).
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{AVL deletion} -- the harder sibling: rebalance \emph{every} ancestor (heights can shrink),
+        practised on the GFG deletion judge below.
+  \item \textbf{Order-statistics AVL} -- store subtree \emph{size} alongside height; rotations are
+        identical, and you gain rank/kth queries -- the augmented-tree preview of \secref{c06-treaps}.
+  \item \textbf{Compare with the rebuild} -- LC 1382 balances a static BST by median-halving the inorder
+        ($\bigO{n}$, no rotations); AVL balances a \emph{dynamic} set one key at a time. Know when each wins.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you \texttt{upd} the demoted node before the promoted one in every rotation? (Trap~1.)
+  \item Did you reassign the child on the zig-zag's first rotation, \texttt{n->left = rotateLeft(n->left)}?
+        (Trap~3.)
+  \item On deletion, did you resist stopping early -- a shrunk subtree must propagate upward? (Var.~1.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{AVL Tree Deletion}{GeeksforGeeks}
+    {https://www.geeksforgeeks.org/problems/avl-tree-deletion/1}{GFG Hard · L4}
+    {Delete a key from an AVL tree and print the inorder of the result. Reuse \coderef{c06-avlrot}
+    verbatim; the only new wrinkle is \thmref{c06-fixheight}'s caveat: after Ch.7's successor-splice delete
+    (\thmref{c05-delete}) the subtree may be one shorter, so \texttt{balance} the \emph{entire} path back
+    to the root, not just the first violator. The four rotation cases at each level are unchanged. This is
+    the single most bug-prone routine in the chapter -- test the two-child delete and the null-balance
+    child carefully.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 8.2 AVL Trees]
+AVL enforces $|\bal(v)|\le1$ at every node, storing a height per node (\defref{c06-bal}); that local rule
+forces height $\le 1.44\lg(n+2)$ via the Fibonacci minimum-node count (\thmref{c06-avlbound}). Insert is
+Ch.7's descent plus one \texttt{balance} call on the way up (\coderef{c06-avlins}); a single $\texttt{BF}(n)$
+test plus the child-lean test picks the one- or two-rotation fix (\defref{c06-rotcases},
+\lemref{c06-onerot}). After an insertion the repair lands at the \emph{lowest} violator and stops, because
+the restructured subtree regains its old height -- $\le2$ rotations total (\thmref{c06-fixheight}). Every
+operation is thus guaranteed $\bigO{\log n}$, worst case -- the enemy of \probref{c06-treecons}'s chain is
+finally dead.
+\selftest{
+  \item Why does $|\bal|\le1$ forbid a linear-height tree, and what shape \emph{is} the tallest AVL?
+  \item Give the balance factors before/after \texttt{rotateLeft(1)} on the chain $1\to2\to3$.
+  \item Why may insertion stop at the first repaired ancestor but deletion may not?
+  \item In \texttt{balance}, what does $\texttt{BF(n->left)}<0$ tell you to do before \texttt{rotateRight(n)}?
+  \item State the AVL height bound with its constant and derive it in one line from $N(h)$'s recurrence.
+}
+\end{recallbox}

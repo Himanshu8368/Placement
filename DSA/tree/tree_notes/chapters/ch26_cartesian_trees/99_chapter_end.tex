@@ -1,0 +1,901 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  Chapter 9 review -- the 15-section revision contract (chapter_end.txt).
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\propref/\defref/\exref/\figref/\lemref/\corref.
+%  No derivations.  Summit: CF 817D Imbalanced Array
+%  (sum over all subsegments of max-minus-min -- a signed sum of
+%   a[i] * (span where it is max) - a[i] * (span where it is min), each
+%   span read off one monotonic-stack pass; two contributions, one stack
+%   discipline).  NOTE: the old ch06 header called 817D "Showmen"; the
+%  correct title is "Imbalanced Array" -- corrected here.
+% =====================================================================
+
+\chaptersection{Chapter 9 Summary}
+
+One sentence: \emph{read a tree straight out of an array with a single stack}. Chapter~8 (\chref{c06})
+kept a tree short by \emph{editing} it -- insert, delete, then pay a rotation to repair the height. This
+chapter never edits anything: it starts from a bare array $a[1..n]$ and asks \emph{what tree is already
+hiding inside these numbers}. The answer is the \term{Cartesian tree} -- inorder $=$ the index order, a
+heap on the values -- and the machine that reads it out in one left-to-right pass is the \term{monotonic
+stack} (kit line~(1), \coderef{c26-kit}). Once you see that a node's subtree is exactly the maximal window in which
+it is the minimum (\lemref{c26-span}), a whole problem family collapses onto two stack passes: largest
+rectangle, subarray minimums, next-greater, sliding-window extremes, the range-minimum reduction, and the
+chapter's Summit. Every entry below is a pointer, not a re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.25\linewidth} p{0.47\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement (with conditions)} & \textbf{Where} \\
+\midrule
+Two orders, one tree & Cartesian tree of $a$: inorder $=$ index order $1..n$, and a min-heap on the
+  values (parent $\le$ children). & \defref{c26-cartesian} \\
+Uniqueness & With \emph{distinct} values the Cartesian tree is unique; its root is the position of the
+  minimum, and the two sides recurse. & \thmref{c26-unique} \\
+Subtree $=$ dominance window & Node $i$'s subtree spans exactly the maximal window $(L_i,R_i)$ in which
+  $a[i]$ is the minimum -- the nearest smaller index on each side bounds it. & \lemref{c26-span} \\
+Linear build & One increasing stack builds the tree in $\bigO{n}$: the popped links \emph{are} the parent
+  pointers; each index is pushed once, popped at most once. & \coderef{c26-stackbuild} \\
+The monotonic stack & Keep the stack values monotone; the moment a new element breaks monotonicity, the
+  popped element's answer (its nearest beating neighbour) is finally known. & \defref{c26-monostack} \\
+Rectangle decided at pop & A histogram bar's widest rectangle is fixed exactly when it is popped: width
+  $=i-L-1$ from the popping index $i$ and the new stack top $L$. & \thmref{c26-hist} \\
+Range minimum $=$ ancestor & In the min-Cartesian tree the minimum of $a[l..r]$ is the value at
+  $\lca(l,r)$; the range's least element is the shared ancestor of its endpoints. & \lemref{c26-cartmin},
+  \thmref{c26-rmqlca} \\
+Cartesian $=$ treap & The min-Cartesian tree of $a$ \emph{is} the treap keyed by index with priority $=$
+  value; a plain BST built by insertion order is a Cartesian tree with priority $=$ arrival time. &
+  \propref{c26-carters-treap} \\
+Random permutation $\to$ random BST & Inserting a uniformly random permutation yields a random treap, so
+  its expected height is $\bigO{\log n}$ -- \thmref{c06-exptheight} quoted, never re-proved. &
+  \thmref{c26-randbst} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter -- read the extremum structure out of the array with one
+stack, then spend it.}}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.19\linewidth} l l p{0.29\linewidth} p{0.155\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Time} & \textbf{Memory} & \textbf{When to use (deciding phrase)} & \textbf{Code} \\
+\midrule
+Cartesian stack build
+  & $\bigO{n}$ & $\bigO{n}$
+  & ``turn an array into its min/max-tree in one pass''
+  & \coderef{c26-stackbuild} \\
+Largest rectangle
+  & $\bigO{n}$ & $\bigO{n}$
+  & ``widest bar where each height is the minimum''
+  & \coderef{c26-hist84-soln} \\
+Sliding-window max (deque)
+  & $\bigO{n}$ & $\bigO{k}$
+  & ``extreme inside every length-$k$ window''
+  & \coderef{c26-deque} \\
+RMQ via Cartesian $+$ LCA
+  & $\bigO{n\log n}$ pre & $\bigO{n\log n}$
+  & ``many static range-minimum queries; $\bigO{\log n}$ each''
+  & \coderef{c26-rmq1647-soln} \\
+Imbalanced-Array contribution (Summit)
+  & $\bigO{n}$ & $\bigO{n}$
+  & ``sum a per-subarray extremum over all subarrays''
+  & \coderef{c26-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches. It decides \emph{whether a
+monotonic stack is even the right tool} -- a follower never reaches for a stack when the array will be
+edited between queries (that is a segment tree), nor trusts a one-pass stack to answer an \emph{arbitrary}
+range question.
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You have an array and a range/window question. Which engine?
+  |
+  |-- will the array be EDITED between queries (point update, then ask)?
+  |     +-- a one-pass stack cannot remember edits -> segment tree [c13]
+  |     +-- static array + many range-min queries   -> Cartesian + LCA [9.3]
+  |
+  |-- is the answer "decided the moment an element meets a bigger/smaller neighbour"?
+  |     +-- that neighbour is a prev/next smaller (or greater) bound  [9.1, 9.2]
+  |     +-- monotonic stack: pop when monotonicity breaks, settle the pop  [9.2]
+  |
+  |-- largest rectangle / maximal grid / trapped water
+  |     +-- increasing stack + zero sentinel; width = i - L - 1 at pop   [9.2, LC 84/85/42]
+  |
+  |-- sum/min/max over ALL subarrays, or "how many ranges is a[i] the winner of"
+  |     +-- prev & next smaller (or greater) span; a[i] * (i-L) * (R-i)  [9.1 span, Summit 817D]
+  |     +-- ties -> asymmetric boundary (one side strict, one side not)  [Summit]
+  |
+  |-- max (or min) inside a SLIDING window of fixed width k
+  |     +-- monotonic DEQUE: drop smaller from back, expired from front  [9.2, LC 239]
+  |     +-- sliding-window MEDIAN (two heaps / multiset) is NOT here -> [c06]
+  |
+  |-- next greater element / daily temperatures / visible buildings
+  |     +-- decreasing stack; pop when a bigger value arrives            [9.2, LC 739/503]
+  |
+  |-- asked to "rebuild a max-tree" or insert at the far right
+  |     +-- the Cartesian / treap view; one walk down the right spine     [9.4, LC 998]
+  |
+  +-- want a balanced search tree you EDIT under adversarial keys
+        +-- that is rotations-by-chance -> treap, Chapter 8 [c06]; priorities here are read off, not chosen
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Forgetting the sentinel.} A histogram stack must flush what is left on it after the scan.
+        Append a $0$ (or sweep a virtual $i=n$ with height $0$) so every bar is popped and its width
+        finalised; without it the tallest rectangles hiding at the right end are lost (\thmref{c26-hist},
+        \coderef{c26-hist84-soln}).
+  \item \textbf{Reading the width as $i-L$ instead of $i-L-1$.} When index $i$ pops a bar $x$, the new
+        stack top $L$ is the \emph{first bar strictly shorter on the left}, so $x$ spans
+        $(L,\,i)$ exclusively: width $=i-L-1$. Off-by-one here fails the very first official sample
+        (\thmref{c26-hist}, \exref{c26-hist-run}).
+  \item \textbf{Choosing the wrong tie-break when counting spans.} With duplicate values, "the number of
+        subarrays where $a[i]$ is the minimum" double-counts a plateau unless one boundary is strict and
+        the other is not. Fix: \emph{prev strictly smaller, next smaller-or-equal} for minima (mirror the
+        inequalities for maxima). Both-strict undercounts, both-loose overcounts (\probref{c26-summit}).
+  \item \textbf{Confusing which neighbour bounds which side.} $L_i$ is the nearest index on the \emph{left}
+        that beats $a[i]$ and $R_i$ the nearest on the \emph{right}; the span count is $(i-L_i)(R_i-i)$.
+        Swapping them silently changes which elements you attribute each subarray to (\lemref{c26-span}).
+  \item \textbf{Letting the deque keep equal elements that are already expired.} A sliding-window deque
+        must drop out-of-window indices from the \emph{front} every step \emph{and} monotone-violators from
+        the back; forget the front eviction and a stale maximum reports past the window (\coderef{c26-deque}).
+  \item \textbf{Re-deriving treap balance in 9.4.} \thmref{c26-randbst} is a \emph{reduction}: a random
+        permutation is a random-priority treap, so \thmref{c06-exptheight} applies verbatim. Cite it, do
+        not re-prove it -- that chapter owns the height bound (\propref{c26-carters-treap}).
+  \item \textbf{Overflowing a 32-bit accumulator.} In the Summit each term is $a[i]\cdot(i-L)\cdot(R-i)$
+        with $a[i],n\le 10^{6}$, so a single term reaches $10^{18}$ -- the whole sum \emph{must} be a
+        \code{long long} (\probref{c26-summit}).
+  \item \textbf{Trying to use the stack for an online edit-then-query range problem.} The monotonic stack is
+        a \emph{one-pass} structure; once values change between queries it holds no state. That family is
+        the segment tree (\chref{c13}) or a balanced tree (\chref{c06}).
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled. Diagnose top-down -- every
+leaf names the training problem.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=58mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 6mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=1mm of verdict] (tle) {\textbf{TLE}};
+  \node[b, below left=8mm and 1mm of verdict, xshift=30mm] (re) {\textbf{RE}};
+  \node[b, below right=8mm and 6mm of verdict] (mle) {\textbf{MLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {missing the sentinel leaves the right-end bars unsettled (\thmref{c26-hist}); width read as $i-L$
+     instead of $i-L-1$ (\exref{c26-hist-run}); both-strict or both-loose tie-break on duplicate spans
+     (\probref{c26-summit}); $\lca$ returned as an index where a value is wanted (\thmref{c26-rmqlca})};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {an $\bigO{n^2}$ all-subarray scan where the span formula is $\bigO{n}$ (\lemref{c26-span}); re-running
+     a full stack per query instead of building once (\coderef{c26-rmq}); the deque kept as a
+     \code{stack} so expiry is a linear clear (\coderef{c26-deque})};
+  \node[l, below right=1mm and 2mm of re.south] (re1)
+    {popping an empty stack when the very first element breaks monotonicity -- guard with the $0$ sentinel
+     (\coderef{c26-hist84-soln}); indexing a parent array past $n$ in the Cartesian build
+     (\coderef{c26-stackbuild})};
+  \node[l, below right=1mm and 2mm of mle.south] (mle1)
+    {materialising the tree as node objects when only the prev/next arrays are needed (\lemref{c26-span});
+     storing a full $n\times n$ span table instead of two $\bigO{n}$ passes (\probref{c26-summit})};
+  \draw[flow] (verdict) -- (wa); \draw[flow] (verdict) -- (tle);
+  \draw[flow] (verdict) -- (re); \draw[flow] (verdict) -- (mle);
+  \draw[flow] (wa) -- (wa1); \draw[flow] (tle) -- (tle1);
+  \draw[flow] (re) -- (re1); \draw[flow] (mle) -- (mle1);
+\end{tikzpicture}
+\caption*{Chapter~9 verdict tree -- only the failures this chapter's problems can produce.}
+\end{figure}
+
+\medskip
+\noindent Backup table (same content, terse):
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llp{0.42\linewidth}l@{}}
+\toprule
+\textbf{Verdict} & \textbf{Usual cause} & \textbf{One-line fix} & \textbf{Trained in} \\
+\midrule
+WA  & no sentinel flush        & append height $0$ and pop the rest & \thmref{c26-hist} \\
+WA  & width off by one         & use $i-L-1$ at the pop            & \exref{c26-hist-run} \\
+WA  & duplicate-span tie-break & one boundary strict, the other not & \probref{c26-summit} \\
+TLE & per-subarray rescan      & two passes give every span at once & \lemref{c26-span} \\
+RE  & pop on empty stack       & sentinel guarantees a base to pop to & \coderef{c26-hist84-soln} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 9 at a glance]
+\textbf{One stack, four readings.} The monotonic stack \emph{is} the Cartesian build, and the Cartesian
+tree \emph{is} a value-priority treap (\defref{c26-monostack}, \propref{c26-carters-treap}). The whole
+chapter is one sentence: \emph{an element's fate is sealed the moment it meets the nearest neighbour that
+beats it} -- so pop, and read the answer off the pop (\thmref{c26-hist}).
+
+\medskip
+\textbf{The span is the payoff.} Node $i$'s subtree is exactly the window where $a[i]$ is the minimum,
+bounded by prev/next smaller $L_i,R_i$ (\lemref{c26-span}); so "how many subarrays does $a[i]$ win" is
+$(i-L_i)(R_i-i)$, and sum-over-subarrays problems become two stack passes -- the Summit is that identity
+twice, with a sign (\probref{c26-summit}).
+
+\medskip
+\textbf{Two running objects.} The array $A=(3,1,4,2)$ has a unique min-Cartesian tree with root $a_2=1$
+(\figref{c26-cartA}). The histogram $H=(2,1,5,6,2,3)$ pops to the answer $10$, a $5\times 2$ rectangle over
+bars $3$--$4$ (\figref{c26-hist}); its duplicate $2$ is why the tie-break must be asymmetric.
+
+\medskip
+\textbf{Know your boundaries.} The stack owns \emph{static, one-pass} extremum questions. Editing between
+queries belongs to the segment tree (\chref{c13}); an \emph{ordered set you change} belongs to the balanced
+tree (\chref{c06}); the sliding-window \emph{median} is also \chref{c06}. This chapter owns the sliding
+\emph{extreme} via the deque and the array$\to$tree read via the stack.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 9 code kit: the Cartesian stack build, the histogram pop, the sliding-window deque, an RMQ-by-LCA query, and the Summit's two-pass contribution}, label={lst:c26-kit}]
+#include <bits/stdc++.h>
+using namespace std;
+
+// (1) Cartesian tree in O(n): increasing stack, popped links are the tree.  [9.1]
+void buildCartesian(const vector<int>& a, vector<int>& Lc, vector<int>& Rc, vector<int>& par){
+    int n = a.size(); Lc.assign(n,-1); Rc.assign(n,-1); par.assign(n,-1);
+    vector<int> st;                                   // increasing stack of indices
+    for (int i=0;i<n;i++){
+        int last=-1;
+        while(!st.empty() && a[st.back()]>a[i]){ last=st.back(); st.pop_back(); }
+        if(!st.empty()){ Rc[st.back()]=i; par[i]=st.back(); }   // i is right child of new top
+        if(last!=-1 ){ Lc[i]=last;        par[last]=i; }         // last popped becomes left child
+        st.push_back(i);
+    }
+}
+// (2) Largest rectangle: one increasing stack + a 0 sentinel; width = i-L-1 at pop. [9.2]
+long long largestRect(vector<int> h){
+    h.push_back(0); vector<int> st; long long best=0;
+    for(int i=0;i<(int)h.size();i++){
+        while(!st.empty() && h[st.back()]>=h[i]){
+            int x=st.back(); st.pop_back();
+            int L= st.empty() ? -1 : st.back();
+            best = max(best, (long long)h[x]*(i-L-1));
+        }
+        st.push_back(i);
+    }
+    return best;
+}
+// (3) Sliding-window maximum: monotonic deque, evict expired front each step.  [9.2]
+vector<int> windowMax(const vector<int>& a,int k){
+    deque<int> dq; vector<int> out;
+    for(int i=0;i<(int)a.size();i++){
+        while(!dq.empty() && a[dq.back()]<=a[i]) dq.pop_back();
+        if(!dq.empty() && dq.front()<=i-k)       dq.pop_front();
+        dq.push_back(i);
+        if(i>=k-1) out.push_back(a[dq.front()]);
+    }
+    return out;
+}
+// (4) Static range minimum as LCA on the Cartesian tree (parents + binary lifting) [9.3]
+//     query(l,r) = a[ lca(l,r) ];  build the lifting table from the parents of (1).
+// (5) Summit CF 817D: signed sum of a[i] * (i-L) * (R-i) -- two contributions.     [Summit]
+//     min  : prev strictly smaller (pop >=), next smaller-or-equal (pop  >)
+//     max  : prev strictly larger  (pop <=), next larger-or-equal  (pop  <)
+long long imbalanced(vector<long long>& a){           // a is 1-based, size n+2
+    int n = (int)a.size()-2; vector<int> L(n+2),R(n+2),st; long long ans=0;
+    auto bounds=[&](bool asMin){
+        st.clear();
+        for(int i=1;i<=n;i++){ while(!st.empty() &&
+            (asMin ? a[st.back()]>=a[i] : a[st.back()]<=a[i])) st.pop_back();
+            L[i]=st.empty()?0:st.back(); st.push_back(i); }
+        st.clear();
+        for(int i=n;i>=1;i--){ while(!st.empty() &&
+            (asMin ? a[st.back()]>a[i]  : a[st.back()]<a[i]))  st.pop_back();
+            R[i]=st.empty()?n+1:st.back(); st.push_back(i); }
+    };
+    bounds(true);  for(int i=1;i<=n;i++) ans -= a[i]*(long long)(i-L[i])*(R[i]-i);
+    bounds(false); for(int i=1;i<=n;i++) ans += a[i]*(long long)(i-L[i])*(R[i]-i);
+    return ans;
+}
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter. Cover the key line,
+reproduce it from memory, then check the answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- the Cartesian stack build (from \coderef{c26-stackbuild})}]
+int last = -1;
+while (!st.empty() && a[st.back()] > a[i]) { last = st.back(); /* FILL: st.pop_back() */; }
+if (!st.empty()) { Rc[st.back()] = i; }   // i hangs as the RIGHT child of the new top
+if (last != -1)  { /* FILL: Lc[i] = last */; }  // the last popped is i's LEFT child
+st.push_back(i);
+\end{lstlisting}
+\noindent{\scriptsize Key: monotonicity is broken by the run of \emph{larger} values; they pop, the last
+one becomes your left child, the surviving top adopts you as its right child -- the popped links \emph{are}
+the tree (\defref{c26-cartesian}, \lemref{c26-span}).}
+
+\begin{lstlisting}[caption={Drill 2 -- the histogram pop (from \coderef{c26-hist84-soln})}]
+while (!st.empty() && h[st.back()] >= h[i]) {
+    int x = st.back(); st.pop_back();
+    int L = st.empty() ? -1 : st.back();
+    best = max(best, (long long)h[x] * /* FILL: (i - L - 1) */);
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: at the pop, $i$ is the first shorter bar on the \emph{right} and the new top $L$
+the first shorter on the \emph{left}, so the width is $i-L-1$ \emph{exclusive}; append a $0$ so the stack
+flushes (\thmref{c26-hist}, \exref{c26-hist-run}).}
+
+\begin{lstlisting}[caption={Drill 3 -- the sliding-window deque (from \coderef{c26-deque})}]
+while (!dq.empty() && a[dq.back()] <= a[i]) dq.pop_back();     // drop dominated tails
+if  (!dq.empty() && dq.front() <= i - k)    /* FILL: dq.pop_front() */;  // evict expired head
+dq.push_back(i);
+if  (i >= k - 1) out.push_back(a[dq.front()]);                // head is the window max
+\end{lstlisting}
+\noindent{\scriptsize Key: two evictions -- from the \emph{back} anything $\le a[i]$ (it can never win
+again), from the \emph{front} anything that slid out of the window; the surviving head is the max
+(\defref{c26-monostack}).}
+
+\begin{lstlisting}[caption={Drill 4 -- RMQ as an ancestor (from \coderef{c26-rmq1647-soln})}]
+// build parents with Drill 1, lift depths, then:
+int query(int l, int r){ return a[ /* FILL: lca(l, r) */ ]; }
+\end{lstlisting}
+\noindent{\scriptsize Key: the minimum of $a[l..r]$ is the \emph{value} at the lowest common ancestor of
+$l$ and $r$ in the min-Cartesian tree -- index in, value out (\thmref{c26-rmqlca}, \lemref{c26-cartmin}).}
+
+\begin{lstlisting}[caption={Drill 5 -- the Summit contribution (from \coderef{c26-summit})}]
+// minimum side: prev STRICTLY smaller, next smaller-or-equal
+while (!st.empty() && a[st.back()] /* FILL: >= */ a[i]) st.pop_back();   // for L
+while (!st.empty() && a[st.back()] /* FILL: >  */ a[i]) st.pop_back();   // for R
+ans += sign * a[i] * (long long)(i - L[i]) * (R[i] - i);   // sign = -1 min, +1 max
+\end{lstlisting}
+\noindent{\scriptsize Key: exactly one boundary is strict or the plateau of equal values is counted twice;
+mirror the two comparisons to switch from the minimum to the maximum contribution (\probref{c26-summit}).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, 5 practice, one Summit, five mixed.
+Tick \emph{only} after an unaided solve; a hinted attempt counts as half. Cite by name and number --
+URLs appear once, in the solved and practice entries.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.24\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 9.1 -- the Cartesian tree; the two orders}} \\
+W9.1.1 & Maximum Score of a Good Subarray & LC 1793 & \lv{5} prev/next smaller spans & pick the min $m$ with $L[m]<k<R[m]$; maximise $\mathit{nums}[m]\cdot(R{-}L{-}1)$ & $\square$ \\
+P9.1.2 & Sum of Subarray Minimums & LC 907 & \lv{3} span contribution & $a[i]\cdot(i{-}L)\cdot(R{-}i)$; asymmetric tie-break on equal values & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 9.2 -- the monotonic stack}} \\
+W9.2.1 & Largest Rectangle in Histogram & LC 84 & \lv{5} increasing stack + sentinel & width $=i-L-1$ at the pop; flush with a trailing $0$ & $\square$ \\
+P9.2.2 & Maximal Rectangle & LC 85 & \lv{4} per-row histogram & turn each grid row into heights, reuse LC 84 & $\square$ \\
+P9.2.3 & Trapping Rain Water & LC 42 & \lv{4} stack of bars & width from the pop, bounded height $=\min(\text{walls})-\text{floor}$ & $\square$ \\
+P9.2.4 & Sliding Window Maximum & LC 239 & \lv{4} monotonic deque & evict back (dominated) and front (expired) each step & $\square$ \\
+P9.2.5 & Daily Temperatures & LC 739 & \lv{3} decreasing stack & pop when a warmer day arrives; distance $=i-\mathit{top}$ & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 9.3 -- range minimum via the tree}} \\
+W9.3.1 & Static Range Minimum Queries & CSES 1647 & \lv{3} Cartesian $+$ LCA & query answer $=a[\lca(l,r)]$; build once, answer fast & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 9.4 -- the treap view}} \\
+W9.4.1 & Maximum Binary Tree II & LC 998 & \lv{3} right-spine walk & insert on the far right of the array; one descent, priority view & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+S9 & Imbalanced Array & CF 817D & \lv{5} signed span contribution & sum $\max-$(sum $\min$) over all subarrays; two stack passes; \code{long long} & $\square$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day 1 builds the tree and internalises the two orders; day 2 runs the whole stack
+family cold; day 3 uses the tree as an index (RMQ); day 4 flips the lens to the treap; day 5 is the Summit.
+Solve in this order even where it differs from section order -- each day's tool is already in hand the day
+before.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 9.1 & build the tree of $A=(3,1,4,2)$ by hand (\exref{c26-cart-run}); state \lemref{c26-span};
+    LC 1793, LC 907 \\
+2 & Read + do 9.2 & run the stack on $H=(2,1,5,6,2,3)$ to area $10$ (\exref{c26-hist-run}); write the
+    histogram pop and the deque cold; LC 84, then 85, 42, 239, 739 \\
+3 & Read + do 9.3 & reduce $\min a[l..r]$ to $\lca(l,r)$ on $A$ (\exref{c26-rmq-run}); CSES 1647 \\
+4 & Read + do 9.4 & draw the three readings of $A$ (\figref{c26-iso}); cite \thmref{c06-exptheight};
+    LC 998 \\
+5 & Summit + revise & CF 817D with the two-pass contribution; walk the decision flowchart on five questions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks, not just a rating
+bucket.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.36\linewidth}p{0.34\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+$\lv{3}$ \ $\bigstar\bigstar\bigstar$
+  & LC 907, LC 739, CSES 1647, LC 998
+  & you can pop to a decision and read a range minimum off the tree \\
+$\lv{4}$ \ $\bigstar\bigstar\bigstar\bigstar$
+  & LC 85, LC 42, LC 239, the treap view
+  & you compose the stack with a second idea (per-row heights, a deque, an equivalence) \\
+$\lv{5}$ \ $\bigstar\bigstar\bigstar\bigstar\bigstar$
+  & LC 1793, LC 84, CF 817D (Summit)
+  & you see the monotonic structure where the problem hides it, and count spans without double-work \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+The stack is a disguise; each line collapses a family onto the one idea -- \emph{an element's answer is
+decided the moment it meets its nearest beating neighbour}. No new theory -- just where the pop is already
+hiding.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item "read this array as a tree; smallest is the root" $\longrightarrow$ the Cartesian build, one
+        increasing stack (\defref{c26-cartesian}, \coderef{c26-stackbuild}).
+  \item "largest rectangle in a histogram" (LC 84) $\longrightarrow$ the width of a bar is fixed at its pop,
+        $i-L-1$ (\thmref{c26-hist}, \probref{c26-hist84}).
+  \item "maximal all-1 rectangle in a grid" (LC 85) $\longrightarrow$ one LC 84 call per row, heights
+        accumulated upward (\secref{c26-monostack}).
+  \item "sum of $\min$ (or $\max$) over all subarrays" (LC 907) $\longrightarrow$ $a[i]\cdot(i-L)\cdot(R-i)$
+        from two prev/next-smaller passes (\lemref{c26-span}).
+  \item "score of the widest window whose minimum you may choose" (LC 1793) $\longrightarrow$ the same span,
+        restricted to windows covering the fixed index $k$ (\probref{c26-goodsub}).
+  \item "next greater / daily temperatures / visible buildings" (LC 739, 503) $\longrightarrow$ a decreasing
+        stack; the pop distance is the answer (\secref{c26-monostack}).
+  \item "extreme in every fixed-width sliding window" (LC 239) $\longrightarrow$ a monotonic \emph{deque},
+        amortised $\bigO{1}$ per step (\coderef{c26-deque}).
+  \item "many static range-minimum queries" (CSES 1647) $\longrightarrow$ value at $\lca(l,r)$ in the
+        Cartesian tree -- you build the tree, Chapter~16 owns LCA (\thmref{c26-rmqlca}, \chref{c11}).
+  \item "rebuild a max-tree after a right-end insert" (LC 998) $\longrightarrow$ one descent down the
+        right spine of the treap view (\propref{c26-carters-treap}, \probref{c26-mbt2}).
+  \item "sum $\max-\min$ over all subsegments" (CF 817D) $\longrightarrow$ the span identity twice, one sign
+        each way (\probref{c26-summit}).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+These refuse to name the stack; decide \emph{which monotonic structure decides the answer} before opening
+the code. A hint tells you the shape of the answer, never the tool.
+
+\begin{mixedset}
+  \practice{Remove Duplicate Letters}{LeetCode 316}
+    {https://leetcode.com/problems/remove-duplicate-letters/}{LC Medium · L4}
+    {The lexicographically smallest subsequence holding every distinct character once. Grow an answer
+    stack; before pushing a character, pop a larger tail that will \emph{appear again later} -- the same
+    "settle the element the moment a better one is coming" discipline as \secref{c26-monostack}, with a
+    last-occurrence map as the guard. Notice the popped link is decided by a \emph{next} bound, exactly the
+    tie-break idea of the Summit.}
+  \practice{Online Stock Span}{LeetCode 901}
+    {https://leetcode.com/problems/online-stock-span/}{LC Medium · L3}
+    {For each new price, the run of consecutive recent days whose price is $\le$ it. Keep a decreasing
+    stack of $(\mathit{price},\mathit{count})$; when a taller price arrives, pop the shorter ones and
+    absorb their counts -- the pop settles the span on the spot (\defref{c26-monostack}). Equivalent to the
+    next-greater-left distance of Daily Temperatures, with the run-length folded in.}
+  \practice{Next Greater Element II}{LeetCode 503}
+    {https://leetcode.com/problems/next-greater-element-ii/}{LC Medium · L3}
+    {Circular array, next strictly-greater to the right, wrapping. Run the decreasing stack over $2n$
+    indices, reading $i \bmod n$; each pop writes its answer once (\secref{c26-monostack}). The only new
+    move is the doubled sweep -- the stack logic is \thmref{c26-hist}'s pop-to-decision unchanged.}
+  \practice{132 Pattern}{LeetCode 456}
+    {https://leetcode.com/problems/132-pattern/}{LC Medium · L4}
+    {Find $i<j<k$ with $a[i]<a[k]<a[j]$ (a ``312 by value, 132 by order''). Sweep right-to-left keeping a
+    \emph{decreasing} stack as candidate ``3''s and a running $\mathit{second}$ -- the largest valid ``2''
+    seen; any $a[i]<\mathit{second}$ wins. This is the monotonic stack read \emph{backwards}, the same
+    pop-and-settle invariant as \exref{c26-hist-run} wearing a different predicate.}
+  \practice{Asteroid Collision}{LeetCode 735}
+    {https://leetcode.com/problems/astroid-collision/}{LC Medium · L3}
+    {Left/right-moving bodies annihilate by size. Push each asteroid on a stack; only a right-moving
+    survivor meets a left-moving newcomer, so pop-and-compare until the stack is stable -- a monotone
+    \emph{in} direction, decided at the collision exactly like a histogram pop (\defref{c26-monostack}).
+    No tree here; just the discipline of resolving an element the instant it meets its match.}
+  \practice{Minimum Cost Tree From Leaf Values}{LeetCode 1130}
+    {https://leetcode.com/problems/minimum-cost-tree-from-leaf-values/}{LC Medium · L4}
+    {Every merge costs the product of the two block maxima, and each leaf eventually
+    pairs with the \emph{smaller} of its nearest greater neighbours -- two monotone
+    passes give those neighbours (\defref{c26-monostack}), or equivalently build the
+    Cartesian tree and sum leaf$\times$parent over all non-root nodes.}
+  \practice{Next Greater Element I}{LeetCode 496}
+    {https://leetcode.com/problems/next-greater-element-i/}{LC Easy · L2}
+    {Distinct arrays, next strictly-greater to the right: one decreasing-stack pass --
+    every pop \emph{is} the winner written into the element leaving
+    (\thmref{c26-hist}'s decision, before the first push lands).}
+  \practice{Sum of Total Strength of Wizards}{LeetCode 2281}
+    {https://leetcode.com/problems/sum-of-total-strength-of-wizards/}{LC Hard · L5}
+    {Sum $\min(w[i..j]) \cdot \sum(w[i..j])$ over all windows. Each wizard is the
+    minimum on $(i-L_i)(R_i-i)$ windows by \lemref{c26-span}'s identity, but the
+    multiplicity is now a \emph{sum} of window sums -- two monotone passes plus
+    prefix sums of prefix sums, the Summit's decomposition with weight.}
+  \practice{Maximum Subarray Min-Product}{LeetCode 1856}
+    {https://leetcode.com/problems/maximum-subarray-min-product/}{LC Medium · L4}
+    {Min-product of a window is its minimum times its sum. For each element as the
+    minimum, the \emph{widest} span \lemref{c26-span} grants is optimal -- all values
+    are positive, so growing the window only adds: two monotone passes, prefix sums,
+    one max.}
+  \practice{Sum of Subarray Ranges}{LeetCode 2104}
+    {https://leetcode.com/problems/sum-of-subarray-ranges/}{LC Medium · L3}
+    {Range $=$ max $-$ min, so split the total into $\sum$maxima $-$ $\sum$minima: two
+    \lemref{c26-span}-style sweeps hand each element its max-winning and min-winning
+    multiplicities -- the exact decomposition of this chapter's Summit, settled by
+    $(i-L_i)(R_i-i)$ arithmetic twice.}
+\end{mixedset}
+
+\chaptersection{The Summit -- CF 817D Imbalanced Array}
+
+\begin{notebox}[Why this is the chapter top rope]
+Every section of this chapter ended on the same sentence: \emph{an element's answer is decided when it
+meets the neighbour that beats it}. \emph{Imbalanced Array} is that sentence applied twice with opposite
+signs. The \term{imbalance} of a subsegment is its maximum minus its minimum, and you must sum it over all
+$\binom{n+1}{2}$ contiguous subsegments ($n,a[i]\le 10^{6}$, so the naive per-subsegment scan is
+$\bigO{n^2}$ and dies). Rewrite the total as $\sum(\text{subsegment maxima})-\sum(\text{subsegment minima})$
+and each half is exactly the span identity of \lemref{c26-span}: $a[i]$ is the winner of $(i-L_i)(R_i-i)$
+subsegments, where $L_i,R_i$ are its nearest beating neighbours -- one increasing pass and one decreasing
+pass per half. That is the whole chapter in four stack sweeps: the same pop that settles a histogram bar
+settles a contribution. The only real difficulty, the tell that separates $\lv{4}$ from $\lv{5}$, is
+\emph{seeing} that a ``sum over all subarrays'' question is a per-element ``how many subarrays is this the
+extremum of'' question -- and getting the duplicate tie-break asymmetric so no plateau is double-counted.
+\end{notebox}
+
+\solvedproblem{c26-summit}{Imbalanced Array}{Codeforces 817D}
+  {https://codeforces.com/problemset/problem/817/D}{CF 1900 · L5}
+  {sum over all subsegments of max-minus-min, split into two independent sums, per-element span contribution from prev/next smaller and greater bounds via monotonic stacks, asymmetric tie-break on duplicates, long-long accumulation}
+
+\begin{problemstatement}[Imbalanced Array]
+Given an array $a$ of $n$ positive integers, the \term{imbalance} of a subsegment is
+$\max-\min$ over that subsegment. Find the sum of imbalances over all contiguous subsegments.
+$1\le n\le 10^{6}$ and $1\le a[i]\le 10^{6}$. Sample $a=(1,4,1)$ gives answer $9$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 40 minutes]
+A fair first attempt is the $\bigO{n^2}$ double loop (for each left end, extend a right end tracking a
+running max and min) -- correct, times out at $n=10^{6}$. The upgrade is to stop summing \emph{over
+subsegments} and start summing \emph{over elements}: how much does one $a[i]$ contribute, as a maximum and
+as a minimum?
+\peek{Split $\sum(\max-\min)=\sum\max-\sum\min$ -- two identical problems. For the $\sum\min$ half, for
+each $i$ ask: how many subsegments have $a[i]$ as their minimum, \emph{counted once even when values tie}?}
+\nudge{The subsegments whose minimum is $a[i]$ are exactly those inside $a[i]$'s dominance window -- the
+gap to the \emph{previous strictly smaller} on the left and the \emph{next smaller-or-equal} on the right
+(\lemref{c26-span}). If the window is $(L_i,R_i)$ open at both ends, the count is $(i-L_i)(R_i-i)$ -- a
+product you get from \emph{one} stack pass for each boundary.}
+\fullhint{Compute, $1$-based with $L,R$ arrays: for the minimum side, $L_i=$ previous index with
+$a[\cdot]<a[i]$ (pop while $\ge$), $R_i=$ next index with $a[\cdot]\le a[i]$ (pop while $>$); then
+$\mathit{ans}-=a[i](i-L_i)(R_i-i)$. Mirror for the maximum side: $L_i=$ previous $>$ (pop while $\le$),
+$R_i=$ next $\ge$ (pop while $<$); then $\mathit{ans}+=a[i](i-L_i)(R_i-i)$. One stack per sweep, four
+sweeps total, $\bigO{n}$. Keep $\mathit{ans}$ in \code{long long} -- each term reaches $a[i]\cdot n^2\le
+10^{18}$. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The imbalance of a subsegment is a difference of two extremums, and summation is linear, so
+$\sum_{\text{subsegments}}(\max-\min)=\big(\sum\max\big)-\big(\sum\min\big)$. Each of the two is a
+``sum of subarray extremums'' problem -- the LC 907 template (\secref{c26-cartesian}), solved not by
+enumerating subsegments but by asking, per element, \emph{how many subsegments am I the extremum of}. The
+naive double loop tracks a running max/min and is $\bigO{n^2}$; at $n=10^{6}$ that is $\sim10^{12}$
+operations -- fatal. The contribution view collapses it to four monotonic sweeps, $\bigO{n}$.
+
+\solstep{Key Observations}
+\begin{observation}
+A subsegment's minimum is $a[i]$ precisely when the subsegment lies inside the maximal window around $i$
+that contains no element smaller than $a[i]$. Its width to the left is $i-L_i$ and to the right $R_i-i$,
+so $a[i]$ is \emph{the} minimum of $(i-L_i)(R_i-i)$ subsegments -- exactly \lemref{c26-span}'s
+span-equals-subtree claim.
+\end{observation}
+\begin{observation}
+With duplicate values the ``minimum of the subsegment'' is not unique, so attributing a plateau to every
+tied index double-counts it. Make one boundary strict and the other not -- $L_i$ the previous
+\emph{strictly} smaller, $R_i$ the next smaller \emph{or equal} -- and each subsegment's minimum is charged
+to exactly one index (the leftmost occurrence of the minimum). Mirror the inequalities for maxima
+(\thmref{c26-hist}).
+\end{observation}
+\begin{observation}
+Both boundary arrays come from a single stack pass each -- four passes total, all $\bigO{n}$. The magnitude
+is $a[i]\cdot(i-L_i)\cdot(R_i-i)\le 10^{6}\cdot 10^{6}\cdot 10^{6}$ for one index's whole contribution
+summed, so the accumulator \emph{must} be \code{long long}; a \code{int} product overflows exactly where the
+answer is large (\probref{c26-summit} verification).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Enumerate every subsegment, tracking a running max and min.}
+{Correct in $\bigO{n^2}$ -- a million elements is a trillion steps, well past any time limit. You must
+reduce the double sum to a per-element count.}
+\deadend{For each $i$, expand left and right until an element beats $a[i]$, counting as you go.}
+{That is the span in spirit, but done naively it is still $\bigO{n^2}$ over all $i$. The \emph{same}
+boundaries for every $i$ come out of \emph{one} stack sweep, because the stack already stores the monotone
+run -- the amortised-pop argument of \coderef{c26-stackbuild}.}
+\aha{Read $\sum\max$ and $\sum\min$ separately, each as a sum of $a[i]\cdot(\text{count where }a[i]
+\text{ is the extremum})$, and get every count from two monotonic passes -- the width $(i-L_i)(R_i-i)$ of
+\lemref{c26-span}. Four $\bigO{n}$ sweeps, a signed total, done.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} double loop & running max/min per subsegment & $O(n^2)$ & \tle \\
+2 & \lv{4} per-element expand & walk to the beating neighbour & $O(n^2)$ worst & \tle \\
+3 & \lv{5} signed span contribution & $a[i](i-L)(R-i)$, both extremums, four stack sweeps & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 is the honest ``I know the lemma but not the stack'' attempt -- right shape, wrong cost, because it
+recomputes boundaries from scratch. Rung 3 is \emph{this} chapter's solution: the boundaries for all $i$ are
+the popped links of one monotonic sweep, so the whole answer is linear.
+
+\solstep{Solution}
+Work $1$-based, with $a[0]$ and $a[n+1]$ as untouched sentinels. A helper computes two boundary arrays for a
+chosen polarity: a forward pass for $L_i$ (previous strictly-smaller when $\mathit{asMin}$, previous
+strictly-greater otherwise) and a reverse pass for $R_i$ (next smaller-or-equal, or next greater-or-equal).
+For the minimum side subtract $a[i]\cdot(i-L_i)\cdot(R_i-i)$ from the answer; for the maximum side add the
+same expression. Each pass pushes every index once and pops at most once, so all four sweeps are
+$\bigO{n}$. The accumulator is \code{long long} throughout (listing \coderef{c26-summit}).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The signed span sum equals the total imbalance]
+\emph{Linearity.} $\sum_{\text{subsegments}}(\max-\min)=\sum\max-\sum\min$, so it suffices to show each
+half. \emph{Minimum half.} Fix $i$ and let $L_i$ be the greatest index $<i$ with $a[L_i]<a[i]$ (or $0$),
+and $R_i$ the least index $>i$ with $a[R_i]\le a[i]$ (or $n+1$). A subsegment $[\ell,r]$ has minimum
+$a[i]$ with $i$ as its \emph{leftmost} minimum iff $L_i<\ell\le i\le r<R_i$: the strict left bound and the
+weak right bound are exactly what makes the choice unique among tied minima -- no element $<a[i]$ lies
+inside, and any tied $a[i]$ to the right is excluded by $R_i$, any to the left is excluded by the strict
+$L_i$. There are $i-L_i$ choices for $\ell$ and $R_i-i$ for $r$, all independent, so $a[i]$ is the unique
+attributed minimum of $(i-L_i)(R_i-i)$ subsegments -- and \emph{every} subsegment is attributed to exactly
+one index, its leftmost minimum. Hence $\sum\min=\sum_i a[i](i-L_i)(R_i-i)$. \emph{Maximum half.} Mirror
+with $>$ / $\ge$: $L_i$ previous strictly greater, $R_i$ next greater-or-equal attributes each subsegment to
+its leftmost maximum, giving $\sum\max$. Subtracting yields the total imbalance. Each boundary is produced
+by \coderef{c26-stackbuild}'s monotone sweep (a bar is popped exactly by its nearest beating neighbour),
+so the computed $L,R$ are the ones the proof requires. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Imbalanced Array -- signed span contribution, four monotonic sweeps (Codeforces 817D; O(n) time, long long)}, label={lst:c26-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+int main(){
+    int n;
+    if (scanf("%d", &n) != 1) return 0;
+    vector<long long> a(n + 2);
+    for (int i = 1; i <= n; ++i) scanf("%lld", &a[i]);
+
+    vector<int> L(n + 2), R(n + 2), st;
+    long long ans = 0;
+
+    // asMin: prev strictly smaller, next smaller-or-equal.
+    // asMax: prev strictly larger,  next larger-or-equal.   (ties -> one strict side)
+    auto bounds = [&](bool asMin){
+        st.clear();
+        for (int i = 1; i <= n; ++i){                       // LEFT boundary
+            while (!st.empty() && (asMin ? a[st.back()] >= a[i] : a[st.back()] <= a[i]))
+                st.pop_back();
+            L[i] = st.empty() ? 0 : st.back();
+            st.push_back(i);
+        }
+        st.clear();
+        for (int i = n; i >= 1; --i){                       // RIGHT boundary
+            while (!st.empty() && (asMin ? a[st.back()] >  a[i] : a[st.back()] <  a[i]))
+                st.pop_back();
+            R[i] = st.empty() ? n + 1 : st.back();
+            st.push_back(i);
+        }
+    };
+
+    bounds(true);   // sum of subarray MINIMUMS  -> subtract
+    for (int i = 1; i <= n; ++i)
+        ans -= a[i] * (long long)(i - L[i]) * (R[i] - i);
+    bounds(false);  // sum of subarray MAXIMUMS  -> add
+    for (int i = 1; i <= n; ++i)
+        ans += a[i] * (long long)(i - L[i]) * (R[i] - i);
+
+    printf("%lld\n", ans);
+    return 0;
+}
+\end{lstlisting}
+\begin{notebox}[The tie-break, in one line]
+Minimum side uses \emph{prev strictly smaller} with \emph{next smaller-or-equal}; maximum side uses
+\emph{prev strictly larger} with \emph{next larger-or-equal}. Exactly one side being non-strict attributes
+each plateau subsegment to its leftmost extremum -- both strict would undercount, both loose would
+double-count. This is the same asymmetry \secref{c26-cartesian} needed for $H=(2,1,5,6,2,3)$'s duplicate $2$.
+\end{notebox}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample -- the array 1, 4, 1 (answer 9)]
+Process $1$-based: $a_1=1,a_2=4,a_3=1$. The six subsegments have imbalances
+$[1]{=}0,\ [4]{=}0,\ [1]{=}0,\ [1,4]{=}3,\ [4,1]{=}3,\ [1,4,1]{=}3$, total $9$.
+\emph{Minimum side} (prev $<$, next $\le$):
+\begin{itemize}[nosep,leftmargin=1.3em]
+  \item $i=1$: $L_1{=}0$, $R_1{=}3$ (next $\le 1$ is the trailing $1$) $\Rightarrow$ count $(1{-}0)(3{-}1){=}2$,
+        contributes $1\cdot2{=}2$. \checkmark
+  \item $i=2$: $L_2{=}1$, $R_2{=}3$ $\Rightarrow$ count $(2{-}1)(3{-}2){=}1$, contributes $4\cdot1{=}4$. \checkmark
+  \item $i=3$: $L_3{=}0$, $R_3{=}4$ (none) $\Rightarrow$ count $(3{-}0)(4{-}3){=}3$, contributes $1\cdot3{=}3$. \checkmark
+\end{itemize}
+$\sum\min=2+4+3=9$. \emph{Maximum side} (prev $>$, next $\ge$):
+\begin{itemize}[nosep,leftmargin=1.3em]
+  \item $i=1$: $L_1{=}0$, $R_1{=}2$ $\Rightarrow$ count $(1{-}0)(2{-}1){=}1$, contributes $1\cdot1{=}1$. \checkmark
+  \item $i=2$: $L_2{=}0$, $R_2{=}4$ $\Rightarrow$ count $(2{-}0)(4{-}2){=}4$, contributes $4\cdot4{=}16$. \checkmark
+  \item $i=3$: $L_3{=}2$, $R_3{=}4$ $\Rightarrow$ count $(3{-}2)(4{-}3){=}1$, contributes $1\cdot1{=}1$. \checkmark
+\end{itemize}
+$\sum\max=1+16+1=18$. Answer $=\sum\max-\sum\min=18-9=9$ -- matches the reference \checkmark. The middle
+$4$ alone is the maximum of $4$ subsegments and the minimum of $1$; the two $1$'s share the six minimums
+$2$--$3$ each with no overlap -- the asymmetric tie-break working (\probref{c26-summit}).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$: four sweeps, and each index is pushed once and popped at most once per sweep -- the
+amortised-stack argument of \coderef{c26-stackbuild}. Space $\bigO{n}$ for $a$, $L$, $R$ and the stack.
+The naive enumeration is $\bigO{n^2}$ -- at $n=10^{6}$ that is $\sim5\cdot10^{11}$ subsegments, \tle -- so
+the collapse to a per-element contribution is exactly what separates \ac{} from \tle. The sum itself is
+$\le 10^{6}\cdot\binom{10^{6}+1}{2}\approx5\cdot10^{17}$, which fits a signed \code{long long} and not a
+\code{int}.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Single element $n=1$ & $L_1{=}0$, $R_1{=}2$, both sides give one subsegment, $\max-\min=0$, answer $0$ \\
+All equal (e.g.\ $5,5,5$) & strict one side / weak the other attributes each subsegment once; every max $=$ min so $\sum\max=\sum\min$, answer $0$ \\
+Strictly increasing & minima use the whole left run, maxima a width of $1$ each; boundaries still from one pass \\
+Maximum values $a[i]=10^{6}$ & product $a[i]\cdot(i-L)\cdot(R-i)$ reaches $10^{18}$ -- \code{long long} prevents overflow \\
+Duplicate plateau & the asymmetry charges the plateau subsegments to their leftmost extremum -- no double count \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to break it: (i) making \emph{both} boundaries strict (or both non-strict) on a duplicate array -- the
+first undercounts tied minima, the second double-counts them; exactly one side must be non-strict, and it
+must be mirrored on the maximum side. (ii) accumulating in \code{int} -- a single contribution already
+exceeds $2^{31}$ at $n,a[i]=10^{6}$; the sum needs \code{long long}. (iii) forgetting the $1$-based
+sentinels $L_i=0$ / $R_i=n+1$ when the stack empties, then indexing $a[\cdot]$ out of range. (iv) mixing the
+two polarities -- the maximum side must \emph{add} and use $>$/$\ge$; reusing the minimum comparisons flips
+the sign. \emph{Variants:} the same code with only the minimum half is LC 907 Sum of Subarray Minimums
+(\secref{c26-cartesian}); restricting the window to cover a fixed index $k$ is LC 1793 (\probref{c26-goodsub});
+and the whole answer can equally be obtained from \emph{next}-smaller-only in two sweeps -- the boundaries
+are whatever single monotonic pass you prefer, provided the tie-break stays asymmetric.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{A "sum over all subarrays" is a per-element "how many subarrays do I win".} Swap the order of
+        summation and the $\bigO{n^2}$ becomes $\bigO{n}$: count $a[i]$'s dominance window with two stack
+        passes and multiply (\lemref{c26-span}, \probref{c26-summit}).
+  \item \emph{Extremums split, then mirror.} $\sum(\max-\min)=\sum\max-\sum\min$; solve the minimum half once
+        and flip the two comparisons for the maximum half -- one template, two signs (\thmref{c26-hist}).
+  \item \emph{Duplicates demand an asymmetric boundary.} One side strict, one not -- the same tie-break that
+        kept the histogram of $H$ honest is what stops a plateau from being counted twice (\secref{c26-monostack}).
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Generalises}: any "sum a per-subarray function that decomposes to a nearest-beating-neighbour
+        window" reduces to this contribution sweep -- subarray minimums, maximums, ranges, and "count good
+        subarrays" problems all share it (\secref{c26-cartesian}).
+  \item \textbf{The tree was never needed}: you can build $L,R$ without materialising the Cartesian tree at
+        all -- the stack \emph{is} the tree, and here you only keep its spans (\defref{c26-monostack}).
+  \item \textbf{Alternatives}: a divide-and-conquer over the maximum is $\bigO{n\log n}$; a segment tree
+        over index-and-value can also enumerate contributions, but no engine beats the four-linear sweeps
+        for a pure static extremum sum (\chref{c13}).
+\end{itemize}
+\end{hardeningbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled so far -- cumulative through Chapter~9. Chapters~1--8's rows are carried
+forward; Chapter~9's rows are appended. Pointers only, never prose.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} l c p{0.27\linewidth} p{0.16\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Level} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapters 1--8 -- carried forward} \\
+Three-slot DFS (pre/in/post) & 3.1 & \lv1 & a node sequence in a named order & \coderef{c03-dfs} \\
+BST search / insert / delete descent & 7.1 & \lv2 & ``a BST is given -- does/where does $x$ go?'' & \coderef{c05-search} \\
+Balanced-tree split/merge engine & 8.3 & \lv4 & ``a dynamic ordered set that stays short'' & \coderef{c06-split} \\
+Treap $=$ BST-key + heap-priority & 8.3 & \lv4 & ``read a heap order off a second field'' & \defref{c06-treap} \\
+Expected-height theorem & 8.3 & \lv5 & ``random priorities give $\bigO{\log n}$ in expectation'' & \thmref{c06-exptheight} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 9 -- new this chapter} \\
+Cartesian tree (two orders) & 9.1 & \lv3 & ``read this array as a tree; smallest is the root'' & \defref{c26-cartesian} \\
+Stack build in $\bigO{n}$ & 9.1 & \lv3 & ``build the tree / all spans in one pass'' & \coderef{c26-stackbuild} \\
+Subtree $=$ dominance window & 9.1 & \lv4 & ``how many subarrays is $a[i]$ the extremum of?'' & \lemref{c26-span} \\
+Monotonic stack (pop $=$ decide) & 9.2 & \lv3 & ``answer fixed when the neighbour beats you'' & \defref{c26-monostack} \\
+Largest rectangle / histogram & 9.2 & \lv5 & ``widest run where each bar is the minimum'' & \coderef{c26-hist84-soln} \\
+Sliding-window extreme (deque) & 9.2 & \lv4 & ``max/min in every fixed-width window'' & \coderef{c26-deque} \\
+RMQ as LCA on the tree & 9.3 & \lv3 & ``many static range-minimum queries'' & \thmref{c26-rmqlca} \\
+Cartesian $=$ value-priority treap & 9.4 & \lv4 & ``same object as a Chapter-8 treap'' & \propref{c26-carters-treap} \\
+Signed span contribution (Summit) & Summit & \lv5 & ``sum a per-subarray extremum over all subarrays'' & \coderef{c26-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c06} -- backward: this chapter's treap view (\secref{c26-treapview}) is Chapter~8's
+        definition read backwards. The treap (\defref{c06-treap}) and its expected-height theorem
+        (\thmref{c06-exptheight}) are \emph{leaned on as black boxes}; \thmref{c26-randbst} is a one-sentence
+        reduction, never a re-derivation. Chapter~8 balanced a tree by editing it; here you never edit -- the
+        shape is read off the data.
+  \item \chref{c05} -- backward: the Cartesian tree's ``inorder $=$ the array'' clause is the plain BST
+        inorder fact from Chapter~7, taken as given; we add only the heap-order on values
+        (\defref{c26-cartesian}).
+  \item \chref{c03} -- backward: traversals are the reason an inorder walk recovers the array; the whole
+        ``read the tree back out'' claim rests on that chapter, not re-proved here.
+  \item \chref{c11} -- forward: the RMQ reduction (\thmref{c26-rmqlca}) \emph{produces} the tree and hands
+        the $\lca$ computation to Chapter~16's lifting engine -- we build the index, they own the ancestor
+        machinery.
+  \item \chref{c13}, \chref{c14} -- forward: the segment tree and sparse/Fenwick engines answer the
+        \emph{same} range questions under \emph{edits}, which a one-pass stack cannot survive; the decision
+        flowchart and the Summit's notebox hand those harder cases onward.
+\end{itemize}
+
+\begin{lastword}[Last Word -- Chapter 9]
+\emph{``Chapter 8 kept a tree short by never letting it grow; this chapter finds a tree that was already
+there -- and reads it out in a single pass.''}
+
+\medskip
+A Cartesian tree is the shape a data array \emph{already has} (\defref{c26-cartesian}). From that one
+reading the whole chapter is a corollary: the build is a monotonic stack, its popped links the parent
+pointers (\coderef{c26-stackbuild}); the subtree of a node is exactly its dominance window
+(\lemref{c26-span}); a bar's rectangle, a next-greater distance, a sliding-window extreme and a subarray's
+minimum are all decided at the pop (\thmref{c26-hist}, \defref{c26-monostack}); the range minimum of
+$a[l..r]$ is the value at $\lca(l,r)$ (\thmref{c26-rmqlca}); and the tree is secretly Chapter~8's treap
+wearing value-priorities, so a random permutation is a random BST of expected logarithmic height
+(\propref{c26-carters-treap}, \thmref{c26-randbst}) -- quoted, not re-proved.
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{If the answer is ``decided by the nearest bigger/smaller neighbour'', it is a monotonic stack.}
+        Histogram, next-greater, subarray-minimum and sliding-window problems all hide that sentence; learn
+        to hear it (\defref{c26-monostack}).
+  \item \emph{Swap ``sum over subarrays'' into ``how many subarrays does $a[i]$ win''} and $\bigO{n^2}$ falls to $\bigO{n}$
+        -- the Summit (\probref{c26-summit}) is that move twice, with a sign and an asymmetric tie-break.
+  \item \emph{Know what you are handing off.} This chapter builds the index; the LCA engine is
+        Chapter~16 (\chref{c11}) and edit-surviving range queries are the segment tree (\chref{c13}) -- use
+        the stack only where the array is read once.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: write the histogram pop and the sliding-window deque from memory
+once each, because they are the two engines behind a dozen ``Hard'' problems; always append the sentinel
+before you trust an answer at the right edge; and when a value repeats, \emph{make one boundary strict}
+before counting spans -- the asymmetry is the difference between \ac{} and a silent double-count.
+
+\medskip
+\textbf{Next:} \chref{c07} turns from heap order you \emph{read off a static array} to a heap you
+\emph{maintain while it changes}. A binary heap is the Cartesian heap rule kept alive under insertions and
+deletions -- a priority queue that sifts up and down in $\bigO{\log n}$, the editing counterpart to this
+chapter's read-only ``the minimum is the root'' -- so the very order that let you build a tree straight out
+of an array becomes, in Chapter~10, the order you pay to preserve against a stream of updates.
+\end{lastword}

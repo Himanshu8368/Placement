@@ -1,0 +1,564 @@
+% =====================================================================
+%  19.5  Static and Offline Range Problems            sec:c13-static
+%  Exports: prop:c13-offline  lst:c13-firstge  lst:c13-940-soln
+%           prob:c13-cashback
+%  Solved: CF 940E Cashback (2000), live-verified (statement + all 4 samples).
+%    Task: array a[1..n], int c.  value of a run of length k = (sum of its
+%    elements) - (the floor(k/c) SMALLEST elements).  Partition a into
+%    contiguous runs to MINIMISE the total value.  1<=n,c<=1e5, 1<=a_i<=1e9.
+%    Editorial structure (verified): WLOG every run has length 1 or c, so
+%      dp[i] = min( dp[i-1] + a_i,                     // length-1 run
+%                   dp[i-c] + (sum(a[i-c+1..i]) - min) )// length-c run, frees min
+%    The window minimum is a STATIC range-min oracle -- the segment tree built
+%    once over a (\coderef{c13-build}/\coderef{c13-query}), no updates.
+%    Samples (verbatim from CF) and DP hand-checks:
+%      1) n=3 c=5 [1 2 3]                       -> 6   (c>n: no discount, sum=6)
+%      2) n=12 c=10 [1 1 10x6 9 10x3]           -> 92
+%      3) n=7 c=2 [2 3 6 4 5 7 1]               -> 17  (traced below)
+%      4) n=8 c=4 [1 3 4 5 5 3 4 1]             -> 23  (traced below)
+%    DP for sample 3: dp=(0,2,3,8,9,13,16,17); partition [2 3][6 4][5 7][1].
+%    DP for sample 4: dp=(0,1,4,8,12,15,18,22,23).  Both reproduce the answers.
+%  Practices: CF 474F Ant colony (2100), CF 438D The Child and Sequence (2300),
+%    both live-verified (title/rating/task shape/samples).
+%  Running numbers agree with 00_opener: the worked static-descend example uses
+%    19.1's max-tree over the shared 8-array (3,2,4,5,1,1,5,3).
+% =====================================================================
+\section{Static and Offline Range Problems}\label{sec:c13-static}
+
+\begin{previouslybox}[Ch.~18 answered static ranks with a BIT; some folds need a tree]
+Chapter~18 handled a \emph{static} order statistic -- ``how many values are
+\(\le k\)'' -- with a frequency BIT, and Chapter~5's prefix sums answer a
+\emph{static} range sum in \(O(1)\).  But a growing slice of range problems ask
+for a fold that has \emph{no inverse and no monotone shortcut}: the minimum of a
+window feeding a dynamic program, the leftmost position clearing a threshold,
+the \(\gcd\) of a range counted against its members.  None of those telescope, so
+the BIT of Ch.~18 cannot host them.  A segment tree \emph{built once} and then
+queried many times is exactly the right object: an \(O(n)\) build buys an
+\(O(\log n)\) oracle for \emph{any} associative fold, including the
+threshold-descend of \(\secref{c13-search}\).  This section makes the segtree the
+engine inside an offline sweep and inside a DP, and pays the debt Ch.~18 and
+Ch.~5 left when their invertible tools ran out.
+\end{previouslybox}
+
+\begin{topicintro}
+\term{Static} here means the array is fixed for the whole run -- the tree is
+built once and never updated -- and \term{offline} means we may reorder or sort
+the queries before answering them.  Both freedoms make the segment tree a pure
+\emph{lookup oracle}: the queries are read-only folds or read-only descends, so
+the \(4n\) build of \(\secref{c13-core}\) is the only mutable moment.  The payoff
+is a family of problems that neither a prefix array (dies to any fold that is
+not a sum) nor a BIT (dies to any non-invertible combine) can serve, yet that a
+single pre-built tree answers in \(\bigO{\log n}\) each.
+
+\textbf{Prerequisites.} \(\secref{c13-core}\) (build once, \(\coderef{c13-query}\)
+fold).  \(\secref{c13-combine}\) (a node may carry a record such as
+\((\gcd,\text{count})\)).  \(\secref{c13-search}\) (the threshold descend used as
+the worked oracle here).  Ch.~5 (\(\chref{c24}\)) \(\tin/\tout\) flattening for
+the tree pointer at the end.  Nothing else.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item turn a static range-min/max tree into a ``leftmost \(\ge x\) in
+        \([l,r]\)'' oracle and read it offline; \hfill\lv{3}--\lv{4}
+  \item recognise when a dynamic program's transition cost is a range fold and
+        replace a naive re-scan with a single segtree query; \hfill\lv{4}--\lv{5}
+  \item prove a structural ``optimal partition uses pieces of size \(1\) or \(c\)''
+        lemma and code the resulting DP; \hfill\lv{5}
+  \item explain why a sparse table beats the segtree for pure static RMQ, and
+        where the segtree still wins (updates, descends, records). \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``fixed array, many range lookups, no inverse'']
+\reckey{the input array never changes but \(q\) range questions do; each
+question is a fold \(\min/\max/\gcd\) or a threshold ``first/last position in
+\([l,r]\) satisfying an aggregate predicate''; a dynamic program whose
+transition is \(\mathit{dp}[i]=\min_j \mathit{dp}[j]+\mathcal{F}(j{+}1,i)\) for a
+range fold \(\mathcal{F}\); the phrase ``partition into contiguous parts'' with a
+per-part cost that is a sum minus an extremum.}
+\recuse{
+  \item static array + read-only folds/descends -- build once
+        (\(\coderef{c13-build}\)), query \(\bigO{\log n}\) each; this section;
+  \item a DP whose range cost is \(\text{sum}-\min\) or \(\max\) of a window --
+        let the tree return the extremum, keep running sums in a prefix array;
+  \item offline threshold sweeps -- sort the queries, let one monotone tree pass
+        answer them (\(\propref{c13-offline}\));
+  \item a \emph{pure} static min/max with zero updates -- consider Ch.~21's sparse
+        table for \(O(1)\) (\(\chref{c19}\)); the segtree is the choice the moment
+        an update, a descend, or a record appears.
+}
+\recnotuse{
+  \item the fold is a plain sum with point adds -- prefix array or BIT
+        (\(\chref{c14}\)) is smaller and answers in \(O(1)\)/\(\bigO{\log n}\);
+  \item whole intervals are \emph{modified} -- lazy propagation, Ch.~20
+        (\(\chref{c15}\)); a static tree has no range-write path;
+  \item ``\(k\)-th smallest in a static range \([l,r]\)'' with many queries and no
+        updates -- a merge-sort or persistent tree, Ch.~21 (\(\chref{c19}\)).
+}
+One-line test: \emph{array fixed, questions are non-invertible range folds or
+thresholds?  Build one tree, then answer every question as a read-only query or
+descend.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{A Static Range-Min Oracle That Also Descends}
+% ---------------------------------------------------------------
+
+The simplest static use is \(\coderef{c13-query}\) as a lookup table: build once,
+and every ``what is the minimum of \(A[l..r]\)'' is a fold over the canonical
+cover.  The more interesting static use is the \emph{descend}
+of \(\secref{c13-search}\) re-pointed at a stored range: ``the leftmost position
+of \([l,r]\) whose value is at least \(x\)'' is answered by pruning on a
+\(\max\)-aggregate, with no updates at all.
+
+\begin{lstlisting}[caption={leftmost position in a closed range whose stored max clears a threshold -- a static descend}, label={lst:c13-firstge}]
+// MAX tree over A[1..n].  Returns the smallest p in [L,R] with A[p] >= x,
+// or -1 if no element of [L,R] reaches x.  A static, read-only search.
+int first_ge(int v, int l, int r, int L, int R, long long x){
+    if (l > R || r < L) return -1;          // node wholly outside [L,R]
+    if (mx[v] < x)      return -1;          // no element here can qualify  (PRUNE)
+    if (l == r)         return l;           // l is inside [L,R] and A[l] >= x
+    int mid = (l + r) / 2;
+    int p = first_ge(2*v,   l,   mid, L, R, x);   // try the LEFT half first
+    if (p != -1) return p;                  // leftmost lives left
+    return first_ge(2*v+1, mid+1, r, L, R, x);    // else the right half
+}
+// O(log n) once you hit the boundary; the mx[] prune kills whole subtrees.
+\end{lstlisting}
+
+\begin{observation}
+\(\coderef{c13-firstge}\) is the \(\secref{c13-search}\) descend with a range
+guard bolted on: the two \code{-1} base cases (outside \([L,R]\), and
+\(\mathit{mx}<x\)) discard a whole subtree in \(O(1)\), and because we always
+probe the left child first, the first leaf we accept \emph{is} the leftmost
+qualifying position.  It reads no updates, so the tree is built once and reused
+for all \(q\) queries -- the essence of the static setting.
+\end{observation}
+
+\begin{tracebox}[Static max-tree: leftmost position with value at least 5]
+On \(\figref{c13-minbuild}\)'s tree shape but folding \(\max\) over
+\(A=(3,2,4,5,1,1,5,3)\): \(t_4{=}3,t_5{=}5,t_6{=}1,t_7{=}5,\)
+\(t_2{=}5,t_3{=}5,t_1{=}5\).  Query ``leftmost \(A[p]\ge 5\) in \([1,8]\)''.
+Root \(t_1\): \(\mathit{mx}{=}5\not<5\), not a leaf, \(\mathit{mid}{=}4\); probe
+left \(t_2[1..4]\): \(\mathit{mx}{=}5\), probe its left \(t_4[1..2]\):
+\(\mathit{mx}{=}3<5\) \(\Rightarrow\) \code{-1}; probe its right \(t_5[3..4]\):
+\(\mathit{mx}{=}5\), probe left \(t_{10}[3]\): \(4<5\Rightarrow\) \code{-1}; probe
+right \(t_{11}[4]\): \(5\ge5\), leaf \(\Rightarrow\) return \(4\).  The left
+subtree of the root succeeded, so we never touch \(t_3\).  Answer \(p{=}4\)
+(\(A_4{=}5\), the first \(5\), cross-checking a linear scan).
+\end{tracebox}
+
+\begin{proposition}{Static folds plus offline ordering beat a per-query rescan}{c13-offline}
+Let a batch of read-only range questions (folds or threshold descends) be issued
+on a fixed array of length \(n\).  Building one segment tree in \(\bigO{n}\)
+answers the whole batch in \(\bigO{q\log n}\), against \(\bigO{qn}\) for naive
+rescans.  When the questions are further \emph{offline} -- reorderable, or
+monotone in a threshold -- sorting them lets a single monotone pass (adding
+positions as they qualify) reuse the same tree incrementally, so the total is
+\(\bigO{(n+q)\log n}\) regardless of interleaving.  No inverse or monotonicity of
+the \emph{data} is needed -- only that no query writes to the array.
+\end{proposition}
+\begin{proofbox}
+Correctness of the fold half is \thmref{c13-merge} (canonical cover) and of the
+descend half is \thmref{c13-descend} restricted to a read-only tree with a range
+guard (the Observation above).  For the offline bound: process the
+sorted questions in order of a non-decreasing threshold; each array position is
+activated at most once, and between activations only \(\bigO{\log n}\) nodes
+change, so \(n\) activations plus \(q\) descends cost \(\bigO{(n+q)\log n}\).
+The tree is not even required to hold the thresholded values -- it may be a
+plain \(0/1\) activity tree driven by the sweep -- which is exactly how a
+``first \(\ge x\)'' batch collapses to one pass.
+\end{proofbox}
+
+\noindent\textbf{Why not a sparse table?}  For a \emph{pure} static \(\min/\max\)
+\(\gcd\) lookup with zero updates, Ch.~21's sparse table answers in \(O(1)\) after
+\(O(n\log n)\) build -- asymptotically better than \(\bigO{\log n}\) per query.
+The segment tree stays the right tool when (i) a point update \emph{can} happen
+between queries, (ii) the query is a \emph{descend} (find a boundary, not a fold
+value) where the sparse table has no clean hook, or (iii) the node must carry a
+\emph{record} (\(\secref{c13-combine}\)) whose idempotent-only sparse merge does
+not apply.  940E below is case (iii)-adjacent: its oracle is a static range min,
+but it is consumed by a DP, and pairing the tree with prefix sums keeps the code
+shared with \(\secref{c13-core}\).
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 940E Cashback}
+% ---------------------------------------------------------------
+
+\solvedproblem{c13-cashback}{Cashback}{CF 940E}
+  {https://codeforces.com/problemset/problem/940/E}{CF 2000}
+  {structural partition lemma (pieces of length 1 or c) + a static range-min oracle + prefix sums feeding a linear DP}
+
+\begin{problemstatement}[CF 940E Cashback]
+You are given an array \(a\) of length \(n\) and an integer \(c\).  The
+\emph{value} of an array \(b\) of length \(k\) is the sum of its elements except
+for the \(\lfloor k/c\rfloor\) smallest.  For example, the value of
+\([3,1,6,5,2]\) with \(c=2\) is \(3+6+5=14\).  Among all possible partitions of
+\(a\) into contiguous subarrays, output the smallest possible sum of the values
+of these subarrays.
+
+\textbf{Input.} \(n,c\) with \(1\le n,c\le 10^5\); then \(n\) values
+\(1\le a_i\le 10^9\).
+
+\textbf{Output.} One integer: the minimum total value of a contiguous partition.
+
+\textbf{Examples.}
+\begin{verbatim}
+Input:          Output:
+3 5             6
+1 2 3
+
+Input:                          Output:
+12 10                           92
+1 1 10 10 10 10 10 10 9 10 10 10
+
+Input:            Output:       Input:              Output:
+7 2               17            8 4                 23
+2 3 6 4 5 7 1                 1 3 4 5 5 3 4 1
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself one sitting]
+Total payment is \(\sum a\) minus the total \emph{discount}; a run of length \(k\)
+discounts the \(\lfloor k/c\rfloor\) smallest of that run.  Minimising payment is
+maximising discount, over all contiguous partitions -- an exponential space.
+\peek{what does a run of length \(<c\), of length \(c\), and of length \(2c\) each
+discount?}
+\nudge{Length \(<c\): \(\lfloor k/c\rfloor=0\), no discount -- those elements are
+paid in full, so split them into singletons freely.  Length \(c\): exactly one
+discount (its minimum).  Length \(2c\): two discounts, but the two smallest of one
+big run is \emph{never better} than the minima of two length-\(c\) runs.}
+\fullhint{WLOG every run has length \(1\) or \(c\) (prove it, next).  Then
+\(\mathit{dp}[i]=\min(\mathit{dp}[i{-}1]+a_i,\ \mathit{dp}[i{-}c]+(\text{sum}
+(a_{i{-}c{+}1..i})-\min(a_{i{-}c{+}1..i})))\).  The running sums come from a
+prefix array; the window minimum is a static range-min query on a tree built once
+over \(a\) (\(\coderef{c13-build}\), \(\coderef{c13-query}\)).  \(\bigO{n\log n}\).
+Full program below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+A run of length \(k\) is paid in full except for its \(\lfloor k/c\rfloor\)
+smallest elements.  Cut the array into runs; the objective is the sum of the
+runs' payments.  Because a payment is ``sum minus \(\lfloor k/c\rfloor\) minima,''
+the \(\min\) of a window is the only non-additive piece -- and a window's minimum
+is exactly a static range fold.  Once we know the shape of an optimal run
+(length~1 or~\(c\)), the whole problem is a one-dimensional DP whose second
+transition costs \(\text{windowSum}-\text{windowMin}\), served by a
+\(\bigO{\log n}\) query.
+
+\solstep{Key Observations}
+\begin{observation}
+A run with \(k<c\) discounts nothing; its cost is \(\sum\) over its elements no
+matter where it is cut.  Replace every such run by singletons at zero change --
+so short runs are ``free'' structure we can ignore.
+\end{observation}
+\begin{observation}
+A run of length \(c\) discounts exactly one element, its minimum.  This is the
+\emph{cheapest} way to buy one discount: any longer run that discounts a single
+element (\(c\le k\le 2c{-}1\)) could instead keep the length-\(c\) sub-run
+containing that minimum as its own run and singleton-ise the rest, at equal cost.
+\end{observation}
+\begin{observation}
+A run of length \(\ge 2c\) discounts \(\ge2\) elements, but only the run's very
+smallest.  Splitting it into consecutive length-\(c\) runs discounts one minimum
+per block, and the sum of per-block minima is \(\ge\) the block-of-\(2c\) two
+smallest -- so lengthening past \(c\) never helps.  Hence some optimal partition
+uses only runs of length \(1\) and \(c\).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Optimise the discount by a global ``sort and pick minima''}
+{The runs must be \emph{contiguous} and a discount is the run's own minimum, so a
+greedy that sorts candidate length-\(c\) windows by their minimum and takes
+non-overlapping ones is \emph{wrong}: a slightly worse early minimum can enable a
+far better later one.  (It fails even small cases -- you need the DP.)}
+\deadend{Range-sum DP with a naive re-scan for the window minimum}
+{Reading each window's minimum by scanning \(c\) elements inside the DP is
+\(O(nc)\), which at \(n=c=10^5\) is \(10^{10}\).  A static range-min tree returns
+that minimum in \(\bigO{\log n}\) for a total \(\bigO{n\log n}\).}
+\aha{Collapse the partition to runs of length \(1\) or \(c\); then
+\(\mathit{dp}[i]=\min(\mathit{dp}[i{-}1]+a_i,\ \mathit{dp}[i{-}c]+\mathit{sum}-
+\mathit{min})\) with a once-built min-tree supplying \(\mathit{min}\) and a
+prefix array supplying \(\mathit{sum}\).}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.22\linewidth} p{0.33\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ enumerate partitions & all cut sets, sort each run & \(\bigO{2^n n\log n}\) & \tle \\
+2 & \lv{4}\ full DP, naive minima & every \((j,i)\) run, scan min & \(\bigO{n^2 c}\) & \tle \\
+3 & \lv{4}\ DP, sparse-table minima & \(O(1)\) static RMQ, all \(j<i\) & \(\bigO{n^2}\) & too many states \\
+4 & \lv{5}\ \textbf{\(1\)-or-\(c\) DP + segtree} & two transitions, \(\bigO{\log n}\) window min & \(\bigO{n\log n}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+The structural lemma is what turns the \(O(n^2)\)-transition DP into a
+two-transition DP -- the segtree then makes each transition cheap.
+
+\solstep{Solution}
+Build a static \(\min\)-tree over \(a[1..n]\) once; fill \(\mathit{pref}[i]=
+\sum_{p\le i}a_p\).  Set \(\mathit{dp}[0]=0\).  For \(i=1..n\): take the
+length-~\(1\) option \(\mathit{dp}[i{-}1]+a_i\), and if \(i\ge c\) the length-~\(c\)
+option \(\mathit{dp}[i{-}c]+(\mathit{pref}[i]-\mathit{pref}[i{-}c])-
+\mathit{queryMin}(i{-}c{+}1,i)\); \(\mathit{dp}[i]\) is the smaller.  Print
+\(\mathit{dp}[n]\).  (\(c>n\Rightarrow\) no length-~\(c\) transition ever fires and
+the answer is \(\sum a\), which the code yields for free.)
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Lemma (shape).} Some optimal partition has every run of length \(1\) or
+\(c\).  By Observations: a run of length \(k<c\) costs \(\sum\), so replace it
+with singletons (equal cost); a run of length \(c\le k\le 2c{-}1\) discounts one
+element -- keep a length-\(c\) sub-run containing that discounted minimum and
+singleton the other \(k-c\) positions, and the discount (a minimum of a subset)
+is unchanged, so cost is equal; a run of length \(\ge 2c\) splits into length-\(c\)
+blocks whose minima sum to \(\ge\) the original \(\lfloor k/c\rfloor\) smallest
+(a per-block minimum is at least as large as the correspondingly-ordered global
+smallest it replaces), so splitting never increases cost.  Iterating reduces every
+optimal partition to pieces of size \(1\) or \(c\).\\
+\textbf{DP correctness.} \(\mathit{dp}[i]\) is the min cost for \(a[1..i]\).  The
+last run of an optimal \(1\)-or-\(c\) partition of the prefix either has length
+\(1\) (cost \(a_i\), prefix \(i{-}1\) solved by \(\mathit{dp}[i{-}1]\)) or length
+\(c\) (cost \(\sum_{i-c+1}^{i}-\min\), prefix \(i{-}c\) by \(\mathit{dp}[i{-}c]\)).
+Taking the min of exactly these two is exhaustive over the reduced family.
+\(\mathit{queryMin}\) returns that window minimum by \thmref{c13-merge}, and
+\(\mathit{pref}\) gives the window sum, so both transition costs are exact.
+\textbf{Bounds.} \(n\) states, each \(O(1)\) queries of \(\bigO{\log n}\):
+\(\bigO{n\log n}\) time, \(\bigO{n}\) memory.  \(\mathit{dp}\) values \(\le n\cdot
+10^9=10^{14}\) fit \code{long long}.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 940E full solution: static range-min tree + prefix sums + the length-1-or-c DP}, label={lst:c13-940-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 100005;
+const long long INF = (1LL<<62);
+int n, c; long long a[MX];
+long long pref[MX], dp[MX], mn[4*MX];
+
+void build(int v, int l, int r){               // static min-tree, built once
+    if (l == r) { mn[v] = a[l]; return; }
+    int m = (l + r) / 2;
+    build(2*v, l, m); build(2*v+1, m+1, r);
+    mn[v] = min(mn[2*v], mn[2*v+1]);
+}
+long long queryMin(int v, int l, int r, int ql, int qr){   // fold [ql,qr]
+    if (ql > qr) return INF;
+    if (ql == l && qr == r) return mn[v];
+    int m = (l + r) / 2;
+    return min(queryMin(2*v,   l,   m, ql,           min(qr, m)),
+               queryMin(2*v+1, m+1, r, max(ql, m+1), qr));
+}
+int main(){
+    scanf("%d%d", &n, &c);
+    for (int i=1;i<=n;i++){ scanf("%lld", &a[i]); pref[i]=pref[i-1]+a[i]; }
+    build(1,1,n);
+    dp[0]=0;
+    for (int i=1;i<=n;i++){
+        dp[i] = dp[i-1] + a[i];                          // last piece length 1
+        if (i >= c){                                     // last piece length c
+            long long s  = pref[i] - pref[i-c];
+            long long m  = queryMin(1, 1, n, i-c+1, i);  // frees the window min
+            dp[i] = min(dp[i], dp[i-c] + s - m);
+        }
+    }
+    printf("%lld\n", dp[n]);
+}
+\end{lstlisting}
+
+\solstep{Trace the Official Samples}
+\begin{tracebox}[CF 940E sample 3: n=7, c=2, a = 2 3 6 4 5 7 1]
+Prefix sums \(0,2,5,11,15,20,27,28\).  DP (window \(c{=}2\), min of the two):
+\(i{=}1\): only length-1, \(\mathit{dp}[1]=2\).
+\(i{=}2\): len1 \(\mathit{dp}[1]{+}3{=}5\); len2 \(\mathit{dp}[0]{+}(5{-}2){=}3\)
+\(\Rightarrow\mathit{dp}[2]{=}3\).
+\(i{=}3\): len1 \(2{+}6{=}9\)? \(\mathit{dp}[2]{+}6{=}9\); len2
+\(\mathit{dp}[1]{+}(9{-}3){=}8\) \(\Rightarrow\mathit{dp}[3]{=}8\).
+\(i{=}4\): len1 \(8{+}4{=}12\); len2 \(\mathit{dp}[2]{+}(10{-}4){=}9\)
+\(\Rightarrow\mathit{dp}[4]{=}9\).
+\(i{=}5\): len1 \(9{+}5{=}14\); len2 \(\mathit{dp}[3]{+}(9{-}4){=}13\)
+\(\Rightarrow\mathit{dp}[5]{=}13\).
+\(i{=}6\): len1 \(13{+}7{=}20\); len2 \(\mathit{dp}[4]{+}(12{-}5){=}16\)
+\(\Rightarrow\mathit{dp}[6]{=}16\).
+\(i{=}7\): len1 \(16{+}1{=}17\); len2 \(\mathit{dp}[5]{+}(8{-}1){=}20\)
+\(\Rightarrow\mathit{dp}[7]{=}17\).  Output \texttt{17}.  The chosen pieces are
+\([2,3][6,4][5,7][1]\) -- each length-~\(2\) run frees its minimum.
+\end{tracebox}
+\begin{tracebox}[CF 940E sample 4: n=8, c=4, a = 1 3 4 5 5 3 4 1]
+Now a discount needs a length-\(4\) run.  The DP ends \(\mathit{dp}=(0,1,4,8,
+12,15,18,22,23)\).  At \(i{=}5\) the length-~\(4\) window \([3,4,5,5]\) has sum
+\(17\), min \(3\), cost \(\mathit{dp}[1]{+}14{=}15\) beats five singletons; the
+run \([1]\) at the front and the trailing \([3,4,1]\) (a \(<c\) run, paid in full)
+are singletons.  Output \texttt{23}.  Note this beats the tempting
+``take two length-~\(4\) blocks'' partition \([1,3,4,5][5,3,4,1]\), whose discount
+is \(1{+}1{=}2\) and payment \(26{-}2{=}24>23\) -- the DP's freedom to \emph{skip}
+a poor minimum is exactly what the naive window-sorting greedy loses.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Build \(\bigO{n}\); \(n\) DP states each doing one \(\bigO{\log n}\)
+\(\mathit{queryMin}\) and \(O(1)\) prefix arithmetic \(\Rightarrow\)
+\(\bigO{n\log n}\) time, \(\bigO{n}\) memory (\(4n\) tree + three \(\bigO{n}\)
+\code{long long} arrays \(\approx 5.6\) MB).  At \(n=10^5\) this is \(\sim
+1.7\cdot10^6\) operations -- comfortably inside \(2\) s.  A static sparse table
+would drop the query to \(O(1)\) (\(\bigO{n}\) total) but cannot answer a
+descend and is Ch.~21's tool; the segtree keeps this program on the same three
+functions as \(\secref{c13-core}\).
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Prove the shape lemma before coding.}  The whole speed-up is
+        ``only length \(1\) and \(c\) runs matter''; without it you write the
+        \(O(n^2)\) DP over every \(j<i\).
+  \item \textbf{Use \code{long long} everywhere.}  Costs reach \(n\cdot10^9=10^{14}\);
+        the range-min identity must be \(>\!\) any value (\(\coderef{c13-940-soln}\)'s
+        \code{INF}), and an \code{int} \(\mathit{dp}\) silently overflows to a wrong
+        (often negative) minimum.
+  \item \textbf{Window is \([i{-}c{+}1,\,i]\), inclusive.}  A half-open slip here
+        reads \(c{+}1\) or \(c{-}1\) elements, so the discount counts the wrong
+        smallest set and the DP degrades by one position everywhere downstream.
+  \item \textbf{\(c>n\) and \(c=1\) boundaries.}  \(c>n\): no length-~\(c\) transition
+        fires, answer \(=\sum a\).  \(c=1\): every run discounts its full length,
+        answer \(0\).  The single loop handles both with the \(i\ge c\) guard; do
+        not add special cases that then disagree with it.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{A Light Pointer: Ranges on Trees}
+% ---------------------------------------------------------------
+
+A subtree of a fixed tree \emph{is} an interval once you stamp it with Chapter~5's
+\(\tin/\tout\) (Ch.~5, \(\chref{c24}\), owns the flattening; we do not re-derive
+it).  So ``aggregate over the subtree of \(v\)'' becomes ``fold over
+\([\tin(v),\tout(v)]\)'' and drops straight onto \(\coderef{c13-query}\): put each
+node's value at slot \(\tin(v)\), build one static tree, answer with a range fold.
+What the segtree adds over Ch.~18's BIT is the \emph{combine}: a subtree \(\min\),
+\(\max\), or \(\gcd\) is a non-invertible fold the BIT cannot maintain, so the tree
+is the engine Ch.~5's ``subtree \(=\) interval'' was pointing at.  Two limits are
+honest: if the queries \emph{modify} a whole subtree, you need lazy propagation
+(Ch.~20, \(\chref{c15}\)); if the tree is dynamic (cut/link), you need
+Euler-tour or top trees (Ch.~6) and heavy-light decomposition
+(Ch.~22, \(\chref{c16}\)) to turn root-paths into segtree ranges.  Those engines
+live in those chapters -- here the takeaway is only that a flattened subtree range
+is a static range problem of exactly this section's kind.
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: trusting a window-sorting greedy]
+940E's discount is ``pick the largest minima,'' which \emph{looks} greedy, but the
+runs are contiguous and one discount forces a whole window: taking a slightly
+worse early minimum can block a much better one.  Sample~4 refutes the greedy
+(\(24\) vs the true \(23\)).  When a partition's pieces are contiguous and
+interact, reach for a DP -- the segtree makes it fast, not greedy.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: the wrong identity for a min oracle]
+\(\coderef{c13-940-soln}\)'s \code{queryMin} returns \code{INF} on an empty
+overlap so \(\min\) ignores it -- exactly the \(+\infty\) identity of
+\(\secref{c13-core}\).  Returning \(0\) (or a stale array value) makes every
+window look like it contains a \(0\), and the DP discounts a phantom cheapest
+element on every transition.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: re-building the tree inside the DP]
+The array is \emph{static}; build once (\(\coderef{c13-build}\)) and treat
+\(\mathit{queryMin}\) as pure.  A rebuild per state is \(\bigO{n}\) inside
+\(\bigO{n}\) states -- \(\bigO{n^2}\) for no reason.  The offline/static setting
+is precisely the case where the tree is write-free after construction.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: using the segtree where a sparse table is right]
+For a \emph{pure} static \(\min/\max/\gcd\) lookup table with zero updates and
+zero descends, Ch.~21's sparse table answers in \(O(1)\).  Carrying a
+\(\bigO{\log n}\) segtree there is correct but a factor slow and more code.  Pick
+the segtree when an update, a threshold descend, or a multi-field record appears
+-- and name the sparse table otherwise (\(\chref{c19}\)).
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Have you proved a \emph{structural} reduction (e.g. pieces of length \(1\)
+        or \(c\)) before choosing the DP transitions?
+  \item Is the tree built once and read many, or are you wrongly rebuilding it?
+  \item What is the identity for your fold, and does an empty overlap return it?
+  \item Is your range-min window the right closed interval (exactly \(c\) leaves)?
+  \item Would a sparse table do this lookup in \(O(1)\)?  If so, why the tree?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Ant colony}{CF 474F}
+    {https://codeforces.com/problemset/problem/474/F}
+    {CF 2100 L4}
+    {Static array, \(t\) queries \([l,r]\) and \emph{no updates}.  ``Freed'' ants
+     are those whose strength equals \(\gcd(s_l..s_r)\); answer \(=\) \((r{-}l{+}1)
+     - \#\{\text{elements equal to the range gcd}\}\).  A textbook static fold with a
+     \emph{record} node: store \((\gcd,\ \text{count of elements equal to that } \gcd)\)
+     per node and merge as \(\secref{c13-combine}\) prescribes (equal child gcds add
+     counts; otherwise the merged \(\gcd\) keeps only the children whose \(\gcd\) it
+     divides).  Build once, one query per \([l,r]\) -- this is exactly the
+     static-oracle pattern of \(\secref{c13-static}\), and a BIT cannot fold a
+     \(\gcd\).}
+  \practice{The Child and Sequence}{CF 438D}
+    {https://codeforces.com/problemset/problem/438/D}
+    {CF 2300 L5}
+    {Maintain \(a[1..n]\) under three operations: range \(\sum\) query, range
+     \emph{modulo} (\(a_i := a_i \bmod x\) for \(i\in[l,r]\)), and point set.
+     Store \((\sum,\max)\) per node; a modulo by \(x\) leaves every element
+     \(<x\) untouched, so \emph{descend only into nodes whose } \(\max\ge x\) and
+     fix leaves on the way down (the prune is the \(\secref{c13-search}\) first-\(\ge
+     x\) idea used to bound the work -- each element is reduced \(\bigO{\log}\)
+     times).  It is \emph{not} lazy propagation: the range update is applied by
+     pruning, the point set rebuilds \((\sum,\max)\) up the path.  A genuine
+     range-\emph{assign}/add is Ch.~20 (\(\chref{c15}\)); this one gets its speed
+     from the max-prune, and answers can exceed \(32\) bits.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c13-core}\) supplies the static build and \(\coderef{c13-query}\) the
+oracle; \(\secref{c13-combine}\) the record nodes (here \((\gcd,\text{count})\),
+\((\sum,\max)\)); \(\secref{c13-search}\) the threshold descend reused by the
+worked oracle and CF~438D.  Chapter~18 (\(\chref{c14}\)) owns the invertible
+prefix sums the static case shares with, and its \(\secref{c14-offline}\) owns the
+offline-sweep habit \(\propref{c13-offline}\) extends.  Chapter~5 (\(\chref{c24}\))
+owns \(\tin/\tout\).  Forward: pure static \(O(1)\) RMQ and the merge-sort /
+persistent tree are Ch.~21 (\(\chref{c19}\)); range \emph{updates} are Ch.~20's
+lazy (\(\chref{c15}\)); subtree/path engines are Ch.~22 (\(\chref{c16}\)).
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 19.5 in 10 seconds]
+Fixed array, non-invertible range questions \(\Rightarrow\) build one tree,
+answer read-only: a \emph{fold} via \(\coderef{c13-query}\), or a
+\emph{threshold} via \(\coderef{c13-firstge}\) (prune on \(\mathit{mx}<x\), take
+the left leaf).  Offline order turns \(q\) descends into one monotone pass
+(\(\propref{c13-offline}\)).  When a DP's transition cost is \(\text{sum}-\min\)
+over a window, a static range-min tree makes it \(\bigO{\log n}\).  CF~940E:
+prove runs reduce to length \(1\) or \(c\), then
+\(\mathit{dp}[i]=\min(\mathit{dp}[i{-}1]{+}a_i,\ \mathit{dp}[i{-}c]{+}\mathit{sum}{-}\mathit{min})\).
+Sparse table is \(O(1)\) for \emph{pure} static (\(\chref{c19}\)); the tree wins
+with updates, descends, or records.
+\selftest{
+  \item State the 940E shape lemma (only lengths \(1\) and \(c\)) and the one
+        sentence for why a length-\(\ge 2c\) run never helps.
+  \item What makes the window-sorting greedy fail on sample 4 -- give the numbers?
+  \item Why is \code{INF} the right empty-overlap return for \code{queryMin}, and
+        what breaks if you return \(0\)?
+  \item When would a sparse table replace this section's tree, and when would it
+        \emph{not}?
+  \item Which Ch.~20 feature would CF~438D need if operation 2 were range \emph{add}
+        instead of range modulo?
+}
+\end{recallbox}

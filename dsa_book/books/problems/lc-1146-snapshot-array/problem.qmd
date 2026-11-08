@@ -1,0 +1,289 @@
+### Problem: Snapshot Array {#sec-ds-p2-snapshot}
+
+::: {.p-statement}
+Design a `SnapshotArray(length)` whose cells all start at $0$, with three calls:
+
+- `set(index, val)` — overwrite `arr[index]` with `val`;
+- `snap()` — take a snapshot and return its id, which is the number of earlier `snap()` calls ($0, 1, 2, \ldots$);
+- `get(index, snap_id)` — the value `arr[index]` held **when snapshot `snap_id` was taken**.
+
+$1 \le$ `length` $\le 5\cdot10^4$, $0 \le$ `val` $\le 10^9$, `snap_id` always names a snapshot already taken, and there are at most $5\cdot10^4$ calls in total. The LeetCode sample runs `SnapshotArray(3); set(0,5); snap() -> 0; set(0,6); get(0,0) -> 5`: cell $0$ reads $5$ under snapshot $0$ even though it now holds $6$.
+
+Source: [LC 1146 · Snapshot Array](https://leetcode.com/problems/snapshot-array/){.solved difficulty="Medium"}
+:::
+
+::: {.p-intuition}
+Copying the array on every `snap()` costs $O(n)$ per snapshot, yet between two snapshots only the cells that were `set` change. So `snap()` only advances a counter, and each cell keeps its own history of `(snap_id, value)` records, written only when the cell is set (@sec-ds-a2). `get(i, s)` asks cell `i` for its newest record with id $\le s$; ids on one cell only increase, so that is a binary search (@sec-bst-a2).
+:::
+
+::: {.p-approach}
+1. **Copy the whole array.** `snap()` stores a copy; `get` indexes it. $O(n)$ per snapshot and $O(n \cdot \text{snaps})$ memory. This class is the naive model.
+2. **Versioned columns.** `hist[i]` is a list of `(snap_id, value)`; `snap` bumps a counter, `set` appends under the current id (or overwrites the record already carrying it), `get` walks the column for the newest record with id $\le s$. $O(1)$ `snap`, $O(\text{writes to } i)$ `get`.
+3. **Bisect the column.** The ids of one column are sorted, so `get` is `bisect_right(ids, s) - 1`, $O(\log k)$.
+
+**Operation contract (final form).** Invariant **I**: `ids[i]` is strictly increasing, starts with the seed id $0$, and its last entry is at most the current `snap_id`; `vals[i][j]` is the value cell `i` held at the end of the period with id `ids[i][j]`, as far as writes so far tell.
+
+| Operation | What it does | How **I** survives | Cost |
+|---|---|---|---|
+| `set(i, v)` | overwrite the last record if it carries the current id, else append `(snap_id, v)` | the new id is $\ge$ the last one; equal ids are merged, so the list stays strictly increasing | $O(1)$ amortised |
+| `snap()` | `snap_id += 1`, return the old value | records are untouched; future writes get the larger id | $O(1)$ |
+| `get(i, s)` | `p = bisect_right(ids[i], s) - 1`, return `vals[i][p]` | read only; $p \ge 0$ because of the seed record | $O(\log k_i)$ for $k_i$ records |
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Copy the whole array
+
+::: {.form-next}
+Literally the definition: `snap()` stores `self.cur[:]`, `get` indexes the stored copy. Correct but $O(n)$ per snapshot: a snap-heavy workload pays again and again for cells nobody touched.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("snap", "fullcopy")
+    assert str(final) == "outputs None 0 None 5"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class SnapshotCopy:
+    def __init__(self, length):
+        self.cur = [0] * length
+        self.snaps = []
+
+    def set(self, idx, val):
+        self.cur[idx] = val
+
+    def snap(self):
+        self.snaps.append(self.cur[:])
+        return len(self.snaps) - 1
+
+    def get(self, idx, snap_id):
+        return self.snaps[snap_id][idx]
+
+
+s = SnapshotCopy(3)
+s.set(0, 5)
+assert s.snap() == 0
+s.set(0, 6)
+assert s.get(0, 0) == 5
+assert s.get(1, 0) == 0
+```
+
+##### C++
+
+```cpp
+class SnapshotCopy {
+    vector<int> cur;
+    vector<vector<int>> snaps;
+ public:
+    SnapshotCopy(int n) : cur(n, 0) {}
+    void set(int idx, int val) { cur[idx] = val; }
+    int snap() { snaps.push_back(cur); return (int)snaps.size() - 1; }
+    int get(int idx, int snap_id) { return snaps[snap_id][idx]; }
+};
+```
+:::
+
+#### Versioned columns
+
+::: {.form-next}
+Move the history *inside* each column. `snap()` is `snap_id += 1`; `set` records `(snap_id, val)` on that column only; `get` walks the column and keeps the last record with id $\le$ the query. Snapshots now cost nothing and untouched columns store only their seed record.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("snap", "columns")
+    assert str(final) == "outputs None 0 None 5"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class SnapshotColumns:
+    def __init__(self, length):
+        self.hist = [[(0, 0)] for _ in range(length)]
+        self.snap_id = 0
+
+    def set(self, idx, val):
+        if self.hist[idx][-1][0] == self.snap_id:
+            self.hist[idx][-1] = (self.snap_id, val)   # same snapshot: overwrite, don't append
+        else:
+            self.hist[idx].append((self.snap_id, val))
+
+    def snap(self):
+        self.snap_id += 1
+        return self.snap_id - 1
+
+    def get(self, idx, snap_id):
+        res = 0
+        for sid, val in self.hist[idx]:               # ids are increasing on one column
+            if sid > snap_id:
+                break
+            res = val
+        return res
+
+
+s = SnapshotColumns(3)
+s.set(0, 5)
+assert s.snap() == 0
+s.set(0, 6)
+assert s.get(0, 0) == 5
+assert s.get(1, 0) == 0
+```
+
+##### C++
+
+```cpp
+class SnapshotColumns {
+    vector<vector<pair<int,int>>> hist;
+    int snap_id = 0;
+ public:
+    SnapshotColumns(int n) : hist(n, vector<pair<int,int>>(1, make_pair(0, 0))) {}
+    void set(int idx, int val) {
+        if (hist[idx].back().first == snap_id) hist[idx].back().second = val;
+        else hist[idx].push_back(make_pair(snap_id, val));
+    }
+    int snap() { return snap_id++; }
+    int get(int idx, int sid) {
+        int res = 0;
+        for (const auto& r : hist[idx]) { if (r.first > sid) break; res = r.second; }
+        return res;
+    }
+};
+```
+:::
+
+#### Bisect the column
+
+::: {.form-next}
+The ids of one column are already sorted, so `get` becomes `bisect_right(ids, snap_id) - 1`, $O(\log k)$. Keeping ids and values in two parallel lists lets `bisect` run on the ids directly. The stress test replays random `set`/`snap`/`get` sequences against the copying model and queries every (cell, snapshot) pair.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("snap", "lazy")
+    assert str(final) == "get(0,0)=5, get(0,1)=6, get(1,0)=0"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+import bisect
+
+
+class SnapshotArray:
+    def __init__(self, length):
+        self.ids = [[0] for _ in range(length)]
+        self.vals = [[0] for _ in range(length)]
+        self.snap_id = 0
+
+    def set(self, idx, val):
+        if self.ids[idx][-1] == self.snap_id:
+            self.vals[idx][-1] = val
+        else:
+            self.ids[idx].append(self.snap_id)
+            self.vals[idx].append(val)
+
+    def snap(self):
+        self.snap_id += 1
+        return self.snap_id - 1
+
+    def get(self, idx, snap_id):
+        p = bisect.bisect_right(self.ids[idx], snap_id) - 1
+        return self.vals[idx][p]
+
+
+s = SnapshotArray(3)
+s.set(0, 5)
+assert s.snap() == 0
+s.set(0, 6)
+assert s.get(0, 0) == 5
+assert s.snap() == 1
+assert s.get(0, 1) == 6 and s.get(1, 0) == 0   # the board sample's three reads
+# stress: random interleaved operations against the copying model
+for _ in range(200):
+    n = random.randint(1, 4)
+    fast, model = SnapshotArray(n), SnapshotCopy(n)
+    for _ in range(30):
+        r = random.random()
+        if r < 0.5:
+            i, v = random.randrange(n), random.randint(0, 9)
+            fast.set(i, v); model.set(i, v)
+        elif r < 0.75:
+            assert fast.snap() == model.snap()
+        elif model.snaps:
+            i, sid = random.randrange(n), random.randrange(len(model.snaps))
+            assert fast.get(i, sid) == model.get(i, sid)
+    for sid in range(len(model.snaps)):
+        for i in range(n):
+            assert fast.get(i, sid) == model.get(i, sid)
+    for i in range(n):                               # invariant: ids strictly increasing
+        assert all(a < b for a, b in zip(fast.ids[i], fast.ids[i][1:]))
+```
+
+##### C++
+
+```cpp
+class SnapshotArray {
+    vector<vector<int>> ids, vals;
+    int snap_id = 0;
+ public:
+    SnapshotArray(int n) : ids(n, vector<int>(1, 0)), vals(n, vector<int>(1, 0)) {}
+    void set(int idx, int val) {
+        if (ids[idx].back() == snap_id) vals[idx].back() = val;
+        else { ids[idx].push_back(snap_id); vals[idx].push_back(val); }
+    }
+    int snap() { return snap_id++; }
+    int get(int idx, int sid) {
+        int p = (int)(upper_bound(ids[idx].begin(), ids[idx].end(), sid) - ids[idx].begin()) - 1;
+        return vals[idx][p];
+    }
+};
+```
+:::
+
+:::
+
+::: {.p-complexity}
+**Copy the whole array:** $O(1)$ `set` and `get`, $O(n)$ `snap`, $O(n \cdot \text{snaps})$ memory; at the limits ($5\cdot10^4$ cells and up to $5\cdot10^4$ snapshots) that is up to $2.5\cdot10^9$ stored integers, so it is not a usable answer. **Versioned columns:** $O(1)$ `set` and `snap`, $O(k_i)$ `get` for $k_i$ records on the column, $O(n + w)$ memory for $w$ writes. **Bisect the column:** the same, with $O(\log k_i)$ `get`.
+:::
+
+::: {.p-edge}
+- **Two writes under the same snapshot id**: `set` must *overwrite* the record carrying the current id, or a column would hold two records with one id and `get` would depend on which one the search lands on.
+- **`get` on a never-written cell**: the seed record `(0, 0)` makes id $0$ always a valid floor, so the answer is $0$ without a branch.
+- **A cell written only after the queried snapshot**: `bisect_right(ids, s) - 1` stops at the newest record with id $\le s$, skipping the later write.
+:::
+
+::: {.callout-warning title="Common mistakes"}
+- **`snap()` returning the bumped counter.** The id handed out must be the one the writes *so far* were tagged with: `return snap_id++` (C++) or bump-then-return-minus-one (Python).
+- **`bisect_left` instead of `bisect_right`.** With ids $[0, 2, 5]$ and query $4$, the floor is index $1$; `bisect_left(ids, 4) - 1` happens to agree, but for a query equal to an id, say $2$, `bisect_left` gives index $1 - 1 = 0$, the record *before* the snapshot.
+- **Appending unconditionally in `set`**: several writes under one id must collapse into the last one.
+:::
+
+**Variants.** [LC 981 · Time Based Key-Value Store](https://leetcode.com/problems/time-based-key-value-store/){difficulty="Medium"} is the same per-key history with timestamps chosen by the caller instead of a counter (@sec-lang-p4-timemap solves it). Full persistence, where an old version can itself be modified, needs a persistent tree and belongs to the tree volume.
+
+::: {.practice}
+- [LC 2034 · Stock Price Fluctuation](https://leetcode.com/problems/stock-price-fluctuation/){difficulty="Medium"} — records keyed by timestamp that may be corrected later: a per-key latest value plus an ordered structure for the extremes.
+:::

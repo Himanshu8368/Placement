@@ -1,0 +1,601 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  4.3  Encodings and Input Formats                       sec:c04-formats
+%  Exports: def:c04-encoding  def:c04-levelorder  thm:c04-selfdelim
+%           lst:c04-formats  ex:c04-encodings
+%           prob:c04-string-tree    prob:c04-recover-preorder
+%           lst:c04-string-tree     lst:c04-recover-preorder
+% =====================================================================
+\section{Encodings and Input Formats}\label{sec:c04-formats}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item What single loop turns \code{parent[]} into \code{children[]}? (\coderef{c04-reps})
+  \item Why does a DFS over an \emph{undirected} adjacency list need a parent guard, and
+        what does rooting give you for free? (\thmref{c04-dfs-orient})
+  \item In LC 331 (\probref{c03-verify-pre}) what made a preorder string decodable without
+        rebuilding -- and how is that the same word ``self-delimiting'' used here?
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Before there is a tree, there is a \emph{string} -- or an array, or a list of edges. The
+judge never hands you pointers; it hands you an \term{encoding}, and your first job is to
+\term{decode} it into a structure you can traverse. This section is a field guide to the
+encodings contests actually use: LeetCode's \textbf{level-order array with null
+marks}, the \textbf{preorder string with sentinels}, the \textbf{nested bracket} (Lisp-like)
+form, and the \textbf{depth-dashed preorder} of LC 1028. Each is a different way of laying
+the same tree flat; each needs a different reader. You will also \emph{encode} (produce such
+a string), which is where LC 606 lives, and see exactly which encodings are
+\textbf{uniquely} reversible (\thmref{c04-selfdelim}).
+\textbf{Prerequisites.} \secref{c03-dfs} and \secref{c03-rebuild} (preorder/inorder,
+serialisation); \secref{c04-reps} (the structures you decode \emph{into}); a stack.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item read a level-order array (with \# sentinels) into a pointer tree and back;   \hfill\lv{3}
+  \item emit the parenthesis encoding of a binary tree under LC 606's rules; \hfill\lv{2}
+  \item parse a nested bracket / depth-dashed string with a stack or recursion;      \hfill\lv{3}--\lv{4}
+  \item state why a bare preorder is \emph{not} uniquely decodable without marks.     \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- the tree arrives as a string/array]
+\reckey{the input is \emph{one} $\texttt{string}$ or a $\texttt{vector<string>}$ / array that
+\emph{encodes} the tree -- dashes, parentheses, commas with \#, or a preorder with depths --
+and you must reconstruct (or produce) the structure before solving.}
+\recuse{
+  \item ``parse this expression / nested list / serialised tree'' -- the string \emph{is} the
+        input; decode it (\probref{c04-recover-preorder}, LC 736);
+  \item ``output the tree in this parenthesised form'' -- \emph{encode} it (\probref{c04-string-tree});
+  \item LeetCode's \code{deserialize} helpers -- a level-order array with nulls.
+}
+\recnotuse{
+  \item the input is $n{-}1$ edges or a \code{parent[]} array -- that is a \emph{representation},
+        \secref{c04-reps}/\secref{c04-rooting}, not a string to parse;
+  \item you are given two \emph{traversal arrays} and must rebuild -- LC 105/106, that is
+        reconstruction, \secref{c03-rebuild};
+  \item the tree is fully built and the string is only the \emph{answer format} -- a formatting
+        task, not an encoding.
+}
+One-line test: \emph{is my input (or output) a flat string/array whose layout, not just
+contents, carries the tree shape? If yes, decode/encode -- this section.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Here is running example $R$ (\figref{c04-running-r}) written five ways. The tree never
+changed -- only the \emph{contract} for reading it did. A level-order array is scanned with
+a queue; a depth-dashed preorder with a stack; a bracket string with recursion; two
+traversal arrays need a split. ``Which reader?'' is decided entirely by the format, and
+choosing the reader is the whole problem.
+
+\begin{figure}[H]
+\centering
+\renewcommand{\arraystretch}{1.35}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.60\linewidth}@{}}
+\toprule
+\textbf{Encoding} & \textbf{The same tree $R$} \\
+\midrule
+Pointer tree & \code{TreeNode* root} (addresses; \S\ref{sec:c04-reps}) \\
+Level-order array (LC) & \code{[1,2,3,4,5,\#,\#,\#,\#,6]} \\
+Preorder $+$ null marks & \code{1,2,4,\#,\#,5,\#,\#,3,\#,6,\#,\#} \\
+Nested brackets (LC 606) & \code{1(2(4)(5))(3()(6))} \\
+Depth-dashed preorder & \code{1-2--4--5-3--6} \\
+\bottomrule
+\end{tabular}
+\caption{One binary tree, five encodings. The \# in the level-order array marks \emph{skipped}
+positions so later children line up; the \# in the preorder marks \emph{null children} so the
+stream is self-delimiting (\thmref{c04-selfdelim}); $6$ sits under $3$'s \emph{right}
+child, which the LC 606 brackets record explicitly as \code{(3()(6))} but the dashed preorder
+cannot (see \probref{c04-recover-preorder}).}\label{fig:c04-encodings}
+\end{figure}
+
+Two design axes sort every encoding. First, \textbf{traversal order}: level-order (BFS)
+arrays are flat and queue-friendly; preorder strings nest and recurse naturally. Second,
+\textbf{how nulls are carried}: explicitly (preorder with \#), implicitly by position
+(level-order array pads \# so children stay aligned), structurally (brackets \code{()}), or
+not at all -- and \emph{``not at all'' is exactly when a single order stops being enough},
+which is the content of \thmref{c04-selfdelim}.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Encoding and decoding; self-delimiting}{c04-encoding}
+An \term{encoding} of a tree is a string (or array) over a fixed alphabet from which the
+tree can be \term{decoded} -- recovered -- by some reader. An encoding is
+\term{self-delimiting} if, while scanning left to right, you always know when a subtree has
+ended \emph{without} looking ahead; formally, no proper prefix of a valid encoding is itself
+the encoding of a complete tree. Explicit null sentinels and balanced brackets make an
+encoding self-delimiting.
+\end{definition}
+
+\noindent\textbf{In plain words.} A self-delimiting format tells you, token by token, exactly
+where each node's children stop -- so one pass, no back-tracking, rebuilds the
+tree. Formats that omit that signal (a bare preorder) leave you unable to tell where the left
+subtree ends, hence not uniquely decodable.
+
+\begin{definition}{LeetCode level-order serialisation}{c04-levelorder}
+LeetCode writes a binary tree as the BFS queue of node values, \emph{including} a marker (\# /
+\code{null}) for every missing child of a node that has been emitted, and trimming trailing
+markers. Reading position $k$ (0-based) as a complete-tree slot, a node at slot $k$ has child
+slots $2k+1$ and $2k+2$; the array is \emph{level} order, so a queue (not $2k$ arithmetic on a
+skewed tree) is the safe reader.
+\end{definition}
+
+\subsection{Key Property: when is one order enough?}
+
+\begin{theorem}{Unique decoding requires the nulls to be marked}{c04-selfdelim}
+A preorder sequence of \emph{values alone} (no markers) determines a unique binary tree if and
+only if null children are explicitly marked in the sequence, or a second order (typically the
+inorder) is supplied. Without either, a bare preorder is consistent with \emph{many} trees.
+\end{theorem}
+\begin{proofbox}
+($\Leftarrow$) With explicit null marks, decode recursively: read the root, then \emph{recurse
+for the left subtree} and \emph{recurse for the right}; a mark stops a branch immediately. Each
+subtree is bounded by its own marks, so the parse is forced -- the encoding is self-delimiting
+and yields exactly one tree. ($\Rightarrow$) Conversely, given values-only preorder $1,2,3$: both
+the tree ``$1$ with left child $2$ with left child $3$'' and ``$1$ with left $2$ and \emph{right}
+$3$'' -- and three more -- produce the identical preorder $1,2,3$ (preorder lists node-then-
+left-then-right, and cannot reveal which side a lone child occupies). Since the map
+$\{\text{trees}\} \to \{\text{value-only preorders}\}$ is not injective, decoding is ambiguous
+unless nulls are marked (adding information) or a second order pins each node's
+side (inorder splits by the root -- \thmref{c03-root-position}, \secref{c03-rebuild}).
+\end{proofbox}
+\begin{insightbox}
+This is precisely why LC 606 keeps an \emph{empty} \code{()} for a node with a right child but
+no left (\probref{c04-string-tree}) -- dropping it would collapse \code{3()(6)} to \code{3(6)}
+and lose the left/right distinction, exactly the ambiguity the proof constructs. The dashed
+preorder of LC 1028 makes the \emph{opposite} choice (a lone child is always the left child) to
+stay decodable with fewer tokens.
+\end{insightbox}
+
+\subsection{The Algorithm: two representative readers}
+
+\begin{lstlisting}[caption={Decoding a level-order array, and emitting a general-tree bracket string}, label={lst:c04-formats}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode { int val; TreeNode *left, *right;
+    TreeNode(int x=0): val(x), left(nullptr), right(nullptr) {} };
+
+// READER 1 -- LeetCode level-order array ("1,2,3,#,4,5,#,#,#,#,#,6") -> TreeNode*
+//   Queue-driven: pop a parent, attach the next two tokens as its children.
+TreeNode* deserializeLevel(const vector<string>& tok) {
+    if (tok.empty() || tok[0] == "#") return nullptr;
+    TreeNode* root = new TreeNode(stoi(tok[0]));
+    queue<TreeNode*> q; q.push(root);
+    size_t i = 1;
+    while (!q.empty() && i < tok.size()) {
+        TreeNode* parent = q.front(); q.pop();
+        if (i < tok.size() && tok[i] != "#") {              // left child
+            parent->left = new TreeNode(stoi(tok[i])); q.push(parent->left);
+        }
+        ++i;
+        if (i < tok.size() && tok[i] != "#") {              // right child
+            parent->right = new TreeNode(stoi(tok[i])); q.push(parent->right);
+        }
+        ++i;
+    }
+    return root;
+}
+
+// READER 2 -- general tree -> nested bracket string "root(c1)(c2)..." (bracket encode)
+//   DFS; wrap each child's rendering in parentheses (the LC-606 / Lisp shape).
+string encodeBrackets(const vector<vector<int>>& kids, int u) {
+    string s = to_string(u);
+    for (int c : kids[u]) s += "(" + encodeBrackets(kids, c) + ")";
+    return s;                                               // leaf -> just its label
+}
+\end{lstlisting}
+\begin{complexitybox}
+Both readers are $\bigO{n}$ in the number of tokens/nodes and $\bigO{n}$ space (queue /
+recursion). Reader 1 uses a \emph{queue} -- the level-order array is a BFS object, so do not
+try to read it as a preorder. Reader 2 recurses once per node; on a deep general tree this is
+$\bigO{h}$ stack (chain risk as usual). The dash-preorder and the null-preorder readers
+(\probref{c04-recover-preorder}) are $\bigO{n}$ with a stack instead.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Decoding $R$'s level-order array}{c04-encodings}
+Feed Reader 1 the array $[1,2,3,4,5,\#,\#,\#,\#,6]$ (\figref{c04-encodings}).
+\textbf{Queue}: pop $1$, read tokens $2,3$ as its left,right (push both). Pop $2$, read $4,5$
+(left,right, push). Pop $3$, read $\#$(no left) then $6$(right, push). Pop $4$, read $\#,\#$; pop
+$5$, read nothing left. Result: $1\!\to\!\{2,3\}$, $2\!\to\!\{4,5\}$, $3\!\to\!\{\_,6\}$ -- exactly
+$R$, with $6$ on $3$'s \emph{right}. The four $\#$ markers are what keep $4,5$ and
+$6$ in their correct slots; drop one and everything shifts and the tree is wrong.
+\end{example}
+\begin{tracebox}[Reader 2 re-encodes $G$'s rooted children]
+$\children$ of $G$ (from \secref{c04-rooting}): $0\!\to\!\{1,2,3\}$, $1\!\to\!\{4,5\}$, $3\!\to\!\{6\}$.
+\code{encodeBrackets} on $0$: \code{"0"} + \code{"(" + enc(1) + ")"} + \code{"(" + enc(2) + ")"}
++ \code{"(" + enc(3) + ")"}. enc(1)$=$\code{1(4)(5)}, enc(2)$=$\code{2}, enc(3)$=$\code{3(6)}.
+Result \code{"0(1(4)(5))(2)(3(6))}" -- the bracket encoding of \figref{c04-running-g}. \checkmark
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Multi-digit tokens}: a value may be several characters -- parse integers, do
+        not index single chars (\probref{c04-recover-preorder} handles this).   \hfill\lv{3}
+  \item \textbf{Comma vs space separators}: split on the delimiter before reading; a
+        mis-set delimiter shifts every position.                               \hfill\lv{2}
+  \item \textbf{JSON / nested-array input} (\code{[1,[2,[4]],[]]}\ldots): a bracket reader with
+        a recursion + index, LC-flavoured.                                     \hfill\lv{4}
+  \item \textbf{Lisp expression} (add/mul/let with scoping): a bracket parse \emph{plus} an
+        environment stack.                                        \hfill\lv{5} (LC 736)
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c04-formats-pitfalls}
+
+\begin{warningbox}[Trap 1 -- making a node for a \# / null token]
+In a level-order array the \# means ``this child slot is empty''. Creating a node for it gives
+phantom zeros and a wrong shape; the check \code{if (tok[i] != "\#")} before \code{new TreeNode}
+is mandatory.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: allocates a node for the sentinel}, language=C++, basicstyle=\ttfamily\small]
+parent->left = new TreeNode(stoi(tok[i]));   // stoi("#") is UB / throws
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: only build when the token is a value}, language=C++, basicstyle=\ttfamily\small]
+if (tok[i] != "#") { parent->left = new TreeNode(stoi(tok[i])); q.push(parent->left); }
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- reading a level-order array as if it were preorder]
+The arrays carry different \emph{contracts}. Feeding $[1,2,3,\ldots]$ to a preorder decoder
+attaches $3$ as $2$'s child instead of $1$'s right -- the tree is
+mis-rooted. Match the reader to the format (\figref{c04-encodings}).
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: preorder recursion on a level-order array}, language=C++, basicstyle=\ttfamily\small]
+// [1,2,3,4,...]: "root, then ALL of left subtree, then right" -- but this is BFS order!
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: use the queue reader (Reader 1)}, language=C++, basicstyle=\ttfamily\small]
+// pop parent, consume the NEXT TWO tokens as left,right -- level by level
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- dropping the empty \code{()} for a right-only child (LC 606)]
+Encoding \code{3} with only a right child $6$ as \code{3(6)} instead of \code{3()(6)} loses the
+left/right distinction and is \emph{not} uniquely decodable (\thmref{c04-selfdelim}). The empty
+parentheses \emph{are} the information.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: omits the left placeholder}, language=C++, basicstyle=\ttfamily\small]
+s += "(" + tree2str(t->right) + ")";   // when left is null this mislabels right as left
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: emit "()" for a null left when a right exists}, language=C++, basicstyle=\ttfamily\small]
+s += "(" + tree2str(t->left) + ")";               // "()" if left is null
+if (t->right) s += "(" + tree2str(t->right) + ")";
+\end{lstlisting}
+
+\subsection{Problem Lab}
+
+One encoder and one decoder. LC 606 is a $\lv{2}$ \emph{output}-format problem whose only
+teeth are the right-only-child \code{()} rule; LC 1028 is a genuine $\lv{4}$ decoder that
+turns a depth-dashed preorder string back into pointers -- the inverse of a serialisation.
+
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-string-tree}{Construct String from Binary Tree}{LeetCode 606}
+  {https://leetcode.com/problems/construct-string-from-binary-tree/}{LC Easy L2}
+  {preorder bracket encoding, the empty-parenthesis rule, encode (not decode)}
+
+\begin{problemstatement}[Construct String from Binary Tree]
+Given the root of a binary tree, build a string by \emph{preorder} traversal where every
+node's value is printed, children are printed in parentheses, and \textbf{the empty
+parentheses for a missing \emph{left} child must be printed only when a right child exists}.
+Rules: a leaf prints just its number; a node with a left child prints
+\code{val(leftsubtree)}; a node with \emph{only} a right child prints \code{val()(rightsubtree)}
+(the \code{()} keeps the left slot). Example: tree $[1,2,3,4,\#,5,\#,6]$? no -- for the tree with
+root $1$, left $2$ (left $4$), right $3$ (right $6$), the output is
+\code{"1(2(4))(3()(6))"}. $1 \le n \le 3\cdot10^4$; values are non-negative integers.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+This is the \emph{forward} direction of \thmref{c04-selfdelim}: we are not parsing, we are
+\textbf{emitting} a uniquely-readable bracket encoding of $R$-like trees. A preorder DFS that
+wraps each child's rendering in \code{()} almost works -- the sole subtlety is the rule that
+keeps left/right distinguishable: an empty \code{()} must appear for a missing left child
+\emph{only if} there is a right child; a missing right child with a present left needs
+nothing.
+
+\solstep{Solution}
+Recurse preorder. \code{nullptr} $\to$ \code{""}. A leaf $\to$ just its value. Otherwise print
+\code{val}, then always \code{"(" + left + ")"} (which is \code{"()"} if left is \code{nullptr}),
+then \code{"(" + right + ")"} \emph{only if} right exists.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Construct String from Binary Tree (LeetCode 606)}, label={lst:c04-string-tree}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode { int val; TreeNode *left, *right;
+    TreeNode(int x=0): val(x), left(nullptr), right(nullptr) {} };
+
+class Solution {
+public:
+    string tree2str(TreeNode* t) {
+        if (!t) return "";                                  // null contributes empty
+        string s = to_string(t->val);
+        if (!t->left && !t->right) return s;                // leaf: no parentheses
+        s += "(" + tree2str(t->left) + ")";                 // left slot ALWAYS wrapped
+        if (t->right) s += "(" + tree2str(t->right) + ")";  // right only when it exists
+        return s;                                           // (null left + right exists -> "()")
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ (node $3$ has no left child, right child $6$)]
+Leaves: $4\to$\code{"4"}, $5\to$\code{"5"}, $6\to$\code{"6"}.
+$2$ (left $4$, right $5$): \code{"2" + "(4)" + "(5)"} $=$ \code{"2(4)(5)"}.
+$3$ (no left, right $6$): \code{"3" + "(())" $\to$ "()" + "(6)"} $=$ \code{"3()(6)"} -- the
+empty \code{()} marks the absent left.
+Root $1$: \code{"1" + "(2(4)(5))" + "(3()(6))"} $=$ \code{"1(2(4)(5))(3()(6))}". \checkmark\ \probref{c04-string-tree}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (each node visited once; total string length is $\bigO{n}$ including
+parentheses), space $\bigO{h}$ recursion. Note \code{s += ...} building strings by value can be
+$O(n^2)$ in the worst concatenation pattern if naively done at every level -- here each node
+concatenates its own children once, so total is $\bigO{n}$. Verdict: \ac.
+\end{complexitybox}
+
+\begin{insightbox}[Key takeaway]
+The empty \code{()} is not decoration -- it is the information that keeps the encoding
+\emph{uniquely decodable} (\thmref{c04-selfdelim}). Encoding problems have all the same
+formatting discipline as decoding ones, just read backwards.
+\end{insightbox}
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-recover-preorder}{Recover a Tree From Preorder Traversal}{LeetCode 1028}
+  {https://leetcode.com/problems/recover-a-tree-from-preorder-traversal/}{LC Hard L4}
+  {depth-dashed preorder, stack keyed by depth, multi-digit parse, decode}
+
+\begin{problemstatement}[Recover a Tree From Preorder Traversal]
+A binary tree is written in \emph{preorder}; before each node value there are exactly $d$
+dashes \code{-} where $d$ is that node's depth (root has $0$). Values may be
+\textbf{multi-digit}. Given the string \code{traversal}, rebuild the tree and return its root.
+If a node has a single child, it is the \emph{left} child. Example: \code{"1-2--3--4-5--6--7"}
+rebuilds root $1$, left $2$ (children $3,4$), right $5$ (children $6,7$). $1 \le$
+length $\le 3\cdot10^4$; $1 \le$ node values $\le 10^9$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+A fair first attempt: tokenise the string (dash-count = depth, then an integer), then think
+about how a preorder-with-depth rebuilds.
+\peek{when you read a node at depth $d$, its parent is the last node you saw at depth $d-1$;
+what structure remembers ``the current node at each depth''?}
+\peek{multi-digit: the number can be up to $10$ characters -- do not treat one char as one value.}
+\nudge{keep a stack whose size equals the current path length; before placing a node, pop
+until the stack holds exactly the ancestors (size $= d$); attach as parent's
+left if free, else right.}
+\fullhint{Single left-to-right pass: parse (depth, value) tokens; maintain a \code{stack} of
+the current root-to-node path; pop to depth $d$, parent $=$ top, set left-else-right, push.
+Root is the depth-$0$ node. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The format is a \textbf{depth-annotated preorder}. Because preorder lists node-then-left-then-
+right, the very next token is either the current node's left child (depth $+1$) or, after a
+subtree finishes, a shallower node (depth $\le$ current). The dash count hands us the depth for
+free, so the reader is: parse tokens, and let a stack track the current path -- when a node of
+depth $d$ arrives, the $d$-th stack slot is its parent. This replaces the recursion of
+\secref{c03-rebuild} with an explicit path stack and needs no inorder array.
+
+\solstep{Key Observations}
+\begin{observation}
+A node at depth $d$ is attached to the most recent node at depth $d-1$ -- which is exactly the
+top of a stack kept at size $d$ after popping deeper entries. Preorder guarantees that parent is
+already built.
+\end{observation}
+\begin{observation}
+Attach order encodes the side: the \emph{first} child seen under a parent is its left, the
+\emph{second} is its right. A single child is therefore left (the problem's
+convention) -- the format cannot otherwise tell left from right for a lone child.
+\end{observation}
+\begin{observation}
+Values are multi-digit, so the tokenizer must greedily read all consecutive digits into one
+integer (\code{val = val*10 + (c-'0')}), not emit one node per character.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Reparse dashes into an adjacency list and rebuild by rooting.}{There are no explicit
+edges -- the dashes carry depth, and a tree is the \emph{preorder} of that rooting. Building an
+edge list discards the visit order that tells you which node is whose parent; you would have to
+re-derive the same stack logic anyway.}
+\deadend{Branch over ``is this lone child left or right?''}{$2^{\text{\#lone-children}}$
+possibilities -- exponential, and \emph{unnecessary}: LC fixes the convention (lone child $=$
+left). The ambiguity the dash format has is \emph{resolved by the spec}, not searched over.}
+\deadend{Use \code{split('-')} to get tokens.}{An empty token between consecutive dashes
+encodes the depth, but \code{split} on \code{'-'} loses the count of \emph{how many} dashes
+separated nodes -- depth is the number of dashes, so you must \emph{count} them, not split on
+them.}
+\aha{One pass with a path \emph{stack}: pop until size $= d$, parent $=$ top, attach
+left-else-right, push the node -- depth handling is just stack height.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{4} branch on lone-child side & try left/right for each single child & $O(2^{k})$ & \tle \\
+2 & \lv{4} recursive descent by depth & consume a subtree given its depth & $O(n)$ & \ac \\
+3 & \lv{4} path stack, single pass & pop to depth, attach left-else-right & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rungs 2 and 3 are both linear and correct; the stack (3) is written below because it avoids
+$\bigO{h}$ recursion and makes the ``size $=$ depth'' invariant explicit.
+
+\solstep{Solution}
+Tokenise into (depth, value) pairs. Walk them with a \code{stack} of \code{TreeNode*}: pop
+until the stack size equals the node's depth; make the node; if the stack is empty it is
+the root, else attach it as the parent's left if that is free, else right; push the node.
+Return the root.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Loop invariant on the path stack]
+\emph{Invariant:} after processing each token, the stack holds exactly the chain of nodes from
+the root down to the most recently emitted node, i.e.\ the current root-to-frontier path, and
+\code{stack[i]} has depth $i$. \emph{Base:} before any token the stack is empty; the first token
+has depth $0$, popping to size $0$ is a no-op, its node becomes the root (empty stack), and is
+pushed -- invariant holds. \emph{Step:} for a token at depth $d$, by the invariant all nodes at
+depth $> d$ (a finished deeper subtree) are strictly above position $d$; popping to size $d$
+discards exactly them, leaving \code{stack[d-1]} $=$ the last-seen depth-$(d-1)$ node $=$ the
+parent (preorder guarantees the parent of a depth-$d$ node was the most recent depth-$(d-1)$
+node). Left-else-right attachment reproduces preorder's ``left subtree before right'' and the
+lone-child-left convention. Pushing the node restores the invariant (it is the new frontier).
+By induction the built pointers form a tree whose preorder-with-depth is exactly the input
+tokens, so the reconstruction is correct and unique under the convention.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Recover a Tree From Preorder Traversal (LeetCode 1028)}, label={lst:c04-recover-preorder}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode { int val; TreeNode *left, *right;
+    TreeNode(int x=0): val(x), left(nullptr), right(nullptr) {} };
+
+class Solution {
+public:
+    TreeNode* recoverFromPreorder(string traversal) {
+        int n = (int)traversal.size(), i = 0;
+        vector<pair<int,int>> tok;                   // (depth, value)
+        while (i < n) {
+            int d = 0;
+            while (i < n && traversal[i] == '-') { ++d; ++i; }   // count dashes = depth
+            long long val = 0;
+            while (i < n && isdigit((unsigned char)traversal[i]))  // greedy multi-digit
+                { val = val * 10 + (traversal[i] - '0'); ++i; }
+            tok.push_back({d, (int)val});
+        }
+
+        stack<TreeNode*> path;                       // invariant: path[k] has depth k
+        TreeNode* root = nullptr;
+        for (auto [d, val] : tok) {
+            while ((int)path.size() > d) path.pop(); // discard finished deeper subtree
+            TreeNode* cur = new TreeNode(val);
+            if (path.empty()) root = cur;            // depth 0 -> the root
+            else {
+                TreeNode* p = path.top();            // parent = last node at depth d-1
+                if (!p->left) p->left = cur; else p->right = cur;   // preorder side rule
+            }
+            path.push(cur);
+        }
+        return root;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$'s dashed preorder \code{1-2--4--5-3--6}, tokens $(0,1)(1,2)(2,4)(2,5)(1,3)(2,6)$]
+$(0,1)$: path empty $\to$ root $1$, push $[1]$.
+$(1,2)$: size $1 \ngtr 1$; parent $1$, left free $\to 1.\text{left}=2$, push $[1,2]$.
+$(2,4)$: size $2 \ngtr 2$; parent $2$, left $\to 2.\text{left}=4$, push $[1,2,4]$.
+$(2,5)$: pop to size $2$ (drop $4$) $[1,2]$; parent $2$, left used $\to 2.\text{right}=5$, push $[1,2,5]$.
+$(1,3)$: pop to size $1$ (drop $5,2$) $[1]$; parent $1$, left used $\to 1.\text{right}=3$, push $[1,3]$.
+$(2,6)$: size $2 \ngtr 2$; parent $3$, left free $\to 3.\text{left}=6$. \textbf{Note}: the format
+places $6$ as $3$'s \emph{left} -- it cannot say ``right-only''; that is exactly
+the ambiguity LC 606 resolves by emitting \code{()} (\thmref{c04-selfdelim}). The tree is $R$
+mirrored at node $3$. \checkmark\ \probref{c04-recover-preorder}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{L}$ where $L$ is the string length (each char scanned a constant number of times;
+each node pushed and popped from the stack at most once). Space $\bigO{n}$ tokens plus
+$\bigO{h}$ stack -- and the stack is \emph{heap} memory, so unlike a recursive descent it never
+overflows the call stack on a $3\cdot10^4$-long chain. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Single node \code{"10"} & one token $(0,10)$, root only, both children \code{nullptr} \\
+Multi-digit like \code{1000000000} & greedy digit loop builds it into one value \\
+Right-skewed chain & stack pops one each step; depth handling unchanged, no RE \\
+Left-only children & every lone node attaches to \code{left} (the convention) \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Three bugs dominate: (i) reading one character as a value (multi-digit breaks); (ii)
+\code{while(path.size() >= d)} instead of \code{> d} -- off-by-one that pops the parent; (iii)
+attaching right before left (the preorder side order flips the tree). Variant: the identical
+stack works for a \emph{general} tree (attach to the top's \code{children} list
+instead of left/right) and for LC 938-style ``depth $+$ value'' encodings.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A depth-annotated preorder decodes in one pass with a \textbf{path stack}: pop to the
+        parent's depth, attach, push. Stack height \emph{is} the depth.
+  \item Any string reader must respect \textbf{multi-digit} tokens -- count, then greedily parse
+        digits.
+  \item Encodings that omit the left/right signal for a lone child must fix a convention; LC 606
+        keeps the signal (\code{()}), LC 1028 fixes it (lone $=$ left) -- \thmref{c04-selfdelim}.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Recursion alternative}: a recursive-descent reader (consume subtree at depth
+        $d$) is shorter but $\bigO{h}$ stack-deep -- on a skewed $3\cdot10^4$ tree the explicit
+        \code{stack} above is the safe choice; keep it iterative.
+  \item \textbf{Value overflow}: LC bounds values to $10^9$ (fits \code{int}), but read into
+        \code{long long} while accumulating so a longer judge bound cannot silently wrap.
+  \item \textbf{Memory}: emitting all $(d,\text{val})$ tokens up front is $O(n)$; you can also
+        parse-and-place in a single fused pass to halve the constant when $L$ is large.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Are you sure which \emph{order} the input array is -- level (BFS/queue) or preorder
+        (DFS/stack)? (\figref{c04-encodings}, Trap 2.)
+  \item In a string reader, does your tokenizer read a \emph{whole} integer, not one digit?
+  \item When \emph{emitting} brackets, did you keep the empty \code{()} that preserves a
+        right-only child? (Trap 3.)
+  \item Does your depth/stack invariant pop \emph{to} the parent depth (\code{size $>$ d}), not
+        too far?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Score of Parentheses}{LeetCode 856}
+    {https://leetcode.com/problems/score-of-parentheses/}{LC Medium L3}
+    {A balanced-parentheses string \emph{is} a nested (bracket) encoding of a tree: depth $=$
+    nesting level, each \code{()} a leaf. Track a running \code{score} with a depth counter (or a
+    stack): on \code{(} go deeper (push $0$); on \code{)} pop, and add $\max(2\cdot\text{child},1)$
+    to the new top. Decode-by-depth, one pass.}
+  \practice{Parse Lisp Expression}{LeetCode 736}
+    {https://leetcode.com/problems/parse-lisp-expression/}{LC Hard L4}
+    {A Lisp-like nested encoding: \code{let}/\code{add}/\code{mul} with variable \emph{scoping}.
+    Decode recursively, carrying a \textbf{stack of environments}; \code{let} pushes a scope of
+    name/value bindings, \code{add}/\code{mul} recurse on operands, a bare var resolves in the
+    innermost scope, and scopes pop as you return -- the same ``structure lives in nesting''
+    reader as LC 1028, with an environment in each frame.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 4.3 Encodings and Input Formats]
+Read the \emph{format}, then pick the reader: level-order array $\to$ \textbf{queue}; preorder
+with \#/depth marks $\to$ \textbf{stack} or recursion; brackets $\to$ recursion. A single order is
+uniquely decodable only when nulls are marked or a second order is given
+(\thmref{c04-selfdelim}). When \emph{emitting}, the empty \code{()} is load-bearing.
+\selftest{
+  \item Write $R$ as (a) the level-order array, (b) the null-marked preorder, (c) the LC 606
+        bracket string -- from memory.
+  \item Why must the level-order reader use a queue and not a preorder recursion? (Trap 2.)
+  \item State \thmref{c04-selfdelim} and give a value-only preorder that has two distinct trees.
+  \item In LC 1028, why does a lone child become the \emph{left} child, and what would LC 606
+        print differently?
+  \item Parse the (depth, value) tokens of \code{1-2--3-4} and place them with the path stack.
+}
+\end{recallbox}

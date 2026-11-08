@@ -1,0 +1,702 @@
+% =====================================================================
+%  18.4  Fenwick on Trees: driving Ch.5's Euler array   sec:c14-trees
+%  Exports: def:c14-eulerbit  prop:c14-eulerrange  prop:c14-path
+%           thm:c14-parity    lst:c14-flatten  lst:c14-subtree
+%           lst:c14-path  lst:c14-383-soln  fig:c14-euler  prob:c14-prop
+%  Reuses (never re-derives): Ch.5 (\chref{c24}) tin/tout + subtree=interval
+%    (\thmref{c24-range}); \secref{c14-core} plain BIT; \secref{c14-range}
+%    difference BIT (range add / point read).
+%  Running tree T (Ch.12--17), root 1, children ascending, edges
+%    1-2,1-3,2-4,2-5,3-6,3-7,5-8,7-9,9-10.  Ch.16 preorder (INCLUSIVE tout):
+%      tin  (by node 1..10) = (1,2,6,3,4,7,8,5,9,10)
+%      tout (by node 1..10) = (10,5,10,3,5,7,10,5,10,10)
+%      size=(10,4,5,1,2,1,3,1,2,1)  depth=(0,1,1,2,2,2,2,3,3,4)
+%      Euler order (position -> node) = (1,2,4,5,8,3,6,7,9,10)
+%      sgn (depth parity, by node)    = (+1,-1,-1,+1,+1,+1,+1,-1,-1,+1)
+%  Opener six-angle row (BIT on T) reproduced in the subtree-add trace:
+%    subtree(2)=[2,5] add +3, then whole tree +2: node4 reads 5, node6 reads 2.
+%  CF 383C Propagating tree (2000) -- live-verified via the CF API + statement:
+%    n,m<=200000, a_i<=1000, val<=1000, root 1.
+%    Query "1 x val": add val to x, then -val to children, +val to grand-
+%    children, ... alternating by depth through the whole subtree.
+%    Query "2 x": print current value at x.
+%    Sample (verified): 5 5 / 1 2 1 1 2 / edges 1-2,1-3,2-4,2-5 /
+%      1 2 3 / 1 1 2 / 2 1 / 2 2 / 2 4  => output 3 / 3 / 0.
+%    Solution: single difference BIT over Euler positions; store delta=val*sgn[x]
+%      on range [tin[x],tout[x]]; read a[x] + sgn[x]*point(tin[x]).
+% =====================================================================
+\section{Fenwick on Trees: Driving the Euler Array}\label{sec:c14-trees}
+
+\begin{previouslybox}[Ch.~5 flattened the tree; it just had no engine yet]
+Chapter~5 (\chref{c24}) proved the reduction we now exploit without re-deriving
+it: a depth-first \term{Euler tour} stamps each node \(v\) an entry time
+\(\tin(v)\) and an exit time \(\tout(v)\) so that \emph{the subtree of \(v\) is
+exactly the index interval} \([\tin(v),\tout(v)]\) (\thmref{c24-range}).  What
+Ch.~5 could do was read static sums over that interval with a prefix array
+(\(\propref{c24-prefix}\)); what it \emph{could not} do was keep answering
+after the values changed, because a prefix array dies under updates.  This
+section bolts \secref{c14-core}'s BIT onto Ch.~5's flat array, discharging the
+forward pointer Ch.~5 left here: subtree ranges now get an engine.
+\end{previouslybox}
+
+\begin{topicintro}
+Once the tree is flattened, every ``add to a subtree / read a node / sum a
+subtree'' question stops being a \emph{tree} problem and becomes a \emph{range}
+problem over the slots \(1..n\) -- and ranges over slots with an invertible
+accumulator are exactly what a BIT is built for.  Concretely we place each
+node's value at slot \(\tin(v)\), then reach for whichever \secref{c14-range}
+flavour the query shape forces: a \emph{plain} BIT for point-update + subtree
+sum, a \emph{difference} BIT for subtree-add + node-read, and the
+\emph{enter\(+1\)/leave\(-1\)} re-interpretation of the difference BIT for
+root-path reads.  The single new idea -- used to crack the solved problem -- is
+that a sign that alternates with \emph{depth} becomes a \(\pm1\) multiplier
+attached to each slot, so a depth-propagating update is still \emph{one} range
+addition.
+
+\textbf{Prerequisites.} Ch.~5 (\chref{c24}) for \(\tin/\tout\);
+\secref{c14-core} for the two walks; \secref{c14-range} for the difference BIT
+(range add / point read).  The running example is the tree \(T\) with the
+stamps recorded in \figref{c14-array}'s opener block.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item turn any subtree update/query into a range operation on the Euler
+        array and pick the right BIT flavour; \hfill\lv{3}
+  \item answer root-path reads with the two-event \(\mathit{enter}{+}1 /
+        \mathit{leave}{-}1\) trick, no LCA machinery; \hfill\lv{4}
+  \item absorb a depth-parity (or any per-node \(\pm1\)) into the stored
+        value so a propagating update stays a single range add; \hfill\lv{4}--\lv{5}
+  \item solve CF~383C with one difference BIT over the tour. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``many subtree / root-path operations on one static tree'']
+\reckey{``add \(x\) to every node in the subtree of \(v\)'' interleaved with
+``read node \(v\)'`; ``invert the colour of a whole subtree, query one
+vertex''; ``sum of the values on the path from the root to \(v\)''; ``the
+value at \(v\) after updates that propagate to descendants with alternating
+sign''; ``how many marked nodes are ancestors of \(v\)''.  The tree itself
+never changes -- only per-node numbers do, and queries cluster on
+subtrees/paths.}
+\recuse{
+  \item subtree add + point read (or point add + subtree sum) -- flatten to
+        \([\tin,\tout]\), difference BIT (this section, CF~383C, CSES~1137);
+  \item root-path read with point ``activation'' -- enter\(+1\)/leave\(-1\)
+        on the same difference BIT (\(\propref{c14-path}\));
+  \item updates whose effect depends on depth parity or a per-node sign --
+        fold the sign into the stored delta (\(\thmref{c14-parity}\)).
+}
+\recnotuse{
+  \item the tree is \emph{cut, linked or rerooted} between queries --
+        Euler-tour trees / splay, Ch.~6 (\chref{c06}); a static tour array
+        cannot survive a structural change;
+  \item the range aggregate is not invertible (max/min/gcd over the subtree)
+        -- segment tree with the flat array, Ch.~19 (\chref{c13});
+  \item paths are \emph{arbitrary} \(u\)-to-\(v\) with non-commutative data
+        -- heavy-light decomposition on top of a segment tree, not a BIT;
+  \item the tree is a single path -- it is just an array; use
+        \secref{c14-range} directly.
+}
+One-line test: \emph{is the tree static and does every operation address a
+subtree or a root-path?  Flatten with Ch.~5's \(\tin/\tout\), then let a BIT
+own the range.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The Flattened Array and Its Two Range Shapes}
+% ---------------------------------------------------------------
+
+\begin{definition}{Euler-indexed BIT}{c14-eulerbit}
+Fix a DFS order of the tree and let \(\mathit{euler}[p]\) be the node stamped
+\(\tin(\mathit{euler}[p])=p\).  An \term{Euler-indexed BIT} is a BIT
+\(B[1..n]\) whose slot \(p\) stores the aggregate of the \emph{node}
+\(\mathit{euler}[p]\).  A node operation on \(v\) becomes a slot operation at
+\(\tin(v)\); a subtree operation on \(v\) becomes a range operation on
+\([\tin(v),\tout(v)]\) (both \(1\)-based, \(\tout\) \emph{inclusive}, per this
+chapter's convention).  Because \(\tin\) is a permutation, ``node \(v\)'' and
+``slot \(\tin(v)\)'' name the same object -- we translate silently between
+them.
+\end{definition}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.62, transform shape,
+    tnode/.style={circle, draw=primaryblue, line width=0.8pt, fill=primaryblue!8,
+                  minimum size=6.5mm, font=\scriptsize\bfseries, text=primaryblue!55!black}]
+  % tree edges (root 1 at top), children ascending left-to-right
+  \node[tnode] (n1) at (0,3)   {1};
+  \node[tnode] (n2) at (-3,2)  {2};
+  \node[tnode] (n3) at (3,2)   {3};
+  \node[tnode] (n4) at (-4,1)  {4};
+  \node[tnode] (n5) at (-1.5,1){5};
+  \node[tnode] (n6) at (2,1)   {6};
+  \node[tnode] (n7) at (4.2,1) {7};
+  \node[tnode] (n8) at (-1.5,0){8};
+  \node[tnode] (n9) at (4.2,0) {9};
+  \node[tnode] (n10) at (4.2,-1){10};
+  \draw (n1)--(n2) (n1)--(n3) (n2)--(n4) (n2)--(n5) (n3)--(n6) (n3)--(n7)
+        (n5)--(n8) (n7)--(n9) (n9)--(n10);
+  % tin/tout annotations
+  \node[annot, font=\tiny, anchor=south] at (n1.north) {\(1[1,\!10]\)};
+  \node[annot, font=\tiny, anchor=east]  at (n2.west)  {\(2[2,\!5]\)};
+  \node[annot, font=\tiny, anchor=east]  at (n3.west)  {\(3[6,\!10]\)};
+  \node[annot, font=\tiny, anchor=south] at (n4.north) {\(4[3]\)};
+  \node[annot, font=\tiny, anchor=north] at (n5.south) {\(5[4,\!5]\)};
+  \node[annot, font=\tiny, anchor=south] at (n6.north) {\(6[7]\)};
+  \node[annot, font=\tiny, anchor=south] at (n7.north) {\(7[8,\!10]\)};
+  \node[annot, font=\tiny, anchor=east]  at (n8.west)  {\(8[5]\)};
+  \node[annot, font=\tiny, anchor=east]  at (n9.west)  {\(9[9,\!10]\)};
+  \node[annot, font=\tiny, anchor=west]  at (n10.east) {\(10[10]\)};
+  % Euler slot strip below the tree
+  \foreach \p/\nd in {1/1,2/2,3/4,4/5,5/8,6/3,7/6,8/7,9/9,10/10} {
+    \draw[difforange, line width=0.6pt, fill=difforange!8] (\p*0.62,-2.6) rectangle (\p*0.62+0.62,-2.0);
+    \node[font=\tiny\ttfamily, text=orange!55!black] at (\p*0.62+0.31,-2.3) {\nd};
+    \node[font=\tiny\ttfamily, text=darkgray] at (\p*0.62+0.31,-1.82) {\p};}
+  \node[font=\scriptsize, text=orange!55!black, anchor=east] at (0.4,-2.3) {euler:};
+  % subtree(2)=[2,5] and subtree(3)=[6,10] interval bars
+  \fill[successgreen!35] (2*0.62+0.05,-3.0) rectangle (5*0.62+0.57,-2.75);
+  \node[font=\tiny, text=green!45!black] at (3.5*0.62+0.3,-3.15) {subtree(2)=[2,5]};
+  \fill[softpurple!28] (6*0.62+0.05,-3.0) rectangle (10*0.62+0.57,-2.75);
+  \node[font=\tiny, text=purple!55!black] at (8*0.62+0.3,-3.15) {subtree(3)=[6,10]};
+\end{tikzpicture}
+\caption{Tree \(T\) with each node annotated \emph{v}[\(\tin(v),\tout(v)\)]
+(Ch.~5's tour, \(\tout\) inclusive).  The orange strip is the Euler array:
+slot~\(p\) holds node \(\mathit{euler}[p]\), read as \((1,2,4,5,8,3,6,7,9,10)\).
+The two shaded bars are the intervals a BIT is handed to answer ``sum/add
+subtree(2)'' and ``sum/add subtree(3)'' -- the whole tree collapses to
+contiguous slots.  Node~3 sits at slot~6, so it is \emph{outside} the
+subtree(2) bar even though it is drawn beside node~2 in the picture.}
+\label{fig:c14-euler}
+\end{figure}
+
+Two operation shapes cover almost every tree-BIT problem.  Both are just a
+flavour from \secref{c14-core}/\secref{c14-range} wearing the \(\tin\)
+translation:
+
+\begin{proposition}{Subtree sum with point updates; subtree add with point reads}{c14-eulerrange}
+Let \(B\) be a BIT over the Euler array.
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \emph{Point update of a node, subtree sum query} (plain BIT,
+        \secref{c14-core}): to add \(\delta\) to node \(v\), run
+        \(\code{update}(\tin(v),\delta)\); the sum of the whole subtree of
+        \(u\) is \(\code{query}(\tout(u))-\code{query}(\tin(u)-1)\).
+        This is CSES~1137 (``Subtree Queries''), solved in Ch.~5 with a static
+        prefix array; here updates are free.
+  \item \emph{Subtree add, single-node read} (difference BIT,
+        \secref{c14-range}): to add \(\delta\) to every node of
+        \(\subtree(v)\), run \(\code{range\_add}(\tin(v),\tout(v),\delta)\);
+        the current value at node \(u\) is the point read
+        \(\code{point}(\tin(u))\).  Cost \(\bigO{\log n}\) each.
+\end{itemize}
+\end{proposition}
+
+\begin{lstlisting}[caption={Euler-indexed BIT: subtree sum with point updates, and subtree add with point reads}, label={lst:c14-subtree}]
+// Ch.5 produced tin[1..n], tout[1..n]; we never recompute them here.
+int lowbit(int i){ return i & -i; }
+
+// (A) PLAIN BIT: add delta to node v, read the sum over subtree(u).
+void bit_add(long long B[], int i, long long d){ for(; i<=n; i+=lowbit(i)) B[i]+=d; }
+long long bit_pre(long long B[], int i){
+    long long s=0; for(; i>0; i-=lowbit(i)) s+=B[i]; return s; }
+void update_node(int v, long long d){ bit_add(B, tin[v], d); }          // 18.1
+long long subtree_sum(int u){                                          // 18.1
+    return bit_pre(B, tout[u]) - bit_pre(B, tin[u]-1); }
+
+// (B) DIFFERENCE BIT: add d to every node of subtree(v), read one node.
+void diff_add(long long D[], int i, long long d){ for(; i<=n; i+=lowbit(i)) D[i]+=d; }
+void subtree_add(int v, long long d){        // range [tin, tout] = subtree(v)
+    diff_add(D, tin[v], d); diff_add(D, tout[v]+1, -d); }   // 18.2 (i>n is a no-op)
+long long node_value(int u){                 // point read at slot tin[u]
+    long long s=0; for(int i=tin[u]; i>0; i-=lowbit(i)) s+=D[i]; return s; }
+\end{lstlisting}
+
+\begin{tracebox}[Subtree add on \(T\): \(\subtree(2){+}3\), then whole tree \(+2\)]
+All nodes start at \(0\).  \(\subtree(2)=[\tin_2,\tout_2]=[2,5]\); the whole
+tree is \(\subtree(1)=[1,10]\).  Two difference-BIT range adds:
+\(\text{diff\_add}(2,+3),\text{diff\_add}(6,-3)\) then
+\(\text{diff\_add}(1,+2),\text{diff\_add}(11,-2)\) (the last is \(i>n\), a
+no-op).  Reading \(\code{node\_value}\) as a prefix sum over the difference
+array at each node's \(\tin\):
+\[
+\renewcommand{\arraystretch}{1.1}
+\begin{array}{c|c|c|c|c}
+\text{node }u & \tin(u) & \tin\in[2,5]? & \tin\in[1,10]? & \text{value}\\ \hline
+4 & 3 & \checkmark\ (+3) & \checkmark\ (+2) & \mathbf{5}\\
+6 & 7 & \times & \checkmark\ (+2) & \mathbf{2}\\
+2 & 2 & \checkmark\ (+3) & \checkmark\ (+2) & 5\\
+3 & 6 & \times & \checkmark\ (+2) & 2
+\end{array}
+\]
+Node~4 (a child of~2) carries both adds \(\to5\); node~6 (under~3) misses the
+subtree(2) add \(\to2\).  This is exactly the opener's \textsc{BIT on \(T\)}
+row -- and \figref{c14-euler}'s interval bars make it obvious without any
+walking.
+\end{tracebox}
+
+\begin{complexitybox}[Why a BIT and not a segment tree here]
+Both shapes of \(\propref{c14-eulerrange}\) are \(\bigO{\log n}\) with a
+\emph{single} array and four-line code.  A segment tree does the same in the
+same asymptotics but carries lazy tags and a \(4n\) array; the BIT is smaller,
+faster, and cache-friendly.  The BIT is the right tool \emph{because} the
+aggregate is a sum (invertible).  The moment the subtree query wants a
+non-invertible combine -- ``maximum value in the subtree'' or ``first node
+passing a threshold with arbitrary decrements'' -- the flat interval no longer
+supports the difference trick and you owe the range to Ch.~19's segment tree
+(\chref{c13}).  That boundary is stated here, not coded here.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Root-Path Reads: the Enter\(	ext{+}1\) / Leave\(	ext{-}1\) Trick}
+% ---------------------------------------------------------------
+
+The difference BIT already stores a range add as a \(+\delta\) entering the
+interval and a \(-\delta\) leaving it.  Read that backwards: if we \emph{tag}
+a node \(v\) with a value \(x\) by writing \(+x\) at \(\tin(v)\) and \(-x\) at
+\(\tout(v){+}1\), then a point read at \(\tin(u)\) sums \(x\) over exactly the
+tags whose interval contains \(\tin(u)\) -- and \(\tin(v)\le\tin(u)\le\tout(v)\)
+holds \emph{iff} \(v\) is an ancestor of \(u\) (Ch.~5, \(\thmref{c24-range}\)).
+So the point read is the \emph{root-path} sum.
+
+\begin{proposition}{Point-read at \(\tin(u)\) equals the root-to-\(u\) path sum}{c14-path}
+Maintain a difference BIT \(D\).  To ``activate'' node \(v\) with weight \(x\)
+for all its descendants, do \(D[\tin(v)]{+}{=}x,\;D[\tout(v){+}1]{-}{=}x\).
+Then \(\sum_{p\le\tin(u)} D[p]\) (the point read at node \(u\)) equals
+\(\sum_{v \text{ ancestor of } u} x_v\): the running prefix at slot
+\(\tin(u)\) is inside \(v\)'s live window precisely when \(v\) is on the path
+from the root to \(u\).  Each activation and each path read is \(\bigO{\log n}\).
+\end{proposition}
+
+\begin{lstlisting}[caption={two-event activation: subtree-add semantics become root-path reads}, label={lst:c14-path}]
+// +x on ENTERING v's window, -x on LEAVING it -- one range add over [tin, tout].
+void activate(int v, long long x){
+    diff_add(D, tin[v],     x);        // switch x ON for v's whole subtree
+    diff_add(D, tout[v] + 1, -x);      // switch it OFF after the subtree
+}
+// point read at tin[u] = sum of x over every ancestor v of u (root path of u):
+long long root_path_sum(int u){
+    long long s=0; for(int i=tin[u]; i>0; i-=lowbit(i)) s+=D[i]; return s; }
+// So "add x to subtree(v); read value at u" and
+//    "activate v with x; read the root-to-u sum" are the SAME two numbers
+//    (x, -x) at (tin(v), tout(v)+1) -- just read with opposite intent.
+\end{lstlisting}
+
+\begin{insightbox}[One pair of writes, two stories]
+The lines \(\mathit{diff\_add}(D,\tin(v),x)\) and
+\(\mathit{diff\_add}(D,\tout(v){+}1,-x)\) are the same whether you call them
+``add \(x\) to subtree \(v\)'' or ``activate \(v\) for its descendants''.  The
+difference is only \emph{what you query}: at the same \(\tin(u)\), a subtree
+add sees \(x\) when \(u\) is a \emph{descendant} of the source; a root-path
+read sees \(x\) when the source is an \emph{ancestor} of \(u\).  Ancestor and
+descendant are one relation read from opposite ends -- so one difference BIT
+serves both, and this is the whole trick behind CF~383C below.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Folding a Depth Sign into the Stored Value}
+% ---------------------------------------------------------------
+
+\begin{theorem}{Alternating-by-depth becomes a \(\pm1\) multiplier}{c14-parity}
+Root the tree; let \(\operatorname{sgn}(v)=+1\) if \(\depth(v)\) is even and
+\(-1\) otherwise.  An update ``add \(x\) at node \(r\), and let it propagate
+with a sign flip at every edge'' gives node \(u\in\subtree(r)\) the
+contribution
+\[
+  x\cdot(-1)^{\depth(u)-\depth(r)} \;=\; x\cdot\operatorname{sgn}(u)\cdot\operatorname{sgn}(r).
+\]
+Hence if we store, for each update, the single number \(\Delta=x\cdot\operatorname{sgn}(r)\)
+as a \emph{plain} subtree-range add on \([\tin(r),\tout(r)]\), then reading a
+node is \(\operatorname{sgn}(u)\cdot(\text{point read at }\tin(u))\), which
+reproduces the alternating contribution exactly.  The sign pattern costs
+nothing but one \(\pm1\) multiply on each end.
+\end{theorem}
+\begin{proofbox}
+Since \((-1)^{a-b}=(-1)^{a+b}=(-1)^a(-1)^b\) for integers, the propagated
+sign of update \(r\) at node \(u\) is \(\operatorname{sgn}(u)\operatorname{sgn}(r)\).
+The range add stores \(\Delta=x\operatorname{sgn}(r)\) so that \emph{every}
+slot in \([\tin(r),\tout(r)]\) (i.e.\ every descendant of \(r\)) accumulates
+\(\Delta\); a point read at \(u\) is the sum \(\sum_{r\,\text{anc. of}\,u}
+x_r\operatorname{sgn}(r)\) over exactly the updates whose subtree contains
+\(u\).  Multiplying by \(\operatorname{sgn}(u)\) gives
+\(\sum_r x_r\operatorname{sgn}(u)\operatorname{sgn}(r)=\sum_r x_r(-1)^{\depth(u)-\depth(r)}\),
+the definition of the propagating process.  Nodes outside \(\subtree(r)\) never
+see \(\Delta\) because their \(\tin\) is outside its range.
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  Do not simulate the up-down-up propagation.
+Precompute each node's \(\operatorname{sgn}\) once in the same DFS that stamps
+\(\tin/\tout\), then treat ``add to a propagating subtree'' as \emph{one}
+difference-BIT range add of a signed amount.  \(\thmref{c14-parity}\) is what
+turns CF~383C from a scary statement into \(\coderef{c14-subtree}\).
+
+\begin{tracebox}[Parity store on \(T\): ``add 4 at node 3'' propagates]
+\(\depth(3)=1\) so \(\operatorname{sgn}(3)=-1\); \(\Delta=4\cdot(-1)=-4\) added
+to range \([\tin_3,\tout_3]=[6,10]\).  Read \(u\) as
+\(\operatorname{sgn}(u)\cdot(\text{point at }\tin(u))\), point over the range
+\(=-4\) for all of \(\subtree(3)=\{3,6,7,9,10\}\):
+\[
+\renewcommand{\arraystretch}{1.1}
+\begin{array}{c|c|c|c|c}
+u & \depth & \operatorname{sgn}(u) & \text{point} & \text{contrib }=\operatorname{sgn}(u)\cdot(-4)\\ \hline
+3 & 1 & -1 & -4 & +4\ (\text{self})\\
+6 & 2 & +1 & -4 & -4\ (\text{child})\\
+7 & 2 & +1 & -4 & -4\\
+9 & 3 & -1 & -4 & +4\ (\text{grandchild})\\
+10& 4 & +1 & -4 & -4
+\end{array}
+\]
+Self \(+4\), children \(-4\), grandchildren \(+4\), great-grandchild \(-4\) --
+the alternating propagation of the statement, from a single range add and a
+read-time sign (\(\thmref{c14-parity}\)).
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 383C Propagating Tree}
+% ---------------------------------------------------------------
+
+\solvedproblem{c14-prop}{Propagating tree}{CF 383C}
+  {https://codeforces.com/problemset/problem/383/C}{CF 2000 L5}
+  {Euler tour + one difference BIT, depth-parity sign folded into the stored delta}
+
+\begin{problemstatement}[CF 383C Propagating tree]
+A tree of \(n\) nodes numbered \(1..n\), root~\(1\); node \(i\) has value
+\(a_i\).  Its \emph{propagating} rule: when a value \(\mathit{val}\) is added
+to node \(i\), \(-\mathit{val}\) is added to every child of \(i\); and when
+\(-\mathit{val}\) reaches a child, \(+\mathit{val}\) reaches that child's
+children, and so on down the whole subtree -- the sign flips every level.
+Two query types: \(\texttt{1 }x\,\mathit{val}\) performs the propagating
+addition starting at \(x\); \(\texttt{2 }x\) prints the current value at \(x\).
+
+\textbf{Input.} \(n,m\le 2\cdot10^5\); then \(a_1..a_n\) (\(1\le a_i\le1000\));
+then \(n-1\) edges; then \(m\) queries with \(1\le x\le n\), \(1\le\mathit{val}\le1000\).
+
+\textbf{Output.} For each type~2 query, one line: the value at \(x\).
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+5 5
+1 2 1 1 2
+1 2
+1 3
+2 4
+2 5
+1 2 3
+1 1 2
+2 1
+2 2
+2 4
+
+Output:
+3
+3
+0
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 30 minutes]
+``Add to a subtree with a sign that flips by level'' sounds like you must
+walk the subtree.  But the tree is static, so the subtree is a flat interval
+(\(\thmref{c24-range}\)) and the sign is a fixed \(\pm1\) per node
+(\(\thmref{c14-parity}\)).  Can you make the update \emph{one} range addition?
+\peek{store \(\mathit{val}\cdot\!\operatorname{sgn}(x)\) on the interval and read with a sign.}
+\nudge{a difference BIT over Euler slots handles ``add to subtree, read one
+node'' (\(\coderef{c14-subtree}\) shape B).  All that is left is the parity
+factor of \(\thmref{c14-parity}\).}
+\fullhint{Precompute \(\tin,\tout,\operatorname{sgn}\) in one DFS.  Query 1
+\((x,\mathit{val})\): \(\code{subtree\_add}(x,\;\mathit{val}\cdot\operatorname{sgn}(x))\).
+Query 2 \((x)\): print \(a_x+\operatorname{sgn}(x)\cdot\code{node\_value}(x)\).
+Both \(\bigO{\log n}\); use \code{long long} for the accumulated values
+(\(m\cdot1000\) drifts past \code{int}).}
+\end{attemptgate}
+
+\solstep{Understanding}
+Two facts collapse the problem.  (1) The tree never changes, so ``the subtree
+of \(x\)'' is the fixed index interval \([\tin(x),\tout(x)]\) -- Ch.~5's
+\(\thmref{c24-range}\), which we use as a black box.  (2) The propagating sign
+is not a process to simulate: it is \(+1/-1\) determined by the parity of the
+\emph{depth difference}, which \(\thmref{c14-parity}\) factors into
+\(\operatorname{sgn}(u)\operatorname{sgn}(x)\).  Once factored, the update is a
+range addition of a signed constant and the read multiplies by a per-node
+constant -- \(\propref{c14-eulerrange}\) shape B with one extra \(\pm1\).
+
+\solstep{Key Observations}
+\begin{observation}
+A type~1 query touches only \(\subtree(x)\); in Euler order that is a
+\emph{contiguous} range, so the difference BIT's two writes
+(\(+\Delta\) at \(\tin(x)\), \(-\Delta\) at \(\tout(x)+1\)) do the whole
+update in \(\bigO{\log n}\).
+\end{observation}
+\begin{observation}
+The node value never needs to be materialised: the answer to a type~2 query is
+\(a_x\) (frozen) plus the propagated total, which is
+\(\operatorname{sgn}(x)\) times a single point read.
+\end{observation}
+\begin{observation}
+\(m\le2\cdot10^5\) additions of \(\mathit{val}\le1000\) can move a value by
+\(\pm2\cdot10^8\), and with alternating signs the accumulator can be negative
+-- \code{long long} for the BIT, and signed arithmetic throughout.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Recolour the subtree level by level on each query}
+{A subtree can be \(\Theta(n)\) and there are \(\Theta(n)\) queries --
+\(\bigO{n^2}\) worst case at \(n=2\cdot10^5\), far past the 2\,s budget.  The
+propagation is a red herring: it is a \emph{formula}, not a \emph{process}.}
+\deadend{Keep two segment trees, one per depth parity}
+{Works, but you pay a \(4n\) tree twice and lazy tags for a task that is just
+``range add, point read''.  That is the difference BIT's signature job
+(\secref{c14-range}); a segment tree is overkill and easy to get wrong.}
+\aha{One difference BIT plus a \(\pm1\) sign array does everything: store
+\(\mathit{val}\cdot\operatorname{sgn}(x)\) on the subtree interval, and read
+\(a_x+\operatorname{sgn}(x)\cdot\text{point}(\tin(x))\).}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.245\linewidth} p{0.29\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ BFS the subtree & apply the flip edge by edge & \(\bigO{nm}\) & \tle \\
+2 & \lv{3}\ two segment trees & even/odd depth, lazy range add & \(\bigO{n\log n}\) & heavy \\
+3 & \lv{5}\ \textbf{difference BIT + parity} & one tree, store \(\mathit{val}\cdot\operatorname{sgn}\) (\(\thmref{c14-parity}\)) & \(\bigO{n\log n}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~3 is \(\coderef{c14-subtree}\)'s shape B plus \(\thmref{c14-parity}\) --
+no new data structure, one extra multiply.
+
+\solstep{Solution}
+One DFS fills \(\tin,\tout\) (Ch.~5) and, in the same walk, \(\operatorname{sgn}(v)=(-1)^{\depth(v)}\).
+A single difference BIT \(D\) over slots \(1..n\).  Query 1\((x,\mathit{val})\):
+\(\code{subtree\_add}(x,\mathit{val}\cdot\operatorname{sgn}(x))\).  Query
+2\((x)\): print \(a_x+\operatorname{sgn}(x)\cdot\code{node\_value}(x)\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\emph{Range coverage:} \(\code{subtree\_add}\) writes \(+\Delta\) at
+\(\tin(x)\) and \(-\Delta\) at \(\tout(x)+1\); its point read at \(u\) equals
+\(\Delta\) iff \(\tin(x)\le\tin(u)\le\tout(x)\), i.e.\ iff \(u\in\subtree(x)\)
+(\(\thmref{c24-range}\)), and \(0\) otherwise -- matching ``propagation only
+reaches descendants''.  \emph{Sign:} the stored delta is
+\(\Delta=\mathit{val}\operatorname{sgn}(x)\); the read multiplies by
+\(\operatorname{sgn}(u)\), contributing
+\(\mathit{val}\operatorname{sgn}(u)\operatorname{sgn}(x)=\mathit{val}(-1)^{\depth(u)-\depth(x)}\),
+exactly the level-by-level flip after \(\depth(u)-\depth(x)\) edges
+(\(\thmref{c14-parity}\)).  \emph{Superposition:} each query~1 is linear and
+independent, so a node's value is \(a_x\) plus the sum of its contributions,
+which the prefix sum accumulates.  \emph{Bounds:} \(\bigO{\log n}\) per query,
+\(\bigO{n\log n}\) total with the sort-free DFS; \code{long long} is sound
+since each value stays within \(\pm(1000\cdot2\cdot10^5+1000)\).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 383C: Euler tour + one difference BIT with a depth-parity sign}, label={lst:c14-383-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+int n, m, tin[MX], tout[MX], sgn[MX], tmr_;
+long long a[MX], D[MX];
+vector<int> adj[MX];
+
+void dfs(int u, int p, int dep){                 // Ch.5 tour + parity, one pass
+    tin[u] = ++tmr_;  sgn[u] = (dep & 1) ? -1 : 1;
+    for (int v : adj[u]) if (v != p) dfs(v, u, dep + 1);
+    tout[u] = tmr_;                              // inclusive
+}
+int lowbit(int i){ return i & -i; }
+void bitadd(long long t[], int i, long long d){ for(; i<=n; i+=lowbit(i)) t[i]+=d; }
+void range_add(int l, int r, long long d){ bitadd(D,l,d); bitadd(D,r+1,-d); } // 18.2
+long long point(int i){ long long s=0; for(; i>0; i-=lowbit(i)) s+=D[i]; return s; }
+
+int main(){
+    scanf("%d%d", &n, &m);
+    for (int i=1;i<=n;i++) scanf("%lld", &a[i]);
+    for (int i=1;i<n;i++){ int u,v; scanf("%d%d",&u,&v);
+        adj[u].push_back(v); adj[v].push_back(u); }
+    dfs(1, 0, 0);
+    while (m--){
+        int type, x; scanf("%d%d", &type, &x);
+        if (type==1){ long long val; scanf("%lld", &val);
+            range_add(tin[x], tout[x], val * sgn[x]);    // signed subtree add
+        } else {
+            printf("%lld\n", a[x] + sgn[x] * point(tin[x]));
+        }
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CF 383C: tree \(1\!\to\!2,1\!\to\!3,2\!\to\!4,2\!\to\!5\)]
+Root~1, so \(\depth=(0,1,1,2,2)\) and \(\operatorname{sgn}=(+1,-1,-1,+1,+1)\)
+for nodes \(1..5\).  \(\tin=(1,2,5,3,4)\), \(\tout=(5,4,5,3,4)\) (subtree\(2=[2,4]\)).
+\(a=(1,2,1,1,2)\).
+
+\emph{Q1 \texttt{1 2 3}:} \(\Delta=3\cdot\operatorname{sgn}(2)=-3\) added to
+\([2,4]\): \(D\mathrel{+}=(-3\) at~2, \(+3\) at~5\()\).
+\emph{Q2 \texttt{1 1 2}:} \(\Delta=2\cdot(+1)=+2\) added to \([1,5]\):
+\(D\mathrel{+}=(+2\) at~1, \(-2\) at~6 no-op\()\).
+Now the difference array (slots \(1..5\)) is \((+2,-3,0,0,+3)\); prefix sums
+\(=(2,-1,-1,-1,2)\).
+
+\emph{Q3 \texttt{2 1}:} point\((\tin_1{=}1)=2\); \(a_1+\operatorname{sgn}(1)\cdot2=1+2=\mathbf{3}\).\\
+\emph{Q4 \texttt{2 2}:} point\((\tin_2{=}2)=-1\); \(a_2+\operatorname{sgn}(2)(-1)=2+1=\mathbf{3}\).\\
+\emph{Q5 \texttt{2 4}:} point\((\tin_4{=}3)=-1\); \(a_4+\operatorname{sgn}(4)(-1)=1-1=\mathbf{0}\).\\
+Printed \(3,3,0\) -- the official output \checkmark.  (Node~5 reads \(a_5+1\cdot(-1)=1\),
+node~3 reads \(a_3+(-1)\cdot2=-1\), matching the statement's worked note.)
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+One DFS (\(\bigO{n}\)) to fill \(\tin/\tout/\operatorname{sgn}\), then \(m\)
+queries at \(\bigO{\log n}\) each: total \(\bigO{(n+m)\log n}\) with
+\(n,m\le2\cdot10^5\) -- roughly \(4\cdot10^6\) tree touches, easily inside 2\,s.
+Memory: two \(O(n)\) \code{long long} arrays, two \(O(n)\) \code{int} arrays,
+and the adjacency list \(2(n-1)\) -- about \(20\) MB, well under 256 MB.
+\textbf{AC}.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.30\linewidth} p{0.38\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+update at a leaf & subtree is one slot & \(\tin=\tout\), range add hits one point \\
+\(\tout(x)=n\) & write at \(\tout+1=n+1\) & \code{bitadd} guard \(i\le n\) drops it safely \\
+root update & whole array flips sign & \(\operatorname{sgn}\) already encodes it, no special case \\
+value goes negative & alternating adds & \code{long long} and signed read \(a_x+\operatorname{sgn}\cdot\text{pt}\) \\
+deep chain \(n=2\cdot10^5\) & recursion depth & raise the stack or DFS iteratively \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{One-indexed everything:} \(\tin\in[1,n]\), BIT loop
+        \(i\le n\), and \(\tout\) \emph{inclusive}.  If you port a \(0\)-based
+        Ch.~5 tour (its \(\tout\) is half-open), \emph{shift by one} before
+        touching this BIT -- mixing the two conventions is the classic silent
+        WA on subtree ranges.
+  \item \textbf{Recursion depth:} a chain tree sends \code{dfs} \(2\cdot10^5\)
+        frames deep.  Use an explicit stack, or the compiler flag
+        \texttt{-Wl,-stack,}, or compile with \code{int} recursion limit raised;
+        a stack overflow shows as RE, not TLE.
+  \item \textbf{\(\operatorname{sgn}\) is \(\pm1\), not the depth:} the bug is
+        writing \(\mathit{val}\cdot\depth\) instead of \(\mathit{val}\cdot\operatorname{sgn}\).
+        Verify on the root: its own contribution must be \(+\mathit{val}\).
+  \item \textbf{Fast I/O:} \(m\le2\cdot10^5\) lines of output -- buffer it;
+        \code{printf}/\code{scanf} as shown, or untied \code{cin}/\code{cout}.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: mixing Ch.~5's \(0\)-based tour with this \(1\)-based BIT]
+Ch.~5 (\chref{c24}) builds \(\tin\in[0,n)\) with a \emph{half-open}
+\(\tout=\tin+\mathit{size}\); this chapter's BIT uses \(\tin\in[1,n]\) and an
+\emph{inclusive} \(\tout=\tin+\mathit{size}-1\).  Feeding the first into
+\(\code{query}(\tout)-\code{query}(\tin-1)\) is off by one on \emph{both}
+ends: subtree sums come out one node too big, and slot~0 indexes past the
+array.  Pick one convention per program and translate in exactly one place.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: treating a root-path read as a subtree read]
+\(\propref{c14-path}\): the point read at \(\tin(u)\) sums updates at
+\(u\)'s \emph{ancestors}, while \(\propref{c14-eulerrange}\)-B's subtree add is
+seen by \(u\)'s \emph{descendants}.  They share the two writes but answer
+opposite questions.  Getting ``number of active ancestors of \(u\)'' with a
+subtree-add semantics (instead of the enter/leave activation) returns the
+descendant count -- right number, wrong nodes.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: simulating the propagation]
+CF~383C's statement reads like a process.  Do not BFS the subtree flipping
+signs; \(\thmref{c14-parity}\) already collapsed it to one signed range add.
+The tell that you fell into this trap: your solution has a ``level'' counter
+inside the update loop and passes samples but TLEs on a chain.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: forgetting the read-time \(\operatorname{sgn}\)]
+Both ends of \(\thmref{c14-parity}\) matter: multiply the stored delta by
+\(\operatorname{sgn}(x)\) \emph{and} the read by \(\operatorname{sgn}(u)\).
+Dropping the read-time factor makes same-parity and opposite-parity nodes
+return values of the wrong sign -- samples with a shallow tree (depth 1--2)
+often still pass, hiding the bug until a hidden test.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Did you get \(\tin,\tout\) from Ch.~5 by label and \emph{not} re-derive
+        them, and are they in the same (1-based, inclusive) convention as the BIT?
+  \item Is your update a single range add, or are you secretly walking the
+        subtree?
+  \item For a sign-propagating problem, is \(\operatorname{sgn}\) computed once
+        in the DFS and applied at \emph{both} the write and the read?
+  \item Is \(\tout+1\) handled when \(\tout=n\) (the guard, not a crash)?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Danil and a Part-time Job}{CF 877E}
+    {https://codeforces.com/problemset/problem/877/E}
+    {CF 2000 L4}
+    {``Invert the colour of the whole subtree of \(v\); read the colour of
+     \(u\)''.  Colour is a bit, and flipping a subtree is a range add
+     \(\bmod 2\): flatten with Ch.~5 and keep a difference BIT over
+     \([\tin(v),\tout(v)]\), reading \(\code{node\_value}(u)\bmod 2\) (the
+     \(\oplus\) running parity).  Exactly \(\coderef{c14-subtree}\) shape B,
+     with the value taken mod~2 -- no segment tree needed.}
+  \practice{Little Girl and Problem on Trees}{CF 276E}
+    {https://codeforces.com/problemset/problem/276/E}
+    {CF 2100 L5}
+    {``Add \(x\) to every node at distance exactly \(w\) from \(v\) within
+     \(v\)'s subtree''.  Nodes at a fixed depth occupy a contiguous block in
+     each subtree's Euler span, so keep \emph{one BIT per depth} over the tour
+     positions and range-add \(x\) on depth \(\depth(v)+w\) inside
+     \([\tin(v),\tout(v)]\); a node read is one point query in its depth's BIT.
+     The lesson: when the query keys on (subtree, depth), index the Euler
+     array by depth groups -- the same \(\tin/\tout\) reduction, refined.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+The \(\tin/\tout\) stamps and ``subtree \(=\) interval'' come wholly from
+Ch.~5 (\chref{c24}, \(\thmref{c24-range}\)); we supply only the range engine it
+deferred.  CSES~1137 ``Subtree Queries'' is Ch.~5's own solved case with a
+static prefix array -- replay it here with \(\coderef{c14-subtree}\) shape A and
+updates become free.  CF~343D ``Water Tree'' is the same subtree-add /
+root-path-read pair with the URL owned by Ch.~6 (\chref{c06}) -- cited by name,
+not re-linked.  Forward: ``add on one axis, read on another, offline'' returns
+in \secref{c14-offline}; the k-th-by-lifting predicate the Summit CF~1181D
+binary-searches over is this section's structure seen from the value side
+(\(\secref{c14-order}\)).
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 18.4 in 10 seconds]
+Ch.~5 flattened the tree; a BIT now owns its ranges.  Node\(\,\to\,\)slot
+\(\tin(v)\), subtree\(\,\to\,\)interval \([\tin(v),\tout(v)]\)
+(\(\defref{c14-eulerbit}\)).  Point-update + subtree-sum is the plain BIT,
+subtree-add + point-read is the difference BIT (\(\propref{c14-eulerrange}\),
+\(\coderef{c14-subtree}\)); the same two writes read the other way give
+root-path sums (\(\propref{c14-path}\), \(\coderef{c14-path}\)).  A depth-parity
+sign folds into the stored delta so a propagating update stays one range add
+(\(\thmref{c14-parity}\)) -- that solves CF~383C
+(\(\probref{c14-prop}\), \(\coderef{c14-383-soln}\)).  Keep one tour
+convention per program.
+\selftest{
+  \item State, in one line each, the reduction for ``subtree sum'' and for
+        ``root-path sum'' on a static tree.
+  \item Why can \emph{one} difference BIT answer both, and what differs: the
+        writes or the read?
+  \item For a query ``add to subtree with a sign flipping by level'', what is
+        stored and what is the node read?
+  \item Give the exact symptom of mixing a \(0\)-based half-open tour with a
+        \(1\)-based inclusive BIT.
+  \item Which chapter owns \(\tin/\tout\), and which one owns the range engine?
+}
+\end{recallbox}

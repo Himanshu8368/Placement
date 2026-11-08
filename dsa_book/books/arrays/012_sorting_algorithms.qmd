@@ -1,0 +1,2440 @@
+# Sorting Algorithms {#sec-salgo}
+
+<!--
+Author-facing provenance (not rendered): Chapter 12 of the arrays volume, per outline.yml
+("Sorting Algorithms"). This is the THEORY chapter: how comparison sorts work and what they cost.
+Part A: A0 vocabulary + test harness, A1 insertion, A2 selection, A3 merge, A4 quicksort (+ quickselect),
+A5 heaps + heapsort, A6 stability + the Omega(n log n) bound, A7 introsort, A8 Timsort, A9 choosing.
+Part B: five patterns, each with >= 2 registry problems (trace boards in books/traces/arr012_traces.py).
+No source chapter in the LaTeX notes; references are CLRS 4e ch. 2, 6, 7, 8.1, 9; Sedgewick & Wayne
+ch. 2; CPython Objects/listsort.txt; Musser 1997. Application-side sorting is @sec-srt (chapter 10);
+counting/radix/bucket sorts are the next chapter, @sec-lts. Do not print problem kinds. See STYLE.md.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** (4th ed.) ch. 2 (insertion sort, §2.1; merge sort, §2.3), ch. 6 (heaps and heapsort), ch. 7 (quicksort: Lomuto partition §7.1, randomisation §7.3, the expected-time analysis §7.4, Hoare's partition in Problem 7-1), §8.1 (the decision-tree lower bound), ch. 9 (selection in expected linear time) · **Sedgewick & Wayne**, *Algorithms* (4th ed.) ch. 2 (elementary sorts, mergesort, quicksort with three-way partitioning, priority queues and heapsort, stability) · **Musser**, "Introspective Sorting and Selection Algorithms", *Software: Practice and Experience* 27(8), 1997 (introsort and introselect) · **Tim Peters**, `Objects/listsort.txt` in the CPython source (Timsort: runs, minrun, merge policy, galloping) · **CPH** ch. 3 (sorting in contests) · cppreference on `std::sort`, `std::stable_sort`, `std::nth_element`, `std::make_heap` · the statements of the twelve problems solved here (LeetCode, Codeforces).
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- **Write from memory** insertion, selection, merge (top-down and bottom-up), quicksort (Lomuto, Hoare, three-way) and heapsort, and state for each its invariant, its best / average / worst time, its extra space, and whether it is stable.
+- **Prove** each sort correct with a loop invariant, prove merge sort's $\Theta(n\log n)$ from its recursion tree, quicksort's expected $2n\ln n$ comparisons from indicator variables, and the $O(n)$ heap build from a sum over heights.
+- **Prove the $\Omega(n \log n)$ lower bound** for comparison sorting from the decision tree, and say exactly which assumption counting sort breaks (@sec-lts).
+- **Explain what the libraries run**: introsort behind `std::sort` (quicksort with a depth limit, a heapsort fallback and an insertion-sort finish) and Timsort behind Python's `sorted` (natural runs, minrun, a merge stack, galloping).
+- **Reuse the machinery** on problems: count inversions with a merge (@sec-salgo-p2), select one rank in expected $O(n)$ with quickselect (@sec-salgo-p3-a), keep a bounded heap for top-$k$ and streams (@sec-salgo-p4), and exploit stability and tie-break direction (@sec-salgo-p5).
+:::
+
+```{python}
+#| include: false
+import itertools
+import math
+import random
+import sys
+from bisect import bisect_left, bisect_right
+from collections import Counter
+from fractions import Fraction
+from functools import cmp_to_key
+from heapq import heapify, heappop, heappush, heapreplace
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr012_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-salgo-why}
+
+::: {.callout-note title="In plain words"}
+@sec-srt used sorting as a *tool*: sort first, then scan. This chapter opens the box. It asks how the order is produced, what each method costs, and what it promises about ties. There is a quadratic family that is easy to write (insertion, selection), a $n\log n$ divide-and-conquer family (merge sort, quicksort, heapsort), a floor that no comparison sort can go below ($\Omega(n\log n)$), and, behind every `sorted(...)` and `std::sort(...)` you have ever called, a hybrid (Timsort, introsort) that mixes several of these to be fast *and* safe.
+:::
+
+The arrays volume has leaned on order again and again. Two pointers (@sec-tp) only slide inwards because the array is sorted; binary search (@sec-bst) needs a monotone predicate; @sec-srt turned "closest pair" into "adjacent pair" with one library call. Every one of those chapters *assumed* that a sorted copy costs $O(n\log n)$ and never asked why that number is both reachable and unavoidable. Interviews ask exactly that ("implement merge sort", "why is quicksort fast if its worst case is quadratic?", "is `std::sort` stable?"), and contest problems hide sorting machinery inside counting questions ("how many pairs are out of order?").
+
+Here is the ladder of lessons, each one buying a property the previous one lacked:
+
+- **A0. The vocabulary.** The comparison model, in place, stable, adaptive, inversions, and the test harness every sort in the chapter goes through.
+- **A1. Insertion sort.** $O(n^2)$ worst case but $O(n + \text{inversions})$, so nearly linear on nearly sorted data; stable; the small-array finisher inside real sorts.
+- **A2. Selection sort.** Always $\binom n2$ comparisons, but at most $n-1$ swaps: the sort that minimises writes, and the idea that heapsort speeds up.
+- **A3. Merge sort.** $\Theta(n\log n)$ in every case and stable, at the price of $O(n)$ extra memory; its *merge* is a reusable machine.
+- **A4. Quicksort.** In place and the fastest in practice, but only on average; three partition schemes, the expected-time proof, and quickselect.
+- **A5. Heapsort.** $O(n\log n)$ worst case *and* in place, by turning selection sort's linear scan into a heap's logarithmic sift.
+- **A6. The limits.** Stability as a property you can test and buy, and the decision-tree proof that $n\log n$ comparisons are necessary.
+- **A7–A8. What libraries run.** Introsort (quicksort with a heapsort safety net) and Timsort (a stable merge sort that exploits existing order).
+- **A9. Choosing a sort**, with one table of measured costs.
+
+Part B then spends the machinery on five patterns: write a sort by hand (P1), count with a merge (P2), select a rank without sorting (P3), keep a heap (P4), and design the order of ties (P5). Sorts that do not compare at all (counting, radix, bucket) escape the $\Omega(n\log n)$ floor by reading the keys themselves; they are the next chapter, @sec-lts.
+
+## A0. The vocabulary of sorting {#sec-salgo-a0}
+
+::: {.callout-note title="In plain words"}
+Before comparing sorts we need words for what they promise. **Comparison sort**: it learns about the keys only by asking "is $x < y$?". **In place**: it needs only $O(1)$ extra memory (we also accept the $O(\log n)$ recursion stack). **Stable**: two items with equal keys come out in the order they went in. **Adaptive**: it runs faster when the input is already partly sorted. **Inversion**: a pair of positions that is in the wrong order; the number of inversions measures how unsorted an array is.
+:::
+
+**The comparison model.** A comparison sort may move items around however it likes, but the only way it learns anything about the keys is to compare two of them. We count its cost as the number of comparisons (and sometimes the number of moves). Merge sort, quicksort, heapsort, insertion and selection sort are all comparison sorts; so are Python's `sorted` and C++'s `std::sort`, which accept any type with a `<`. Counting sort is not: it uses a key as an array index.
+
+**Inversions.** For an array $a[0..n)$, an inversion is a pair $i < j$ with $a[i] > a[j]$. A sorted array has $0$ inversions; a strictly decreasing one has the maximum, $\binom n2 = n(n-1)/2$. In a random permutation each of the $\binom n2$ pairs is inverted with probability $\tfrac12$, so the expected count is $n(n-1)/4$. Swapping two *adjacent* out-of-order items removes exactly one inversion and creates none, which is why any sort that only swaps neighbours (insertion sort, bubble sort) needs at least as many swaps as there are inversions.
+
+**Stability, precisely.** A sort is stable if, whenever positions $i < j$ hold items with equal keys, the item from $i$ is output before the item from $j$. Stability is invisible when you sort plain numbers (equal numbers are indistinguishable) and essential when you sort *records* by one field: it is what lets "sort by name, then stably by grade" produce grade order with names alphabetical inside each grade (@sec-srt-a1).
+
+Every sort in this chapter goes through the same harness below. It checks the output against `sorted` on empty, tiny, sorted, reversed, all-equal and random inputs with few or many distinct keys. Then it tests stability with **records** that compare only by key but remember their input position. A sort that claims stability must keep the positions in order on every trial. A sort that does not claim it must be caught out: the harness searches for a concrete **witness**, a small key list on which the sort reorders equal keys. A second helper counts comparisons by wrapping each value in an object whose `<` increments a counter, so every complexity claim below is a measured number, not a slogan.
+
+```{python}
+#| label: arr-salgo-a0-harness
+class a0_Rec:
+    """A record compared only by its key k; tag remembers its input position."""
+    __slots__ = ("k", "tag")
+    def __init__(self, k, tag): self.k, self.tag = k, tag
+    def __lt__(self, o): return self.k < o.k
+    def __le__(self, o): return self.k <= o.k
+    def __gt__(self, o): return self.k > o.k
+    def __ge__(self, o): return self.k >= o.k
+    def __eq__(self, o): return self.k == o.k
+    __hash__ = None
+
+A0_CMP = [0]                                  # global comparison counter
+
+class a0_Cnt:
+    """A value whose every comparison is counted."""
+    __slots__ = ("v",)
+    def __init__(self, v): self.v = v
+    def __lt__(self, o): A0_CMP[0] += 1; return self.v < o.v
+    def __le__(self, o): A0_CMP[0] += 1; return self.v <= o.v
+    def __gt__(self, o): A0_CMP[0] += 1; return self.v > o.v
+    def __ge__(self, o): A0_CMP[0] += 1; return self.v >= o.v
+    def __eq__(self, o): A0_CMP[0] += 1; return self.v == o.v
+    __hash__ = None
+
+def a0_comparisons(sort_fn, values):
+    """Run sort_fn on counted copies of values; check the result; return #comparisons."""
+    A0_CMP[0] = 0
+    out = sort_fn([a0_Cnt(v) for v in values])
+    used = A0_CMP[0]
+    assert [c.v for c in out] == sorted(values)
+    return used
+
+def a0_inversions(a):
+    return sum(1 for i in range(len(a)) for j in range(i + 1, len(a)) if a[i] > a[j])
+
+def a0_inputs(trials=200, max_n=40):
+    yield from ([], [7], [2, 1], [1, 1], list(range(30)), list(range(30, 0, -1)), [5] * 20)
+    for _ in range(trials):
+        spread = random.choice([2, 10, 1000])          # few, some, many distinct keys
+        yield [random.randint(-spread, spread) for _ in range(random.randint(0, max_n))]
+
+def a0_is_stable_on(sort_fn, keys):
+    recs = [a0_Rec(k, i) for i, k in enumerate(keys)]
+    return [(r.k, r.tag) for r in sort_fn(recs)] == sorted((r.k, r.tag) for r in recs)
+
+def a0_check(sort_fn, stable):
+    """Correctness on many inputs; then stability, or a witness that it is unstable."""
+    for a in a0_inputs():
+        assert sort_fn(list(a)) == sorted(a), a
+    if stable:
+        for _ in range(200):
+            keys = [random.randint(0, 3) for _ in range(random.randint(0, 25))]
+            assert a0_is_stable_on(sort_fn, keys), keys
+        return None
+    for n in range(2, 7):                              # small exhaustive search first
+        for keys in itertools.product(range(3), repeat=n):
+            for _ in range(3):                         # randomised sorts get a few tries
+                if not a0_is_stable_on(sort_fn, list(keys)):
+                    return list(keys)
+    for _ in range(500):                               # then longer random key lists
+        keys = [random.randint(0, 2) for _ in range(random.randint(7, 60))]
+        if not a0_is_stable_on(sort_fn, keys):
+            return keys
+    raise AssertionError("claimed unstable, but no witness found")
+
+a0_check(sorted, stable=True)                          # the harness accepts Python's own sort
+assert a0_inversions([5, 2, 4, 6, 1, 3]) == 9
+perms = list(itertools.permutations(range(6)))
+assert Fraction(sum(map(a0_inversions, perms)), len(perms)) == Fraction(6 * 5, 4)   # n(n-1)/4
+print("a0 harness OK")
+```
+
+The last two lines check the inversion facts: the array $[5,2,4,6,1,3]$ used below has $9$ inversions, and the average over all $720$ permutations of six items is exactly $n(n-1)/4 = 7.5$.
+
+## A1. Insertion sort: grow a sorted prefix {#sec-salgo-a1}
+
+::: {.callout-note title="In plain words"}
+Walk left to right keeping `a[0..i)` sorted. Take `a[i]`, **shift** every larger element of the prefix one cell right, and drop `a[i]` into the gap. It is how most people sort a hand of cards. The work is one shift per inversion, so it costs $O(n^2)$ on a reversed array but only $O(n)$ on an array that is already nearly sorted, and it is **stable** and **in place**.
+:::
+
+**How it works.** Hold the next key in your hand, compare it with the sorted prefix from the right, and shift each larger element one step right until you meet an element that is not larger. Put the key in the hole.
+
+```text
+for i in 1 .. n-1:
+    key = a[i]; j = i - 1
+    while j >= 0 and a[j] > key:     # strict '>' : an equal key is never jumped over
+        a[j+1] = a[j]; j -= 1        # shift right to open a gap
+    a[j+1] = key                      # drop the key into the gap
+```
+
+::: {#fig-salgo-a1-anim}
+
+```{python}
+#| echo: false
+a1_frames, a1_caps = [], []
+a1_a = [5, 2, 4, 6, 1, 3]
+a1_frames.append((list(a1_a), 0, None))
+a1_caps.append("start: the prefix [5] (index 0) is sorted on its own")
+for i in range(1, len(a1_a)):
+    key, j = a1_a[i], i - 1
+    while j >= 0 and a1_a[j] > key:
+        a1_a[j + 1] = a1_a[j]
+        j -= 1
+    a1_a[j + 1] = key
+    a1_frames.append((list(a1_a), i, j + 1))
+    a1_caps.append(f"insert {key}: {i - j - 1} larger element(s) shift right, {key} drops into index {j + 1}")
+assert a1_a == [1, 2, 3, 4, 5, 6] and len(a1_frames) == 6
+
+def a1_frame(ax, p, k):
+    vals, i, pos = a1_frames[k]
+    regions = [(0, i + 1, "green", "sorted prefix")]
+    if i + 1 < len(vals):
+        regions.append((i + 1, len(vals), "muted", "not yet seen"))
+    colors = {pos: "amber"} if pos is not None else {}
+    ptrs = [(pos, "key", "amber")] if pos is not None else []
+    V.array(ax, p, vals, colors=colors, regions=regions, pointers=ptrs)
+
+V.animate(a1_frame, len(a1_frames), captions=a1_caps, interval=1300)
+```
+
+Insertion sort on $[5,2,4,6,1,3]$ (the example of CLRS §2.1). Each frame inserts one key (amber) into the green prefix. Watch the shift counts: $1, 1, 0, 4, 3$, nine in all, which is exactly the number of inversions of the input.
+
+:::
+
+**Invariant and proof.** *At the start of iteration $i$, the prefix `a[0..i)` holds the original first $i$ elements, in sorted order.* Initially ($i = 1$) the prefix is one element, trivially sorted. During iteration $i$ the while loop moves exactly the prefix elements greater than `key` one cell right, keeping their order, and stops at the first element $\le$ `key` (or at the left end). Placing `key` just after that element leaves `a[0..i+1)` sorted and made of the original first $i+1$ elements, so the invariant holds for $i+1$. When the loop ends, $i = n$ and the whole array is sorted. **Stability** comes from the strict test `a[j] > key`: the scan stops at an equal element, so `key` lands *after* every earlier equal key, never before it.
+
+**Cost.** Each shift moves one prefix element past `key`, and that pair was an inversion; no other moves happen. So the number of shifts is *exactly* the number of inversions $I$. Each iteration makes one comparison per shift plus at most one comparison that fails, so the comparisons $C$ satisfy $I \le C \le I + n - 1$.
+
+| Input | Comparisons | Shifts | Time |
+|---|---|---|---|
+| sorted (best) | $n - 1$ | $0$ | $\Theta(n)$ |
+| random (average) | $\approx n^2/4$ | $n(n-1)/4$ | $\Theta(n^2)$ |
+| reversed (worst) | $n(n-1)/2$ | $n(n-1)/2$ | $\Theta(n^2)$ |
+
+Extra space $O(1)$, in place, stable, adaptive ($O(n + I)$), and **online**: it can sort items as they arrive, because it never looks at an item before inserting it.
+
+**Binary insertion sort.** The prefix is sorted, so the slot for `key` can be found by binary search with $\lceil \log_2(i+1) \rceil$ comparisons instead of a linear scan. Use `bisect_right` (the slot *after* equal keys) to stay stable. This cuts comparisons to $O(n\log n)$, but the elements still have to move, so the time stays $O(n^2)$ in the worst case. It pays when comparisons are expensive and moves are cheap (a block shift is one `memmove`), which is exactly why Timsort uses it for short runs (@sec-salgo-a8).
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-salgo-a1-demo
+def a1_insertion(a):
+    a = list(a)
+    for i in range(1, len(a)):
+        key, j = a[i], i - 1
+        while j >= 0 and a[j] > key:          # strict '>' keeps equal keys in input order
+            a[j + 1] = a[j]
+            j -= 1
+        a[j + 1] = key
+    return a
+
+def a1_shifts(a):
+    """Same loop, returning the number of shifts instead of the array."""
+    a, shifts = list(a), 0
+    for i in range(1, len(a)):
+        key, j = a[i], i - 1
+        while j >= 0 and a[j] > key:
+            a[j + 1] = a[j]; j -= 1; shifts += 1
+        a[j + 1] = key
+    return shifts
+
+def a1_binary_insertion(a):
+    a = list(a)
+    for i in range(1, len(a)):
+        key = a[i]
+        pos = bisect_right(a, key, 0, i)      # slot after all keys <= key: stable
+        a[pos + 1:i + 1] = a[pos:i]           # shift the block right by one
+        a[pos] = key
+    return a
+
+a0_check(a1_insertion, stable=True)
+a0_check(a1_binary_insertion, stable=True)
+for _ in range(200):                           # shifts == inversions, I <= C <= I + n - 1
+    a = random.sample(range(100), random.randint(1, 30))
+    inv, c = a0_inversions(a), a0_comparisons(a1_insertion, a)
+    assert a1_shifts(a) == inv and inv <= c <= inv + len(a) - 1
+assert a0_comparisons(a1_insertion, list(range(50))) == 49                  # best case n - 1
+assert a0_comparisons(a1_insertion, list(range(50, 0, -1))) == 50 * 49 // 2  # worst case
+for _ in range(100):                           # binary insertion: sum of ceil(log2(i+1)) comparisons
+    a = [random.randint(0, 99) for _ in range(random.randint(1, 60))]
+    bound = sum(math.ceil(math.log2(i + 1)) for i in range(1, len(a)))
+    assert a0_comparisons(a1_binary_insertion, a) <= bound
+assert a1_shifts([5, 2, 4, 6, 1, 3]) == a0_inversions([5, 2, 4, 6, 1, 3]) == 9
+print("a1 insertion OK")
+```
+
+#### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+// Insertion sort: grow a sorted prefix. Strict '>' keeps equal keys in input order (stable).
+template <class T, class Less>
+void insertionSort(vector<T>& a, Less less) {
+    for (int i = 1; i < (int)a.size(); ++i) {
+        T key = a[i];
+        int j = i - 1;
+        while (j >= 0 && less(key, a[j])) { a[j + 1] = a[j]; --j; }   // shift larger elements right
+        a[j + 1] = key;
+    }
+}
+
+// Binary insertion sort: find the slot with upper_bound (after equal keys), then rotate it in.
+template <class T, class Less>
+void binaryInsertionSort(vector<T>& a, Less less) {
+    for (int i = 1; i < (int)a.size(); ++i) {
+        auto pos = upper_bound(a.begin(), a.begin() + i, a[i], less);
+        rotate(pos, a.begin() + i, a.begin() + i + 1);
+    }
+}
+
+int main() {
+    mt19937 rng(12);
+    auto byKey = [](const pair<int, int>& x, const pair<int, int>& y) { return x.first < y.first; };
+    for (int t = 0; t < 3000; ++t) {
+        int n = rng() % 40;
+        vector<pair<int, int>> a(n);
+        for (int i = 0; i < n; ++i) a[i] = {(int)(rng() % 5), i};   // few keys, index as a tag
+        vector<pair<int, int>> want = a, b = a;
+        stable_sort(want.begin(), want.end(), byKey);
+        insertionSort(a, byKey);
+        binaryInsertionSort(b, byKey);
+        assert(a == want && b == want);                               // sorted AND stable
+    }
+    puts("insertion sorts OK");
+}
+```
+:::
+
+Stability is a checkable property, not a claim, and the harness has already checked it. Here it is once more on named records, so you can see it: the three `A` records keep their input order `x, z, v` because the shift test is strict.
+
+```{python}
+#| label: arr-salgo-a1-stable
+def a1_insert_key(a, keyf):
+    a = list(a)
+    for i in range(1, len(a)):
+        key, j = a[i], i - 1
+        while j >= 0 and keyf(a[j]) > keyf(key):
+            a[j + 1] = a[j]; j -= 1
+        a[j + 1] = key
+    return a
+
+recs = [("x", "A"), ("y", "B"), ("z", "A"), ("w", "B"), ("v", "A")]
+out = a1_insert_key(recs, keyf=lambda r: r[1])
+assert [r[0] for r in out] == ["x", "z", "v", "y", "w"]   # A's in input order, then B's
+print("a1 stability OK")
+```
+
+**When it is used.** Insertion sort loses to every $n\log n$ sort once $n$ is more than a few dozen, but below that its tiny constant wins: introsort finishes small blocks with it (@sec-salgo-a7) and Timsort extends short runs with its binary variant (@sec-salgo-a8). It is also the right tool for data that is known to be nearly sorted (a log with a few late arrivals) and for keeping a small list sorted as items arrive. On a linked list it needs no shifting at all, only relinking (@sec-salgo-p1-b).
+
+## A2. Selection sort: minimise writes, not comparisons {#sec-salgo-a2}
+
+::: {.callout-note title="In plain words"}
+For each slot $i$, **scan** the unsorted tail for its minimum and **swap** it into slot $i$. It always makes $\binom{n}{2}$ comparisons, whatever the input, but at most $n-1$ swaps. When moving an element is the expensive operation (large records, writes to flash memory), that small write budget is the one to beat. It is **in place** but **not stable**: the swap can carry an element far to the right, past an equal one.
+:::
+
+**How it works.** The array is split into a sorted prefix and an unsorted tail. Each pass finds the smallest element of the tail with one linear scan and swaps it to the front of the tail, which grows the prefix by one.
+
+```text
+for i in 0 .. n-2:
+    m = index of the minimum of a[i .. n-1]     # one linear scan of the tail
+    swap(a[i], a[m])                            # at most one swap per pass
+```
+
+::: {#fig-salgo-a2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a2_frames(src):
+    a = list(src); frames = []
+    frames.append(dict(values=list(a), label="before", note="nothing sorted yet", cell_w=1.0))
+    for i in range(len(a) - 1):
+        m = min(range(i, len(a)), key=lambda j: a[j])
+        a[i], a[m] = a[m], a[i]
+        c = {k: ("green" if k <= i else "amber" if k == m else "muted") for k in range(len(a))}
+        frames.append(dict(values=list(a), label=f"pass {i}",
+                           note=f"min {a[i]} was at {m}" + (", swapped in" if m != i else ", no swap"),
+                           colors=c, cell_w=1.0))
+    assert a == sorted(src)
+    return frames
+
+def a2_draw(ax, p):
+    V.trace(ax, p, a2_frames([5, 2, 4, 1, 3]), gap=2.4)
+V.show(a2_draw)
+```
+
+Selection sort on $[5,2,4,1,3]$. Pass 0 finds the minimum $1$ at index 3 and swaps it to the front; pass 1 finds $2$ already in place. Each pass grows the green prefix by exactly one; the amber cell is where the swapped-out element went.
+
+:::
+
+**Invariant and proof.** *Before pass $i$, `a[0..i)` holds the $i$ smallest elements of the input, in sorted order.* It holds for $i = 0$. Pass $i$ swaps the minimum of the tail `a[i..n)` into position $i$; every element of the prefix is $\le$ every tail element (they are the $i$ smallest), so the new prefix `a[0..i+1)` is sorted and holds the $i+1$ smallest. After pass $n-2$ the prefix holds the $n-1$ smallest and the last element is the largest, so the array is sorted.
+
+**Cost.** Pass $i$ compares the current minimum with each of the $n - 1 - i$ other tail elements, so the total is $\sum_{i=0}^{n-2}(n-1-i) = \binom n2$ comparisons on *every* input: selection sort is not adaptive. It makes at most one swap per pass, so at most $n - 1$ swaps, $O(n)$ writes.
+
+| Input | Comparisons | Swaps | Time |
+|---|---|---|---|
+| any | $n(n-1)/2$ | $\le n - 1$ | $\Theta(n^2)$ |
+
+Extra space $O(1)$, in place, **not stable**, not adaptive.
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-salgo-a2-demo
+def a2_selection(a):
+    a, n = list(a), len(a)
+    for i in range(n - 1):
+        m = i
+        for j in range(i + 1, n):
+            if a[j] < a[m]:                    # strict '<' keeps the FIRST minimum ...
+                m = j
+        a[i], a[m] = a[m], a[i]                # ... but this swap can still break stability
+    return a
+
+def a2_swaps(a):
+    a, n, swaps = list(a), len(a), 0
+    for i in range(n - 1):
+        m = min(range(i, n), key=lambda j: a[j])
+        if m != i:
+            a[i], a[m] = a[m], a[i]; swaps += 1
+    return swaps
+
+a2_witness = a0_check(a2_selection, stable=False)
+for n in (0, 1, 2, 10, 37):                        # exactly n(n-1)/2 comparisons on any input
+    for a in (list(range(n)), list(range(n, 0, -1)), random.sample(range(1000), n)):
+        assert a0_comparisons(a2_selection, a) == n * (n - 1) // 2
+        assert a2_swaps(a) <= max(0, n - 1)        # the O(n)-writes promise
+assert a2_selection([5, 2, 4, 1, 3]) == [1, 2, 3, 4, 5]
+print("a2 selection OK; instability witness:", a2_witness)
+```
+
+#### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+// Selection sort: swap the minimum of the unsorted tail into place. Returns the number of swaps.
+int selectionSort(vector<int>& a) {
+    int n = (int)a.size(), swaps = 0;
+    for (int i = 0; i + 1 < n; ++i) {
+        int m = i;
+        for (int j = i + 1; j < n; ++j)
+            if (a[j] < a[m]) m = j;                 // strict '<' keeps the first minimum
+        if (m != i) { swap(a[i], a[m]); ++swaps; }
+    }
+    return swaps;
+}
+
+int main() {
+    mt19937 rng(7);
+    for (int t = 0; t < 3000; ++t) {
+        int n = rng() % 40;
+        vector<int> a(n);
+        for (int& x : a) x = (int)(rng() % 21) - 10;
+        vector<int> want = a;
+        sort(want.begin(), want.end());
+        int swaps = selectionSort(a);
+        assert(a == want && swaps <= max(0, n - 1));  // at most n-1 swaps
+    }
+    puts("selection sort OK");
+}
+```
+:::
+
+The harness found the witness $[1, 1, 0]$: pass 0 swaps the $0$ at index 2 with the *first* $1$, which lands behind the second $1$. Here is the same failure with named records, next to insertion sort on the same input:
+
+```{python}
+#| label: arr-salgo-a2-unstable
+def a2_selection_by_key(recs):
+    a = list(recs); n = len(a)
+    for i in range(n - 1):
+        m = min(range(i, n), key=lambda j: a[j][0])   # min keeps the first tie; the SWAP does not
+        a[i], a[m] = a[m], a[i]
+    return a
+
+a2_recs = [(2, "a"), (2, "b"), (1, "c")]        # two equal keys 2, tagged a then b
+assert a2_selection_by_key(a2_recs) == [(1, "c"), (2, "b"), (2, "a")]   # 'a' jumped behind 'b'
+assert a1_insert_key(a2_recs, keyf=lambda r: r[0]) == [(1, "c"), (2, "a"), (2, "b")]   # kept
+print("a2 instability OK")
+```
+
+The swap that pulls the minimum `1` to the front drags the first `2` past the second `2`; insertion sort only shifts while *strictly* greater, so equal keys never cross. (Selection sort can be made stable by *rotating* the minimum into place instead of swapping, but that costs $O(n)$ moves per pass and gives up its one advantage.)
+
+**When it is used.** Rarely on its own. Its value is the write bound (sorting where each write is costly, or problems that limit the number of swaps, like the practice problem CF 489A) and the idea itself: "repeatedly take the minimum of what is left" is exactly what a heap does in $O(\log n)$ instead of $O(n)$, which turns selection sort into heapsort (@sec-salgo-a5).
+
+## A3. Merge sort: divide, conquer, and the reusable merge {#sec-salgo-a3}
+
+::: {.callout-note title="In plain words"}
+Split the array in half, **sort each half recursively**, then **merge** the two sorted halves into one sorted array in a single left-to-right sweep. The recursion is $\log_2 n$ levels deep and each level does $n$ work in total, so the cost is $\Theta(n \log n)$ in *every* case: no lucky pivot, no bad input. The merge takes from the left half on ties, so the sort is **stable**. The price is $O(n)$ extra memory for the merge buffer.
+:::
+
+Insertion and selection sort both grow a sorted prefix one element at a time, which is why they are quadratic. Merge sort is the first sort here that uses **divide and conquer**: it splits the problem into two half-size problems, solves them independently, and combines the answers cheaply. Everything rests on the combine step, so we prove it first.
+
+### The merge {#sec-salgo-a3-merge}
+
+Given two sorted runs `L` and `R`, keep one finger at the head of each. Repeatedly compare the two heads and move the smaller one to the output; on a tie take the head of `L`. When one run is exhausted, copy the rest of the other.
+
+```text
+merge(L, R):
+    i = j = 0; out = []
+    while i < len(L) and j < len(R):
+        if L[i] <= R[j]: out.append(L[i]); i += 1     # '<=' : ties come from the left run
+        else:            out.append(R[j]); j += 1
+    return out + L[i:] + R[j:]
+```
+
+::: {#fig-salgo-a3-anim}
+
+```{python}
+#| echo: false
+a3_L, a3_R = [2, 4, 5, 7], [1, 2, 3, 6]
+a3_frames, a3_caps = [(0, 0, [])], ["start: two sorted runs; compare the heads 2 and 1"]
+a3_i = a3_j = 0
+a3_out = []
+while a3_i < len(a3_L) and a3_j < len(a3_R):
+    l, r = a3_L[a3_i], a3_R[a3_j]
+    if l <= r:
+        a3_out.append(l); a3_i += 1
+        cap = f"{l} <= {r}: take {l} from L" + (" (a tie: the LEFT copy goes first, so the merge is stable)" if l == r else "")
+    else:
+        a3_out.append(r); a3_j += 1
+        cap = f"{l} > {r}: take {r} from R"
+    a3_frames.append((a3_i, a3_j, list(a3_out))); a3_caps.append(cap)
+rest = a3_L[a3_i:] + a3_R[a3_j:]
+a3_out += rest
+a3_frames.append((len(a3_L), len(a3_R), list(a3_out)))
+a3_caps.append(f"one run is empty: copy the rest {rest} unchanged; 8 elements, 7 comparisons")
+assert a3_out == [1, 2, 2, 3, 4, 5, 6, 7] and len(a3_frames) == 9
+
+def a3_frame(ax, p, k):
+    i, j, out = a3_frames[k]
+    V.array(ax, p, a3_L, y=6.0, label="L", dim=range(i),
+            colors={i: "amber"} if i < len(a3_L) else {}, pointers=[(i, "i", "amber")] if i < len(a3_L) else [])
+    V.array(ax, p, a3_R, y=3.0, label="R", dim=range(j),
+            colors={j: "cyan"} if j < len(a3_R) else {}, pointers=[(j, "j", "cyan")] if j < len(a3_R) else [])
+    cells = out + [None] * (8 - len(out))
+    V.array(ax, p, cells, x=-2.0, y=0.0, label="out", colors={t: "green" for t in range(len(out))})
+
+V.animate(a3_frame, len(a3_frames), captions=a3_caps, interval=1200)
+```
+
+Merging $L=[2,4,5,7]$ and $R=[1,2,3,6]$ (the final merge of CLRS Figure 2.3). Each step compares the two heads (amber, cyan) and moves the smaller to `out`; grey cells are used up. At the tie $2$ versus $2$ the left copy goes first.
+
+:::
+
+**Merge invariant.** *After each step, `out` holds the $|out|$ smallest elements of $L \cup R$ in sorted order, and `L[i]`, `R[j]` are the smallest remaining elements of their runs.* Each step outputs $\min(L[i], R[j])$, which is the smallest remaining element overall because both runs are sorted, so the invariant is kept. **Cost:** every comparison outputs one element, and the last element is output without a comparison, so merging runs of total length $m$ takes at most $m - 1$ comparisons and exactly $m$ moves. **Stability:** an element of `R` is output before an equal element of `L` only if the test `L[i] <= R[j]` fails, which it never does for equal keys; inside each run the order is kept; so equal keys leave in input order (left run first, as in the input).
+
+### Merge sort and its recursion tree {#sec-salgo-a3-sort}
+
+```text
+merge_sort(a):
+    if len(a) <= 1: return a
+    mid = len(a) // 2
+    return merge(merge_sort(a[:mid]), merge_sort(a[mid:]))
+```
+
+**Correctness** is strong induction on the length: arrays of length $0$ or $1$ are sorted; a longer array splits into two strictly shorter halves, which the induction hypothesis sorts, and the merge of two sorted runs is a sorted permutation of their union.
+
+**Cost.** Let $T(n)$ be the worst-case time. Then $T(n) = T(\lfloor n/2\rfloor) + T(\lceil n/2\rceil) + \Theta(n)$. Draw the recursion tree (@fig-salgo-a3-tree): level $d$ holds $2^d$ subarrays whose sizes add up to $n$, and merging them costs $\Theta(n)$ in total. There are $\lceil\log_2 n\rceil$ levels of merges, so $T(n) = \Theta(n\log n)$; @sec-cx-recurrences solves the same recurrence with the Master theorem. Counting comparisons exactly, the worst case $W(n) = W(\lfloor n/2\rfloor) + W(\lceil n/2\rceil) + n - 1$ has the closed form $W(n) = n\lceil\log_2 n\rceil - 2^{\lceil\log_2 n\rceil} + 1$, and the best case (already sorted input, where every merge just exhausts its left run) costs about half that. Because the split is always in the middle, *whatever the input*, there is no bad case: this is the property quicksort lacks.
+
+::: {#fig-salgo-a3-tree}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a3_tree(a, depth=0):
+    """Run merge sort on a, returning (sorted list, recursion-tree node)."""
+    if len(a) == 1:
+        return list(a), V.Node(str(a[0]), color="muted")
+    mid = len(a) // 2
+    (L, lt), (R, rt) = a3_tree(a[:mid], depth + 1), a3_tree(a[mid:], depth + 1)
+    out, i, j = [], 0, 0
+    while i < len(L) and j < len(R):
+        if L[i] <= R[j]: out.append(L[i]); i += 1
+        else: out.append(R[j]); j += 1
+    out += L[i:] + R[j:]
+    return out, V.Node(" ".join(map(str, out)), [lt, rt], color=["green", "indigo", "cyan"][depth])
+
+def a3_tree_draw(ax, p):
+    out, root = a3_tree([5, 2, 4, 7, 1, 3, 2, 6])
+    assert out == [1, 2, 2, 3, 4, 5, 6, 7]
+    V.tree(ax, p, root, dx=1.25, dy=1.4, size=10,
+           level_notes=["1 merge of 8: 8 moves", "2 merges of 4: 8 moves", "4 merges of 2: 8 moves",
+                        "8 single elements: sorted already"])
+V.show(a3_tree_draw)
+```
+
+Merge sort on $[5,2,4,7,1,3,2,6]$, read bottom-up: each node shows the merged result of its two children. Every level moves all $n = 8$ elements once, and there are $\log_2 8 = 3$ levels of merges, so the total is $n\log_2 n = 24$ moves.
+
+:::
+
+**Space.** The merge needs a buffer as large as the runs it merges, so $\Theta(n)$ extra memory, plus $O(\log n)$ for the recursion. Merging in place is possible but complicated and slower in practice, so real implementations use a buffer; merge sort is **not in place**.
+
+**Bottom-up merge sort.** The recursion only decides *which* runs get merged. You can get the same merges without recursion: first merge neighbouring runs of width $1$, then width $2$, then $4$, and so on, until one run covers the array. That is $\lceil\log_2 n\rceil$ passes of $O(n)$ each. It needs no stack, and it is the form that suits linked lists (@sec-salgo-p1-c) and files.
+
+| Input | Comparisons | Time | Extra space |
+|---|---|---|---|
+| sorted (best) | $\approx \tfrac12 n\log_2 n$ | $\Theta(n\log n)$ | $\Theta(n)$ |
+| any (worst) | $n\lceil\log_2 n\rceil - 2^{\lceil\log_2 n\rceil} + 1$ | $\Theta(n\log n)$ | $\Theta(n)$ |
+
+Stable, not in place, not adaptive in this plain form (natural merge sort and Timsort fix that, @sec-salgo-a8).
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-salgo-a3-demo
+def a3_merge(L, R):
+    out, i, j = [], 0, 0
+    while i < len(L) and j < len(R):
+        if L[i] <= R[j]:                       # tie -> left run first: stability
+            out.append(L[i]); i += 1
+        else:
+            out.append(R[j]); j += 1
+    out.extend(L[i:]); out.extend(R[j:])
+    return out
+
+def a3_merge_sort(a):
+    if len(a) <= 1:
+        return list(a)
+    mid = len(a) // 2
+    return a3_merge(a3_merge_sort(a[:mid]), a3_merge_sort(a[mid:]))
+
+def a3_bottom_up(a):
+    a, n, width = list(a), len(a), 1
+    while width < n:                           # merge neighbouring runs of this width
+        a = [x for lo in range(0, n, 2 * width)
+             for x in a3_merge(a[lo:lo + width], a[lo + width:lo + 2 * width])]
+        width *= 2
+    return a
+
+def a3_worst(n):                               # W(n) = W(floor) + W(ceil) + n - 1
+    return 0 if n <= 1 else a3_worst(n // 2) + a3_worst(n - n // 2) + n - 1
+
+a0_check(a3_merge_sort, stable=True)
+a0_check(a3_bottom_up, stable=True)
+for n in range(1, 200):                        # the closed form of the worst case
+    L = (n - 1).bit_length()                   # = ceil(log2 n)
+    assert a3_worst(n) == n * L - 2 ** L + 1
+for _ in range(300):                           # no input ever exceeds it
+    a = [random.randint(-50, 50) for _ in range(random.randint(1, 70))]
+    n = len(a); L = (n - 1).bit_length()
+    assert a0_comparisons(a3_merge_sort, a) <= n * L - 2 ** L + 1
+for e in range(1, 8):                          # best case: sorted input, n = 2^e, (n/2) log2 n
+    assert a0_comparisons(a3_merge_sort, list(range(2 ** e))) == 2 ** e * e // 2
+assert a3_merge([2, 4, 5, 7], [1, 2, 3, 6]) == [1, 2, 2, 3, 4, 5, 6, 7]
+print("a3 merge sort OK")
+```
+
+#### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+// Merge the sorted runs a[lo, mid) and a[mid, hi) into buf[lo, hi), then copy back.
+// The right head is taken only when it is strictly smaller, so ties come from the left: stable.
+template <class T, class Less>
+void mergeRuns(vector<T>& a, vector<T>& buf, int lo, int mid, int hi, Less less) {
+    int i = lo, j = mid, k = lo;
+    while (i < mid && j < hi) buf[k++] = less(a[j], a[i]) ? a[j++] : a[i++];
+    while (i < mid) buf[k++] = a[i++];
+    while (j < hi) buf[k++] = a[j++];
+    copy(buf.begin() + lo, buf.begin() + hi, a.begin() + lo);
+}
+
+template <class T, class Less>
+void mergeSortRec(vector<T>& a, vector<T>& buf, int lo, int hi, Less less) {
+    if (hi - lo <= 1) return;
+    int mid = lo + (hi - lo) / 2;
+    mergeSortRec(a, buf, lo, mid, less);
+    mergeSortRec(a, buf, mid, hi, less);
+    mergeRuns(a, buf, lo, mid, hi, less);
+}
+
+template <class T, class Less>
+void mergeSort(vector<T>& a, Less less) {            // top-down: one buffer, reused by every merge
+    vector<T> buf(a.size());
+    mergeSortRec(a, buf, 0, (int)a.size(), less);
+}
+
+template <class T, class Less>
+void mergeSortBottomUp(vector<T>& a, Less less) {    // no recursion: merge widths 1, 2, 4, ...
+    int n = (int)a.size();
+    vector<T> buf(n);
+    for (int w = 1; w < n; w *= 2)
+        for (int lo = 0; lo + w < n; lo += 2 * w)
+            mergeRuns(a, buf, lo, lo + w, min(lo + 2 * w, n), less);
+}
+
+int main() {
+    mt19937 rng(3);
+    auto byKey = [](const pair<int, int>& x, const pair<int, int>& y) { return x.first < y.first; };
+    for (int t = 0; t < 3000; ++t) {
+        int n = rng() % 60;
+        vector<pair<int, int>> a(n);
+        for (int i = 0; i < n; ++i) a[i] = {(int)(rng() % 6), i};
+        vector<pair<int, int>> want = a, b = a;
+        stable_sort(want.begin(), want.end(), byKey);
+        mergeSort(a, byKey);
+        mergeSortBottomUp(b, byKey);
+        assert(a == want && b == want);
+    }
+    puts("merge sorts OK");
+}
+```
+:::
+
+The merge can do more than order. At the moment a right-run element is placed ahead of left-run elements still waiting, you learn that it is smaller than every one of them, and each of those pairs is an inversion. Tallying them during the merge counts all inversions in $O(n\log n)$ instead of $O(n^2)$: that is Pattern 2 (@sec-salgo-p2).
+
+**When it is used.** Merge sort is the standard choice when you need a guaranteed $O(n\log n)$ *and* stability: `std::stable_sort` is typically a merge sort that uses a buffer when one is available, and Java's `Arrays.sort` for objects and Python's `sorted` are Timsort, a merge sort (@sec-salgo-a8). It is also the sort for **linked lists**, where the merge relinks nodes instead of copying (@sec-salgo-p1-c), and for **external sorting**, where data too big for memory is sorted in chunks and the chunks are merged by streaming through them in order.
+
+## A4. Quicksort: partition, recurse, and select one rank {#sec-salgo-a4}
+
+::: {.callout-note title="In plain words"}
+Pick a **pivot**. **Partition** the array so that everything smaller than the pivot is on its left and everything larger is on its right; the pivot is now in its final position. Then sort the two sides recursively. No merging is needed afterwards, everything happens in place, and with a **random** pivot the expected cost is about $1.39\, n\log_2 n$ comparisons, which makes quicksort the fastest general-purpose sort in practice. The catch is that this is an *average*: a pivot that is always the smallest element makes it $\Theta(n^2)$.
+:::
+
+Merge sort does trivial splitting and careful combining. Quicksort is the mirror image: careful splitting (the partition) and no combining at all. Its whole correctness rests on one fact about the partition: afterwards, the pivot sits at the index it will have in the sorted array, everything left of it is $\le$ it, and everything right of it is $\ge$ it.
+
+```text
+quicksort(a, lo, hi):            # sorts a[lo..hi]
+    if lo < hi:
+        p = partition(a, lo, hi)     # pivot lands at its final index p
+        quicksort(a, lo, p - 1)
+        quicksort(a, p + 1, hi)
+```
+
+### Lomuto's partition {#sec-salgo-a4-lomuto}
+
+Take the last element as the pivot $x$. Scan $j$ from left to right, keeping a boundary $i$: cells `a[lo..i]` hold elements $\le x$, cells `a[i+1..j-1]` hold elements $> x$, and `a[j..hi-1]` is not yet examined. When `a[j]` $\le x$, grow the left region by swapping `a[j]` into position $i+1$. At the end, swap the pivot into position $i+1$.
+
+```text
+partition(a, lo, hi):            # Lomuto (CLRS 7.1)
+    x = a[hi]; i = lo - 1
+    for j in lo .. hi-1:
+        if a[j] <= x: i += 1; swap(a[i], a[j])
+    swap(a[i+1], a[hi]); return i + 1
+```
+
+::: {#fig-salgo-a4-anim}
+
+```{python}
+#| echo: false
+a4_src = [2, 8, 7, 1, 3, 5, 6, 4]
+a4_a, a4_hi = list(a4_src), len(a4_src) - 1
+a4_x, a4_i = a4_a[a4_hi], -1
+a4_frames = [(list(a4_a), a4_i, -1, None)]
+a4_caps = [f"pivot x = a[{a4_hi}] = {a4_x}; i = -1, so the '<= x' region is empty"]
+for j in range(a4_hi):
+    if a4_a[j] <= a4_x:
+        a4_i += 1
+        a4_a[a4_i], a4_a[j] = a4_a[j], a4_a[a4_i]
+        a4_caps.append(f"j = {j}: {a4_a[a4_i]} <= {a4_x}, so i = {a4_i} and swap a[{a4_i}] with a[{j}]")
+    else:
+        a4_caps.append(f"j = {j}: {a4_a[j]} > {a4_x}, so the '> x' region grows; i stays {a4_i}")
+    a4_frames.append((list(a4_a), a4_i, j, None))
+a4_p = a4_i + 1
+a4_a[a4_p], a4_a[a4_hi] = a4_a[a4_hi], a4_a[a4_p]
+a4_frames.append((list(a4_a), a4_i, a4_hi, a4_p))
+a4_caps.append(f"swap the pivot into a[{a4_p}]: everything left of it is <= {a4_x}, everything right is > {a4_x}")
+assert a4_a == [2, 1, 3, 4, 7, 5, 6, 8] and a4_p == 3 and len(a4_frames) == 9
+
+def a4_frame(ax, p, k):
+    vals, i, j, piv = a4_frames[k]
+    n = len(vals)
+    if piv is None:
+        regions = [(0, i + 1, "green", "<= x"), (i + 1, j + 1, "amber", "> x"), (j + 1, n - 1, "muted", "unseen")]
+        colors = {n - 1: "violet"}
+        ptrs = ([(i, "i", "green", "top")] if i >= 0 else []) + ([(j, "j", "indigo")] if j >= 0 else [])
+    else:
+        regions = [(0, piv, "green", "<= x"), (piv + 1, n, "amber", "> x")]
+        colors = {piv: "violet"}
+        ptrs = [(piv, "pivot", "violet")]
+    V.array(ax, p, vals, regions=regions, colors=colors, pointers=ptrs)
+
+V.animate(a4_frame, len(a4_frames), captions=a4_caps, interval=1200)
+```
+
+Lomuto's partition of $[2,8,7,1,3,5,6,4]$ around the pivot $4$ (violet), the example of CLRS Figure 7.1. Green is the "$\le x$" region ending at $i$, amber the "$> x$" region ending at $j$, grey is unseen. The last frame swaps the pivot between the two regions, at its final index 3.
+
+:::
+
+**Partition invariant and proof.** *At the start of each iteration with index $j$: every element of `a[lo..i]` is $\le x$, every element of `a[i+1..j-1]` is $> x$, and `a[hi]` $= x$.* Initially both regions are empty. If `a[j]` $> x$, incrementing $j$ extends the "$>x$" region. If `a[j]` $\le x$, the swap moves it to the end of the "$\le x$" region and moves the first "$>x$" element to position $j$, the end of its region. At termination $j = hi$, so every cell is classified, and the final swap puts $x$ between the two regions: everything to its left is $\le x$ and everything to its right is $> x$, so $x$ is at its sorted index. Partitioning $m$ elements costs exactly $m - 1$ comparisons.
+
+### Hoare's partition and the three-way partition {#sec-salgo-a4-hoare}
+
+**Hoare's partition** (the original one, CLRS Problem 7-1) runs two fingers towards each other: $i$ from the left stops at an element $\ge x$, $j$ from the right stops at an element $\le x$, and if they have not crossed the two are swapped. It returns $j$ with `a[lo..j]` $\le x \le$ `a[j+1..hi]`. The pivot is not necessarily at $j$; the recursion is on `[lo..j]` and `[j+1..hi]`. It does fewer swaps than Lomuto and, importantly, splits an array of **equal** keys in the middle, because both fingers stop at elements equal to $x$.
+
+**The three-way partition** (Dijkstra's Dutch national flag, the form Sedgewick & Wayne recommend) keeps four regions: `< x`, `== x`, unseen, `> x`. One pass classifies each element, and the whole `== x` block is finished: it is never recursed into. With many duplicates this is the difference between $\Theta(n^2)$ and $\Theta(n)$. Its invariant and proof are the content of the Sort Colors problem in @sec-pf-p1-colors:
+
+{{< include ../problems/lc-0075-sort-colors/card.qmd >}}
+
+Here the three colours become "less than, equal to, greater than the pivot", and quicksort recurses only into the first and last blocks.
+
+### Why quicksort is fast on average {#sec-salgo-a4-analysis}
+
+**Worst case.** If every partition is as unbalanced as possible (sizes $0$ and $m-1$), the cost is $(n-1) + (n-2) + \dots + 1 = \Theta(n^2)$. With Lomuto's last-element pivot, that happens on input that is *already sorted* (the pivot is always the maximum), and also on all-equal input (every element is $\le x$, so the left side gets everything). A fixed pivot rule is easy to attack.
+
+**Best case.** If every pivot is the median, $T(n) = 2T(n/2) + \Theta(n) = \Theta(n\log n)$, like merge sort.
+
+**Expected case with a random pivot.** Choose each pivot uniformly at random. Call the elements in sorted order $z_1 < z_2 < \dots < z_n$ (assume distinct keys). Two elements are compared at most once, because comparisons are always against the current pivot and a pivot is never compared again after its partition. Now $z_i$ and $z_j$ ($i < j$) are compared **if and only if** the first pivot chosen from the range $Z_{ij} = \{z_i, \dots, z_j\}$ is $z_i$ or $z_j$: until some element of $Z_{ij}$ is chosen, all of $Z_{ij}$ stays on one side together; if the first chosen is strictly between them, they are separated and never meet; if it is one of them, it is compared with the other. Every element of $Z_{ij}$ is equally likely to be first, so
+
+$$
+\Pr[z_i \text{ and } z_j \text{ compared}] = \frac{2}{j - i + 1},\qquad
+\mathbb{E}[C(n)] = \sum_{i<j} \frac{2}{j-i+1} < 2n H_n \approx 2n\ln n \approx 1.39\, n\log_2 n,
+$$ {#eq-salgo-qs}
+
+where $H_n = 1 + \tfrac12 + \dots + \tfrac1n$. The exact value, from the recurrence $C(n) = (n-1) + \tfrac{2}{n}\sum_{k<n} C(k)$, is $C(n) = 2(n+1)H_n - 4n$. The code below checks that closed form with exact fractions and compares it with measured runs. The randomness is in the algorithm, not the input, so no input is bad: every input has the same expected cost, and a cost far above it is very unlikely.
+
+**Stack depth.** Recursing into both sides can still nest $\Theta(n)$ deep on an unlucky run. The standard fix: recurse into the **smaller** side and loop on the larger one. The smaller side has at most half the elements, so the recursion depth is at most $\log_2 n$, and the extra space is $O(\log n)$ in the worst case.
+
+| Input | Time (random pivot) | Worst case (fixed last pivot) | Extra space |
+|---|---|---|---|
+| any | expected $\Theta(n\log n)$, about $1.39\,n\log_2 n$ comparisons | $\Theta(n^2)$ on sorted or all-equal input | $O(\log n)$ stack |
+
+In place, **not stable** (a swap can jump an element over an equal one), not adaptive.
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-salgo-a4-demo
+def a4_lomuto(a, lo, hi):
+    """Pivot a[hi]; returns its final index p: a[lo..p-1] <= a[p] < a[p+1..hi]."""
+    x, i = a[hi], lo - 1
+    for j in range(lo, hi):
+        if a[j] <= x:
+            i += 1
+            a[i], a[j] = a[j], a[i]
+    a[i + 1], a[hi] = a[hi], a[i + 1]
+    return i + 1
+
+def a4_hoare(a, lo, hi):
+    """Pivot value from the middle; returns j: a[lo..j] <= x <= a[j+1..hi], lo <= j < hi."""
+    x, i, j = a[(lo + hi) // 2], lo - 1, hi + 1
+    while True:
+        i += 1
+        while a[i] < x: i += 1
+        j -= 1
+        while a[j] > x: j -= 1
+        if i >= j:
+            return j
+        a[i], a[j] = a[j], a[i]
+
+A4_DEPTH = [0]
+def a4_quicksort(a):
+    """Randomised Lomuto quicksort; recurse on the smaller side, loop on the larger."""
+    a = list(a)
+    def qs(lo, hi, depth):
+        A4_DEPTH[0] = max(A4_DEPTH[0], depth)
+        while lo < hi:
+            r = random.randint(lo, hi)
+            a[r], a[hi] = a[hi], a[r]                  # a random pivot moves to the end
+            p = a4_lomuto(a, lo, hi)
+            if p - lo < hi - p:
+                qs(lo, p - 1, depth + 1); lo = p + 1
+            else:
+                qs(p + 1, hi, depth + 1); hi = p - 1
+    qs(0, len(a) - 1, 1)
+    return a
+
+def a4_quicksort_hoare(a):
+    a = list(a)
+    def qs(lo, hi):
+        while lo < hi:
+            r, m = random.randint(lo, hi), (lo + hi) // 2
+            a[r], a[m] = a[m], a[r]                    # a random pivot moves to the middle
+            p = a4_hoare(a, lo, hi)
+            if p - lo < hi - p:
+                qs(lo, p); lo = p + 1
+            else:
+                qs(p + 1, hi); hi = p
+    qs(0, len(a) - 1)
+    return a
+
+def a4_quicksort3(a):
+    """Three-way partition: a[lo..lt-1] < x, a[lt..gt] == x, a[gt+1..hi] > x."""
+    a = list(a)
+    def qs(lo, hi):
+        while lo < hi:
+            x = a[random.randint(lo, hi)]
+            lt, i, gt = lo, lo, hi
+            while i <= gt:
+                if a[i] < x:
+                    a[lt], a[i] = a[i], a[lt]; lt += 1; i += 1
+                elif a[i] > x:
+                    a[i], a[gt] = a[gt], a[i]; gt -= 1
+                else:
+                    i += 1
+            if lt - lo < hi - gt:
+                qs(lo, lt - 1); lo = gt + 1
+            else:
+                qs(gt + 1, hi); hi = lt - 1
+    qs(0, len(a) - 1)
+    return a
+
+a4_witnesses = [a0_check(f, stable=False) for f in (a4_quicksort, a4_quicksort_hoare, a4_quicksort3)]
+for _ in range(300):                       # the two partition contracts
+    a = [random.randint(0, 9) for _ in range(random.randint(1, 30))]
+    p = a4_lomuto(a, 0, len(a) - 1)
+    assert all(v <= a[p] for v in a[:p]) and all(v > a[p] for v in a[p + 1:])
+    b = [random.randint(0, 9) for _ in range(random.randint(2, 30))]
+    j = a4_hoare(b, 0, len(b) - 1)
+    assert 0 <= j < len(b) - 1 and max(b[:j + 1]) <= min(b[j + 1:])
+C = [Fraction(0)]                          # exact expected comparisons, distinct keys
+for n in range(1, 41):
+    C.append(n - 1 + Fraction(2, n) * sum(C))
+    assert C[n] == 2 * (n + 1) * sum(Fraction(1, k) for k in range(1, n + 1)) - 4 * n
+a4_expect = 2 * 201 * sum(1 / k for k in range(1, 201)) - 4 * 200
+a4_avg = sum(a0_comparisons(a4_quicksort, random.sample(range(10**6), 200)) for _ in range(40)) / 40
+assert abs(a4_avg - a4_expect) < 0.1 * a4_expect          # measured ~ 2(n+1)H_n - 4n
+assert a0_comparisons(a4_quicksort, [7] * 100) == 100 * 99 // 2     # Lomuto: all-equal is quadratic
+assert a0_comparisons(a4_quicksort3, [7] * 256) == 2 * 256          # three-way: one linear pass
+assert a0_comparisons(a4_quicksort_hoare, [7] * 256) < 2 * 256 * 8  # Hoare: about n log2 n
+A4_DEPTH[0] = 0
+a4_quicksort(list(range(2000)))
+assert A4_DEPTH[0] <= (2000).bit_length()                 # smaller side first: depth <= log2 n + 1
+print(f"a4 quicksort OK: {a4_avg:.0f} comparisons on average for n = 200, formula {a4_expect:.0f}")
+```
+
+#### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+mt19937 rng(5);
+
+// Lomuto: pivot a[hi]; returns its final index p with a[lo..p-1] <= a[p] < a[p+1..hi].
+int lomuto(vector<int>& a, int lo, int hi) {
+    int x = a[hi], i = lo - 1;
+    for (int j = lo; j < hi; ++j)
+        if (a[j] <= x) swap(a[++i], a[j]);
+    swap(a[i + 1], a[hi]);
+    return i + 1;
+}
+
+// Hoare: pivot value from the middle; returns j with a[lo..j] <= x <= a[j+1..hi], lo <= j < hi.
+int hoare(vector<int>& a, int lo, int hi) {
+    int x = a[lo + (hi - lo) / 2], i = lo - 1, j = hi + 1;
+    while (true) {
+        do ++i; while (a[i] < x);
+        do --j; while (a[j] > x);
+        if (i >= j) return j;
+        swap(a[i], a[j]);
+    }
+}
+
+// Randomised Lomuto quicksort: recurse on the smaller side, loop on the larger => O(log n) stack.
+void quickLomuto(vector<int>& a, int lo, int hi) {
+    while (lo < hi) {
+        swap(a[lo + rng() % (hi - lo + 1)], a[hi]);
+        int p = lomuto(a, lo, hi);
+        if (p - lo < hi - p) { quickLomuto(a, lo, p - 1); lo = p + 1; }
+        else                 { quickLomuto(a, p + 1, hi); hi = p - 1; }
+    }
+}
+
+void quickHoare(vector<int>& a, int lo, int hi) {
+    while (lo < hi) {
+        swap(a[lo + rng() % (hi - lo + 1)], a[lo + (hi - lo) / 2]);   // random value into the middle
+        int p = hoare(a, lo, hi);
+        if (p - lo < hi - p) { quickHoare(a, lo, p); lo = p + 1; }
+        else                 { quickHoare(a, p + 1, hi); hi = p; }
+    }
+}
+
+// Three-way (Dutch national flag): a[lo..lt-1] < x, a[lt..gt] == x, a[gt+1..hi] > x.
+void quick3(vector<int>& a, int lo, int hi) {
+    while (lo < hi) {
+        int x = a[lo + rng() % (hi - lo + 1)], lt = lo, i = lo, gt = hi;
+        while (i <= gt) {
+            if (a[i] < x) swap(a[lt++], a[i++]);
+            else if (a[i] > x) swap(a[i], a[gt--]);
+            else ++i;
+        }
+        if (lt - lo < hi - gt) { quick3(a, lo, lt - 1); lo = gt + 1; }
+        else                   { quick3(a, gt + 1, hi); hi = lt - 1; }
+    }
+}
+
+int main() {
+    for (int t = 0; t < 3000; ++t) {
+        int n = rng() % 60, spread = t % 3 == 0 ? 2 : 1000;
+        vector<int> a(n);
+        for (int& x : a) x = (int)(rng() % (2 * spread + 1)) - spread;
+        if (t % 50 == 0) sort(a.begin(), a.end());              // sorted input
+        vector<int> want = a, b = a, c = a;
+        sort(want.begin(), want.end());
+        quickLomuto(a, 0, n - 1);
+        quickHoare(b, 0, n - 1);
+        quick3(c, 0, n - 1);
+        assert(a == want && b == want && c == want);
+    }
+    vector<int> same(200000, 7);                                // all equal: Hoare and 3-way stay fast
+    quickHoare(same, 0, (int)same.size() - 1);
+    quick3(same, 0, (int)same.size() - 1);
+    puts("quicksorts OK");
+}
+```
+:::
+
+The measured lines confirm each claim of the table: the average comparison count on random input matches $2(n+1)H_n - 4n$ within a few percent; Lomuto's partition on $100$ equal keys makes exactly $\binom{100}{2}$ comparisons; the three-way partition finishes $256$ equal keys in one pass; and on sorted input of $2000$ elements the smaller-side rule keeps the recursion at most $11$ calls deep.
+
+### One side only: quickselect {#sec-salgo-a4-select}
+
+After a partition the pivot sits at its final index $p$. If you want only the element of rank $t$ (the $t$-th smallest, 0-based), you do not need both sides: if $t = p$ the pivot is the answer, if $t < p$ the answer is in the left part, otherwise in the right part. Recurse into **one** side and forget the other. This is **quickselect** (Hoare's FIND).
+
+**Expected linear time.** Call a pivot *good* if it lands in the middle half of the current range; then the side we keep has at most $\tfrac34$ of the elements. A random pivot is good with probability $\tfrac12$, so on average two partitions bring the range below $\tfrac34$ of its size. The expected total work is therefore at most $2(n + \tfrac34 n + (\tfrac34)^2 n + \dots) = 8n$, which is $O(n)$; a sharper analysis gives at most about $3.4n$ comparisons. The worst case is still $\Theta(n^2)$; CLRS §9.3 gives a deterministic worst-case linear method (median of medians), and C++'s `std::nth_element` uses Musser's introselect, which adds the same kind of safety net as introsort (@sec-salgo-a7). Problem @sec-salgo-p3-a solves the classic interview question with it.
+
+```{python}
+#| label: arr-salgo-a4-select
+def a4_quickselect(a, t):
+    """Element of rank t (0-based) in expected O(n); three-way partition, one side kept."""
+    a, lo, hi, work = list(a), 0, len(a) - 1, 0
+    while True:
+        work += hi - lo + 1
+        x = a[random.randint(lo, hi)]
+        lt, i, gt = lo, lo, hi
+        while i <= gt:
+            if a[i] < x:
+                a[lt], a[i] = a[i], a[lt]; lt += 1; i += 1
+            elif a[i] > x:
+                a[i], a[gt] = a[gt], a[i]; gt -= 1
+            else:
+                i += 1
+        if t < lt:
+            hi = lt - 1
+        elif t > gt:
+            lo = gt + 1
+        else:
+            return x, work
+
+for _ in range(300):
+    a = [random.randint(-20, 20) for _ in range(random.randint(1, 40))]
+    t = random.randrange(len(a))
+    assert a4_quickselect(a, t)[0] == sorted(a)[t]
+a4_work = [a4_quickselect(random.sample(range(10**6), 2000), 1000)[1] for _ in range(30)]
+assert sum(a4_work) / 30 < 4 * 2000                 # expected work is linear (here about 3.4n)
+print("a4 quickselect OK: average work / n =", round(sum(a4_work) / 30 / 2000, 2))
+```
+
+**When it is used.** Quicksort, in its introsort form, is the default in-memory sort for arrays in C++ (`std::sort`, @sec-salgo-a7); Java sorts primitive arrays with a dual-pivot quicksort. It wins because its inner loop is a tight sequential scan with few moves and good cache behaviour. It is the wrong choice when you need stability, a worst-case guarantee without a fallback, or when the data is a linked list (partitioning needs cheap swaps at arbitrary positions, @sec-salgo-p1-c).
+
+## A5. Heaps and heapsort {#sec-salgo-a5}
+
+::: {.callout-note title="In plain words"}
+A **binary max-heap** is an array read as a tree: the children of index $i$ are $2i+1$ and $2i+2$, and every parent is $\ge$ its children, so the root `a[0]` is the maximum. **Sift-down** repairs one out-of-place node in $O(\log n)$ by swapping it with its larger child until it fits. Heapsort builds a heap in $O(n)$, then repeatedly swaps the root (the maximum) to the end of the array and sifts the new root down. That is $O(n \log n)$ in the **worst** case with $O(1)$ extra space, but it is **not stable** and its jumps through memory make it slower than quicksort in practice.
+:::
+
+Selection sort spends a linear scan to find each maximum (or minimum). Heapsort is selection sort with a better data structure for that one question: the heap answers "what is the largest remaining element?" in $O(1)$ and repairs itself in $O(\log n)$ after the answer is removed.
+
+**The array as a tree.** Store a complete binary tree level by level in `a[0..n)`. With 0-based indices the children of $i$ are $2i+1$ and $2i+2$ and the parent of $i > 0$ is $\lfloor (i-1)/2 \rfloor$; no pointers are stored. The **max-heap property** says `a[parent(i)]` $\ge$ `a[i]` for every $i > 0$. By transitivity the root is the maximum. The tree has height $\lfloor \log_2 n \rfloor$. (Python's `heapq` and C++'s `priority_queue` are the same structure; `heapq` keeps the *minimum* on top, @sec-lang-p2.)
+
+### Sift-down {#sec-salgo-a5-sift}
+
+Suppose both subtrees of node $i$ are heaps but `a[i]` may be smaller than a child. Compare `a[i]` with its children; if the larger child is bigger, swap them and continue from the child's position; stop when `a[i]` is $\ge$ both children or is a leaf.
+
+::: {#fig-salgo-a5-anim}
+
+```{python}
+#| echo: false
+def a5_sift_steps(a, i, size):
+    """Run sift-down on a copy, recording (array, current node) before each comparison."""
+    a, steps = list(a), []
+    while True:
+        l, r, big = 2 * i + 1, 2 * i + 2, i
+        steps.append((list(a), i))
+        if l < size and a[l] > a[big]: big = l
+        if r < size and a[r] > a[big]: big = r
+        if big == i:
+            return a, steps
+        a[i], a[big] = a[big], a[i]
+        i = big
+
+a5_src = [16, 4, 10, 14, 7, 9, 3, 2, 8, 1]
+a5_out, a5_steps = a5_sift_steps(a5_src, 1, len(a5_src))
+assert a5_out == [16, 14, 10, 8, 7, 9, 3, 2, 4, 1] and len(a5_steps) == 3
+a5_frames = [(arr, cur, False) for arr, cur in a5_steps] + [(a5_out, None, True)]
+a5_caps = []
+for arr, cur, _ in a5_frames[:-1]:
+    kids = [c for c in (2 * cur + 1, 2 * cur + 2) if c < len(arr)]
+    if kids and max(arr[c] for c in kids) > arr[cur]:
+        big = max(kids, key=lambda c: arr[c])
+        a5_caps.append(f"node {cur} holds {arr[cur]}; children {[arr[c] for c in kids]}: "
+                       f"swap with the larger child {arr[big]} (index {big})")
+    else:
+        a5_caps.append(f"node {cur} holds {arr[cur]} and has no larger child: stop")
+a5_caps.append("max-heap restored: every parent is >= its children")
+
+def a5_node(h, i, colors):
+    kids = [a5_node(h, c, colors) for c in (2 * i + 1, 2 * i + 2) if c < len(h)]
+    return V.Node(str(h[i]), kids, color=colors.get(i, "indigo"), filled=i in colors)
+
+def a5_frame(ax, p, k):
+    arr, cur, done = a5_frames[k]
+    if done:
+        colors = {t: "green" for t in range(len(arr))}
+    else:
+        colors = {cur: "amber"}
+        colors.update({c: "cyan" for c in (2 * cur + 1, 2 * cur + 2) if c < len(arr)})
+    V.tree(ax, p, a5_node(arr, 0, colors), x=0.0, y=0.0, dx=1.3, dy=1.35)
+    V.array(ax, p, arr, x=-1.4, y=-6.4, colors=colors, cell_w=0.8)
+
+V.animate(a5_frame, len(a5_frames), captions=a5_caps, interval=1500)
+```
+
+Sift-down at index 1 of $[16,4,10,14,7,9,3,2,8,1]$ (CLRS Figure 6.2). The amber node is compared with its cyan children and swapped with the larger one; the value $4$ sinks two levels, and the tree and its array (below) change together.
+
+:::
+
+**Invariant and proof.** *At the start of each step, the only possible violation of the heap property inside the subtree of $i$ is between `a[i]` and its children.* If `a[i]` is $\ge$ both children there is no violation and we stop. Otherwise swap with the larger child $c$: now `a[i]` is $\ge$ the other child (the new value is the larger of the two) and $\ge$ the old `a[i]`, so node $i$ is fine; the only possible violation has moved down to $c$. Each step goes one level down, so sift-down costs $O(h)$ for a node of height $h$, at most $2\lfloor\log_2 n\rfloor$ comparisons.
+
+### Building a heap in linear time {#sec-salgo-a5-build}
+
+Leaves are heaps already. Sift down every internal node, from the last one, $\lfloor n/2\rfloor - 1$, back to the root; when node $i$ is processed both its subtrees are heaps, so sift-down's precondition holds. The naive bound is $n/2$ sift-downs of $O(\log n)$ each, but most nodes are near the bottom: at most $\lceil n/2^{h+1}\rceil$ nodes have height $h$, and each costs $O(h)$, so the total is
+
+$$
+\sum_{h=0}^{\lfloor \log_2 n\rfloor} \left\lceil \frac{n}{2^{h+1}} \right\rceil O(h) = O\!\left(n \sum_{h \ge 0} \frac{h}{2^h}\right) = O(2n) = O(n).
+$$
+
+In fact the number of swaps is at most the sum of the heights of all nodes, which is less than $n$; the code below asserts it.
+
+### Heapsort {#sec-salgo-a5-sort}
+
+```text
+heapsort(a):
+    build a max-heap on a[0..n)
+    for end = n-1 down to 1:
+        swap(a[0], a[end])         # the maximum joins the sorted tail
+        sift_down(a, 0, end)       # repair the heap a[0..end)
+```
+
+**Invariant.** *Before the step with index `end`, `a[0..end]` is a max-heap holding the `end + 1` smallest elements, and `a[end+1..n)` holds the largest elements in sorted order.* The swap moves the maximum of the heap to position `end`, just before the sorted tail and no larger than any tail element, so the tail grows by one and stays sorted; the old last leaf sits at the root and sift-down restores the heap on `a[0..end)`. When `end` reaches $0$ the whole array is sorted.
+
+::: {#fig-salgo-a5-sort}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a5_sort_rows(src):
+    a = list(src); n = len(a)
+    for i in range(n // 2 - 1, -1, -1):
+        a = a5_sift_steps(a, i, n)[0]                 # the sift-down recorded above
+    rows = [dict(values=list(a), label="build", note=f"max-heap: root {a[0]} is the largest",
+                 regions=[(0, n, "indigo", "heap")])]
+    for end in range(n - 1, 0, -1):
+        a[0], a[end] = a[end], a[0]
+        a = a5_sift_steps(a, 0, end)[0]
+        regs = [(0, end, "indigo", "heap"), (end, n, "green", "sorted")]
+        rows.append(dict(values=list(a), label=f"end = {end}", note=f"{a[end]} moved to the tail", regions=regs))
+    assert a == sorted(src)
+    return rows
+
+def a5_sort_draw(ax, p):
+    V.trace(ax, p, a5_sort_rows([5, 2, 4, 6, 1, 3]), gap=2.5)
+V.show(a5_sort_draw)
+```
+
+Heapsort on $[5,2,4,6,1,3]$. After the build, each row swaps the root to the end of the heap (indigo) and re-sifts; the green sorted tail grows by one per row, which is the invariant.
+
+:::
+
+| Input | Comparisons | Time | Extra space |
+|---|---|---|---|
+| any | at most about $2n\log_2 n$ | $\Theta(n\log n)$ (for distinct keys, even when sorted) | $O(1)$ |
+
+In place, **not stable**, not adaptive. The build is $O(n)$ but the $n - 1$ extractions each sift from the root, so presorted input does not help.
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-salgo-a5-demo
+def a5_sift_down(a, i, size):
+    """Restore the max-heap property at i inside a[0:size]; both subtrees are heaps."""
+    while True:
+        l, r, big = 2 * i + 1, 2 * i + 2, i
+        if l < size and a[l] > a[big]: big = l
+        if r < size and a[r] > a[big]: big = r
+        if big == i:
+            return
+        a[i], a[big] = a[big], a[i]
+        i = big
+
+def a5_build_max_heap(a):
+    for i in range(len(a) // 2 - 1, -1, -1):           # last internal node back to the root
+        a5_sift_down(a, i, len(a))
+
+def a5_is_max_heap(a, size):
+    return all(a[(i - 1) // 2] >= a[i] for i in range(1, size))
+
+def a5_heapsort(a):
+    a = list(a)
+    a5_build_max_heap(a)
+    for end in range(len(a) - 1, 0, -1):
+        a[0], a[end] = a[end], a[0]                     # max joins the sorted tail
+        a5_sift_down(a, 0, end)
+    return a
+
+a5_witness = a0_check(a5_heapsort, stable=False)
+for _ in range(200):                                    # build: a heap, with fewer than n swaps
+    a = [random.randint(0, 50) for _ in range(random.randint(1, 100))]
+    b, swaps = list(a), 0
+    for i in range(len(b) // 2 - 1, -1, -1):
+        j = i
+        while True:
+            l, r, big = 2 * j + 1, 2 * j + 2, j
+            if l < len(b) and b[l] > b[big]: big = l
+            if r < len(b) and b[r] > b[big]: big = r
+            if big == j: break
+            b[j], b[big] = b[big], b[j]; j = big; swaps += 1
+    assert a5_is_max_heap(b, len(b)) and swaps < len(b)
+    c = list(a); a5_build_max_heap(c)                   # heapsort's loop invariant, step by step
+    for end in range(len(c) - 1, 0, -1):
+        c[0], c[end] = c[end], c[0]
+        a5_sift_down(c, 0, end)
+        assert a5_is_max_heap(c, end) and c[end:] == sorted(c[end:])
+        assert max(c[:end]) <= c[end]
+for _ in range(100):                                    # at most about 2 n log2 n comparisons
+    n = random.randint(2, 200)
+    assert a0_comparisons(a5_heapsort, random.sample(range(1000), n)) <= 2 * n * math.log2(n) + 2 * n
+assert a5_heapsort([16, 4, 10, 14, 7, 9, 3, 2, 8, 1]) == [1, 2, 3, 4, 7, 8, 9, 10, 14, 16]
+print("a5 heapsort OK; instability witness:", a5_witness)
+```
+
+#### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+// Restore the max-heap property at i inside a[0, size), assuming both subtrees are max-heaps.
+void siftDown(vector<int>& a, int i, int size) {
+    while (true) {
+        int l = 2 * i + 1, r = l + 1, big = i;
+        if (l < size && a[l] > a[big]) big = l;
+        if (r < size && a[r] > a[big]) big = r;
+        if (big == i) return;
+        swap(a[i], a[big]);
+        i = big;
+    }
+}
+
+void heapSort(vector<int>& a) {
+    int n = (int)a.size();
+    for (int i = n / 2 - 1; i >= 0; --i) siftDown(a, i, n);   // build a max-heap bottom-up, O(n)
+    for (int end = n - 1; end > 0; --end) {
+        swap(a[0], a[end]);                                     // the maximum joins the sorted tail
+        siftDown(a, 0, end);                                    // repair the shrunken heap
+    }
+}
+
+int main() {
+    mt19937 rng(11);
+    for (int t = 0; t < 3000; ++t) {
+        int n = rng() % 60;
+        vector<int> a(n);
+        for (int& x : a) x = (int)(rng() % 41) - 20;
+        vector<int> want = a, h = a;
+        sort(want.begin(), want.end());
+        heapSort(a);
+        assert(a == want);
+        make_heap(h.begin(), h.end());                          // the library does the same two phases
+        sort_heap(h.begin(), h.end());
+        assert(h == want);
+    }
+    puts("heapsort OK");
+}
+```
+:::
+
+The witness $[0, 0]$ is the smallest possible: building the heap leaves it alone, then the first extraction swaps the root to the end, so the two equal keys trade places.
+
+**When it is used.** Heapsort's selling point is the guarantee: $O(n\log n)$ worst case in $O(1)$ extra memory, with no recursion. That is why introsort uses it as the fallback when quicksort keeps choosing bad pivots (@sec-salgo-a7), and why it appears where memory and worst-case time are both fixed. The heap itself is used far more than heapsort: `std::partial_sort` (the $k$ smallest in order) and priority queues are heaps, and keeping a heap of size $k$ instead of sorting everything gives top-$k$ in $O(n\log k)$, which is Pattern 4 (@sec-salgo-p4).
+
+## A6. Stability and the $\Omega(n\log n)$ wall {#sec-salgo-a6}
+
+::: {.callout-note title="In plain words"}
+Two facts close the theory. **Stability** is a property you can test, and you can buy it for any sort by attaching each item's input position to its key. And **no comparison sort can beat $n\log n$**: there are $n!$ possible orders of the input, each comparison has only two outcomes, so some input needs at least $\log_2(n!) \approx n\log_2 n$ comparisons. Merge sort and heapsort meet this bound, so in the comparison model they are optimal up to a constant factor.
+:::
+
+### Stability: which sorts have it, and how to buy it {#sec-salgo-a6-stable}
+
+Five lessons gave five answers. Insertion sort is stable because it shifts only past *strictly* larger keys (@sec-salgo-a1); merge sort is stable because the merge takes the left head on ties (@sec-salgo-a3). Selection sort, quicksort and heapsort are not, because each makes long-distance swaps that can carry an item over an equal one; the harness found a witness for each.
+
+**Buying stability.** Sort the pairs $(\text{key}, \text{input index})$ instead of the keys. Equal keys are then ordered by index, so *every* sort becomes stable, at the price of $O(n)$ extra memory and a slightly more expensive comparison. **Using stability.** To sort records by a primary key and then a secondary key, sort by the *secondary* key first and then *stably* by the primary key: the second pass keeps the secondary order inside each group of equal primary keys. Doing this digit by digit, least significant first, is exactly LSD radix sort (@sec-lts). In one pass, a tuple key `(primary, secondary)` does the same job (@sec-srt-a2). Python's `sorted` and `list.sort` are guaranteed stable; C++ `std::sort` is not, `std::stable_sort` is.
+
+```{python}
+#| label: arr-salgo-a6-stable
+def a6_stabilize(sort_fn):
+    """Any comparison sort becomes stable when it sorts (key, input index) pairs."""
+    def stable_sort(a):
+        return [x for x, _ in sort_fn([(x, i) for i, x in enumerate(a)])]
+    return stable_sort
+
+def a6_sort_by(sort_fn, items, key):
+    """Sort items by key(item) using a sort that only sees the keys (records carried as tags)."""
+    return [r.tag for r in sort_fn([a0_Rec(key(x), x) for x in items])]
+
+a6_table = {"insertion": (a1_insertion, True), "binary insertion": (a1_binary_insertion, True),
+            "selection": (a2_selection, False), "merge (top-down)": (a3_merge_sort, True),
+            "merge (bottom-up)": (a3_bottom_up, True), "quicksort (Lomuto)": (a4_quicksort, False),
+            "quicksort (3-way)": (a4_quicksort3, False), "heapsort": (a5_heapsort, False),
+            "heapsort on (key, index)": (a6_stabilize(a5_heapsort), True)}
+for name, (fn, stable) in a6_table.items():
+    a0_check(fn, stable)                           # stable ones pass; unstable ones yield a witness
+
+for _ in range(100):                               # two stable passes == one tuple-key sort
+    recs = [(random.randint(0, 3), random.randint(0, 3), i) for i in range(30)]
+    by_second = a6_sort_by(a3_merge_sort, recs, key=lambda r: r[1])
+    two_pass = a6_sort_by(a3_merge_sort, by_second, key=lambda r: r[0])
+    assert two_pass == sorted(recs, key=lambda r: (r[0], r[1]))
+broken = False                                     # ... and an unstable second pass breaks it
+for _ in range(100):
+    recs = [(random.randint(0, 3), random.randint(0, 3), i) for i in range(30)]
+    by_second = a6_sort_by(a3_merge_sort, recs, key=lambda r: r[1])
+    if a6_sort_by(a5_heapsort, by_second, key=lambda r: r[0]) != sorted(recs, key=lambda r: (r[0], r[1])):
+        broken = True
+        break
+assert broken
+print("a6 stability OK")
+```
+
+### The decision-tree lower bound {#sec-salgo-a6-bound}
+
+@sec-pf-lower-bounds introduced decision trees; here is the argument for sorting in full (CLRS §8.1). Fix a comparison sort and an input size $n$, and consider inputs that are permutations of $n$ distinct keys. Run the sort and record each comparison it makes and its outcome. Draw the possibilities as a binary tree: each internal node is a comparison "$x_i > x_j$?", its two branches are the two answers, and each leaf is reached when the sort stops and outputs an order.
+
+- The tree has **at least $n!$ leaves**: two different input permutations must end at different leaves, because the same sequence of moves cannot sort both.
+- A binary tree of height $h$ has **at most $2^h$ leaves**.
+
+So $2^h \ge n!$, that is $h \ge \log_2(n!)$. The height is the number of comparisons on the worst input, so **every comparison sort makes at least $\lceil\log_2(n!)\rceil$ comparisons on some input.** To see how big that is, keep only the largest $n/2$ factors of $n!$, each at least $n/2$:
+
+$$
+\log_2(n!) \;\ge\; \log_2\!\big((n/2)^{n/2}\big) \;=\; \tfrac{n}{2}\log_2\tfrac{n}{2} \;=\; \Omega(n\log n),
+$$ {#eq-salgo-lb}
+
+and Stirling's formula sharpens it to $\log_2(n!) = n\log_2 n - n\log_2 e + O(\log n) \approx n\log_2 n - 1.44n$.
+
+::: {#fig-salgo-a6-tree}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a6_insertion_log(vals):
+    """Insertion sort on three named items x1, x2, x3; record each comparison and its answer."""
+    order, log = [0, 1, 2], []
+    for i in range(1, 3):
+        key, j = order[i], i - 1
+        while j >= 0:
+            yes = vals[order[j]] > vals[key]
+            log.append(((order[j], key), yes))
+            if not yes:
+                break
+            order[j + 1] = order[j]
+            j -= 1
+        order[j + 1] = key
+    return log, order
+
+def a6_build(paths):
+    if all(not log for log, _ in paths):
+        assert len(paths) == 1                      # one input order per leaf
+        return V.Node("<".join(f"x{t + 1}" for t in paths[0][1]), color="green")
+    (i, j), _ = paths[0][0][0]
+    assert all(log[0][0] == (i, j) for log, _ in paths)   # same question for every input here
+    kids = []
+    for ans, lab in ((True, "yes"), (False, "no")):
+        sub = [(log[1:], out) for log, out in paths if log[0][1] == ans]
+        if sub:
+            node = a6_build(sub)
+            node.edge = lab
+            kids.append(node)
+    return V.Node(f"x{i + 1} > x{j + 1} ?", kids, color="indigo")
+
+a6_paths = []
+for perm in itertools.permutations([1, 2, 3]):
+    log, out = a6_insertion_log(perm)
+    assert [perm[t] for t in out] == [1, 2, 3]
+    a6_paths.append((log, out))
+a6_depths = [len(log) for log, _ in a6_paths]
+assert len(a6_paths) == 6 and max(a6_depths) == 3 and Fraction(sum(a6_depths), 6) == Fraction(8, 3)
+
+def a6_tree_draw(ax, p):
+    V.tree(ax, p, a6_build(a6_paths), dx=2.7, dy=1.6, size=10)
+V.show(a6_tree_draw)
+```
+
+The decision tree of insertion sort on three items, computed by running it on all $3! = 6$ input orders. Each internal node is a comparison, each green leaf the order the sort outputs. There are $6$ leaves, so the height must be at least $\lceil\log_2 6\rceil = 3$, and insertion sort meets it.
+
+:::
+
+**The bound also holds on average.** Even if you only care about the average over all $n!$ equally likely inputs, you cannot do better. If the leaves sit at depths $d_1, \dots, d_L$ in a binary tree, then $\sum_\ell 2^{-d_\ell} \le 1$ (Kraft's inequality: each leaf at depth $d$ "uses up" a $2^{-d}$ share of the root). By convexity of $2^{-x}$, $2^{-\bar d} \le \frac1L \sum_\ell 2^{-d_\ell} \le \frac1L$, so the average depth $\bar d \ge \log_2 L \ge \log_2(n!)$. In the figure the average is $8/3 \approx 2.67 \ge \log_2 6 \approx 2.58$. The same argument applies to randomised sorts such as quicksort with random pivots, because fixing the random choices gives an ordinary decision tree (CLRS works this out in an end-of-chapter problem of ch. 8).
+
+**What the bound does and does not say.** It is about the *worst* (or average) input in the comparison model, so:
+
+- Merge sort ($n\lceil\log_2 n\rceil$ comparisons at most) and heapsort ($\le 2n\log_2 n$) are **asymptotically optimal**; nothing in the comparison model is faster than $\Theta(n\log n)$.
+- An *adaptive* sort may still use $n - 1$ comparisons on a sorted input (insertion sort, Timsort): the bound is about the hardest inputs, not every input.
+- A sort that reads the keys as numbers is outside the model. Counting sort uses a key as an array index, which is not a two-way comparison, and runs in $O(n + k)$ for keys below $k$. That is how @sec-lts beats $n\log n$, and it pays with assumptions about the keys.
+
+The table below compares the bound with two real algorithms for small $n$. For $n = 5$ the bound is $7$; merge sort may need $8$ and binary insertion $8$, while cleverer schemes (merge insertion, due to Ford and Johnson) reach $7$.
+
+```{python}
+#| label: arr-salgo-a6-bound
+def a6_lb(n):                                  # ceil(log2(n!)), exactly, with integers
+    return (math.factorial(n) - 1).bit_length()
+
+def a6_binary_insertion_worst(n):              # sum of ceil(log2(k)) for k = 2..n
+    return sum((k - 1).bit_length() for k in range(2, n + 1))
+
+a6_rows = []
+for n in range(2, 13):
+    lb, ms, bi = a6_lb(n), a3_worst(n), a6_binary_insertion_worst(n)
+    assert lb <= ms and lb <= bi                       # no algorithm beats the bound
+    assert math.log2(math.factorial(n)) >= n / 2 * math.log2(n / 2)   # the (n/2) log2(n/2) estimate
+    a6_rows.append((n, lb, ms, bi))
+for n in (8, 64, 1024):                                # Stirling: about n log2 n - 1.44 n
+    assert abs(math.log2(math.factorial(n)) - (n * math.log2(n) - n * math.log2(math.e))) <= math.log2(2 * math.pi * n)
+assert a6_rows[3] == (5, 7, 8, 8)
+for n, lb, ms, bi in a6_rows:
+    print(f"n = {n:2}: lower bound {lb:2}, merge sort worst {ms:2}, binary insertion worst {bi:2}")
+```
+
+## A7. Introsort: what `std::sort` runs {#sec-salgo-a7}
+
+::: {.callout-note title="In plain words"}
+Introsort is quicksort with a safety net. It runs ordinary quicksort, but counts how deep the recursion goes. If it ever goes deeper than $2\lfloor\log_2 n\rfloor$, the pivots have been bad too often, so it switches to **heapsort** for that part, which guarantees $O(n\log n)$. Small pieces (around 16 elements) are left alone and finished by **one insertion-sort pass** at the end. You get quicksort's speed on typical data and heapsort's worst case on the rest.
+:::
+
+Quicksort's only weakness is its worst case, and heapsort's only weaknesses are its constant factor and cache behaviour. Musser's **introspective sort** (1997) combines them so that each covers the other. The recursion depth is a cheap, reliable signal: a run of good pivots keeps it near $\log_2 n$; deep recursion means the partitions are unbalanced.
+
+```text
+introsort(a):
+    loop(a, 0, n, depth = 2 * floor(log2 n))
+    insertion_sort(a)                      # one pass over the whole array
+loop(a, lo, hi, depth):
+    while hi - lo > THRESHOLD:             # small blocks are left for the final pass
+        if depth == 0: heapsort(a[lo:hi]); return
+        depth -= 1
+        pivot = median of a[lo], a[mid], a[hi-1]
+        cut = partition(a, lo, hi, pivot)
+        loop on one side, recurse on the other
+```
+
+::: {#fig-salgo-a7}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a7_flow(ax, p):
+    V.flow(ax, p, {
+        "part": (0.0, 0.0, "partition (median of 3)", "indigo"),
+        "small": (-2.4, -2.8, "block <= 16: leave it", "muted"),
+        "deep": (2.4, -2.8, "depth used up: heapsort", "amber"),
+        "fin": (0.0, -5.6, "one insertion-sort pass", "green"),
+    }, [("part", "small", ""), ("part", "deep", ""), ("small", "fin", ""),
+        ("deep", "fin", "")], w=4.2, h=0.9, size=10)
+V.show(a7_flow)
+```
+
+The three parts of introsort. Every block is either partitioned (and the depth budget shrinks), handed to heapsort when the budget is gone, or left as a small unsorted block in its correct position for the final insertion pass.
+
+:::
+
+**Why the worst case is $O(n\log n)$.** Every partitioning level costs $O(n)$ in total across the blocks at that depth, and there are at most $2\lfloor\log_2 n\rfloor$ levels, so partitioning costs $O(n\log n)$. The heapsort calls run on disjoint blocks of total size at most $n$, so they cost $O(n\log n)$ together. After the loop, every element lies in a block of at most $16$ elements that is already in the right position relative to the other blocks, so the final insertion sort makes fewer than $16$ shifts per element, $O(n)$. The final pass is one long insertion sort rather than many small ones because a single tight loop over the array is cheaper in practice.
+
+**What the libraries do.** GCC's libstdc++ implements `std::sort` this way: a depth limit of $2\lfloor\log_2 n\rfloor$, a median-of-three pivot, a heapsort fallback, and a final insertion sort with a block threshold of 16. Other implementations use the same idea with different details; pattern-defeating quicksort (pdqsort), for example, also recognises already-sorted stretches. The standard only promises $O(n\log n)$ comparisons and no stability. `std::nth_element` is the selection version (introselect).
+
+| Input | Time | Extra space |
+|---|---|---|
+| any | $O(n\log n)$ worst case; quicksort-like on typical data | $O(\log n)$ |
+
+In place, **not stable**, not adaptive (beyond what the median-of-three pivot gives on sorted input).
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-salgo-a7-demo
+A7_THRESHOLD = 16
+
+def a7_introsort(a, naive_pivot=False, depth_limit=True, stats=None):
+    """Quicksort (median of 3, Hoare) + depth limit -> heapsort; final insertion pass."""
+    a, n = list(a), len(a)
+    stats = {} if stats is None else stats
+    stats["heap"] = 0
+
+    def median3(i, j, k):
+        if a[i] < a[j]:
+            if a[j] < a[k]: return j
+            return k if a[i] < a[k] else i
+        if a[i] < a[k]: return i
+        return k if a[j] < a[k] else j
+
+    def partition(lo, hi):                         # Hoare, pivot a[lo]: a[lo..j] <= x <= a[j+1..hi]
+        x, i, j = a[lo], lo - 1, hi + 1
+        while True:
+            i += 1
+            while a[i] < x: i += 1
+            j -= 1
+            while a[j] > x: j -= 1
+            if i >= j: return j
+            a[i], a[j] = a[j], a[i]
+
+    def loop(lo, hi, depth):                       # works on a[lo:hi]
+        while hi - lo > A7_THRESHOLD:
+            if depth == 0:
+                a[lo:hi] = a5_heapsort(a[lo:hi])   # (C++ does this in place)
+                stats["heap"] += 1
+                return
+            depth -= 1
+            m = lo if naive_pivot else median3(lo, (lo + hi) // 2, hi - 1)
+            a[lo], a[m] = a[m], a[lo]
+            cut = partition(lo, hi - 1) + 1
+            if cut - lo < hi - cut:                # smaller side recursively, larger in the loop
+                loop(lo, cut, depth); lo = cut
+            else:
+                loop(cut, hi, depth); hi = cut
+
+    loop(0, n, 2 * (n.bit_length() - 1) if (depth_limit and n) else float("inf"))
+    stats["final_shifts"] = a1_shifts(a)
+    return a1_insertion(a)
+
+a7_witness = a0_check(a7_introsort, stable=False)
+for _ in range(100):
+    st, arr = {}, [random.randint(0, 50) for _ in range(random.randint(0, 300))]
+    assert a7_introsort(arr, stats=st) == sorted(arr)
+    assert st["final_shifts"] < max(1, len(arr)) * A7_THRESHOLD    # the final pass is O(n)
+n, st = 300, {}
+a7_guarded = a0_comparisons(lambda b: a7_introsort(b, naive_pivot=True, stats=st), list(range(n)))
+a7_plain = a0_comparisons(lambda b: a7_introsort(b, naive_pivot=True, depth_limit=False), list(range(n)))
+assert st["heap"] >= 1                              # first-element pivot on sorted input: fallback fires
+assert a7_guarded <= 4 * n * math.log2(n) and a7_plain > n * n // 3   # O(n log n) versus quadratic
+assert a0_comparisons(a7_introsort, random.sample(range(10**6), 1000)) <= 2 * 1000 * math.log2(1000)
+print(f"a7 introsort OK: sorted input, first-element pivot: {a7_guarded} comparisons with the "
+      f"depth limit, {a7_plain} without")
+```
+
+#### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+const int THRESHOLD = 16;
+int heapFallbacks = 0;
+
+int median3(vector<int>& a, int i, int j, int k) {
+    if (a[i] < a[j]) return a[j] < a[k] ? j : (a[i] < a[k] ? k : i);
+    return a[i] < a[k] ? i : (a[j] < a[k] ? k : j);
+}
+
+// Hoare partition with the pivot at a[lo]; returns j with a[lo..j] <= x <= a[j+1..hi], lo <= j < hi.
+int hoareFront(vector<int>& a, int lo, int hi) {
+    int x = a[lo], i = lo - 1, j = hi + 1;
+    while (true) {
+        do ++i; while (a[i] < x);
+        do --j; while (a[j] > x);
+        if (i >= j) return j;
+        swap(a[i], a[j]);
+    }
+}
+
+// Sort a[lo, hi) down to unsorted blocks of <= THRESHOLD elements, in the right block order.
+void introLoop(vector<int>& a, int lo, int hi, int depth, bool naive) {
+    while (hi - lo > THRESHOLD) {
+        if (depth == 0) {                                       // too many bad splits: heapsort this range
+            make_heap(a.begin() + lo, a.begin() + hi);
+            sort_heap(a.begin() + lo, a.begin() + hi);
+            ++heapFallbacks;
+            return;
+        }
+        --depth;
+        int m = naive ? lo : median3(a, lo, lo + (hi - lo) / 2, hi - 1);
+        swap(a[lo], a[m]);
+        int cut = hoareFront(a, lo, hi - 1) + 1;
+        if (cut - lo < hi - cut) { introLoop(a, lo, cut, depth, naive); lo = cut; }
+        else                     { introLoop(a, cut, hi, depth, naive); hi = cut; }
+    }
+}
+
+void introSort(vector<int>& a, bool naive = false) {
+    int n = (int)a.size();
+    if (n < 2) return;
+    int lg = 31 - __builtin_clz(n);                              // floor(log2 n)
+    introLoop(a, 0, n, 2 * lg, naive);
+    for (int i = 1; i < n; ++i) {                                // one final insertion pass
+        int key = a[i], j = i - 1;
+        while (j >= 0 && a[j] > key) { a[j + 1] = a[j]; --j; }
+        a[j + 1] = key;
+    }
+}
+
+int main() {
+    mt19937 rng(8);
+    for (int t = 0; t < 2000; ++t) {
+        int n = rng() % 400, spread = t % 2 ? 3 : 100000;
+        vector<int> a(n);
+        for (int& x : a) x = (int)(rng() % (2 * spread + 1)) - spread;
+        vector<int> want = a;
+        sort(want.begin(), want.end());
+        introSort(a, t % 5 == 0);
+        assert(a == want);
+    }
+    vector<int> s(100000);
+    iota(s.begin(), s.end(), 0);
+    heapFallbacks = 0;
+    introSort(s, true);                       // first-element pivot on sorted input: worst case for quicksort
+    assert(is_sorted(s.begin(), s.end()) && heapFallbacks >= 1);
+    printf("introsort OK (%d heapsort fallback on sorted input)\n", heapFallbacks);
+}
+```
+:::
+
+The experiment at the end of the Python tab is the point of the design. With a deliberately bad pivot rule (the first element) on sorted input, plain quicksort makes a quadratic number of comparisons; with the depth limit, the same code bails out to heapsort after $2\lfloor\log_2 300\rfloor = 16$ bad levels and stays within a small multiple of $n\log_2 n$.
+
+## A8. Timsort: what Python's `sorted` runs {#sec-salgo-a8}
+
+::: {.callout-note title="In plain words"}
+Real data is rarely random: it often contains stretches that are already in order (a sorted list with a few new items appended, two sorted lists glued together, a reversed block). Timsort finds these **runs**, reverses the descending ones, lengthens short runs to a minimum length with binary insertion sort, and merges neighbouring runs in a balanced order. It is a **stable**, **adaptive** merge sort: $n - 1$ comparisons on sorted input, $O(n\log n)$ in the worst case.
+:::
+
+Tim Peters wrote Timsort for Python in 2002, and `Objects/listsort.txt` in the CPython source describes it in detail. It is also used for object arrays in Java and for `Array.prototype.sort` in V8 (the JavaScript engine of Chrome and Node.js). Its parts:
+
+1. **Runs.** Scan from the left for the longest prefix that is non-decreasing (`a[0] <= a[1] <= ...`) or *strictly* decreasing (`a[0] > a[1] > ...`). A strictly decreasing run is reversed in place; strictness matters, because reversing a run that contains equal keys would swap their order and break stability.
+2. **Minrun.** Very short runs would make many tiny merges, so a run shorter than `minrun` is extended to `minrun` elements (or to the end of the array) with binary insertion sort (@sec-salgo-a1). For $n < 64$, `minrun` $= n$: the whole array is one binary insertion sort. Otherwise `minrun` lies between 32 and 64, chosen so that $n/\text{minrun}$ is a power of two or just below one, which keeps the merges balanced. (The classic rule takes the six leading bits of $n$ and adds 1 if any other bit is set; recent CPython versions refine it so that run lengths differ by at most one.)
+3. **The merge stack.** Each new run is pushed on a stack of pending runs, and neighbouring runs are merged until the stack satisfies a balance invariant. In the original design the lengths $A, B, C$ of the three topmost runs must satisfy $A > B + C$ and $B > C$, so lengths grow at least like Fibonacci numbers down the stack and the stack has $O(\log n)$ runs. (In 2015 de Gouw and others found, while trying to verify Java's port formally, that the original check did not always restore the invariant; the fix checks one more level. Current CPython chooses merges with the "powersort" rule of Munro and Wild instead.) Only *neighbouring* runs are ever merged, which is what keeps the sort stable.
+4. **Galloping.** When one run keeps winning the merge (seven times in a row at first; the threshold adapts), the merge switches to an exponential search for where the other run's head belongs and copies the whole block at once. Merging a short run into a long one then costs about $O(\text{short} \cdot \log \text{long})$ comparisons instead of $O(\text{short} + \text{long})$.
+
+**Cost.** Run detection makes about one comparison per element. On sorted (or strictly decreasing) input there is a single run and no merge, so the sort costs exactly $n - 1$ comparisons. With $\rho$ runs of similar length the merges form a balanced tree of depth $\log_2 \rho$, so the cost is about $n\log_2 \rho$: few runs, nearly linear. On random data all runs are boosted to `minrun` and Timsort behaves like a well-balanced merge sort, $O(n\log n)$ (a 2018 analysis by Auger, Jugé, Nicaud and Pivoteau proved the worst case $O(n\log n)$ for the repaired merge rule). Merges copy the smaller of the two runs into a temporary buffer, so the extra memory is at most $n/2$ elements.
+
+| Input | Comparisons | Extra space |
+|---|---|---|
+| sorted or strictly decreasing | $n - 1$ | $O(1)$ |
+| $\rho$ balanced runs | about $n\log_2 \rho$ | $\le n/2$ |
+| random (worst) | $O(n\log n)$ | $\le n/2$ |
+
+**Stable** and **adaptive**; not in place.
+
+The version below ("Timsort-lite") has runs, minrun, binary insertion and the repaired stack invariant, but merges without galloping. It checks the stack invariant after every push, sorts like `sorted`, is stable, and makes $n - 1$ comparisons on sorted and on reversed input.
+
+::: {.panel-tabset group="lang"}
+#### Python
+
+```{python}
+#| label: arr-salgo-a8-demo
+def a8_minrun(n):
+    """Classic rule: n < 64 -> n; else the top 6 bits of n, plus 1 if any lower bit is set."""
+    r = 0
+    while n >= 64:
+        r |= n & 1
+        n >>= 1
+    return n + r
+
+def a8_count_run(a, lo, n):
+    """Length of the run at lo; a strictly descending run is reversed in place."""
+    hi = lo + 1
+    if hi == n:
+        return 1
+    if a[hi] < a[lo]:                                   # strictly descending
+        while hi + 1 < n and a[hi + 1] < a[hi]:
+            hi += 1
+        a[lo:hi + 1] = a[lo:hi + 1][::-1]
+    else:                                               # non-descending
+        while hi + 1 < n and not a[hi + 1] < a[hi]:
+            hi += 1
+    return hi - lo + 1
+
+def a8_binary_insertion(a, lo, hi, start):
+    """a[lo:start] is sorted; insert a[start:hi] one by one (stable: bisect_right)."""
+    for i in range(start, hi):
+        x = a[i]
+        pos = bisect_right(a, x, lo, i)
+        a[pos + 1:i + 1] = a[pos:i]
+        a[pos] = x
+
+def a8_merge_at(a, runs, i):
+    (s1, n1), (s2, n2) = runs[i], runs[i + 1]
+    a[s1:s2 + n2] = a3_merge(a[s1:s2], a[s2:s2 + n2])  # neighbours only: stable
+    runs[i] = (s1, n1 + n2)
+    del runs[i + 1]
+
+def a8_merge_collapse(a, runs):
+    """Merge until, from the top, lengths satisfy A > B + C and B > C (repaired check)."""
+    while len(runs) > 1:
+        n = len(runs) - 2
+        L = [r[1] for r in runs]
+        if (n > 0 and L[n - 1] <= L[n] + L[n + 1]) or (n > 1 and L[n - 2] <= L[n - 1] + L[n]):
+            if L[n - 1] < L[n + 1]:
+                n -= 1
+            a8_merge_at(a, runs, n)
+        elif L[n] <= L[n + 1]:
+            a8_merge_at(a, runs, n)
+        else:
+            break
+
+def a8_timsort(a, stats=None):
+    a, n = list(a), len(a)
+    stats = {} if stats is None else stats
+    stats.update(runs=0, max_stack=0)
+    if n < 2:
+        return a
+    minrun, runs, lo = a8_minrun(n), [], 0
+    while lo < n:
+        length = a8_count_run(a, lo, n)
+        if length < minrun:                             # boost a short run to minrun
+            force = min(minrun, n - lo)
+            a8_binary_insertion(a, lo, lo + force, lo + length)
+            length = force
+        runs.append((lo, length))
+        stats["runs"] += 1
+        a8_merge_collapse(a, runs)
+        L = [r[1] for r in runs]                        # the invariant, checked every time
+        assert all(L[k] > L[k + 1] for k in range(len(L) - 1))
+        assert all(L[k] > L[k + 1] + L[k + 2] for k in range(len(L) - 2))
+        stats["max_stack"] = max(stats["max_stack"], len(runs))
+        lo += length
+    while len(runs) > 1:                                # final collapse, top down
+        k = len(runs) - 2
+        if k > 0 and runs[k - 1][1] < runs[k + 1][1]:
+            k -= 1
+        a8_merge_at(a, runs, k)
+    return a
+
+for n in list(range(1, 200)) + [1000, 4096, 4097, 10**5]:
+    m = a8_minrun(n)
+    assert m == n if n < 64 else 32 <= m <= 64
+a0_check(a8_timsort, stable=True)
+for _ in range(50):
+    arr = [random.randint(0, 9) for _ in range(random.randint(0, 3000))]
+    assert a8_timsort(arr) == sorted(arr)
+for n in (5, 64, 1000):                                 # one run: n - 1 comparisons
+    assert a0_comparisons(a8_timsort, list(range(n))) == n - 1
+    assert a0_comparisons(a8_timsort, list(range(n, 0, -1))) == n - 1
+a8_four = [x for _ in range(4) for x in sorted(random.sample(range(10**6), 1024))]
+assert a0_comparisons(a8_timsort, a8_four) <= 3 * len(a8_four)     # 4 runs: two merge levels
+a8_stats = {}
+a8_timsort(random.sample(range(10**6), 20000), a8_stats)
+assert a8_stats["max_stack"] <= 2 * math.log2(20000)               # the stack stays logarithmic
+print("a8 timsort-lite OK:", a8_stats)
+```
+
+#### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+using Item = pair<int, int>;                       // (key, input index); only the key is compared
+bool lessKey(const Item& x, const Item& y) { return x.first < y.first; }
+
+int minRun(int n) {                                // classic rule: n < 64 -> n, else in [32, 64]
+    int r = 0;
+    while (n >= 64) { r |= n & 1; n >>= 1; }
+    return n + r;
+}
+
+// Length of the run at lo; a strictly descending run is reversed (strict, so reversing is stable).
+int countRun(vector<Item>& a, int lo, int n) {
+    int hi = lo + 1;
+    if (hi == n) return 1;
+    if (lessKey(a[hi], a[lo])) {
+        while (hi + 1 < n && lessKey(a[hi + 1], a[hi])) ++hi;
+        reverse(a.begin() + lo, a.begin() + hi + 1);
+    } else {
+        while (hi + 1 < n && !lessKey(a[hi + 1], a[hi])) ++hi;
+    }
+    return hi - lo + 1;
+}
+
+void binaryInsertion(vector<Item>& a, int lo, int hi, int start) {   // a[lo, start) is sorted
+    for (int i = start; i < hi; ++i) {
+        auto pos = upper_bound(a.begin() + lo, a.begin() + i, a[i], lessKey);
+        rotate(pos, a.begin() + i, a.begin() + i + 1);
+    }
+}
+
+struct Run { int start, len; };
+
+void mergeAt(vector<Item>& a, vector<Run>& runs, int i) {           // merge runs i and i+1
+    Run x = runs[i], y = runs[i + 1];
+    vector<Item> tmp(a.begin() + x.start, a.begin() + x.start + x.len);   // copy the left run out
+    merge(tmp.begin(), tmp.end(), a.begin() + y.start, a.begin() + y.start + y.len,
+          a.begin() + x.start, lessKey);                             // std::merge is stable
+    runs[i].len += y.len;
+    runs.erase(runs.begin() + i + 1);
+}
+
+void mergeCollapse(vector<Item>& a, vector<Run>& runs) {             // keep run lengths shrinking fast
+    while (runs.size() > 1) {
+        int n = (int)runs.size() - 2;
+        if ((n > 0 && runs[n - 1].len <= runs[n].len + runs[n + 1].len) ||
+            (n > 1 && runs[n - 2].len <= runs[n - 1].len + runs[n].len)) {
+            if (runs[n - 1].len < runs[n + 1].len) --n;
+            mergeAt(a, runs, n);
+        } else if (runs[n].len <= runs[n + 1].len) {
+            mergeAt(a, runs, n);
+        } else break;
+    }
+}
+
+void timSortLite(vector<Item>& a) {
+    int n = (int)a.size();
+    if (n < 2) return;
+    int mr = minRun(n), lo = 0;
+    vector<Run> runs;
+    while (lo < n) {
+        int len = countRun(a, lo, n);
+        if (len < mr) {                                              // boost a short run to minrun
+            int force = min(mr, n - lo);
+            binaryInsertion(a, lo, lo + force, lo + len);
+            len = force;
+        }
+        runs.push_back({lo, len});
+        mergeCollapse(a, runs);
+        lo += len;
+    }
+    while (runs.size() > 1) {                                        // final collapse
+        int n2 = (int)runs.size() - 2;
+        if (n2 > 0 && runs[n2 - 1].len < runs[n2 + 1].len) --n2;
+        mergeAt(a, runs, n2);
+    }
+}
+
+int main() {
+    mt19937 rng(9);
+    for (int t = 0; t < 600; ++t) {
+        int n = rng() % 3000;
+        vector<Item> a(n);
+        for (int i = 0; i < n; ++i) a[i] = {(int)(rng() % (t % 2 ? 7 : 100000)), i};
+        if (t % 7 == 0) sort(a.begin(), a.begin() + n / 2, lessKey);  // partly presorted
+        vector<Item> want = a;
+        stable_sort(want.begin(), want.end(), lessKey);
+        timSortLite(a);
+        assert(a == want);                                            // sorted and stable
+    }
+    puts("timsort-lite OK");
+}
+```
+:::
+
+Here are the runs that `a8_count_run` finds on a small example:
+
+::: {#fig-salgo-a8-runs}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a8_runs_draw(ax, p):
+    src = [3, 5, 8, 9, 7, 4, 2, 6, 6, 10, 12, 1]
+    a, lo, regions, names = list(src), 0, [], ["run 1", "run 2", "run 3", "run 4"]
+    while lo < len(a):
+        before = a[lo:lo + 2]
+        length = a8_count_run(a, lo, len(a))
+        kind = "desc, reversed" if len(before) == 2 and before[1] < before[0] else "asc"
+        regions.append((lo, lo + length, ["indigo", "amber", "cyan", "violet"][len(regions)],
+                        f"{names[len(regions)]}: {kind}" if length > 1 else names[len(regions)]))
+        lo += length
+    assert a == [3, 5, 8, 9, 2, 4, 7, 6, 6, 10, 12, 1] and len(regions) == 4
+    V.array(ax, p, src, y=2.6, label="input")
+    V.array(ax, p, a, y=0.0, label="runs", regions=regions)
+V.show(a8_runs_draw)
+```
+
+Natural runs of $[3,5,8,9,7,4,2,6,6,10,12,1]$, found by the same `count_run` the code below uses. The strictly descending run $7,4,2$ is reversed in place; $6,6,10,12$ is a non-decreasing run (equal neighbours are allowed in ascending runs). For an array this short, real Timsort would then binary-insertion-sort everything, because $n < 64$.
+
+:::
+
+**When it is used.** Whenever stability is required or the data is likely to be partly ordered: Python's `sorted` and `list.sort`, Java's `Arrays.sort` for objects and `Collections.sort`, and JavaScript's `Array.prototype.sort` in V8. Its weakness is the $n/2$ buffer and slightly more data movement than quicksort on random data, which is why C++ keeps an unstable introsort as its default.
+
+## A9. Choosing a sort {#sec-salgo-a9}
+
+::: {.callout-note title="In plain words"}
+There is no best sort, only a best sort for a situation. Ask four questions: do I need **stability**? Is the data **already partly sorted**? Can I afford **$O(n)$ extra memory**? Do I need a **worst-case** guarantee? The table answers them; the figure measures them.
+:::
+
+| Sort | Best | Average | Worst | Extra space | Stable | Adaptive | Typical use |
+|---|---|---|---|---|---|---|---|
+| Insertion (@sec-salgo-a1) | $n$ | $n^2$ | $n^2$ | $O(1)$ | yes | yes | tiny or nearly sorted arrays; the finisher in hybrids |
+| Selection (@sec-salgo-a2) | $n^2$ | $n^2$ | $n^2$ | $O(1)$ | no | no | when writes are expensive (at most $n-1$ swaps) |
+| Merge (@sec-salgo-a3) | $n\log n$ | $n\log n$ | $n\log n$ | $O(n)$ | yes | no | stable sorting, linked lists, external sorting |
+| Quicksort (@sec-salgo-a4) | $n\log n$ | $n\log n$ | $n^2$ | $O(\log n)$ | no | no | fast in-memory sorting (inside introsort) |
+| Heapsort (@sec-salgo-a5) | $n\log n$ | $n\log n$ | $n\log n$ | $O(1)$ | no | no | worst-case guarantee in $O(1)$ memory; fallback |
+| Introsort (@sec-salgo-a7) | $n\log n$ | $n\log n$ | $n\log n$ | $O(\log n)$ | no | little | C++ `std::sort` |
+| Timsort (@sec-salgo-a8) | $n$ | $n\log n$ | $n\log n$ | $O(n)$ | yes | yes | Python, Java objects, V8 |
+
+All entries are $\Theta(\cdot)$ time bounds (quicksort's average is with a random pivot). The comparison-model floor is $\Omega(n\log n)$ (@sec-salgo-a6); counting, radix and bucket sort escape it by not comparing (@sec-lts).
+
+::: {#fig-salgo-a9}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a9_n = 256
+a9_inputs = {"random": random.sample(range(10**6), a9_n), "sorted": list(range(a9_n)),
+             "reversed": list(range(a9_n, 0, -1)), "4 keys": [random.randint(0, 3) for _ in range(a9_n)],
+             "all equal": [7] * a9_n}
+a9_sorts = {"insertion": a1_insertion, "selection": a2_selection, "merge": a3_merge_sort,
+            "quick (Lomuto)": a4_quicksort, "quick (3-way)": a4_quicksort3, "heapsort": a5_heapsort,
+            "introsort": a7_introsort, "timsort-lite": a8_timsort}
+a9_ref = a9_n * math.log2(a9_n)
+a9_cells, a9_colors = [], {}
+for r, fn in enumerate(a9_sorts.values()):
+    row = []
+    for c, data in enumerate(a9_inputs.values()):
+        cmp = a0_comparisons(fn, data)
+        row.append(str(cmp))
+        a9_colors[(r, c)] = "green" if cmp <= 1.5 * a9_ref else ("amber" if cmp <= 4 * a9_ref else "red")
+    a9_cells.append(row)
+assert a9_cells[0][1] == str(a9_n - 1) and a9_cells[7][1] == str(a9_n - 1)      # adaptive on sorted
+assert a9_colors[(3, 4)] == "red" and a9_colors[(4, 4)] == "green"               # Lomuto vs 3-way, equal keys
+
+def a9_draw(ax, p):
+    V.grid(ax, p, a9_cells, row_labels=list(a9_sorts), col_labels=list(a9_inputs), cell_w=1.7, size=10)
+V.show(a9_draw)
+```
+
+Comparisons made by each sort of this chapter on $n = 256$ keys, measured with the counting harness of @sec-salgo-a0. Green is at most $1.5\,n\log_2 n$ (here $n\log_2 n = 2048$), amber at most $4\,n\log_2 n$, red above. Read down a column to choose for a known input shape: insertion sort and Timsort are nearly free on sorted input, Lomuto quicksort collapses on all-equal keys while the three-way partition finishes them in one pass, and only the quadratic sorts turn red on random data.
+
+:::
+
+A practical decision list:
+
+- **Just sorting in a contest or at work:** call the library (`sorted`, `std::sort`). Need stability in C++? `std::stable_sort`.
+- **Need stability yourself:** merge sort (or any sort on `(key, index)` pairs).
+- **Linked list:** merge sort, by relinking (@sec-salgo-p1-c).
+- **Hard memory limit and a hard time limit:** heapsort.
+- **Only the $k$-th element, or the $k$ smallest:** do not sort; quickselect or a heap (@sec-salgo-p3, @sec-salgo-p4).
+- **Small integer keys:** counting or radix sort (@sec-lts).
+
+## Part B — Patterns {#sec-salgo-partb}
+
+Each pattern opens with the signals that say "use me", a boxed template with its invariant, and its complexity; then come its solved problems. Every problem has a full statement, a brute-force form and a refined form with matching C++, and stress tests against the brute force; most also have trace boards recorded by *running* the code.
+
+## Pattern 1: Implement a comparison sort from scratch {#sec-salgo-p1}
+
+**Where we are.** Part A built the sorts; Part B spends them. P1 is the raw skill: sort *by hand*, with no library call, on an array and then on a linked list, where the lack of random access decides which sort survives. P2 keeps merge sort's split but makes the merge *count* while it sorts. P3 drops the promise to order everything and keeps only quicksort's partition to select one rank. P4 replaces a one-off batch with a stream and keeps only a heap of the $k$ best. P5 stops asking "which order" and asks what the order does with ties.
+
+**Recognise it.** "Sort the array **without any built-in sort**, in $O(n\log n)$, with as little extra space as possible"; "sort a **linked list**"; "sort it in place with at most $k$ swaps". These problems *are* the sorting algorithm, so they are the cleanest place to practise A1–A5, their invariants and their edge cases.
+
+::: {.callout-important title="Template"}
+Pick the sort by the constraint that bites, then prove its invariant.
+
+```text
+array, O(n log n), stable or simple:   merge sort (top-down or bottom-up)        O(n) extra
+array, O(1) extra, worst-case bound:   heapsort: build max-heap; swap root to end; sift down
+linked list:                           insertion by relinking (O(n^2)), or merge sort by relinking
+                                       (split with slow/fast pointers; bottom-up for O(1) extra)
+```
+
+**Invariant.** Every form keeps "a sorted region that only grows" (prefix for insertion/selection, suffix for heapsort) or "each recursive call returns a sorted permutation of its input" (merge sort).
+:::
+
+**Complexity.** Insertion and selection $O(n^2)$, merge sort $O(n\log n)$ with $O(n)$ extra on arrays, heapsort $O(n\log n)$ with $O(1)$ extra; on lists, merge sort is $O(n\log n)$ with $O(\log n)$ stack (top-down) or $O(1)$ (bottom-up).
+
+{{< include ../problems/lc-0912-sort-an-array/problem.qmd >}}
+
+[**From an array to a chain.** LC 912 lets you index anywhere. A linked list allows only "next": no binary search for the slot, no swapping by index. The first sort to try on a chain is insertion sort, and the shift that cost $O(n)$ moves on an array becomes a single relink.]{.flow-bridge}
+
+{{< include ../problems/lc-0147-insertion-sort-list/problem.qmd >}}
+
+[**From quadratic to $n\log n$ on a chain.** Insertion sort by relinking is still $O(n^2)$ on a reversed list. Of the $n\log n$ sorts, quicksort's partition and heapsort's index arithmetic need random access, but merge sort only walks forward: split with slow and fast pointers, merge by relinking.]{.flow-bridge}
+
+{{< include ../problems/lc-0148-sort-list/problem.qmd >}}
+
+## Pattern 2: Count across the merge {#sec-salgo-p2}
+
+**From sorting to counting with a merge.** Pattern 1 used the merge only to build order. While it stitches two *sorted* halves together it also learns, for free, how elements of the left half compare with elements of the right half, and every pair $(i, j)$ with $i$ in the left half and $j$ in the right half has $i < j$ in the original array. So a question like "how many pairs $i < j$ have $a_i > a_j$?" costs $O(n^2)$ by brute force and $O(n\log n)$ once the merge tallies the crossings.
+
+**Recognise it.** "Count pairs $(i, j)$ with $i < j$ and [a comparison of $a_i$ with $a_j$]": inversions, crossings of wires, "smaller numbers after self", "$a_i > 2a_j$", "the minimum number of adjacent swaps to sort". The signal is a predicate that is **monotone** in each value, so that inside sorted runs it can be counted with one advancing pointer. $n$ up to $10^5$ rules out the pair scan.
+
+::: {.callout-important title="Template"}
+Recurse for the pairs inside each half; count the pairs across the halves while (or just before) merging.
+
+```text
+sort_count(lo, hi):
+    if hi - lo <= 1: return 0
+    mid = (lo + hi) // 2
+    c = sort_count(lo, mid) + sort_count(mid, hi)      # both halves now sorted
+    c += cross(lo, mid, hi)                             # one forward pointer, O(hi - lo)
+    merge a[lo:mid] and a[mid:hi]                       # stable merge, O(hi - lo)
+    return c
+```
+
+**Invariant.** After the two recursive calls both halves are sorted and every within-half pair has been counted; every remaining pair crosses the midpoint, and because both halves are sorted the predicate can be tallied with pointers that only move forward. Sort *indices* instead of values when the answer must be reported per original position.
+:::
+
+**Complexity.** $O(n\log n)$ time, $O(n)$ extra space: the merge sort cost plus $O(1)$ per element per level for the tally. The pair scan is the $O(n^2)$ oracle.
+
+{{< include ../problems/cf-1676h2-maximum-crossings-hard-version/problem.qmd >}}
+
+[**From one total to a count per element.** CF 1676H2 needs only the number of inverted pairs. LC 315 asks, for *every* position, how many smaller elements lie to its right, so the merge must sort indices and credit each count to the element's original position.]{.flow-bridge}
+
+{{< include ../problems/lc-0315-count-of-smaller-numbers-after-self/problem.qmd >}}
+
+[**From `nums[i] > nums[j]` to `nums[i] > 2 * nums[j]`.** Same divide and conquer, but now the predicate is not the merge's own comparison, so the crossing count becomes a separate two-pointer pass before the merge, and the doubling needs 64-bit care.]{.flow-bridge}
+
+{{< include ../problems/lc-0493-reverse-pairs/problem.qmd >}}
+
+## Pattern 3: Select a rank without a full sort {#sec-salgo-p3}
+
+**From ordering everything to answering one rank.** Merge sort places *every* element; quicksort's partition places only the **pivot** at its final index and leaves each side unordered. If you only need the $k$-th element, that is all the promise you need: recurse into the single side holding the target and drop the other (@sec-salgo-a4-select). When the data is already ordered by structure (a matrix with sorted rows and columns) you cannot index by rank at all, and the trick becomes binary searching the *value* with a monotone count instead.
+
+**Recognise it.** "The $k$-th largest/smallest", "the median", "the $k$ smallest values in any order", often with a "without sorting" follow-up. $n$ up to $10^5$ makes a full sort legal but wasteful; the follow-up is the hint to select.
+
+::: {.callout-important title="Template"}
+Partition, read the pivot's rank, keep one side.
+
+```text
+quickselect, target index t (k-th largest: t = n - k):
+    partition a[lo..hi] three ways around a random pivot x: [< x | == x | > x] at [lo..lt-1 | lt..gt | gt+1..hi]
+    t < lt: hi = lt - 1     t > gt: lo = gt + 1     else: return x
+pre-ordered structure (sorted rows and columns): binary search the value v, count(<= v) per row
+```
+
+**Invariant.** The answer's index $t$ always lies in `[lo, hi]`, and after a partition every element left of the `== x` block is smaller and every element right of it is larger, so discarding the side without $t$ never discards the answer.
+:::
+
+**Complexity.** Quickselect expected $O(n)$, worst case $O(n^2)$, $O(1)$ extra. Binary search on the value over an $n\times n$ matrix costs $O(n\log(\text{range}))$ with a staircase count. A full sort, $O(n\log n)$, is the oracle.
+
+{{< include ../problems/lc-0215-kth-largest-element-in-an-array/problem.qmd >}}
+
+[**From a flat array to a sorted matrix.** Quickselect needs to move elements around by index. A matrix whose rows and columns are sorted already contains a lot of order, but you cannot partition it or index it by rank; binary search over the *value*, with a monotone "how many cells $\le x$" count, selects the rank without moving anything.]{.flow-bridge}
+
+{{< include ../problems/lc-0378-kth-smallest-element-in-a-sorted-matrix/problem.qmd >}}
+
+## Pattern 4: Keep a heap for top-k {#sec-salgo-p4}
+
+**From one rank to a running set of k.** Pattern 3 answered a *single* rank once, over data held in memory all at once. Ask instead for "the best $k$", or let the data **stream** in so that history cannot be re-scanned, and the right structure is the binary heap of @sec-salgo-a5: a heap capped at $k$ elements gives top-$k$ in $O(n\log k)$, and its root is the current $k$-th best, readable in $O(1)$ after every arrival.
+
+**Recognise it.** "The $k$ closest / $k$ most frequent / top $k$"; "the $k$-th largest **in a stream**" (a class with an `add`); "merge $k$ sorted lists"; anything where $k \ll n$ makes paying $\log n$ per element wasteful.
+
+::: {.callout-important title="Template"}
+A bounded heap is a running top-$k$; its root is the eviction threshold.
+
+```text
+k smallest of a batch:   max-heap of size k (Python: push -key); pop when size > k   -> the k survivors
+k-th largest of stream:  min-heap of size k; root = answer; add: push if size < k, else replace if val > root
+k-way merge:             min-heap of the k current heads; pop the smallest, push its successor
+```
+
+**Invariant.** The heap holds exactly the $k$ best elements seen so far (or, for a $k$-way merge, the smallest unmerged element of each list); its root is the worst of them, so it is both the answer and the next element to evict.
+:::
+
+**Complexity.** $O(n\log k)$ time and $O(k)$ space for $n$ elements, against $O(n\log n)$ and $O(n)$ to sort everything; $O(\log k)$ per stream update. Quickselect is the batch $O(n)$ alternative when everything fits in memory and the $k$ results may come out in any order.
+
+{{< include ../problems/lc-0973-k-closest-points-to-origin/problem.qmd >}}
+
+[**From a batch to a stream.** The $k$ closest points are fixed once you can see them all; when values arrive one by one and you must answer after each, you cannot re-sort. Keep the heap alive between queries, and the answer becomes its root.]{.flow-bridge}
+
+{{< include ../problems/lc-0703-kth-largest-element-in-a-stream/problem.qmd >}}
+
+**The heap as a merge engine.** A heap can also *produce* sorted order from several sorted sources. Merging $k$ sorted lists keeps the $k$ current heads in a min-heap: pop the smallest, output it, push its successor. That is $O(N\log k)$ for $N$ elements in total, and it is exactly the inner loop of **external merge sort**: sort memory-sized chunks of a huge file, write each chunk out as a sorted run, then merge all runs in one streaming pass with a heap of $k$ heads. The problem is solved in full where heaps first appear:
+
+{{< include ../problems/lc-0023-merge-k-sorted-lists/card.qmd >}}
+
+Read it as the merge of @sec-salgo-a3 with the two-way "smaller head" test replaced by a heap of $k$ heads.
+
+## Pattern 5: Stability and the direction of a tie-break {#sec-salgo-p5}
+
+**From the order to what the order keeps.** The first four patterns used sortedness for its *value* order. Two facts about *how* the order is produced decide another family of problems. **Stability** says that elements that compare equal keep their input order (@sec-salgo-a6-stable); **tie-break direction** says, among equal primary keys, whether the secondary key ascends or descends. Each can be the difference between right and wrong.
+
+**Recognise it.** A sort where a *group must not move relative to itself* ("the digit-logs keep their relative order", "equal elements keep their original order") points to stability. A multi-key sort followed by a sweep, where an element must not be "beaten" by an equal-key neighbour, points to a designed tie-break. Both feel like "the sort is easy, the order I want is subtle".
+
+::: {.callout-important title="Template"}
+The key and the tie-break are the algorithm.
+
+```text
+keep one group fixed:     sort only the other group and concatenate, or one STABLE sort with key (group, ...)
+several keys:             one tuple key (primary, secondary), or stable passes from least to most significant
+ties must not dominate:   sort (primary ASC, secondary DESC), then sweep keeping a running max of secondary
+```
+
+**Invariant.** A stable sort never reorders items with equal keys; a chosen tie-break direction decides which equal-key items are adjacent, and therefore which ones a later sweep can see as strictly better.
+:::
+
+**Complexity.** $O(n\log n)$ comparisons; the design effort is in proving that the key is a strict weak ordering (@sec-srt-a2) and that the sort used is stable when stability is needed. These problems are cheap to code and expensive to get *right*.
+
+{{< include ../problems/lc-0937-reorder-data-in-log-files/problem.qmd >}}
+
+[**From "keep a group in order" to "make ties harmless".** LC 937 uses stability to freeze one group's order. LC 1996 pulls the opposite lever: it deliberately *reverses* the secondary key's direction so that characters with equal attack can never count as dominating each other in the sweep that follows. Same control over ties, opposite purpose.]{.flow-bridge}
+
+{{< include ../problems/lc-1996-the-number-of-weak-characters-in-the-game/problem.qmd >}}
+
+**Looking back.** One idea ran through every lesson: *keep an invariant about a region that only grows*. Insertion and selection sort grow a sorted prefix one element at a time and pay $O(n^2)$ for it (A1, A2). Merge sort replaces "one element at a time" with "two sorted halves at a time", which is balanced by construction and gives $\Theta(n\log n)$ always, plus a merge that can count (A3, P1, P2). Quicksort does the work before recursing instead of after, and its partition, applied to one side only, selects a rank in expected linear time (A4, P3). Heapsort keeps selection sort's idea but answers "what is the maximum?" with a heap, which also powers top-$k$ and streams (A5, P4). The decision tree shows that $n\log n$ comparisons cannot be beaten (A6), so the libraries compete on everything else: introsort on the worst case, Timsort on existing order and stability (A7, A8), and stability itself becomes a tool (P5). The one way left to go faster is to stop comparing, which is the next chapter, @sec-lts.
+
+## Pattern map
+
+<!-- Copied into the Cheat Sheets appendix by gen_book.py: keep it one table, no labels. -->
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Sort without a built-in sort, $O(n\log n)$, least space" | Merge sort or heapsort by hand | @sec-salgo-p1-a |
+| "Sort a linked list" (small $n$, or "insertion") | Insertion sort by relinking | @sec-salgo-p1-b |
+| "Sort a linked list in $O(n\log n)$, $O(1)$ memory" | List merge sort, bottom-up | @sec-salgo-p1-c |
+| "How many pairs $i<j$ with $a_i \ge a_j$" (inversions, crossings, adjacent swaps) | Count across the merge | @sec-salgo-p2-a |
+| "For each $i$, how many smaller to its right" | Merge sort over indices | @sec-salgo-p2-b |
+| Pairs with $a_i > 2a_j$ or another monotone predicate | Separate cross-count pass, 64-bit | @sec-salgo-p2-c |
+| "The $k$-th largest/smallest", "median", once | Quickselect on the pivot's rank | @sec-salgo-p3-a |
+| $k$-th smallest where rows and columns are sorted | Binary search the value, count $\le x$ | @sec-salgo-p3-b |
+| "The $k$ closest / top $k$" of a batch | Bounded heap (or quickselect) | @sec-salgo-p4-a |
+| "The $k$-th largest **in a stream**", an `add` with a running answer | Persistent size-$k$ heap | @sec-salgo-p4-b |
+| "One group must keep its relative order" | Stability (or sort only the other group) | @sec-salgo-p5-a |
+| Correctness hinges on how equal primary keys are ordered | Design the tie-break direction | @sec-salgo-p5-b |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **`>=` in insertion sort's shift test.** Shifting while `a[j] >= key` moves equal keys past each other and loses stability (and does extra work). Shift only while strictly greater (@sec-salgo-a1).
+- **A strict `<` for the left head in a merge.** Taking the right head on ties (`L[i] < R[j]` for the left) makes merge sort unstable. Take the left head when `L[i] <= R[j]` (@sec-salgo-a3).
+- **A fixed pivot on sorted input.** Always choosing `a[hi]` (or `a[lo]`) splits sorted data $0 \mid n-1$ and runs in $\Theta(n^2)$, with $\Theta(n)$ recursion depth. Randomise the pivot or use median-of-three, and recurse into the smaller side (@sec-salgo-a4).
+- **Lomuto's partition on many equal keys.** Every element is $\le$ the pivot, so the split is $n-1 \mid 0$ again. Use Hoare's partition, which stops on equal keys, or the three-way partition (@sec-salgo-a4-hoare).
+- **Hoare's partition with the pivot at `a[hi]`.** With the classic code the returned $j$ can equal `hi`, so the recursion on `[lo..j]` never shrinks. Take the pivot from the middle (or the front), as in @sec-salgo-a4-hoare.
+- **Off-by-one in heap indices.** With 0-based arrays the children of $i$ are $2i+1$ and $2i+2$ and the last internal node is $\lfloor n/2\rfloor - 1$; the 1-based formulas $2i, 2i+1$ silently skip or duplicate nodes (@sec-salgo-a5).
+- **Building a heap with $n$ pushes and calling it $O(n)$.** Repeated `push` is $O(n\log n)$; bottom-up sift-down (`heapify`, `make_heap`) is $O(n)$ (@sec-salgo-a5-build).
+- **Assuming `std::sort` is stable.** It is introsort and is not stable; use `std::stable_sort`, or a tuple key, when input order inside ties matters (@sec-salgo-a7, @sec-salgo-p5-a).
+- **Reversing a non-strictly descending run.** A run like $5, 3, 3, 1$ reversed in place swaps the two $3$s; Timsort only reverses *strictly* descending runs (@sec-salgo-a8).
+- **Counting crossings with a nested loop.** Once both halves are sorted, the cross count is one forward pointer; re-scanning is the $O(n^2)$ you came to avoid (@sec-salgo-p2-a, @sec-salgo-p2-c).
+- **`2 * nums[j]` in 32-bit.** For values near $2^{31}$ the doubling overflows; widen to `long long` first (@sec-salgo-p2-c).
+- **Sorting a linked list with quicksort or heapsort.** No random access means no index-based partition and no `2i+1` children; use merge sort by relinking (@sec-salgo-p1-c).
+- **Re-sorting the whole pool per stream query.** That makes each `add` $O(n\log n)$; a size-$k$ heap makes it $O(\log k)$ (@sec-salgo-p4-b).
+- **Wrong tie-break direction on dominance.** Sorting `(attack, defense)` both ascending lets an equal-attack character "dominate" its peer; `(attack ASC, defense DESC)` is what makes the right-to-left sweep correct (@sec-salgo-p5-b).
+:::
+
+## Exercises
+
+**1. [E] Write insertion sort and state its exact inner-loop condition. Why must that comparison be strict (`>`) rather than `>=` for the sort to be stable?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Shift `a[j]` right only while `a[j] > key`. If the test were `>=`, an element equal to `key` would also be shifted, so `key` would land *before* an equal element that came first in the input, breaking input order. The strict test stops at the first equal element and drops `key` right after it (@sec-salgo-a1).
+:::
+
+**2. [E] On `a = [5, 2, 4, 1, 3]` count the total number of shifts made by insertion sort and the total number of swaps made by selection sort. Relate the shift count to inversions.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The inversions of $[5,2,4,1,3]$ are $(5,2),(5,4),(5,1),(5,3),(2,1),(4,1),(4,3)$, seven of them, and insertion sort makes exactly $7$ shifts: each shift moves one element past a smaller key that was behind it, which removes one inversion. Selection sort swaps at most once per pass: pass 0 swaps $1$ to the front ($[1,2,4,5,3]$), pass 1 finds $2$ in place, pass 2 swaps $3$ in ($[1,2,3,5,4]$), pass 3 swaps $4$ in: $3$ swaps, never more than $n - 1 = 4$. So insertion sort costs $O(n + \text{inversions})$ while selection sort's writes stay $O(n)$ on every input (@sec-salgo-a1, @sec-salgo-a2).
+:::
+
+**3. [E] Bubble sort repeatedly sweeps the array and swaps adjacent out-of-order pairs. Prove that it makes exactly as many swaps as there are inversions, and give its best and worst number of sweeps (with the "stop when a sweep makes no swap" rule).**
+
+::: {.callout-note collapse="true" title="Solution"}
+Swapping an adjacent pair $a_i > a_{i+1}$ removes exactly that one inversion and changes no other pair's relative order, so each swap lowers the inversion count by exactly one; the array is sorted when the count is $0$, hence #swaps $=$ #inversions. After sweep $k$ the $k$ largest elements are in their final places (each sweep carries the maximum of the unsorted part to its end), so at most $n - 1$ sweeps are needed (a reversed array); on a sorted array the first sweep makes no swap and the algorithm stops after one sweep, $n - 1$ comparisons. Like insertion sort it is stable (it never swaps equal neighbours), but it does more comparisons and writes, so insertion sort is preferred (@sec-salgo-a0, @sec-salgo-a1).
+:::
+
+**4. [M] Give an input on which quicksort with a last-element pivot runs in $\Theta(n^2)$ while merge sort stays $\Theta(n\log n)$, and explain what randomising the pivot does and does not guarantee.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A sorted array: the last element is always the maximum, so every partition splits $n-1 \mid 0$ and the comparisons are $(n-1) + (n-2) + \dots = \binom n2$. Merge sort splits in the middle whatever the input, so it stays $\Theta(n\log n)$. With a random pivot *every* input has expected cost $2(n+1)H_n - 4n \approx 1.39 n\log_2 n$ (@eq-salgo-qs), so no input is bad on average, but an unlucky sequence of random choices can still be quadratic; the guarantee comes only from a fallback such as introsort's heapsort (@sec-salgo-a4-analysis, @sec-salgo-a7).
+:::
+
+**5. [M] How many comparisons does merging two sorted runs of lengths $p$ and $q$ make, at least and at most? Give inputs that reach both bounds.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Each comparison outputs one element, and the merge stops comparing when one run is empty. **At least $\min(p, q)$:** if every element of the shorter run is smaller than every element of the other, that run is used up after $\min(p,q)$ comparisons (for example $[1,2]$ and $[3,4,5]$: two comparisons). **At most $p + q - 1$:** the last element is always output without a comparison, and if the runs interleave perfectly ($[1,3,5]$ and $[2,4,6]$) every other element needs one, so $5$ comparisons. That is why sorted input is merge sort's best case (about half the comparisons) (@sec-salgo-a3-merge).
+:::
+
+**6. [M] Prove that merge sort makes at most $n\lceil\log_2 n\rceil$ comparisons, and name the two properties beyond speed that make merge sort the sort for linked lists and for data on disk.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A merge of $m$ elements makes at most $m - 1 < m$ comparisons. The subarrays at one level of the recursion tree are disjoint, so the merges of one level make fewer than $n$ comparisons together, and there are $\lceil\log_2 n\rceil$ levels of merges (the sizes halve, rounding up), so fewer than $n\lceil\log_2 n\rceil$ in total. (1) The merge needs only **sequential access**: it reads both runs front to back, so on a list it relinks `next` pointers (@sec-salgo-p1-c) and on disk it streams. (2) It **combines independently sorted runs**, so a file too big for memory can be sorted in chunks and then merged (@sec-salgo-a3, @sec-salgo-p4).
+:::
+
+**7. [M] In the classic Hoare partition with the pivot value taken from `a[(lo+hi)//2]`, show that the returned index $j$ satisfies $lo \le j < hi$, so both recursive calls are on strictly smaller ranges. What goes wrong with the pivot taken from `a[hi]`?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $m = \lfloor (lo+hi)/2 \rfloor < hi$ when $lo < hi$. In the first round $i$ stops at some index $\le m$ (because `a[m]` $= x$ is not $< x$) and $j$ stops at some index $\ge m$. If $i \ge j$ already, then $i = j = m < hi$. Otherwise the two are swapped and the loop continues, and every later stop of $j$ is strictly below the previous one, so the final $j < hi$; symmetrically $j \ge lo$. With $x = $ `a[hi]` on input like $[1, 2]$: $i$ stops at index $1$, $j$ stops at index $1$, and the function returns $j = hi$, so the call on `[lo..j]` is the whole range again and the recursion never ends (@sec-salgo-a4-hoare).
+:::
+
+**8. [M] How many comparisons does the three-way partition make on $n$ equal keys, and how many does Lomuto's quicksort make? Explain the difference in one sentence.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Three-way: each element is tested once against `<` and once against `>`, then joins the `== x` block, so $2n$ comparisons and the sort is finished (the test in @sec-salgo-a4 measures exactly $2 \cdot 256$). Lomuto: every element is $\le x$, so each partition peels off only the pivot and the total is $\binom n2$. The three-way partition puts all keys equal to the pivot in their final place at once and never recurses into them (@sec-salgo-a4-hoare).
+:::
+
+**9. [M] Show that quickselect with a random pivot does expected $O(n)$ work, and say when a size-$k$ heap is the better tool.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Call a pivot good if it falls in the middle half of the current range; then the kept side has at most $\tfrac34$ of the elements. Each pivot is good with probability $\tfrac12$, so the expected number of partitions until the range shrinks by a factor $\tfrac34$ is $2$, each costing at most the current size. The expected total is at most $2(n + \tfrac34 n + (\tfrac34)^2 n + \dots) = 8n$. A size-$k$ heap, $O(n\log k)$, is better when you need *all* top $k$ in order, when the data **streams** (quickselect needs everything in memory), or when you want a worst-case bound (@sec-salgo-a4-select, @sec-salgo-p4).
+:::
+
+**10. [M] Run the bottom-up heap build on `[1, 2, 3, 4, 5, 6, 7]` (max-heap, 0-based). Write the array after each sift-down and count the swaps. Relate the count to node heights.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Internal nodes are indices $2, 1, 0$. Index 2 (value 3, children 6, 7): swap with 7 → `[1,2,7,4,5,6,3]`. Index 1 (value 2, children 4, 5): swap with 5 → `[1,5,7,4,2,6,3]`. Index 0 (value 1, children 5, 7): swap with 7 → `[7,5,1,4,2,6,3]`; then at index 2 (children 6, 3): swap with 6 → `[7,5,6,4,2,1,3]`. Four swaps, which equals the sum of the heights of the internal nodes ($1 + 1 + 2$): an increasing array is the worst case for a max-heap build, every value sinks to the bottom. In general the swaps are at most the sum of all heights, which is less than $n$ (@sec-salgo-a5-build).
+:::
+
+**11. [M] Show that heapsort is not stable with the smallest possible input, and explain how to make *any* sort stable. What does it cost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Two equal keys $[0_a, 0_b]$: the build changes nothing (the root is not smaller than its child), then the first extraction swaps the root with the last element, giving $[0_b, 0_a]$. To make any sort stable, sort pairs $(\text{key}, \text{input index})$: equal keys then compare by index, so their input order is kept. It costs $O(n)$ extra memory for the indices and a slightly slower comparison; the time bound is unchanged (@sec-salgo-a5, @sec-salgo-a6-stable).
+:::
+
+**12. [M] Build a two-key order by sorting twice (secondary key first, then primary) and say which sorts make this work and which silently break it. Give the one-line Python equivalent.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Only a **stable** second pass works: the primary-key pass must keep the secondary order inside groups of equal primary key. Insertion sort, merge sort, Timsort (Python `sorted`) and C++ `stable_sort` are fine; quicksort, heapsort, selection sort and C++ `std::sort` may scramble the groups (the test in @sec-salgo-a6-stable finds such a case for heapsort). One line: `sorted(recs, key=lambda r: (r.primary, r.secondary))` (@sec-salgo-a6-stable).
+:::
+
+**13. [H] Prove the comparison lower bound $\lceil\log_2(n!)\rceil$ and the estimate $\log_2(n!) \ge \tfrac n2\log_2\tfrac n2$. Then identify exactly which assumption counting sort breaks.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A comparison sort on inputs of size $n$ is a binary decision tree whose leaves are its possible outputs; two different input permutations must reach different leaves (the same moves cannot sort both), so there are at least $n!$ leaves. A binary tree of height $h$ has at most $2^h$ leaves, so $2^h \ge n!$ and the worst case $h \ge \log_2(n!)$. For the estimate, $n! \ge n(n-1)\cdots(\lceil n/2\rceil) \ge (n/2)^{n/2}$, so $\log_2(n!) \ge \tfrac n2\log_2\tfrac n2$. Counting sort breaks the "only comparisons" assumption: `cnt[x] += 1` uses $x$ as an index, a $k$-way branch on the key's value, so there is no binary decision tree (@sec-salgo-a6-bound, @sec-lts).
+:::
+
+**14. [H] Prove that even the *average* number of comparisons over all $n!$ inputs is at least $\log_2(n!)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let some leaves of a binary tree be at depths $d_1, \dots, d_L$. Kraft's inequality says $\sum_\ell 2^{-d_\ell} \le 1$ (start with weight $1$ at the root and split it equally between the two children at every internal node; each leaf receives exactly $2^{-d}$). The function $2^{-x}$ is convex, so by Jensen's inequality $2^{-\bar d} \le \frac1L\sum_\ell 2^{-d_\ell} \le \frac1L$, where $\bar d$ is the average depth. Hence $\bar d \ge \log_2 L$. Apply this to the $L = n!$ leaves reached by the $n!$ input permutations (each reaches its own leaf, and a subset of the leaves still satisfies Kraft's inequality): their average depth, which is the average number of comparisons over all inputs, is at least $\log_2(n!)$ (@sec-salgo-a6-bound).
+:::
+
+**15. [H] Introsort switches to heapsort after $2\lfloor\log_2 n\rfloor$ levels and finishes with one insertion-sort pass over blocks of at most 16. Explain what each stage buys and prove the worst case is $O(n\log n)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Quicksort gives the fast average and good cache behaviour; the depth cap catches runs of bad pivots and hands the block to heapsort, which is $O(m\log m)$ worst case in place; the insertion pass avoids recursion overhead on tiny blocks. Proof: each of at most $2\lfloor\log_2 n\rfloor$ partition levels costs $O(n)$ across its disjoint blocks; the heapsort calls are on disjoint blocks, $O(n\log n)$ together; after the loop every element is within its block of at most 16, which is in its final position relative to other blocks, so the final insertion sort makes fewer than $16$ shifts per element, $O(n)$ (@sec-salgo-a7).
+:::
+
+**16. [H] Timsort reverses only *strictly* descending runs, and only ever merges two *neighbouring* runs on its stack. Show with small examples why each rule is needed for stability.**
+
+::: {.callout-note collapse="true" title="Solution"}
+**Strict runs.** If descending runs were allowed to contain ties, $[2_a, 2_b, 1]$ would count as one descending run and be reversed to $[1, 2_b, 2_a]$, swapping the equal keys. With the strict rule the descending scan stops at the tie: $2_a, 2_b$ is a (non-decreasing) ascending run and is left as it is. **Neighbours only.** A merge outputs equal keys of its left input before those of its right input, which is correct only if the left input lies entirely before the right input in the array. Take runs $A = [1_a, 2]$, $B = [0, 1_b]$, $C = [1_c, 3]$ in that order. Merging $A$ with $C$ first gives $[1_a, 1_c, 2, 3]$, and merging that with $B$ outputs $1_a, 1_c, 1_b$: the input order $a, b, c$ is lost. Merging only neighbours keeps every pending run a contiguous block of the input, so every merge has its left input before its right input (@sec-salgo-a8).
+:::
+
+**17. [M] Compute Timsort's classic `minrun` for $n = 63$, $n = 1000$ and $n = 2112$, and explain why `minrun` is chosen so that $n / \text{minrun}$ is close to a power of two.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$n = 63 < 64$: `minrun` $= 63$, a single binary insertion sort. $n = 1000 = 1111101000_2$: the top six bits are $111110_2 = 62$, and a lower bit is set, so `minrun` $= 63$ (giving 16 runs of about 63). $n = 2112 = 100001000000_2$: top six bits $100001_2 = 33$, no lower bit set, so `minrun` $= 33$ and $2112 = 64 \cdot 33$ splits into exactly 64 runs. On random data almost every run is boosted to exactly `minrun`, so the merge tree is perfectly balanced when the number of runs is a power of two; a count just above a power of two would leave one tiny run to be merged with a huge one at the end, which wastes copies (@sec-salgo-a8).
+:::
+
+**18. [M] Choose between merge sort and quicksort for (a) objects too big to fit in memory, (b) a linked list, (c) an array of integers where you want the fastest typical case, (d) counting inversions.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) Merge sort: sort chunks, then stream-merge the sorted runs with a heap of heads (@sec-salgo-p4). (b) Merge sort by relinking; quicksort needs swaps at arbitrary positions (@sec-salgo-p1-c). (c) Quicksort, in its introsort form: in place, cache-friendly, smallest constant (@sec-salgo-a7). (d) Merge sort: its merge exposes how the two halves compare, which is exactly what an inversion count needs (@sec-salgo-p2-a).
+:::
+
+**19. [M] In @sec-salgo-p2-b the answer credits a left element with `j`, the number of right-half elements already merged. Explain precisely why `j` equals the number of smaller elements to its right *that lie in the other half*.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The two runs are the left and right halves of an original index range, so every right-half element has a larger original index than every left-half element. A right element is merged before a given left element exactly when it is strictly smaller (ties take the left first), so at the moment the left element is emitted, the `j` right elements already output are exactly the smaller ones from the right half. Pairs within the same half were credited deeper in the recursion (@sec-salgo-p2-b).
+:::
+
+**20. [M] @sec-salgo-p2-c counts pairs with `nums[i] > 2 * nums[j]`. Why does a single forward pointer `j` tally all crossings between two sorted halves, and where does overflow hide?**
+
+::: {.callout-note collapse="true" title="Solution"}
+With both halves sorted ascending, as the left value grows, the set of right values with $2 \cdot \text{right} < \text{left}$ can only grow, so `j` only moves forward and `j - mid` is the size of that set: $O(n)$ per level. Overflow hides in `2 * nums[j]` when `nums[j]` is near $\pm 2^{31}$; compute in `long long` (@sec-salgo-p2-c).
+:::
+
+**21. [M] In @sec-salgo-p3-b, why is binary search on the *value* valid when the matrix cannot be indexed by rank, and why does the "enough" branch set `hi = mid` rather than `mid - 1`?**
+
+::: {.callout-note collapse="true" title="Solution"}
+"How many cells are $\le x$" is monotone in $x$, so the smallest $x$ with count $\ge k$ is well defined and binary search finds it; that $x$ is a cell value, because the count only changes at cell values, so it is the $k$-th smallest. `hi = mid` keeps `mid` itself as a candidate: it may be exactly the answer, and `mid - 1` could skip it (@sec-salgo-p3-b).
+:::
+
+**22. [E] You must return the $k$ closest points in any order. Why is sorting all points $O(n\log n)$ but a max-heap of size $k$ $O(n\log k)$, and when does the heap stop paying off?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The heap never holds more than $k$ elements, so each push or pop costs $O(\log k)$, for $O(n\log k)$ in total; it evicts the farthest point whenever it grows past $k$. When $k$ is a constant fraction of $n$, $\log k \approx \log n$ and the heap gains nothing over a sort, while quickselect's expected $O(n)$ then wins (@sec-salgo-p4-a).
+:::
+
+**23. [M] @sec-salgo-p4-b keeps a min-heap of the $k$ largest values. Prove that its root is the $k$-th largest, and explain why the admission test can be `val > root` (strict).**
+
+::: {.callout-note collapse="true" title="Solution"}
+The heap holds exactly the $k$ largest values seen so far, so its minimum, the root, is the $k$-th largest. A new value changes the top-$k$ multiset only if it is larger than the root; a value *equal* to the root would replace it with an identical value and change nothing, so skipping it is correct and saves work (@sec-salgo-p4-b).
+:::
+
+**24. [M] LC 937 can be solved by sorting only the letter-logs, or by one stable sort with a sentinel key. Give the sentinel key and explain why C++ must use `stable_sort` for the one-sort version.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Key $=$ `(is_digit, content if letter else "", identifier if letter else "")`. All digit-logs get the same key, so they tie, and a *stable* sort keeps tied items in input order, which is the requirement. `std::sort` is unstable (introsort), so it may reorder the tied digit-logs; `std::stable_sort` keeps them (@sec-salgo-p5-a).
+:::
+
+**25. [M] For @sec-salgo-p5-b, sort `(attack, defense)` both ascending and give a concrete input on which the right-to-left sweep then counts a character as weak by mistake. What does sorting defense descending change?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Take $[[5,1],[5,5],[6,0]]$. Both ascending: $[[5,1],[5,5],[6,0]]$; sweeping right to left, `best` becomes $0$, then $5$ at $[5,5]$, and $[5,1]$ is counted weak because $1 < 5$, but $[5,5]$ has the *same* attack, and the only larger attack, $[6,0]$, has smaller defense, so $[5,1]$ is not weak. With defense descending inside equal attacks the order is $[[5,5],[5,1],[6,0]]$: an equal-attack neighbour to the right always has *smaller or equal* defense, so it can never raise `best` above an equal-attack row's defense; only strictly larger attacks can (@sec-salgo-p5-b).
+:::
+
+## Interview questions
+
+<!-- Copied into the Question Bank (quiz mode) by gen_book.py. Keep the shape exactly: a bold line
+     starting "**N. " with the question, then one collapsed "Answer" callout. Answers may cite @sec-… -->
+
+**1. Name five comparison sorts and give each one's time, extra space and stability.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Insertion: $O(n^2)$ worst, $O(n)$ best, $O(1)$ space, stable. Selection: $\Theta(n^2)$ always, $O(1)$, not stable. Merge sort: $\Theta(n\log n)$ always, $O(n)$, stable. Quicksort: $O(n\log n)$ expected, $O(n^2)$ worst, $O(\log n)$ stack, not stable. Heapsort: $O(n\log n)$ worst, $O(1)$, not stable (@sec-salgo-a9).
+:::
+
+**2. Why is quicksort $O(n^2)$ on sorted input with a last-element pivot, and what are the standard fixes?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The last element of a sorted range is its maximum, so every partition splits $n-1 \mid 0$ and the costs add up to $\binom n2$. Fixes: a random pivot (expected $O(n\log n)$ on every input), median-of-three, and introsort's heapsort fallback after a depth limit (a guarantee). Separately, a three-way or Hoare partition fixes the all-equal-keys blow-up (@sec-salgo-a4-analysis, @sec-salgo-a7).
+:::
+
+**3. What makes merge sort $\Theta(n\log n)$ in the worst case while quicksort is only $O(n\log n)$ on average?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Merge sort's split is input-independent (always the middle), so its recursion tree always has $\lceil\log_2 n\rceil$ levels of $O(n)$ work. Quicksort's split depends on the pivot's rank, which can be extreme again and again, giving $n$ levels. Balanced by construction versus balanced by luck (@sec-salgo-a3, @sec-salgo-a4).
+:::
+
+**4. Why is quicksort usually faster than merge sort and heapsort in practice, even though all three are $O(n\log n)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Its inner loop is a sequential scan that compares with one pivot held in a register and moves few elements; it works in place, so it touches less memory and uses the cache well. Merge sort moves every element at every level and needs a buffer; heapsort jumps between $i$ and $2i+1$, which is cache-unfriendly, and makes about twice as many comparisons. The expected $1.39\,n\log_2 n$ comparisons of random-pivot quicksort are a small price for that (@sec-salgo-a4-analysis, @sec-salgo-a5).
+:::
+
+**5. How do you keep quicksort's stack depth $O(\log n)$ even in its worst case?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Recurse into the smaller side and loop (tail-iterate) on the larger side. The smaller side has at most half the elements, so each nested call at least halves the size and the depth is at most $\log_2 n$; time can still be quadratic, but the stack cannot overflow (@sec-salgo-a4-analysis).
+:::
+
+**6. State the $\Omega(n\log n)$ lower bound and its hypothesis. How do counting and radix sort escape it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Any comparison sort makes at least $\lceil\log_2(n!)\rceil = \Theta(n\log n)$ comparisons in the worst case (and on average): its decision tree needs $n!$ leaves and a binary tree of height $h$ has at most $2^h$. The hypothesis is that the algorithm learns about keys only through pairwise comparisons. Counting and radix sort use key values as array indices, which is not a comparison, so they can run in $O(n + k)$ (@sec-salgo-a6-bound, @sec-lts).
+:::
+
+**7. Why is building a heap $O(n)$ and not $O(n\log n)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Bottom-up building sifts each node down at most its height, and most nodes are near the bottom: about $n/2$ leaves cost nothing, $n/4$ nodes cost one level, $n/8$ cost two, and so on. The sum $\sum_h \frac{n}{2^{h+1}} h$ is less than $n$. Only repeated pushes (sift-up from the bottom for each new element) cost $O(n\log n)$ (@sec-salgo-a5-build).
+:::
+
+**8. What is a stable sort, why does it matter, and which standard sorts are stable?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Stability keeps equal-key items in input order. It matters for multi-key sorting by successive passes, for keeping a group in its original order (LC 937's digit-logs), and for predictable output. Python's `sorted` and `list.sort` (Timsort) and C++ `std::stable_sort` are stable; C++ `std::sort` is not. Any sort becomes stable if it sorts `(key, index)` pairs (@sec-salgo-a6-stable, @sec-salgo-p5-a).
+:::
+
+**9. What do `std::sort` and Python's `sorted` actually run?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`std::sort` (in GCC's libstdc++) is introsort: median-of-three quicksort with a recursion depth limit of $2\lfloor\log_2 n\rfloor$, a heapsort fallback when the limit is hit, and a final insertion sort over blocks of at most 16; worst case $O(n\log n)$, not stable. `sorted` is Timsort: natural runs (strictly descending ones reversed), short runs extended to `minrun` by binary insertion sort, a stack of runs merged with a balance rule, galloping merges; stable, $n - 1$ comparisons on sorted input, $O(n\log n)$ worst case (@sec-salgo-a7, @sec-salgo-a8).
+:::
+
+**10. How do you count inversions in $O(n\log n)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Merge sort with a counter. Pairs within a half are counted recursively; for the pairs across the halves, when a right-half element is output before the left-half elements still waiting, it forms an inversion with each of them, so add their number. Both halves are sorted, so this is linear per merge. Sort indices instead of values to get per-element counts (@sec-salgo-p2-a, @sec-salgo-p2-b).
+:::
+
+**11. Find the $k$-th largest element without sorting. Give the algorithm, its cost and the alternative for a stream.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Quickselect: partition around a random pivot and continue only into the side that contains index $n - k$; expected $O(n)$, in place, worst case $O(n^2)$ (median of medians or introselect make it linear in the worst case). For a stream, keep a min-heap of the $k$ largest: $O(\log k)$ per element, the root is the answer (@sec-salgo-a4-select, @sec-salgo-p3-a, @sec-salgo-p4-b).
+:::
+
+**12. Why is merge sort, not quicksort or heapsort, the sort for a linked list?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A list has no random access: heapsort's children $2i+1, 2i+2$ cannot be reached cheaply, and quicksort's partition swaps elements at arbitrary positions. Merge sort splits with a slow/fast walk and merges by relinking `next` pointers, with no copying; done bottom-up it needs only $O(1)$ extra memory (@sec-salgo-p1-c).
+:::
+
+**13. When do you keep a heap instead of sorting?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When you need the extreme, or the $k$ extremes, repeatedly but never the full order: top-$k$ ($O(n\log k)$ instead of $O(n\log n)$), running medians, priority scheduling, $k$-way merging, and anything streaming. Extracting *all* $n$ elements from a heap is heapsort, $O(n\log n)$, so the win comes only from extracting or keeping far fewer than $n$ (@sec-salgo-a5, @sec-salgo-p4).
+:::
+
+**14. How would you sort 100 GB of records on a machine with 8 GB of memory?**
+
+::: {.callout-note collapse="true" title="Answer"}
+External merge sort. Pass 1: read the file in chunks that fit in memory, sort each chunk (any in-memory sort), write it out as a sorted run: about 13 runs. Pass 2: merge all runs at once with a min-heap holding the current head of each run, reading and writing sequentially with large buffers. If there are too many runs for one pass, merge them in groups. Merge sort fits because the merge reads its inputs strictly in order (@sec-salgo-a3, @sec-salgo-p4).
+:::
+
+**15. Insertion sort is $O(n^2)$. Why do production sorts still use it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Its cost is $O(n + \text{inversions})$ with a tiny constant: for blocks of a few dozen elements, or data that is nearly sorted, it beats the $n\log n$ sorts and their overhead. Introsort finishes blocks of at most 16 with one insertion pass, and Timsort extends short runs with binary insertion sort, which needs only $O(\log n)$ comparisons per element (@sec-salgo-a1, @sec-salgo-a7, @sec-salgo-a8).
+:::
+
+**16. How does selection sort differ from insertion sort in what it minimises?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Insertion sort minimises work on nearly sorted input: $O(n + \text{inversions})$ comparisons and moves. Selection sort always makes $\binom n2$ comparisons but at most $n - 1$ swaps, so it minimises writes, which matters when moving an element is expensive (@sec-salgo-a1, @sec-salgo-a2).
+:::
+
+**17. For "count pairs with $a_i > 2a_j$, $i < j$", give the brute force, the faster method and the subtle bug.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Brute force: test all pairs, $O(n^2)$. Faster: merge sort with a separate cross-count pass before each merge; both halves are sorted, so one forward pointer counts the pairs in $O(n)$ per level, $O(n\log n)$ in total. Bug: `2 * a[j]` overflows 32-bit integers for values near $2^{31}$; use 64-bit (@sec-salgo-p2-c).
+:::
+
+**18. Why does Timsort make only $n - 1$ comparisons on an already sorted list, and does that contradict the lower bound?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Run detection compares each element with its predecessor once; on sorted input that finds a single run of length $n$ with $n - 1$ comparisons, and there is nothing to merge. It does not contradict the lower bound, which is about the *worst* (or average) input: an adaptive sort may be fast on easy inputs as long as some inputs still cost $\Omega(n\log n)$ (@sec-salgo-a8, @sec-salgo-a6-bound).
+:::
+
+## Summary
+
+<!-- The callout-important below is copied into the Cheat Sheets appendix: make it stand alone. -->
+
+::: {.callout-important title="Templates to remember"}
+- **Insertion** `while j >= 0 and a[j] > key: a[j+1] = a[j]; j -= 1`; $O(n + \text{inversions})$, in place, stable (@sec-salgo-a1).
+- **Selection** `swap(a[i], a[argmin a[i..]])`; $\binom n2$ comparisons, $\le n-1$ swaps, not stable (@sec-salgo-a2).
+- **Merge** sort the halves, merge taking the left head on ties (`L[i] <= R[j]`); $\Theta(n\log n)$ always, $O(n)$ extra, stable; bottom-up needs no recursion (@sec-salgo-a3).
+- **Quicksort** random pivot; Lomuto (`a[j] <= x` grows the left region), Hoare (two fingers, middle pivot), or three-way `< == >`; expected $2n\ln n$ comparisons; recurse on the smaller side (@sec-salgo-a4).
+- **Quickselect** partition, keep only the side with index $t$; expected $O(n)$ (@sec-salgo-a4-select).
+- **Heap** children $2i+1, 2i+2$; sift-down swaps with the larger child; build bottom-up in $O(n)$; heapsort swaps the root to the end, $O(n\log n)$, $O(1)$ extra, not stable (@sec-salgo-a5).
+- **Lower bound** $\lceil\log_2(n!)\rceil \ge \tfrac n2\log_2\tfrac n2$ comparisons, worst case and average (@sec-salgo-a6-bound).
+- **Libraries** introsort = quicksort + depth limit $2\lfloor\log_2 n\rfloor$ + heapsort + final insertion; Timsort = runs + minrun + merge stack + galloping, stable (@sec-salgo-a7, @sec-salgo-a8).
+- **Patterns** count across the merge (P2), select one rank (P3), bounded heap (P4), stable sort or designed tie-break (P5).
+:::
+
+- Every sort here keeps an invariant about a region that only grows: a sorted prefix, a sorted suffix, or "each call returns a sorted permutation" (@sec-salgo-a1, @sec-salgo-a3, @sec-salgo-a5).
+- Insertion sort's cost is the number of inversions plus $n$; that makes it the best sort for tiny and nearly sorted inputs and the finisher inside hybrids (@sec-salgo-a1).
+- Merge sort is balanced by construction: $\Theta(n\log n)$ always, stable, and its merge streams, counts crossings and relinks lists (@sec-salgo-a3, @sec-salgo-p1-c, @sec-salgo-p2).
+- Quicksort is balanced on average: with a random pivot every input costs about $1.39\,n\log_2 n$ comparisons; three-way partitioning handles duplicates and one-sided recursion selects a rank in expected $O(n)$ (@sec-salgo-a4, @sec-salgo-p3-a).
+- Heapsort is selection sort with a heap: $O(n\log n)$ worst case in $O(1)$ memory; the bounded heap is the top-$k$ and streaming workhorse (@sec-salgo-a5, @sec-salgo-p4).
+- No comparison sort beats $\log_2(n!)$ comparisons on its worst or average input; adaptive sorts are fast on easy inputs without contradicting this (@sec-salgo-a6-bound).
+- Library sorts are hybrids: introsort guarantees the worst case, Timsort exploits runs and is stable; know which one your language runs (@sec-salgo-a7, @sec-salgo-a8).
+- Stability and tie-break direction are design decisions, not details; they decide whole problems (@sec-salgo-p5).
+
+## Practice ladder
+
+Ordered by concept, following the chapter. Each item adds one idea to a solved problem above.
+
+::: {.practice}
+- [CF 489A · SwapSort](https://codeforces.com/problemset/problem/489/A){rating="1200"} — A2: sort with at most $n$ swaps; selection sort's write bound is exactly the answer.
+- [LC 21 · Merge Two Sorted Lists](https://leetcode.com/problems/merge-two-sorted-lists/){difficulty="Easy"} — A3: the merge on its own, by relinking.
+- [CF 873D · Merge Sort](https://codeforces.com/problemset/problem/873/D){rating="1800"} — A3/P1: build an array on which merge sort makes exactly $k$ calls; reason about its recursion tree.
+- [LC 86 · Partition List](https://leetcode.com/problems/partition-list/){difficulty="Medium"} — A4/P1: a *stable* partition on a linked list, the list version of quicksort's partition step.
+- [LC 23 · Merge k Sorted Lists](https://leetcode.com/problems/merge-k-sorted-lists/){difficulty="Hard"} — P1/P4: the $k$-way merge with a heap of heads (solved in @sec-lang-p2-merge).
+- [CF 1760E · Binary Inversions](https://codeforces.com/problemset/problem/1760/E){rating="1100"} — P2: inversions of a 0/1 array, and the best single flip.
+- [CF 1430E · String Reversal](https://codeforces.com/problemset/problem/1430/E){rating="1900"} — P2: the minimum number of adjacent swaps equals the inversion count of a permutation you construct.
+- [CF 911D · Inversion Counting](https://codeforces.com/problemset/problem/911/D){rating="1800"} — P2: how reversing a segment changes the inversion parity.
+- [LC 327 · Count of Range Sum](https://leetcode.com/problems/count-of-range-sum/){difficulty="Hard"} — P2: count across the merge on prefix sums, with two pointers for a range predicate.
+- [LC 2426 · Number of Pairs Satisfying Inequality](https://leetcode.com/problems/number-of-pairs-satisfying-inequality/){difficulty="Hard"} — P2: rewrite the predicate as a comparison of one derived array, then merge-count.
+- [CF 1037B · Reach Median](https://codeforces.com/problemset/problem/1037/B){rating="1300"} — P3: only the order around the median matters.
+- [LC 324 · Wiggle Sort II](https://leetcode.com/problems/wiggle-sort-ii/){difficulty="Medium"} — P3: find the median by quickselect, then three-way partition around it (solved in @sec-part-p4-a).
+- [LC 719 · Find K-th Smallest Pair Distance](https://leetcode.com/problems/find-k-th-smallest-pair-distance/){difficulty="Hard"} — P3: binary search on the value with a two-pointer count.
+- [LC 668 · Kth Smallest Number in Multiplication Table](https://leetcode.com/problems/kth-smallest-number-in-multiplication-table/){difficulty="Hard"} — P3: the sorted-matrix idea on a matrix you never store.
+- [LC 692 · Top K Frequent Words](https://leetcode.com/problems/top-k-frequent-words/){difficulty="Medium"} — P4: a bounded heap whose order has a tie-break.
+- [CF 681C · Heap Operations](https://codeforces.com/problemset/problem/681/C){rating="1600"} — P4: simulate a min-heap and repair an invalid log of operations.
+- [CF 1526C2 · Potions (Hard Version)](https://codeforces.com/problemset/problem/1526/C2){rating="1600"} — P4: a min-heap of chosen items lets you undo the worst choice.
+- [LC 295 · Find Median from Data Stream](https://leetcode.com/problems/find-median-from-data-stream/){difficulty="Hard"} — P4: two heaps keep a running median.
+- [LC 2191 · Sort the Jumbled Numbers](https://leetcode.com/problems/sort-the-jumbled-numbers/){difficulty="Medium"} — P5: sort by a derived key; ties must keep input order, so the sort must be stable.
+- [LC 354 · Russian Doll Envelopes](https://leetcode.com/problems/russian-doll-envelopes/){difficulty="Hard"} — P5: width ascending, height *descending*, the same tie-break trick as LC 1996.
+- [LC 406 · Queue Reconstruction by Height](https://leetcode.com/problems/queue-reconstruction-by-height/){difficulty="Medium"} — P5: the order of ties decides whether greedy insertion works.
+:::
+
+## Further reading
+
+- [Sedgewick & Wayne, *Algorithms* (4th ed.), chapter 2 site](https://algs4.cs.princeton.edu/20sorting/) — elementary sorts, mergesort, quicksort with three-way partitioning, and heapsort, with Java code and visual traces (@sec-salgo-a1 to @sec-salgo-a5).
+- [Tim Peters, `listsort.txt` (CPython source)](https://github.com/python/cpython/blob/main/Objects/listsort.txt) — the design notes of Timsort: runs, minrun, the merge policy (now powersort), galloping and its measurements (@sec-salgo-a8).
+- [Wikipedia — Introsort](https://en.wikipedia.org/wiki/Introsort) — Musser's hybrid of quicksort, heapsort and insertion sort, with references to the original paper and to library implementations (@sec-salgo-a7).
+- [cppreference — `std::sort`](https://en.cppreference.com/w/cpp/algorithm/sort) — the complexity guarantee, the lack of stability and the strict-weak-ordering requirement on the comparator (@sec-salgo-a7).
+- [Python Sorting HOWTO](https://docs.python.org/3/howto/sorting.html) — key functions, the documented stability guarantee, and multi-pass sorting (@sec-salgo-a6-stable, @sec-salgo-p5).
+- [V8 blog — Getting things sorted in V8](https://v8.dev/blog/array-sort) — why a JavaScript engine replaced its quicksort with Timsort, with a readable account of runs and galloping (@sec-salgo-a8).
+- [Wikipedia — Quicksort](https://en.wikipedia.org/wiki/Quicksort) — Lomuto and Hoare partitions, pivot rules, the average-case analysis and its history (@sec-salgo-a4).
+- [Competitive Programmer's Handbook (Laaksonen)](https://cses.fi/book/book.pdf) — chapter 3 on sorting in contests: the sorting lower bound, counting sort, and using the library sort with comparators.

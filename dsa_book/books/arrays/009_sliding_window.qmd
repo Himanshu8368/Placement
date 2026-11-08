@@ -1,0 +1,1077 @@
+# Sliding Window {#sec-sw}
+
+<!--
+Author-facing provenance (not rendered): Chapter 9 of the arrays volume, per outline.yml
+("Sliding Window"); the array_book ch.5 plan (lessons A1-A5, patterns P1-P5, the same ten
+solved problems). Registry problems under books/problems/, boards under books/traces/arr009_traces.py.
+The HTML comment above is the only place a local path may appear, and it must never reach
+the rendered page.
+-->
+
+::: {.callout-note title="Sources"}
+**CPH** (Laaksonen, *Competitive Programmer's Handbook*) ch. 8 "Amortized analysis": § 8.1 the two pointers method (a subarray with a given sum, with the amortised argument) and § 8.3 sliding window minimum (the deque that this chapter hands off to) · **CLRS** chapter on amortized analysis (the aggregate method behind "each pointer moves at most $n$ times") · **CP-Algorithms**: minimum stack / minimum queue (window extrema) · **USACO Guide**: Silver "Two Pointers", Gold "Sliding Window" · LeetCode-style interview patterns: fixed windows, longest and shortest windows under a budget, the `r - l + 1` and `n - r` counting batches, "exactly $k$ = at most $k$ minus at most $k - 1$", frequency-table windows. Covered here: fixed-size windows (direct and complement), the grow–shrink loop and its monotonicity licence, where the answer line goes for longest versus shortest, counting windows, windows that carry a frequency table, and the exact conditions under which a window breaks (negatives, equality predicates, window extrema).
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Maintain a **fixed-size** window in $O(n)$ by adding the entering element and dropping the leaving one, and recognise when a "take $k$ from the two ends" statement is secretly this slide on the *complement* window.
+- Write the **grow–shrink** loop for a variable window, state its invariant — "after the repair, the window is valid and is the longest valid window ending here" — and prove it runs in $O(n)$ even though it has a nested `while`.
+- Place the `best = ...` line correctly: **after** the repair for a longest window, **inside** it for a shortest one, and explain why the line moves.
+- Count windows two ways — the batch `r - l + 1` (or `n - r`) and the identity "exactly $k$ = at most $k$ minus at most $k - 1$" — and say which direction of growth each batch needs.
+- Give the window a **frequency table** for distinct-value and mode conditions, with the erase-at-zero habit that keeps it honest.
+- Recognise the three situations where a window is the wrong tool — negatives, an exact-equality predicate on sums, and window extrema — and name the replacement for each (@sec-pref, the monotone deque).
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr009_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-sw-why}
+
+::: {.callout-note title="In plain words"}
+A **window** is a contiguous piece of the array, `a[l..r]`, that you *keep* and update instead of choosing it again from scratch. Many questions ask about "a contiguous subarray with property $P$". There are about $n^2/2$ subarrays, so trying them all is $O(n^2)$. But if $P$ behaves well — a window that satisfies it still satisfies it after you cut cells off its ends — you can sweep the right end once from left to right, drag the left end behind it, and never move either end backwards. Each step adds one element or removes one element, so the whole sweep costs $O(n)$.
+:::
+
+Here is the interview-shaped argument. You get $n = 10^5$ positive reading times and a budget of $T$ minutes, and you must find the longest run of consecutive books you can read. Trying every start and every end is about $5\cdot10^9$ pairs, far over the operation budget of @sec-cx-budget. Prefix sums (@sec-pref) make each pair $O(1)$, but there are still $5\cdot10^9$ pairs. The window does better: it never looks at most pairs at all. When the run `a[l..r]` costs too much, every longer run that starts at `l` costs even more, so `l` can be thrown away for good. Each element enters the window once and leaves at most once — $2n$ moves in total.
+
+**Where this chapter sits.** The arrays volume has been building summaries that turn $O(n^2)$ into $O(n)$: prefix sums summarise *positions* (@sec-pref), hashing summarises *values* (@sec-hash), two pointers exploit *order* (@sec-tp). This chapter takes one idea from @sec-tp — a left pointer that only moves forward while a right pointer scans — and makes it the whole subject, because it covers a huge family of problems about contiguous ranges. It reuses the other tools as well: the window's state is often a hash map of counts (@sec-hash), and when the window fails, prefix sums with a hash map are the fallback (@sec-pref-hash). You have also already seen one window go wrong: @sec-test-p2-substring is a window whose left end must never move backwards, and stress testing in @sec-testing finds the bug on inputs like `"tmmzuxt"`. The next two chapters bring in *sorting* (@sec-srt), which often turns a problem into a window problem, and *binary search* (@sec-bst), the slower but more general tool that several solved problems below use as a middle form.
+
+The chapter has two parts. Part A is five lessons: the fixed slide, the grow–shrink loop and its proof, longest versus shortest, counting, and when the window breaks. Part B is five patterns, each with two fully solved, stress-tested problems — ten problems that between them cover every lesson.
+
+## Part A — Lessons
+
+## A1. Fixed-size windows: add the enterer, drop the leaver {#sec-sw-a1}
+
+::: {.callout-note title="In plain words"}
+If every window has the same length $k$, two neighbouring windows share $k-1$ cells. So the sum of the next window is the sum of this window, **minus the element leaving on the left, plus the element entering on the right**. You pay two operations per step instead of $k$, so the whole sweep is $O(n)$, not $O(nk)$. The window is always exactly $k$ wide, so there is no "is it valid?" test and no shrinking — just a slide.
+:::
+
+The pattern is one line repeated. Build the first window in one pass; then, for each shift, undo the outgoing cell and apply the incoming one.
+
+```text
+cur = fold(a[0..k-1])                 # the first window, from scratch
+best = cur
+for l in 1 .. n-k:
+    cur = cur - a[l-1] + a[l+k-1]     # drop the leaver, add the enterer
+    best = better(best, cur)
+```
+
+The invariant is short and worth saying anyway: **`cur` always equals the fold over `a[l .. l+k-1]`**, because it began as the true first window and each update removed exactly the element that left and added exactly the one that entered. That one sentence is why you never re-sum.
+
+"Fold" means any running aggregate you can **undo**: a sum (undo with subtraction), a count of zeros or vowels (undo by decrementing), a product of non-zero numbers (undo with division), a frequency table (undo by decrementing a count). A maximum or minimum *cannot* be undone this way — when the maximum leaves, you do not know the second largest — and that is why window extrema need a different structure (@sec-sw-a5).
+
+::: {#fig-sw-a1-slide}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a1_draw(ax, p):
+    V.array(ax, p, [1, 12, -5, -6, 50, 3],
+            regions=[(1, 4, "cyan", "shared (k - 1 cells)")],
+            colors={0: "amber", 4: "green"},
+            pointers=[(1, "l", "indigo", "bottom"), (4, "r", "violet", "top")],
+            note="cur = 2 - 1 + 50 = 51")
+V.show(a1_draw)
+```
+
+One slide of the length-$4$ window over $[1, 12, -5, -6, 50, 3]$: drop the amber leaver $a[0] = 1$, add the green enterer $a[4] = 50$. The three cyan cells are touched by *neither* operation, and `cur` goes from $2$ to $51$ in two arithmetic moves.
+
+:::
+
+```{python}
+#| label: arr-sw-a1-demo
+def fixed_max_sum(a, k):              # largest sum over any window of length k
+    if k == 0:
+        return 0
+    cur = best = sum(a[:k])
+    for l in range(1, len(a) - k + 1):
+        cur += a[l + k - 1] - a[l - 1]     # drop the leaver, add the enterer
+        best = max(best, cur)
+    return best
+
+def fixed_max_sum_brute(a, k):
+    return max((sum(a[l:l + k]) for l in range(len(a) - k + 1)), default=0)
+
+for _ in range(300):
+    a = [random.randint(-9, 9) for _ in range(random.randint(1, 14))]
+    k = random.randint(1, len(a))
+    assert fixed_max_sum(a, k) == fixed_max_sum_brute(a, k)
+assert fixed_max_sum([1, 12, -5, -6, 50, 3], 4) == 51      # the @sec-sw-p1-a window
+assert fixed_max_sum([2, 3], 2) == 5                        # single window
+print("a1 demo OK")
+```
+
+Notice what the fixed slide does **not** need: the numbers may be negative, and nothing has to be sorted or monotone. The fixed length is the whole structure. Two upgrades come later. When the window must also be *all-distinct*, the same slide carries a frequency table (@sec-sw-p5-a). When the statement talks about the cards you *take* from both ends, the slide runs on the cards you *leave* (@sec-sw-p1-b).
+
+## A2. Variable windows: the grow–shrink loop and "the window is valid" {#sec-sw-a2}
+
+::: {.callout-note title="In plain words"}
+When the window's length is what you are optimising, you cannot fix it. Instead, push the right end forward one cell at a time and feed each new cell into the window's state. Whenever the state **breaks the rule**, pull the left end forward until the rule holds again. The loop makes a promise about the moment the repair `while` stops: *the window is valid*, and because `l` only moves forward, it is the longest valid window that ends here. A rule that only gets harder as the window grows — "sum at most $T$", "at most $k$ zeros" — is what guarantees the left end never needs to move back.
+:::
+
+The precise licence has a name. Call a rule $P$ on windows **shrink-safe** (or *monotone*) if every sub-window of a valid window is also valid. For "sum $\le T$" with non-negative numbers this holds: cutting cells off a window can only lower its sum. Now fix a right end $r$ and ask for the **least valid left end**:
+
+$$\ell^*(r) = \min\{\, l \le r+1 : a[l..r] \text{ satisfies } P \,\},$$ {#eq-sw-lstar}
+
+where $l = r + 1$ stands for the empty window, which we treat as always valid. Two facts make the window work.
+
+1. **Every left end from $\ell^*(r)$ to $r$ is valid.** Each window `a[l..r]` with $l \ge \ell^*(r)$ is a sub-window of `a[ℓ*(r)..r]`, so shrink-safety makes it valid. The valid windows ending at $r$ are exactly a *suffix* of left ends.
+2. **$\ell^*$ never decreases: $\ell^*(r) \le \ell^*(r+1)$.** Suppose `a[l..r+1]` is valid. Its sub-window `a[l..r]` is then valid too, so $l \ge \ell^*(r)$. Every valid left end for $r + 1$ is at least $\ell^*(r)$.
+
+Fact 2 is why one forward-only finger is enough: when `r` advances, the new boundary is at or to the right of the old one, so `l` only has to move forward to find it. Fact 1 is why, once found, the window `a[l..r]` is the *longest* valid window ending at `r`, and why counting arguments in @sec-sw-a4 can add `r - l + 1` at once.
+
+```text
+l = 0
+for r in range(n):
+    add a[r] to the window state
+    while the window violates the rule:      # repair moves l forward ONLY
+        remove a[l]; l += 1
+    # here: l == l*(r), the window a[l..r] is valid and is the longest valid one ending at r
+    answer = combine(answer, l, r)
+```
+
+::: {#fig-sw-staircase}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+st_a, st_T = [3, 1, 2, 1], 5
+st_cells = [[""] + [f"r={r}" for r in range(len(st_a))]]
+st_colors = {}
+st_l, st_s, st_walk = 0, 0, []                 # run the real loop and record l after each repair
+for r, x in enumerate(st_a):
+    st_s += x
+    while st_s > st_T:
+        st_s -= st_a[st_l]
+        st_l += 1
+    st_walk.append(st_l)
+for l in range(len(st_a)):
+    row = [f"l={l}"]
+    for r in range(len(st_a)):
+        if l > r:
+            row.append("")
+            continue
+        ok = sum(st_a[l:r + 1]) <= st_T
+        row.append(f"{sum(st_a[l:r + 1])}" + (" ok" if ok else " no"))
+        st_colors[(l + 1, r + 1)] = "green" if ok else "red"
+        if l == st_walk[r]:
+            st_colors[(l + 1, r + 1)] = "indigo"
+    st_cells.append(row)
+least = [min(l for l in range(r + 1) if sum(st_a[l:r + 1]) <= st_T) for r in range(len(st_a))]
+assert st_walk == least == [0, 0, 1, 1]          # the window's l IS the least valid left end
+del l, r, x, row, ok
+
+
+def draw(ax, p):
+    V.grid(ax, p, st_cells, colors=st_colors, cell_w=1.4)
+V.show(draw)
+```
+
+Every window `a[l..r]` of $[3, 1, 2, 1]$ with its sum, budget $T = 5$ (rows are left ends, columns right ends). In each column the valid cells (green, and the indigo cell where the loop's `l` stops) form one block at the bottom — Fact 1 — and the indigo cell never moves up as $r$ grows — Fact 2. The red cell is a window the loop never has to look at again; skipping such cells is the $n^2$ work the window saves.
+
+:::
+
+This is the same-direction skeleton of @sec-tp-count, now the protagonist. One demo of the loop on a sum budget (the longest stretch you can afford, non-negative numbers only — @sec-sw-p2-b's engine):
+
+```{python}
+#| label: arr-sw-a2-demo
+def longest_sum_le(a, budget):        # longest contiguous run with sum <= budget
+    l = s = best = 0
+    for r, x in enumerate(a):
+        s += x                        # grow: the entering cell joins
+        while s > budget:             # shrink only while the rule is broken
+            s -= a[l]
+            l += 1
+        best = max(best, r - l + 1)   # valid now -> record AFTER the repair
+    return best
+
+def longest_sum_le_brute(a, budget):
+    best = 0
+    for i in range(len(a)):
+        s = 0
+        for j in range(i, len(a)):
+            s += a[j]
+            if s <= budget:
+                best = max(best, j - i + 1)
+            else:
+                break
+    return best
+
+for _ in range(300):
+    a = [random.randint(1, 9) for _ in range(random.randint(1, 14))]
+    budget = random.randint(0, 30)
+    assert longest_sum_le(a, budget) == longest_sum_le_brute(a, budget)
+assert longest_sum_le([3, 1, 2, 1], 5) == 3                 # @sec-sw-p2-b's sample
+print("a2 demo OK")
+```
+
+**Why the nested loop is still $O(n)$.** The `while` sits inside the `for`, so it looks like $O(n^2)$. Count pointer moves instead of loop nesting: `r` advances $n$ times, and every pass of the `while` body advances `l` once. Since `l` never moves back and never passes $n$, the body runs at most $n$ times *in total*, across the whole run. Total work: at most $2n$ moves plus $O(1)$ per move — @sec-cx-loops' charging argument, applied to two fingers. Some single steps are expensive (one `r` may trigger many `l` moves), but they are paid for by steps that did nothing.
+
+**Creep or jump.** The repair above *creeps*: it moves `l` one cell at a time. Sometimes you can compute where `l` must go and *jump* there. If the rule is "no repeated value" and you remember where each value was last seen, the left end can jump to one past that position — that is @sec-test-p2-substring:
+
+{{< include ../problems/lc-0003-longest-substring-without-repeating-characters/card.qmd >}}
+
+The jump is faster in constant factors but adds a trap the creeping loop cannot have: a jump target can lie to the *left* of the current `l` (the earlier copy has already left the window), and jumping there would move `l` backwards and break Fact 2. That is the `"tmmzuxt"` bug, and the fix `l = max(l, last[c] + 1)` is just "never move left". When in doubt, creep: it is correct by construction and has the same $O(n)$ bound.
+
+## A3. Longest versus shortest: where the answer is updated {#sec-sw-a3}
+
+::: {.callout-note title="In plain words"}
+The grow–shrink loop is the same for "as long as possible" and "as short as possible"; only **one line moves**. For a *longest* valid window, shrink only when the rule breaks and record **after** the repair — at that instant the window is the widest valid one ending here. For a *shortest* valid window, the rule runs the other way (a window becomes valid by *growing*), so record **inside** the repair `while`: the moment the window is valid, log its length, then shrink *past* validity to look for a shorter one. Put the line on the wrong side of the `while` and you get a wrong answer that still *runs* — the sneaky kind.
+:::
+
+The two rules are mirror images. "Sum $\le T$" is **shrink-safe**: sub-windows of a valid window are valid, so the valid left ends are a suffix and you want the *least* one. "Sum $\ge T$" (with non-negative numbers) is **grow-safe**: super-windows of a valid window are valid, so for a fixed `r` the valid left ends are a *prefix* $0..\ell^\dagger(r)$ and you want the *greatest* one, which gives the shortest window. The shrink loop walks `l` up to $\ell^\dagger(r) + 1$, logging every valid window on the way, and the last one it logs is the shortest valid window ending at `r`. The same argument as Fact 2 shows $\ell^\dagger$ never decreases, so `l` again moves only forward.
+
+Keep the same sum budget and flip the question:
+
+- **Longest with sum $\le T$** (@sec-sw-a2): valid *between* repairs, so `best = max(best, r-l+1)` sits after the `while`.
+- **Shortest with sum $\ge T$** (@sec-sw-p3-a): valid *during* the shrink, so `best = min(best, r-l+1)` sits inside the `while`, before you break validity.
+
+```{python}
+#| label: arr-sw-a3-demo
+def shortest_sum_ge(a, target):       # shortest window reaching the target
+    l = s = 0
+    best = math.inf
+    for r, x in enumerate(a):
+        s += x                        # grow until valid
+        while s >= target:            # valid -> record, then shrink past it
+            best = min(best, r - l + 1)     # INSIDE the repair
+            s -= a[l]
+            l += 1
+    return best if not math.isinf(best) else 0
+
+def shortest_sum_ge_brute(a, target):
+    best = math.inf
+    for i in range(len(a)):
+        s = 0
+        for j in range(i, len(a)):
+            s += a[j]
+            if s >= target:
+                best = min(best, j - i + 1)
+    return best if not math.isinf(best) else 0
+
+def shortest_logged_after(a, target):  # the wrong placement, for contrast
+    l = s = 0
+    best = math.inf
+    for r, x in enumerate(a):
+        s += x
+        while s >= target:
+            s -= a[l]
+            l += 1
+        best = min(best, r - l + 1)   # logs an INVALID window
+    return best
+
+for _ in range(300):
+    a = [random.randint(1, 9) for _ in range(random.randint(1, 14))]
+    target = random.randint(1, 40)
+    assert shortest_sum_ge(a, target) == shortest_sum_ge_brute(a, target)
+assert shortest_sum_ge([2, 3, 1, 2, 4, 3], 7) == 2          # @sec-sw-p3-a's sample
+assert shortest_logged_after([2, 3, 1, 2, 4, 3], 7) == 1    # wrong: [2] alone is logged at r = 0
+assert longest_sum_le([3, 1, 2, 1], 5) == 3                 # the longest from A2, for contrast
+print("a3 demo OK")
+```
+
+The last two asserts show the trap. Logging after the `while` in the shortest loop records `[2]` at `r = 0` — a window that never reached the target — and answers $1$. The mnemonic that survives interviews: **widen-then-log for longest, log-then-shrink for shortest.** If you can say *why* the line moves (the window is valid at a different instant in the two loops), you have the lesson; if you memorised two nearly identical functions, you will swap them under pressure.
+
+::: {#fig-sw-a3-placement}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a3_draw(ax, p):
+    V.grid(ax, p, [
+        ["question", "where best is updated", "the line"],
+        ["longest (shrink-safe)", "AFTER the repair while", "best = max(best, r - l + 1)"],
+        ["shortest (grow-safe)", "INSIDE the repair while", "best = min(best, r - l + 1)"],
+    ], colors={(1, 0): "green", (1, 1): "green", (1, 2): "green",
+               (2, 0): "amber", (2, 1): "amber", (2, 2): "amber"})
+V.show(a3_draw)
+```
+
+Same loop, one relocated line. The longest window is at its widest the instant validity returns (log after the `while`); the shortest is only known while the window is *still* valid (log inside it, before breaking it). @sec-sw-p2 and @sec-sw-p3 are exactly these two rows.
+
+:::
+
+## A4. Counting windows: everything ending at $r$, and "at most $k$" minus "at most $k-1$" {#sec-sw-a4}
+
+::: {.callout-note title="In plain words"}
+Counting has two tricks. First, the **batch**: if the window `a[l..r]` is valid and every shorter window ending at `r` is valid too, there are exactly $r - l + 1$ valid windows ending at `r` — you add that number in one step instead of looping over left ends. Second, the **subtraction**: for a rule like "exactly $k$ distinct values", the valid left ends for one `r` are *not* a suffix, so the batch does not apply — but "at most $k$" is a suffix rule, so you count "at most $k$" and "at most $k - 1$" and subtract: $\text{exactly}(k) = \text{atMost}(k) - \text{atMost}(k-1)$.
+:::
+
+The batch is Fact 1 of @sec-sw-a2 read as a count: after the repair, `l..r` are *exactly* the valid left ends for this `r`, so the number of valid subarrays ending at `r` is the width of that range. Summing over all `r` counts every valid subarray once, by its right end. You met the same `c += r - l + 1` line in @sec-tp-count.
+
+There is a mirror batch for grow-safe rules. If the rule is "contains at least $k$ copies of something", super-windows of a valid window are valid. Then, for a fixed **left** end, the valid right ends form a suffix $r..n-1$, and there are $n - r$ of them. @sec-sw-p5-b uses this form. Pick the batch by asking which way of extending keeps the window valid: shrinking keeps it valid → count left ends, `r - l + 1`; growing keeps it valid → count right ends, `n - r`.
+
+```{python}
+#| label: arr-sw-a4-demo
+def at_most_distinct(a, cap):         # subarrays with AT MOST cap distinct values
+    if cap < 0:
+        return 0
+    freq = defaultdict(int)
+    l = c = 0
+    for r, x in enumerate(a):
+        freq[x] += 1
+        while len(freq) > cap:        # too many kinds -> shrink
+            freq[a[l]] -= 1
+            if freq[a[l]] == 0:
+                del freq[a[l]]
+            l += 1
+        c += r - l + 1                # every left in [l..r] is a valid subarray
+    return c
+
+def exactly_distinct(a, cap):         # exactly = atMost(cap) - atMost(cap-1)
+    return at_most_distinct(a, cap) - at_most_distinct(a, cap - 1)
+
+def exactly_brute(a, cap):
+    return sum(1 for i in range(len(a)) for j in range(i, len(a))
+               if len(set(a[i:j + 1])) == cap)
+
+for _ in range(300):
+    a = [random.randint(0, 4) for _ in range(random.randint(1, 12))]
+    cap = random.randint(0, 4)
+    assert exactly_distinct(a, cap) == exactly_brute(a, cap)
+assert at_most_distinct([1, 2, 1, 2, 3], 2) == 12
+assert exactly_distinct([1, 2, 1, 2, 3], 2) == 7            # @sec-sw-p4-b's sample
+print("a4 demo OK")
+```
+
+**Why "exactly $k$" needs the subtraction.** Fix `r = 4` in $[1, 2, 1, 2, 3]$ with $k = 2$. Starting at $l = 0, 1, 2$ gives 3 distinct values (too many); $l = 3$ gives $[2, 3]$, exactly 2; $l = 4$ gives $[3]$, only 1. The valid left ends form a *band* in the middle, $\{3\}$, not a suffix, so a single `r - l + 1` cannot count them. But the band is the difference of two suffixes: the left ends with at most 2 distinct ($\{3, 4\}$) minus those with at most 1 ($\{4\}$). Summed over all `r`, that is $\text{atMost}(2) - \text{atMost}(1) = 12 - 5 = 7$. It is @sec-pref's range identity ($\text{sum}(L..R) = P(R) - P(L-1)$) applied to counts, and the picture is @fig-sw-band.
+
+::: {#fig-sw-a4-batch}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a4_draw(ax, p):
+    V.array(ax, p, [1, 2, 1, 2, 3],
+            colors={0: "green", 1: "green", 2: "green"},
+            pointers=[(0, "l", "indigo", "bottom"), (2, "r", "violet", "top")],
+            note="c += r - l + 1 = 3")
+V.show(a4_draw)
+```
+
+The batch at $r = 2$ over $[1, 2, 1, 2, 3]$ with "at most 2 distinct": the window `a[0..2]` is valid, and so is every window ending at $r$ that starts inside it (starts $0, 1, 2$, all green). The count adds $3$ with no inner loop.
+
+:::
+
+## A5. When the window breaks: negatives, equality predicates, and window extrema {#sec-sw-a5}
+
+::: {.callout-note title="In plain words"}
+Everything in A2–A4 rests on one assumption: the rule is **shrink-safe** (or grow-safe), which for sums means the numbers are non-negative. Put a negative number in the array and "shrink while over budget" collapses: removing a negative cell from the front makes the sum *bigger*, so a left end you just evicted might have been the start of the best window. A rule like "sum exactly $s$" is neither shrink-safe nor grow-safe; even with positive numbers it works only in special cases (@sec-sw-p3-b). When the licence is gone, the window is the wrong tool; reach for **prefix sums** and a hash map of the prefix values you have seen (@sec-pref-hash).
+:::
+
+Run it and see it fail. On `a = [5, -3, 2]` with budget $4$, the A2 loop finds length $2$, but the honest answer is $3$ — the whole array sums to $4$:
+
+```{python}
+#| label: arr-sw-a5-demo
+# A2's window, copied: correct only when every a[i] >= 0
+def longest_sum_le_window(a, budget):
+    l = s = best = 0
+    for r, x in enumerate(a):
+        s += x
+        while s > budget and l <= r:  # l <= r: never shrink past an empty window
+            s -= a[l]
+            l += 1
+        best = max(best, r - l + 1)
+    return best
+
+def longest_sum_le_any(a, budget):    # honest O(n^2): works with negatives too
+    best = 0
+    for i in range(len(a)):
+        s = 0
+        for j in range(i, len(a)):
+            s += a[j]
+            if s <= budget:
+                best = max(best, j - i + 1)
+    return best
+
+a5 = [5, -3, 2]
+assert longest_sum_le_window(a5, 4) == 2     # the window undershoots
+assert longest_sum_le_any(a5, 4) == 3        # the whole array is legal (sum 4)
+# the shortest-window loop fails too: [5, -10, 6] has [6], length 1, but the loop never logs
+assert shortest_sum_ge([5, -10, 6], 6) == 0 and shortest_sum_ge_brute([5, -10, 6], 6) == 1
+
+# The correct fallback for "count subarrays summing to exactly t" with negatives:
+def count_sum_target_prefix(a, t):
+    seen = Counter([0])
+    s = c = 0
+    for x in a:
+        s += x
+        c += seen[s - t]              # earlier prefixes equal to (s - t)
+        seen[s] += 1
+    return c
+
+def count_sum_target_brute(a, t):
+    return sum(1 for i in range(len(a)) for j in range(i, len(a))
+               if sum(a[i:j + 1]) == t)
+
+for _ in range(300):
+    a = [random.randint(-5, 5) for _ in range(random.randint(1, 12))]
+    t = random.randint(-6, 9)
+    assert count_sum_target_prefix(a, t) == count_sum_target_brute(a, t)
+assert count_sum_target_prefix([1, -1, 1, -1, 1], 0) == 6
+print("a5 demo OK")
+```
+
+The asserts tell the story three times. The longest window answers $2$ where the truth is $3$: it evicted the $5$ at index $0$, and the $-3$ right behind it would have paid for it. The shortest window answers "none" on $[5, -10, 6]$: the window $[5, -10, 6]$ sums to $1$, it is not valid, so the loop never shrinks it and never sees that dropping the front two cells leaves $[6]$. The prefix-sum map never assumes anything about signs — it indexes *values of the running sum* — and gives the right count. It is @sec-pref-p2-a's tool:
+
+{{< include ../problems/lc-0560-subarray-sum-equals-k/card.qmd >}}
+
+The third failure is different in kind. "The maximum of every window of length $k$" is a fixed window, so the slide of A1 should apply — but a maximum cannot be *undone* when its cell leaves. The fix is a deque of candidates, already solved in @sec-lang:
+
+{{< include ../problems/lc-0239-sliding-window-maximum/card.qmd >}}
+
+The monotone deque gets a full treatment in the stack-and-queue part of the book. Keep the decision rule straight:
+
+- All entries non-negative, rule shrink-safe or grow-safe (sum $\le T$, sum $\ge T$, at most $k$ kinds, all distinct, at least $k$ copies) → **sliding window**, this chapter.
+- Negatives allowed, or an exact sum / exact count predicate → **prefix sums + hash map** (@sec-pref-hash), $O(n)$ time and $O(n)$ memory; for exact *integer counts* of a shrink-safe attribute, the at-most difference of @sec-sw-a4 also works.
+- Shortest subarray with sum $\ge T$ *with negatives* → prefix sums plus a monotone deque (LC 862), a later chapter.
+- Window **extrema** (min/max inside each window) → the **monotone deque**, not a running fold.
+
+::: {#fig-sw-a5-break}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def a5_draw(ax, p):
+    V.array(ax, p, [5, -3, 2],
+            colors={0: "red", 1: "indigo", 2: "indigo"},
+            pointers=[(1, "l", "indigo", "bottom"), (2, "r", "violet", "top")],
+            note="window answers 2; truth is 3")
+V.show(a5_draw)
+```
+
+On $a = [5, -3, 2]$ with budget $4$, the repair evicts index $0$ the instant the sum reads $5$. But the $-3$ behind it means the whole array sums to $4 \le 4$ and is legal at length $3$, while the window answers $2$. Once the rule is not shrink-safe, the left end you threw away may have been the answer's start, and the question belongs to prefix sums (@sec-pref).
+
+:::
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that say "use me", a boxed template with its invariant, and its complexity. Then two problems are solved completely: statement, the one key observation, brute force refined into the pattern, runnable Python stress-tested against brute force, matching C++, complexity, and edge cases. The last form of each problem carries a step board wherever the window visibly slides.
+
+## Pattern 1: Fixed-size windows {#sec-sw-p1}
+
+**Where we are.** The five patterns climb one idea at a time. The **fixed slide** (this pattern) keeps one running value over a window of constant length. **Longest valid window** (Pattern 2) lets the length vary and repairs the window from the left when a budget breaks. **Shortest valid window** (Pattern 3) keeps the same loop and moves the answer line inside the repair. **Counting windows** (Pattern 4) stops asking "how long?" and asks "how many?", with the `r - l + 1` batch and the at-most difference. **Windows with a frequency table** (Pattern 5) give the window a memory of *which* values it holds, for distinctness and mode conditions.
+
+**Recognise it.** The statement fixes the length: "subarray of length $k$", "exactly $k$ consecutive", "a window of size $k$". Or the answer is a sum over $k$ items taken from the two *ends*, whose leftover is one contiguous run of length $n-k$ (the complement tell). Constraints $n \le 10^5$–$10^6$ forbid $O(nk)$ re-summing but fit the $O(n)$ slide.
+
+::: {.callout-important title="Template"}
+Build once, then swap one term per step.
+
+```text
+cur = fold(a[0..k-1]); best = cur
+for l in 1 .. n-k:
+    cur += a[l+k-1] - a[l-1]         # add enterer, drop leaver
+    best = better(best, cur)
+```
+
+**Invariant.** `cur` equals the fold over `a[l .. l+k-1]` at every step; `best` is the extremum over all windows seen.
+:::
+
+**Complexity.** $O(n)$ time, $O(1)$ space (one running value), or $O(k)$ once the window carries a table (@sec-sw-p5-a). No sortedness or sign condition is needed — the fixed length *is* the structure — but the fold must be undoable (A1).
+
+::: {#fig-sw-anim-fixed}
+
+```{python}
+#| echo: false
+fx_nums, fx_k = [2, 1, 5, 1, 3, 2], 3
+fx_frames = []
+cur = sum(fx_nums[:fx_k]); best = cur
+fx_frames.append((0, cur, best))
+for l in range(1, len(fx_nums) - fx_k + 1):
+    r = l + fx_k - 1
+    cur = cur - fx_nums[l - 1] + fx_nums[r]
+    best = max(best, cur)
+    fx_frames.append((l, cur, best))
+assert [c for _, c, _ in fx_frames] == [8, 7, 9, 6] and fx_frames[-1][2] == 9
+assert fixed_max_sum(fx_nums, fx_k) == 9
+
+def fx_frame(ax, p, t):
+    l, cur, best = fx_frames[t]
+    r = l + fx_k - 1
+    cols = {j: "muted" for j in range(len(fx_nums)) if not (l <= j <= r)}
+    cols.update({j: "indigo" for j in range(l, r + 1)})
+    if t > 0:
+        cols[l - 1] = "amber"; cols[r] = "green"   # the leaver just left, the enterer just came
+    V.array(ax, p, fx_nums, colors=cols,
+            pointers=[(l, "l", "indigo", "bottom"), (r, "r", "violet", "top")],
+            note=f"window [{l}..{r}] sum {cur}; best so far {best}")
+
+fx_caps = [f"window [0..{fx_k - 1}] built from scratch: sum {fx_frames[0][1]}"] + [
+    f"drop a[{l - 1}] = {fx_nums[l - 1]}, add a[{l + fx_k - 1}] = {fx_nums[l + fx_k - 1]}: sum {c}, best {b}"
+    for l, c, b in fx_frames[1:]]
+V.animate(fx_frame, len(fx_frames), captions=fx_caps, interval=1000)
+del cur, best, l, r                              # keep the chapter's namespace clean
+```
+
+A length-$3$ window over $[2, 1, 5, 1, 3, 2]$. The amber cell has just left, the green cell has just entered, and the sum changes by one subtraction and one addition per slide. The best window, $[5, 1, 3]$ with sum $9$, appears on the third frame.
+
+:::
+
+{{< include ../problems/lc-0643-maximum-average-subarray-i/problem.qmd >}}
+
+[**From a direct window to its complement.** Maximum Average slides over the length-$k$ window itself. Maximum Points wants the $k$ cards you *take* from the two ends — which is the total minus the cheapest contiguous run of the $n-k$ cards you *leave*, so the same slide runs on the middle and the arithmetic flips.]{.flow-bridge}
+
+{{< include ../problems/lc-1423-maximum-points-you-can-obtain-from-cards/problem.qmd >}}
+
+## Pattern 2: Longest valid window {#sec-sw-p2}
+
+**From a fixed length to a length you choose.** Pattern 1 never had to decide how long the window is. Here the length is the answer, so the window must stretch and snap back: widen to the right, shrink from the left only while a budget is broken, and record the length **after** the repair, when the window is valid and as wide as it can be at this right end. The one new idea is the repair `while` of @sec-sw-a2, licensed by a shrink-safe rule.
+
+**Recognise it.** "Longest / maximum-length contiguous subarray such that …" where the rule is shrink-safe: at most $k$ of something, sum within a budget (non-negative numbers), all distinct, max minus min within a bound. The tell is a *budget* the window may spend ($k$ zeros, $T$ minutes) and a request for the longest stretch that stays inside it.
+
+::: {.callout-important title="Template"}
+Grow wide; repair only when illegal; log after.
+
+```text
+l = 0
+for r in range(n):
+    add a[r] to state
+    while state violates the rule:
+        remove a[l]; l += 1
+    best = max(best, r - l + 1)       # valid here: the longest window ending at r
+```
+
+**Invariant.** After the `while`, `a[l..r]` is valid and is the *longest* valid window ending at `r` ($l = \ell^*(r)$, @eq-sw-lstar); `best` is the maximum over all right ends.
+:::
+
+**Complexity.** $O(n)$ amortised — `l` and `r` each move forward at most $n$ times in total — with $O(1)$ or $O(k)$ state. The shrink-safe rule is the entire licence; @sec-sw-a5 shows where it dies.
+
+::: {#fig-sw-anim-longest}
+
+```{python}
+#| echo: false
+p2_nums, p2_T = [2, 1, 3, 1, 1, 4, 1], 5
+p2_frames = []                          # (l, r, s, best, kind), kind: "evict" | "log"
+_p2_l = _p2_s = _p2_best = 0
+for _p2_r, _p2_x in enumerate(p2_nums):
+    _p2_s += _p2_x
+    while _p2_s > p2_T:                 # repair: l moves forward only
+        _p2_s -= p2_nums[_p2_l]
+        p2_frames.append((_p2_l, _p2_r, _p2_s, _p2_best, "evict"))
+        _p2_l += 1
+    _p2_best = max(_p2_best, _p2_r - _p2_l + 1)
+    p2_frames.append((_p2_l, _p2_r, _p2_s, _p2_best, "log"))
+del _p2_l, _p2_r, _p2_s, _p2_x, _p2_best
+assert len(p2_frames) == 12 and p2_frames[-1] == (5, 6, 5, 3, "log")
+assert longest_sum_le(p2_nums, p2_T) == 3
+assert [f[1] for f in p2_frames if f[4] == "evict"].count(5) == 2   # r = 5 needs two evictions
+
+def p2_frame(ax, p, k):
+    l, r, s, best, kind = p2_frames[k]
+    lo = l + 1 if kind == "evict" else l
+    cols = {j: "muted" for j in range(len(p2_nums)) if j < lo or j > r}
+    cols.update({j: "green" if kind == "log" else "indigo" for j in range(lo, r + 1)})
+    if kind == "evict":
+        cols[l] = "red"
+    V.array(ax, p, p2_nums, colors=cols,
+            pointers=[(lo, "l", "indigo", "bottom"), (r, "r", "violet", "top")],
+            note=f"s = {s}; best = {best}")
+
+p2_caps = [(f"r={r}: over budget -> evict a[{l}] = {p2_nums[l]}; s = {s}" if kind == "evict"
+            else f"r={r}: window [{l}..{r}] valid (s = {s}) -> best = {best}")
+           for l, r, s, best, kind in p2_frames]
+V.animate(p2_frame, len(p2_frames), captions=p2_caps, interval=1100)
+```
+
+The longest-window loop over $[2, 1, 3, 1, 1, 4, 1]$ with budget $5$. The window widens while the sum allows and evicts red cells when it does not; at $r = 5$ the entering $4$ forces **two** evictions in one repair, which is why the repair is a `while` and not an `if`. `best` is logged **after** every repair and ends at $3$ (the window $[1, 3, 1]$).
+
+:::
+
+{{< include ../problems/lc-1004-max-consecutive-ones-iii/problem.qmd >}}
+
+[**From a count budget to a sum budget.** Max Consecutive Ones III spends a budget of `k` *zeros*. CF Books spends a budget of `T` *minutes* on a run of positive reading times — the same window, the same record-after-shrink, with the zero counter swapped for a running sum, and positivity now doing the work that "a cell is 0 or 1" did before.]{.flow-bridge}
+
+{{< include ../problems/cf-279b-books/problem.qmd >}}
+
+## Pattern 3: Shortest valid window {#sec-sw-p3}
+
+**From the widest valid window to the narrowest.** Pattern 2's rule got *harder* as the window grew, so the best window at each right end was the widest one. Flip the rule so it gets *easier* as the window grows — "sum at least target", "contains every required value" — and the best window at each right end is the narrowest. The loop is the same; the one new idea is the answer line moving **inside** the repair `while` (@sec-sw-a3): grow the right until the window becomes valid, then, **while it is still valid**, record its length and pull the left in.
+
+**Recognise it.** "Minimum / shortest contiguous subarray such that …" with a grow-safe rule (sum at least target with non-negative numbers, contains all required characters, covers a set). The tell is a *threshold* the window must reach and a request for the fewest cells that reach it. A second tell is a "fewest removals from the ends" question, which becomes a longest middle window (@sec-sw-p3-b).
+
+::: {.callout-important title="Template"}
+Reach validity; log while valid; shrink through it.
+
+```text
+l = 0; best = +inf
+for r in range(n):
+    add a[r] to state
+    while state satisfies the rule:
+        best = min(best, r - l + 1)       # INSIDE: valid now, try shorter
+        remove a[l]; l += 1
+```
+
+**Invariant.** Every time the `while` body runs, `a[l..r]` is valid and `best` absorbs its length; the loop exits by breaking validity, so the shortest valid window ending at `r` was logged on the last pass.
+:::
+
+**Complexity.** $O(n)$ amortised, $O(1)$ state; seed `best` at $+\infty$ and translate "never reached" into the required sentinel ($0$ or $-1$). The mirror of @sec-sw-p2 — same skeleton, opposite answer side.
+
+::: {#fig-sw-anim-shortest}
+
+```{python}
+#| echo: false
+p3_nums, p3_target = [3, 1, 1, 4, 2, 2], 6
+p3_frames = []                          # (l, r, s, best, kind), kind: "wait" | "log"
+_p3_l = _p3_s = 0
+_p3_best = math.inf
+for _p3_r, _p3_x in enumerate(p3_nums):
+    _p3_s += _p3_x
+    if _p3_s < p3_target:
+        p3_frames.append((_p3_l, _p3_r, _p3_s, _p3_best, "wait"))
+    while _p3_s >= p3_target:           # valid -> log, then shrink past it
+        _p3_best = min(_p3_best, _p3_r - _p3_l + 1)
+        p3_frames.append((_p3_l, _p3_r, _p3_s, _p3_best, "log"))
+        _p3_s -= p3_nums[_p3_l]
+        _p3_l += 1
+del _p3_l, _p3_r, _p3_s, _p3_x, _p3_best
+assert len(p3_frames) == 8 and p3_frames[-1] == (4, 5, 4, 2, "wait")
+assert shortest_sum_ge(p3_nums, p3_target) == 2
+
+def p3_frame(ax, p, k):
+    l, r, s, best, kind = p3_frames[k]
+    cols = {j: "muted" for j in range(len(p3_nums)) if j < l or j > r}
+    cols.update({j: "indigo" if kind == "wait" else "green" for j in range(l, r + 1)})
+    if kind == "log":
+        cols[l] = "amber"               # recorded now, evicted next
+    V.array(ax, p, p3_nums, colors=cols,
+            pointers=[(l, "l", "indigo", "bottom"), (r, "r", "violet", "top")],
+            note=f"s = {s}; best = {best if best != math.inf else '-'}")
+
+p3_caps = [(f"r={r}: s = {s} >= {p3_target} -> log len {r - l + 1} (best {best}), drop a[{l}]"
+            if kind == "log" else f"r={r}: s = {s} < {p3_target} -> grow")
+           for l, r, s, best, kind in p3_frames]
+V.animate(p3_frame, len(p3_frames), captions=p3_caps, interval=1000)
+```
+
+The shortest-window loop over $[3, 1, 1, 4, 2, 2]$ with target $6$. The window grows (indigo) until `s` reaches $6$, then logs **inside** the repair at every valid moment while `l` slips past — the amber cell is recorded and immediately evicted. At $r = 4$ two logs happen in one repair, the second catching $[4, 2]$, length $2$.
+
+:::
+
+{{< include ../problems/lc-0209-minimum-size-subarray-sum/problem.qmd >}}
+
+[**From a shortest direct window to a shortest complement.** Minimum Size Subarray Sum shrinks a window to the shortest run whose sum is *at least* the target. Minimum Operations to Reduce X inverts the picture: minimise the removed ends, which is maximise the untouched middle — so a *longest* exact-sum window (Pattern 2's placement) on the complement answers a *shortest* removal question.]{.flow-bridge}
+
+{{< include ../problems/lc-1658-minimum-operations-to-reduce-x-to-zero/problem.qmd >}}
+
+## Pattern 4: Counting windows {#sec-sw-p4}
+
+**From the best window to all of them.** Patterns 2 and 3 kept one number, the best length. Counting asks how many windows are valid, and the one new idea is that the window invariant already *lists* them: after the repair, `l..r` are exactly the valid left ends for this `r` (Fact 1 of @sec-sw-a2), so the count for this `r` is `r - l + 1`. When the rule is "exactly $k$", the valid left ends are a band rather than a suffix, and the count becomes the difference of two at-most counts (@sec-sw-a4).
+
+**Recognise it.** "**Count** / how many contiguous subarrays satisfy …". If the rule is an inequality on shrink-safe state (product below $k$, sum at most $T$, at most $k$ kinds) use the batch directly; if it is an *exact* count (exactly $k$ distinct, exactly $k$ odd numbers) use at-most minus at-most. Answers are up to $\binom{n+1}{2}$, so check whether the total fits 32 bits (@sec-arr-cost).
+
+::: {.callout-important title="Template"}
+Two shapes, one loop skeleton.
+
+```text
+# batch: after the repair, every left end in [l..r] is valid for this r
+count += r - l + 1
+
+# exact via at-most
+exactly(k) = at_most(k) - at_most(k - 1)
+```
+
+**Invariant.** Batch: after the repair, `l..r` are *exactly* the valid left ends for `r`, so the valid subarrays ending at `r` number `r - l + 1`. Difference: each `at_most(K)` is itself a batch count of a shrink-safe rule, and the windows with exactly $k$ are those counted by the first and not the second.
+:::
+
+**Complexity.** $O(n)$ per window; the difference costs two passes. Accumulate in 64 bits whenever $\binom{n+1}{2}$ can pass $2^{31}$.
+
+::: {#fig-sw-band}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+bd_nums, bd_k, bd_r = [1, 2, 1, 2, 3], 2, 4
+
+def least_left(nums, r, cap):            # the window's l after the repair, for at-most-cap distinct
+    return min(l for l in range(r + 2) if len(set(nums[l:r + 1])) <= cap)
+
+bd_lo, bd_hi = least_left(bd_nums, bd_r, bd_k), least_left(bd_nums, bd_r, bd_k - 1)
+bd_exact = [l for l in range(bd_r + 1) if len(set(bd_nums[l:bd_r + 1])) == bd_k]
+assert (bd_lo, bd_hi) == (3, 4) and bd_exact == list(range(bd_lo, bd_hi))
+
+
+def draw(ax, p):
+    cols = {j: "muted" for j in range(bd_lo)}
+    cols.update({j: "green" for j in range(bd_lo, bd_hi)})
+    cols.update({j: "amber" for j in range(bd_hi, bd_r + 1)})
+    V.array(ax, p, bd_nums, colors=cols,
+            regions=[(bd_lo, bd_r + 1, "cyan", "at most 2: starts 3..4")],
+            pointers=[(bd_lo, "l2", "green", "bottom"), (bd_hi, "l1", "amber", "top")],
+            note="exactly 2 = (r - l2 + 1) - (r - l1 + 1) = 2 - 1 = 1")
+V.show(draw)
+```
+
+"Exactly $k$" as a band, at $r = 4$ over $[1, 2, 1, 2, 3]$ with $k = 2$. The at-most-2 window starts at `l2 = 3`, the at-most-1 window at `l1 = 4`. Grey starts give too many distinct values, amber gives too few, and only the green band between the two left ends gives exactly two. Each left end moves forward on its own, so two ordinary at-most windows count the band at every $r$.
+
+:::
+
+{{< include ../problems/lc-0713-subarray-product-less-than-k/problem.qmd >}}
+
+[**From an inequality that batches to an equality that must subtract.** Subarray Product Less Than K counts a shrink-safe rule and banks `r - l + 1` at once. Subarrays with K Different Integers wants an *exact* count, whose valid starts form a band (@fig-sw-band) — so it becomes the difference of two at-most windows, each still banking `r - l + 1`.]{.flow-bridge}
+
+{{< include ../problems/lc-0992-subarrays-with-k-different-integers/problem.qmd >}}
+
+## Pattern 5: Windows with a frequency table {#sec-sw-p5}
+
+**From one number of state to a table.** Every window so far was described by a single number — a sum, a zero count, a product. Distinctness and mode conditions need more: *which* values are inside, and how many of each. The one new idea is to let the window own a **frequency table** (a hash map from value to count, @sec-hash) and update it on both ends — decrement the leaver, increment the enterer — exactly like A1's slide, but carrying a table. @sec-sw-p4-b already used one; this pattern makes it the main character.
+
+**Recognise it.** "All distinct", "no repeats", "at least $k$ copies of the maximum", "most frequent element", anything whose validity depends on *which* and *how many* values are in the window rather than on one scalar. A fixed version slides over length-$k$ windows (@sec-sw-p5-a); a counting version batches with `n - r` (@sec-sw-p5-b). When only one value matters, the table shrinks to a single counter.
+
+::: {.callout-important title="Template"}
+A window with memory.
+
+```text
+on enter v:  freq[v] += 1
+on leave v:  freq[v] -= 1; if freq[v] == 0: erase v
+read validity off the table: len(freq) == k (all distinct), freq[m] >= k, ...
+```
+
+**Invariant.** `freq` mirrors exactly the multiset of the current window; every validity test is an $O(1)$ read of that mirror (or of a counter such as `len(freq)` or `dups` kept beside it), so the window slides without re-scanning its contents.
+:::
+
+**Complexity.** $O(n)$ expected time (each element enters and leaves the table once; hash operations are expected $O(1)$), and space for at most one key per value in the window. With small values (letters, values up to $10^6$) a plain array replaces the hash map and the bound becomes worst-case. Forgetting to erase a zero-count key corrupts `len(freq)` — the shared trap of @sec-sw-p4-b and @sec-sw-p5-a.
+
+::: {#fig-sw-anim-freq}
+
+```{python}
+#| echo: false
+p5_nums, p5_k = [1, 5, 1, 4, 2, 2], 3
+p5_frames = []                          # (l, freq, cur, clean, best)
+_p5_best = 0
+for _p5_l in range(len(p5_nums) - p5_k + 1):
+    if _p5_l == 0:
+        _p5_win, _p5_cur = Counter(p5_nums[:p5_k]), sum(p5_nums[:p5_k])
+    else:
+        _p5_win[p5_nums[_p5_l - 1]] -= 1
+        if _p5_win[p5_nums[_p5_l - 1]] == 0:
+            del _p5_win[p5_nums[_p5_l - 1]]     # erase at zero, or len lies
+        _e = p5_nums[_p5_l + p5_k - 1]
+        _p5_win[_e] = _p5_win.get(_e, 0) + 1
+        _p5_cur += p5_nums[_p5_l + p5_k - 1] - p5_nums[_p5_l - 1]
+    _p5_clean = len(_p5_win) == p5_k
+    if _p5_clean:
+        _p5_best = max(_p5_best, _p5_cur)
+    p5_frames.append((_p5_l, dict(sorted(_p5_win.items())), _p5_cur, _p5_clean, _p5_best))
+del _p5_l, _p5_win, _p5_cur, _p5_clean, _p5_best, _e
+assert len(p5_frames) == 4 and p5_frames[-1][4] == 10 and not p5_frames[0][3]
+
+def p5_frame(ax, p, k):
+    l, win, cur, clean, best = p5_frames[k]
+    r = l + p5_k - 1
+    cols = {j: "muted" for j in range(len(p5_nums)) if j < l or j > r}
+    for j in range(l, r + 1):
+        cols[j] = "green" if clean else ("red" if win[p5_nums[j]] > 1 else "indigo")
+    V.array(ax, p, p5_nums, colors=cols,
+            pointers=[(l, "l", "indigo", "bottom"), (r, "r", "violet", "top")],
+            note="freq " + ", ".join(f"{v}:{c}" for v, c in win.items()) + f"; best {best}")
+
+p5_caps = [(f"window [{l}..{l + p5_k - 1}]: all counts 1 -> sum {cur}, best {best}" if clean
+            else f"window [{l}..{l + p5_k - 1}]: a count exceeds 1 -> skip (sum {cur})")
+           for l, win, cur, clean, best in p5_frames]
+V.animate(p5_frame, len(p5_frames), captions=p5_caps, interval=1200)
+```
+
+The fixed slide with a table over $[1, 5, 1, 4, 2, 2]$, $k = 3$. The table flags the repeated $1$ red in the first frame; then $[5, 1, 4]$ is clean (every count $1$) and its sum $10$ wins, and the last window repeats $2$. Distinctness is an $O(1)$ *read* of the table, never a re-scan of the cells.
+
+:::
+
+{{< include ../problems/lc-2461-maximum-sum-of-distinct-subarrays-with-length-k/problem.qmd >}}
+
+[**From a distinct fixed window to a counting window over a mode.** Maximum Distinct Sum keeps a length-$k$ table and rewards only the all-unique windows. Count Subarrays Where Max Appears at Least K Times needs the count of just one value, so the table shrinks to one counter — and because "at least $k$ copies" is grow-safe, Pattern 4's counting returns in its mirror form, `n - r` valid right ends per left end.]{.flow-bridge}
+
+{{< include ../problems/lc-2962-count-subarrays-where-max-element-appears-at-least-k-times/problem.qmd >}}
+
+**Looking back.** One loop, five postures. The fixed slide (P1) keeps one undoable running value; the longest window (P2) grows wide and logs after the repair; the shortest (P3) logs inside it; counting (P4) banks `r - l + 1` or subtracts two at-most counts; the frequency table (P5) gives the window a memory so distinctness and mode tests stay $O(1)$. Under all five sits one fact from @sec-sw-a2: when the rule is shrink-safe (or grow-safe), the boundary of valid left ends only moves forward, so two forward-only fingers see everything that matters in $2n$ moves. Where that fact fails — negatives, exact sums, window extrema — the window hands off to prefix sums with a hash map (@sec-pref-hash) or to a monotone deque. The next chapter, @sec-srt, adds a step *before* the window: many "longest group of close values" problems become a plain window once the array is sorted.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Subarray of length exactly $k$" | Fixed-size slide (add enterer, drop leaver) | @sec-sw-p1, @sec-sw-a1 |
+| Take $k$ items from the two ends / remove ends to reach a value | Window on the complement (the kept middle) | @sec-sw-p1-b, @sec-sw-p3-b |
+| Longest stretch within a budget (at most $k$ zeros, sum $\le T$, at most $k$ kinds) | Longest valid window, log after the repair | @sec-sw-p2, @sec-sw-a2 |
+| Shortest subarray reaching a threshold (sum $\ge$ target, contains all of a set) | Shortest valid window, log inside the repair | @sec-sw-p3, @sec-sw-a3 |
+| Count subarrays with a shrink-safe rule (product $< k$, sum $\le T$) | Batch `r - l + 1` | @sec-sw-p4-a, @sec-sw-a4 |
+| Count subarrays with a grow-safe rule ("at least $k$ copies") | Batch `n - r` | @sec-sw-p5-b, @sec-sw-a4 |
+| Count subarrays with **exactly** $k$ (distinct values, odd numbers) | at-most-$k$ minus at-most-$(k-1)$ | @sec-sw-p4-b, @sec-sw-a4 |
+| All-distinct window, or a condition on counts of values | Window with a frequency table | @sec-sw-p5 |
+| Negatives, or "sum exactly $s$" | **Not a window** — prefix sums + hash map | @sec-sw-a5, @sec-pref-hash |
+| Min / max of every window | **Not a running fold** — monotone deque | @sec-sw-a5 |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Recording a shortest window's answer after the `while`.** For a *minimum* length you must log **inside** the repair, while the window is still valid; logging after it records a window that is no longer valid — on $[2, 3, 1, 2, 4, 3]$ with target $7$ it answers $1$ instead of $2$ (@sec-sw-a3). The reverse error — logging a *longest* window inside the repair — records windows that are over budget and can answer too long or too short.
+- **Moving `l` backwards.** Any `l -= 1`, or a jump `l = last[c] + 1` without the `max`, breaks the "boundary only moves forward" fact and with it either the $O(n)$ bound or correctness. If you feel you need to move back, the rule is probably not shrink-safe and the window is the wrong tool (@sec-sw-a2, @sec-sw-a5).
+- **Using the window on negatives or an exact-sum rule.** `while s > T` can evict a left end that was the start of the best window: `a = [5, -3, 2]` (budget $4$) makes the window answer $2$ where the truth is $3$. Switch to prefix sums (@sec-sw-a5, @sec-pref-hash).
+- **Leaving zero-count keys in the frequency table.** `len(freq)` is your distinct count; a stale `freq[v] == 0` entry over-counts distinct values and rejects good windows (@sec-sw-p4-b, @sec-sw-p5-a).
+- **The wrong seed for `best`.** A *longest* window seeds at $0$; a *shortest* seeds at $+\infty$ and translates "never reached" into the required sentinel; a maximum sum over windows of *any* sign seeds from the first real window, not $0$ (@sec-sw-p1-a); a "maximum sum over distinct windows, else 0" seeds at $0$ (@sec-sw-p5-a).
+- **`if` where the invariant needs `while`.** One entering element can force `l` past several leaving ones; a single-step `if` under-shrinks and keeps an invalid window (@fig-sw-anim-longest, @sec-sw-p2-a).
+- **Shrinking past an empty window.** With a budget that even the empty window breaks (a negative budget, `need < 0` in @sec-sw-p3-b, `K < 0` in @sec-sw-p4-b) the repair runs `l` past `r` and off the array. Guard with `l <= r` or reject the case before the loop.
+- **32-bit counts and sums.** LC 2962's answer reaches about $5\cdot10^9$ and LC 2461's window sum about $10^{10}$, both past a 32-bit `int`. Check every accumulator against @sec-arr-cost.
+- **Missing the complement.** Maximum Points and Minimum Operations are windows only after you look at what is *left over* — one contiguous middle. Miss it and you reach for a two-ended greedy that fails (@sec-sw-p1-b, @sec-sw-p3-b).
+:::
+
+## Exercises
+
+**1. [E] Trace the fixed slide of @sec-sw-a1 on $a = [3, -1, 4, 1, 5]$, $k = 3$: list each window's sum and the running `best`. Which single add/drop produced the answer?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Windows: $[3, -1, 4] = 6$, $[-1, 4, 1] = 4$, $[4, 1, 5] = 10$; `best` goes $6 \to 6 \to 10$. The last slide, from $[-1, 4, 1]$ (sum $4$), drops $a[1] = -1$ and adds $a[4] = 5$: $4 - (-1) + 5 = 10$. The two shared cells $4, 1$ were never re-summed (@sec-sw-a1).
+:::
+
+**2. [E] In @sec-sw-p1-b (Maximum Points), explain why the leftover cards are always one contiguous block, and what happens when $k = n$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+You only ever take from the two ends, so the untouched cards form one middle run: $i$ taken from the left and $k-i$ from the right leaves `cardPoints[i .. i+(n-k)-1]`. Maximising the taken sum is the same as taking the total minus the smallest length-$(n-k)$ window. When $k = n$ the middle has length $0$ and the answer is the total. The code returns it early for clarity; the general loop would also return it, because the empty window sums to $0$ and each "slide" adds and removes the same card (@sec-sw-p1-b).
+:::
+
+**3. [E] In @sec-sw-p2-a, why is `best` updated *after* the `while` and not inside it? Give an input where logging inside the repair answers too short, and one where it answers too long.**
+
+::: {.callout-note collapse="true" title="Solution"}
+After the repair the window is valid and is the longest valid window ending at `r`; inside the repair the window is still *over budget*. Too short: `nums = [1, 1, 1]`, $k = 0$ — no repair ever runs, so "inside" never logs and answers $0$ instead of $3$. Too long: `nums = [1, 0, 1, 1, 0, 1]`, $k = 1$ — at $r = 4$ the window $[0..4]$ holds two zeros and is logged with length $5$, but the true answer is $4$. Logging inside measures invalid windows, so it can be wrong in both directions (@sec-sw-a3).
+:::
+
+**4. [M] @sec-sw-p3-a records inside the `while`. Rewrite it to record *after* the `while` (like Pattern 2), run it on $[2, 3, 1, 2, 4, 3]$ with target $7$, and explain the answer you get.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`shortest_logged_after` in @sec-sw-a3 is that rewrite; it returns $1$, not $2$. At $r = 0$ the window $[2]$ sums to $2 < 7$, the `while` does not run, and the line after it logs length $1$ — a window that never reached the target. After the `while` the window is always *invalid* in this loop (that is how the `while` exits), so logging there measures the wrong thing every time. Longest windows are valid after the repair; shortest windows are valid during it (@sec-sw-a3).
+:::
+
+**5. [M] Prove `count += r - l + 1` in @sec-sw-p4-a: state why every left end in `l..r` is valid for this `r`, and why no left end before `l` is.**
+
+::: {.callout-note collapse="true" title="Solution"}
+After the repair, $\mathrm{prod}(l..r) < k$. For $i \in [l, r]$, $\mathrm{prod}(i..r)$ is $\mathrm{prod}(l..r)$ divided by the factors in front of $i$, each $\ge 1$, so it is $\le \mathrm{prod}(l..r) < k$: all $r-l+1$ left ends are valid. For $i < l$: the left end $i$ was evicted at some earlier right end $r' \le r$ because $\mathrm{prod}(i..r') \ge k$, and multiplying in more factors $\ge 1$ keeps $\mathrm{prod}(i..r) \ge k$. So the valid left ends for $r$ are exactly $l..r$ (@sec-sw-a2, @sec-sw-a4).
+:::
+
+**6. [M] In @sec-sw-p4-b, write a one-pass version that counts "exactly $k$" directly, and argue why at-most-minus-at-most is easier to get right. What does the same idea give for "at least $k$ distinct"?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Keep two left ends with two frequency tables: `l2`, the least start with at most $k$ distinct, and `l1`, the least start with at most $k-1$ distinct. Both only move forward (each is an ordinary at-most window), and for each `r` the starts with exactly $k$ are `l2 .. l1 - 1`, so add `l1 - l2` (@fig-sw-band). It is the two at-most windows run in lockstep — the same work, but two tables in one loop to keep in sync. Calling one tested `at_most` twice reuses a single, simple skeleton. For "at least $k$ distinct": total subarrays $\binom{n+1}{2}$ minus `at_most(k - 1)`, since "at least $k$" is the complement of "at most $k - 1$" (@sec-sw-a4).
+:::
+
+**7. [M] @sec-sw-p5-a rejects a window if any value repeats. Two ways to test that off the table: `len(freq) == k`, and a `dups` counter (the number of values with count $> 1$). Show the add/drop updates for `dups` and why erase-at-zero matters for the `len` version.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`dups`: on entering $v$, `if freq[v] == 1: dups += 1` (it is about to become a repeat), then `freq[v] += 1`; on leaving $v$, `if freq[v] == 2: dups -= 1`, then `freq[v] -= 1`. The window is clean iff `dups == 0`. The `len(freq)` version must **erase** $v$ when its count reaches $0$; otherwise a value that fully left still counts as a key, `len` can reach $k + 1$, and a clean window is rejected. Both tests are $O(1)$; `dups` cannot fall into the erase trap (@sec-sw-p5-a).
+:::
+
+**8. [M] @sec-sw-p5-b adds `n - r` while the max-count is at least `k`. Justify it, and say why the same batch is wrong for "the maximum appears **exactly** $k$ times".**
+
+::: {.callout-note collapse="true" title="Solution"}
+When `nums[l..r]` holds at least $k$ copies of $m$, every `nums[l..j]` with $j \ge r$ contains it, so it holds at least $k$ copies too: all $n - r$ right ends from $r$ to $n-1$ are good for start $l$. And $r$ is the *first* good end for $l$, because at $r - 1$ the loop had already moved past every start whose window was good there. For "exactly $k$" the rule is not grow-safe: a longer window can pick up a $(k+1)$-th copy and stop qualifying, so `n - r` over-counts. Exactly-$k$ falls to the at-most difference (@sec-sw-a4).
+:::
+
+**9. [M] For each, name window or prefix sums and give one reason: (a) longest subarray with sum $\le S$, positive numbers; (b) count subarrays with sum $= 0$, negatives allowed; (c) shortest subarray with sum $\ge$ target, positive numbers; (d) maximum of every window of length $k$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) **Window** — with non-negative numbers "sum $\le S$" is shrink-safe (@sec-sw-p2-b). (b) **Prefix sums + hash map** — negatives and an exact sum: no boundary to chase; count earlier prefixes equal to the current one (@sec-sw-a5, @sec-pref-hash). (c) **Window** — "sum $\ge$ target" is grow-safe with positive numbers, log inside the shrink (@sec-sw-p3-a). (d) **Neither a running fold nor prefix sums** — a maximum cannot be undone when it leaves; use the monotone deque (@sec-sw-a5). The question to ask every time: is validity preserved by shrinking, or by growing?
+:::
+
+**10. [H] @sec-sw-p3-b (Minimum Operations) computes `need = total - x`. Explain `need == 0` and `need < 0` in the removal story, and decide for each whether the early return is required for correctness or only for clarity.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`need < 0` means $x$ is more than the whole array: impossible, $-1$. The guard is **required**: every window has sum $\ge 0 >$ `need`, so `while s > need` shrinks past the empty window and reads beyond the array. `need == 0` means the kept middle is empty: remove all $n$ elements. Here the guard is only for clarity: each repair empties the window, `s == 0 == need` is then true with length $0$, `best` becomes $0$, and $n - 0 = n$ (@sec-sw-p3-b).
+:::
+
+**11. [H] The A5 copy of the longest-window loop has `while s > budget and l <= r`. Give an input where dropping `l <= r` crashes, and explain why the original A2 loop never needed it.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`a = [1]`, `budget = -1`. At $r = 0$, $s = 1 > -1$: evict, $l = 1$, $s = 0$. The window is now empty, but $0 > -1$ still, so without the guard the loop reads `a[1]` — an `IndexError`. The guard stops at the empty window ($l = r + 1$), whose length $0$ is the correct answer. A2 needs no guard because its numbers are non-negative and its budget is $\ge 0$: the empty window sums to $0 \le$ budget, so the repair always stops by then. The guard protects the case where even the empty window breaks the rule (@sec-sw-a2, @sec-sw-a5).
+:::
+
+**12. [H] Generalise @sec-sw-a4's identity. Using only an `at_most` window, count (a) subarrays with between $a$ and $b$ distinct values inclusive, and (b) subarrays of a 0/1 array with exactly $k$ ones. State the one property each relies on.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) `at_most(b) - at_most(a - 1)`. (b) `at_most_ones(k) - at_most_ones(k - 1)`, where `at_most_ones(K)` is the batch window for "at most $K$ ones" (with `at_most_ones(-1) = 0`). Both rely on the counted attribute being an integer that can only shrink when the window shrinks, so each "at most" rule is shrink-safe and `at_most(K)` is a cumulative count in $K$. A range of the attribute is then a difference of two cumulative counts — @sec-pref's range identity with $K$ as the index (@sec-sw-a4, @sec-sw-p4-b).
+:::
+
+**13. [M] Show that the greedy "take the larger end card each turn" fails for Maximum Points on `[2, 79, 80, 1, 1, 1, 200, 1]` with $k = 3$, and get the right answer from the complement window.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Greedy: $2$ vs $1$ → take $2$; $79$ vs $1$ → take $79$; $80$ vs $1$ → take $80$; total $161$. The total is $365$ and the kept middle has $8 - 3 = 5$ cards; the four middles are $[2, 79, 80, 1, 1] = 163$, $[79, 80, 1, 1, 1] = 162$, $[80, 1, 1, 1, 200] = 283$, $[1, 1, 1, 200, 1] = 204$. The smallest is $162$, so the answer is $365 - 162 = 203$: take $2$ from the left and $200, 1$ from the right. Greedy looks one card ahead; the complement window looks at all $k + 1$ splits (@sec-sw-p1-b).
+:::
+
+**14. [M] A circular array: the window may wrap from the end back to the start. How do you run the fixed slide of length $k \le n$ over all $n$ circular windows without copying the array?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Index modulo $n$. Build the first window from `a[0..k-1]`, then for $l = 1, \dots, n - 1$ do `cur += a[(l + k - 1) % n] - a[l - 1]`. That is $n$ windows, one per start, $O(n)$ time and $O(1)$ extra space. Copying the array twice (`a + a`) and sliding over the first $n$ starts is the same thing with $O(n)$ extra memory. CF 46C (Hamsters and Tigers) is this slide on a circle (@sec-sw-a1).
+:::
+
+**15. [H] Count subarrays of a non-negative array whose sum lies in $[lo, hi]$, in $O(n)$. Then explain what changes if negatives are allowed.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let `at_most(S)` be the batch window for "sum $\le S$": grow, shrink while the sum exceeds $S$ (stop at the empty window, so `at_most(S) = 0` for $S < 0$), add `r - l + 1`. With non-negative numbers the rule is shrink-safe, so the answer is `at_most(hi) - at_most(lo - 1)`, two $O(n)$ passes. With negatives the rule is not shrink-safe and neither count is a window; you need the prefix sums $P$ and, for each $r$, the number of earlier prefixes in $[P_r - hi, P_r - lo]$ — a sorted structure or merge sort, $O(n \log n)$ (@sec-sw-a4, @sec-sw-a5).
+:::
+
+**16. [H] Prove that the window loop of @sec-sw-p3-b finds the *longest* middle with sum exactly `need`, using only positivity.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Fix the right end $r$. With positive numbers, $\mathrm{sum}(i..r)$ strictly decreases as $i$ moves right, so at most one start $i^*$ gives exactly `need`. After the repair the loop's $l$ is the least start with $\mathrm{sum}(l..r) \le$ `need` (Facts 1 and 2 of @sec-sw-a2 for the shrink-safe rule "sum $\le$ need"). If $i^*$ exists, then $\mathrm{sum}(i^*..r) =$ `need`, so $l \le i^*$; and every start left of $i^*$ has a sum $>$ `need`, so $l \ge i^*$. Hence $l = i^*$ and the loop's `s == need` test sees it. Every exact-sum middle is checked at its own right end, so the maximum over $r$ is the longest one (@sec-sw-p3-b).
+:::
+
+## Interview questions
+
+**1. State the fixed-size window invariant and the one-line update. Why is it $O(n)$ and not $O(nk)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`cur` always equals the fold over the current length-$k$ window; the update is `cur += a[l+k-1] - a[l-1]` (add the enterer, drop the leaver). Consecutive windows share $k - 1$ cells, so each slide is two operations instead of a re-sum of $k$: $O(1)$ per step for $n - k + 1$ steps, plus $O(k)$ for the first window (@sec-sw-a1).
+:::
+
+**2. What is the grow–shrink loop's invariant, and what property of the rule makes `l` a forward-only finger?**
+
+::: {.callout-note collapse="true" title="Answer"}
+After the repair `while`, `a[l..r]` is valid and `l` is the least valid left end for `r`, so the window is the longest valid one ending at `r`. The property is **shrink-safety**: every sub-window of a valid window is valid. It gives two facts — the valid left ends for `r` form a suffix, and the least one never decreases as `r` grows — so `l` never needs to move back. Negatives or equality predicates destroy it (@sec-sw-a2, @sec-sw-a5).
+:::
+
+**3. Longest versus shortest window: where does the answer update in each, and why does it move?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Longest: **after** the `while`, because the rule is shrink-safe and the window is valid, and widest, exactly when the repair stops. Shortest: **inside** the `while`, because the rule is grow-safe — the window becomes valid by growing — and you must log each valid window before shrinking past it. The window is valid at a different instant in the two loops (@sec-sw-a3).
+:::
+
+**4. Count subarrays with product less than $k$ (positive numbers). Give the loop and the count update, and justify it.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Multiply in `a[r]`; `while prod >= k and l <= r: prod //= a[l]; l += 1`; then `count += r - l + 1`. After the shrink `a[l..r]` is the longest window ending at `r` with product $< k$, and positivity makes every shorter window ending at `r` smaller still, so all $r - l + 1$ of them qualify and none starting before `l` does (@sec-sw-p4-a).
+:::
+
+**5. Why can't a single batch count subarrays with exactly $k$ distinct values? What do you compute instead?**
+
+::: {.callout-note collapse="true" title="Answer"}
+For a fixed right end, starting too far left gives more than $k$ distinct values and too far right gives fewer, so the valid starts are a band in the middle, not a suffix, and `r - l + 1` cannot count them. "At most $K$" is shrink-safe, so compute $f(K)$ = number of subarrays with at most $K$ distinct by the batch window, and answer $f(k) - f(k - 1)$ (@sec-sw-a4, @fig-sw-band).
+:::
+
+**6. LC 209 (shortest sum $\ge$ target) needs positive entries. Concretely, what fails with a negative number?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The loop only shrinks while the window is valid, assuming that an invalid window cannot become valid by dropping its front. A negative front breaks that: on $[5, -10, 6]$ with target $6$, the window $[5, -10, 6]$ sums to $1$, so the loop never shrinks it and never finds $[6]$; it answers "none" while the truth is $1$. The fix is prefix sums plus a monotone deque (LC 862) (@sec-sw-a5).
+:::
+
+**7. LC 1658 (reduce $x$ to $0$): explain the complement inversion and why the answer is $n$ minus the longest middle.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Removing elements from the ends leaves one contiguous middle; the removed ends sum to $x$ exactly when the middle sums to `need = total - x`. Fewest removals means longest middle, so find the longest subarray with sum `need` — a window, because entries are positive — and return $n - \mathit{len}$, or $-1$ if none exists. `need < 0` must be rejected before the loop (@sec-sw-p3-b).
+:::
+
+**8. A window must answer "are all elements distinct?" in $O(1)$ per slide. What state do you keep and how do you update both ends?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A frequency table `freq`: on enter `freq[v] += 1`; on leave `freq[v] -= 1` and **erase** $v$ if its count reaches $0$. All distinct iff `len(freq)` equals the window size — an $O(1)$ read. A `dups` counter (values with count $> 1$) is an alternative that needs no erase (@sec-sw-p5-a).
+:::
+
+**9. When is the sliding window the wrong tool? Give three triggers and the replacement for each.**
+
+::: {.callout-note collapse="true" title="Answer"}
+(1) Negatives where a sum rule should be shrink-safe → prefix sums + hash map (@sec-pref-hash), or prefix sums + monotone deque for "shortest sum $\ge T$". (2) An exact-equality rule on sums ("sum $= s$" with negatives or zeros) → the prefix map; for exact integer counts of a shrink-safe attribute, the at-most difference (@sec-sw-a4). (3) A window aggregate that cannot be undone — min or max of each window → the monotone deque (LC 239). In one sentence: the window needs a rule whose valid starts form a suffix (or prefix) that moves forward; when that fails, another structure does the job (@sec-sw-a5).
+:::
+
+**10. LC 2962 (count where the max appears at least $k$ times): why `ans += n - r` and not `+= r - l + 1`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Both batch a count, but on different ends. "Contains at least $k$ maxima" is preserved by **growing** the window, so once `nums[l..r]` is good, every extension to the right is good — $n - r$ right ends for start `l` — and then `l` moves on. `r - l + 1` counts left ends and needs a rule preserved by **shrinking** (LC 713's product $< k$). Choose the batch by which extension keeps validity (@sec-sw-p5-b, @sec-sw-a4).
+:::
+
+**11. Contrast "longest window with sum $\le T$" with "maximum subarray sum (any length)". Why is the second not a sliding window?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The first has a budget, which makes validity shrink-safe (for non-negative numbers) and the answer a length. The second has no rule to repair against: with negatives the best subarray is found by Kadane's running maximum of "best sum ending here" (@sec-cx-p1-max-subarray), a one-pass DP, not by chasing a boundary. Windows answer "contiguous under a constraint"; unconstrained best sums are a different tool (@sec-sw-a5).
+:::
+
+**12. Give the amortised-$O(n)$ argument for the variable window in two sentences.**
+
+::: {.callout-note collapse="true" title="Answer"}
+`r` advances once per outer iteration, $n$ moves in total, and each pass of the `while` body advances `l` once, never backwards, so it too makes at most $n$ moves over the whole run. All work is $O(1)$ per pointer move, so the total is $O(2n) = O(n)$ even though one `r` may trigger many `l` steps (@sec-sw-a2, @sec-cx-loops).
+:::
+
+**13. In Longest Substring Without Repeating Characters, why is `left = last[c] + 1` wrong and `left = max(left, last[c] + 1)` right? Give a failing input.**
+
+::: {.callout-note collapse="true" title="Answer"}
+The last copy of `c` may already lie to the left of the window; jumping to it moves `left` backwards and lets an old repeat back in. On `"abba"`, at the final `a`, `last['a'] = 0` and the plain version sets `left = 1`, counting `"bba"` (length 3) as repeat-free; the true answer is 2. The `max` enforces "the left end never moves back", the fact the whole method rests on. `"tmmzuxt"` hides the same bug from random tests unless the generator repeats letters (@sec-test-p2-substring, @sec-sw-a2).
+:::
+
+**14. How would you test a sliding-window solution before submitting it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Write the $O(n^2)$ brute force that checks every subarray, and compare on thousands of random small arrays (@sec-testing). Make the values collide often (a tiny alphabet, values in $1..5$, budgets near the typical sum) so repairs, multi-step repairs and empty windows all happen, and add the edge cases by hand: $n = 1$, nothing valid, everything valid, $k = n$, the largest values for overflow. Every solved problem in this chapter is checked this way.
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Fixed slide:** build the first window, then `cur += a[l+k-1] - a[l-1]`, `best = better(best, cur)`; $O(n)$; any undoable fold; also on the *complement* window (@sec-sw-p1).
+- **Longest valid window (shrink-safe rule):** grow right; `while` invalid, drop `a[l]`; record `max(r - l + 1)` **after** the repair (@sec-sw-p2).
+- **Shortest valid window (grow-safe rule):** grow right; `while` valid, record `min(r - l + 1)` **inside**, then drop `a[l]` (@sec-sw-p3).
+- **Counting:** after the repair add `r - l + 1` (shrink-safe) or, while valid, add `n - r` per left end (grow-safe); exactly $k$ = at most $k$ minus at most $k - 1$ (@sec-sw-p4).
+- **Frequency table:** `freq[v] += 1` on enter, `-= 1` and erase at zero on leave; validity is an $O(1)$ read (@sec-sw-p5).
+- **Not a window:** negatives or exact sums → prefix sums + hash map; window min/max → monotone deque (@sec-sw-a5).
+:::
+
+- One loop, many answers: every variable window is A2's grow–shrink with the answer line placed by A3 (after = longest, inside = shortest) and the combine rule set by A4 (length, `r - l + 1`, `n - r`, or an at-most difference) (@sec-sw-a2, @sec-sw-a3, @sec-sw-a4).
+- The licence is shrink-safety (or grow-safety): it makes the valid left ends a suffix and the boundary move only forward, which is both the correctness proof and the $O(n)$ bound (@sec-sw-a2).
+- The nested `while` is amortised: each pointer makes at most $n$ moves in total, so the loop is $O(n)$ even though one step can do a lot (@sec-sw-a2, @sec-cx-loops).
+- The sliding window is the same-direction pointers of @sec-tp-count applied to contiguous ranges; its state is often @sec-hash's counting map, and its fallback is @sec-pref's prefix map (@sec-sw-why).
+- A table turns a one-number window into a general one: distinctness and mode conditions become $O(1)$ reads, provided zero counts are erased (@sec-sw-p5).
+- Complement inversions hide windows in two-ended problems: whenever moves remove from both ends, the untouched part is one contiguous window (@sec-sw-p1-b, @sec-sw-p3-b).
+- Bookkeeping kills more windows than logic: the seed of `best`, the sentinel for "never valid", erase-at-zero, the empty-window guard, and 64-bit accumulators (@sec-arr-cost).
+
+## Practice ladder
+
+Ordered by concept, following the five patterns: each group starts one step beyond a solved problem and adds one idea at a time.
+
+::: {.practice}
+- [CF 363B · Fence](https://codeforces.com/problemset/problem/363/B){rating="1100"} — the fixed slide hunting a minimum, reporting where the window starts.
+- [CF 1690D · Black and White Stripe](https://codeforces.com/problemset/problem/1690/D){rating="1000"} — slide a count of white cells over every length-$k$ window.
+- [LC 1456 · Maximum Number of Vowels in a Substring of Given Length](https://leetcode.com/problems/maximum-number-of-vowels-in-a-substring-of-given-length/){difficulty="Medium"} — a counting fold instead of a sum.
+- [CF 961B · Lecture Sleep](https://codeforces.com/problemset/problem/961/B){rating="1200"} — a base score plus the best fixed window of *extra* gain.
+- [LC 1052 · Grumpy Bookstore Owner](https://leetcode.com/problems/grumpy-bookstore-owner/){difficulty="Medium"} — the same base-plus-window split.
+- [CF 1692G · 2^Sort](https://codeforces.com/problemset/problem/1692/G){rating="1400"} — turn the condition into a 0/1 array first, then count good fixed windows.
+- [CF 1692E · Binary Deque](https://codeforces.com/problemset/problem/1692/E){rating="1200"} — remove from both ends: the complement is the longest middle with a given sum.
+- [LC 2516 · Take K of Each Character From Left and Right](https://leetcode.com/problems/take-k-of-each-character-from-left-and-right/){difficulty="Medium"} — the complement with a per-letter count budget.
+- [LC 1493 · Longest Subarray of 1's After Deleting One Element](https://leetcode.com/problems/longest-subarray-of-1s-after-deleting-one-element/){difficulty="Medium"} — the zero budget with $k = 1$.
+- [CF 660C · Hard Process](https://codeforces.com/problemset/problem/660/C){rating="1600"} — the zero budget, plus printing the best window.
+- [CF 676C · Vasya and String](https://codeforces.com/problemset/problem/676/C){rating="1500"} — the zero budget once for each of the two letters.
+- [LC 424 · Longest Repeating Character Replacement](https://leetcode.com/problems/longest-repeating-character-replacement/){difficulty="Medium"} — the budget is "cells that differ from the window's most common letter".
+- [CF 1873F · Money Trees](https://codeforces.com/problemset/problem/1873/F){rating="1300"} — a sum budget plus a rule that forces a restart.
+- [CF 602B · Approximating a Constant Range](https://codeforces.com/problemset/problem/602/B){rating="1400"} — longest window with max minus min at most 1, from a count table.
+- [CF 1354B · Ternary String](https://codeforces.com/problemset/problem/1354/B){rating="1200"} — the shortest window containing all three characters.
+- [CF 701C · They Are Everywhere](https://codeforces.com/problemset/problem/701/C){rating="1500"} — the shortest window containing every distinct value.
+- [LC 1234 · Replace the Substring for Balanced String](https://leetcode.com/problems/replace-the-substring-for-balanced-string/){difficulty="Medium"} — shortest window whose *outside* satisfies the rule.
+- [LC 76 · Minimum Window Substring](https://leetcode.com/problems/minimum-window-substring/){difficulty="Hard"} — shortest cover with a need/have table; the string chapters return to it.
+- [LC 2302 · Count Subarrays With Score Less Than K](https://leetcode.com/problems/count-subarrays-with-score-less-than-k/){difficulty="Hard"} — the `r - l + 1` batch for a sum-times-length score.
+- [CF 1736C1 · Good Subarrays (Easy Version)](https://codeforces.com/problemset/problem/1736/C1){rating="1300"} — a position-dependent rule that is still shrink-safe.
+- [LC 1248 · Count Number of Nice Subarrays](https://leetcode.com/problems/count-number-of-nice-subarrays/){difficulty="Medium"} — exactly $k$ odd numbers by the at-most difference.
+- [LC 930 · Binary Subarrays With Sum](https://leetcode.com/problems/binary-subarrays-with-sum/){difficulty="Medium"} — exact sum on 0/1 values: at-most difference or prefix map.
+- [CF 165C · Another Problem on Strings](https://codeforces.com/problemset/problem/165/C){rating="1600"} — exactly $k$ ones, including $k = 0$.
+- [LC 1695 · Maximum Erasure Value](https://leetcode.com/problems/maximum-erasure-value/){difficulty="Medium"} — the all-distinct table on a longest window, scored by sum.
+- [LC 438 · Find All Anagrams in a String](https://leetcode.com/problems/find-all-anagrams-in-a-string/){difficulty="Medium"} — a fixed window whose table must match a target table.
+- [LC 2841 · Maximum Sum of Almost Unique Subarray](https://leetcode.com/problems/maximum-sum-of-almost-unique-subarray/){difficulty="Medium"} — a fixed window needing at least $m$ distinct values.
+- [CF 616D · Longest k-Good Segment](https://codeforces.com/problemset/problem/616/D){rating="1600"} — longest window with at most $k$ distinct values, with fast input.
+- [LC 2958 · Length of Longest Subarray With at Most K Frequency](https://leetcode.com/problems/length-of-longest-subarray-with-at-most-k-frequency/){difficulty="Medium"} — the table on a longest window; only the entering value can break the rule.
+- [LC 1358 · Number of Substrings Containing All Three Characters](https://leetcode.com/problems/number-of-substrings-containing-all-three-characters/){difficulty="Medium"} — the `n - r` batch on a grow-safe rule.
+- [LC 2537 · Count the Number of Good Subarrays](https://leetcode.com/problems/count-the-number-of-good-subarrays/){difficulty="Medium"} — `n - r` again, with a pair count maintained from the table.
+- [LC 1838 · Frequency of the Most Frequent Element](https://leetcode.com/problems/frequency-of-the-most-frequent-element/){difficulty="Medium"} — sort first, then a sum-budget window: the bridge to @sec-srt.
+- [LC 862 · Shortest Subarray with Sum at Least K](https://leetcode.com/problems/shortest-subarray-with-sum-at-least-k/){difficulty="Hard"} — negatives: where the window ends and prefix sums with a monotone deque begin.
+:::
+
+## Further reading
+
+- [Competitive Programmer's Handbook (Laaksonen)](https://cses.fi/book/book.pdf) — chapter 8, "Amortized analysis": § 8.1 is the two pointers method with the subarray-sum example and the amortised bound of @sec-sw-a2; § 8.3 is the sliding window minimum that @sec-sw-a5 hands off to.
+- [USACO Guide — Two Pointers](https://usaco.guide/silver/two-pointers) — the same-direction two-pointer technique with graded contest problems; pairs with Patterns 2 and 3.
+- [USACO Guide — Sliding Window](https://usaco.guide/gold/sliding-window) — fixed windows with a data structure inside (sets, the monotone deque), the next step after @sec-sw-p5.
+- [CP-Algorithms — Minimum stack / Minimum queue](https://cp-algorithms.com/data_structures/stack_queue_modification.html) — how to keep the minimum of a queue in $O(1)$ amortised, which answers window minima: the case a running fold cannot handle.
+- [GeeksforGeeks — Sliding Window Technique](https://www.geeksforgeeks.org/dsa/window-sliding-technique/) — a beginner's walk through fixed and variable windows with many short worked examples, useful as a second explanation of @sec-sw-a1 and @sec-sw-a2.
+- [Wikipedia — Amortized analysis](https://en.wikipedia.org/wiki/Amortized_analysis) — the aggregate, accounting and potential methods; the aggregate method is exactly the "each pointer moves at most $n$ times" proof.
+- [Python `collections` documentation](https://docs.python.org/3/library/collections.html) — `Counter`, `defaultdict` and `deque`, the three containers this chapter's windows carry.

@@ -1,0 +1,584 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  8.3  Treaps, Split/Merge, Implicit Keys       sec:c06-treaps
+%  Exports: def:c06-treap  thm:c06-exptheight  def:c06-splitmerge
+%           lem:c06-mergevalid  prop:c06-implicit  fig:c06-splitfig
+%           lst:c06-treap  lst:c06-split  lst:c06-imp  ex:c06-treap-run
+%           prob:c06-rpmq  lst:c06-rpmq-soln   (practice: CSES 1190)
+% =====================================================================
+\section{Treaps, Split/Merge, Implicit Keys}\label{sec:c06-treaps}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item What single local move reshapes a BST without touching its inorder line? (The rotation,
+        \thmref{c06-rotation}.)
+  \item AVL keeps height $\le 1.44\,\lg(n+2)$ by enforcing what local rule, and how many rotations does
+        one insertion need? ($|\bal|\le1$ everywhere; $\le2$, \thmref{c06-fixheight},
+        \thmref{c06-avlbound}.)
+  \item Why does a \emph{random} insertion order into a plain BST give height $\bigO{\log n}$ in
+        expectation? (the random-BST fact we now reuse via a coin flip -- \secref{c05-insert-delete}.)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+AVL paid for its worst-case bound in \emph{case work}: four rebalancing shapes, a balance factor, a
+height field maintained by hand. The \term{treap} throws away the case work and keeps the guarantee by
+\emph{randomising}. Give every key an independent random priority; demand the tree be a BST on the keys
+\emph{and} a heap on the priorities. With distinct priorities there is exactly \emph{one} such tree --
+the Cartesian tree of the key/priority pairs -- and because the priorities are random, that tree is a
+\emph{random} BST, whose height is $\bigO{\log n}$ in expectation without you ever balancing anything
+(\thmref{c06-exptheight}). The real payoff is structural: a treap is maintained by just two universal
+routines, \texttt{split} and \texttt{merge} (\defref{c06-splitmerge}), from which insert, erase, rank,
+and range queries all fall out as one-liners -- no rotations, no four cases. Then the trick that makes
+this section worth a chapter: drop the explicit keys and use each node's \emph{subtree size} as its
+position (\propref{c06-implicit}). A treap becomes a dynamic sequence supporting insert/delete/reverse
+\emph{by index} in $\bigO{\log n}$ expected -- the machinery behind the implicit-treap solutions to
+sequence problems. We land on LeetCode 307, maintaining a mutable array's range sums with exactly this
+size-augmented split/merge.
+\textbf{Prerequisites.} \secref{c06-rotations}, \secref{c06-avl} (you should feel AVL's case work before
+we abolish it); Chapter~7 for the BST descent. Cartesian trees and the monotonic stack that builds them
+are \emph{not} developed here -- that is Chapter~9 (\chref{c26}); we only need that a random priority
+uniquely fixes a tree.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item build a treap from random priorities and explain why its height is $\bigO{\log n}$ expected; \hfill\lv{4}
+  \item implement \texttt{split} and \texttt{merge} and derive insert/erase/rank from them; \hfill\lv{4}
+  \item use an \emph{implicit-key} treap as a dynamic sequence (insert/delete/reverse by index); \hfill\lv{4}--\lv{5}
+  \item augment a treap with an aggregate (a sum) to answer range queries under point updates. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- you want a balanced tree with no rebalancing cases]
+\reckey{you need a \emph{customisable} balanced search tree (own the node, carry aggregates, cut/paste
+subtrees) but AVL's four-case bookkeeping is too much code, and the library \code{set} cannot be
+extended.}
+\recuse{
+  \item a keyed set/map with aggregate queries you must implement yourself -- treap with a size/sum field
+        (\defref{c06-treap});
+  \item operations on a \emph{sequence} by position -- insert/delete/reverse/concat a range -- implicit
+        treap (\propref{c06-implicit}, the LC 307 route \probref{c06-rpmq});
+  \item problems needing subtree \texttt{split}/\texttt{merge} as the primitive (rope editors, persistent
+        sequences) -- see \chref{c23} for the link-cut upgrade.
+}
+\recnotuse{
+  \item a plain ordered set/map suffices -- just use \code{std::set}/\code{map} (red-black,
+        \secref{c06-redblack}); no need to implement anything;
+  \item the array is \emph{fixed-size} with only point updates and prefix/range sums -- a Fenwick tree
+        (\chref{c14}) is far less code and fully deterministic;
+  \item you need a \emph{deterministic} worst-case height and randomness is disallowed (rare) -- AVL
+        (\secref{c06-avl}).
+}
+One-line test: \emph{do you need to reshape arbitrary subtrees (split/merge) or index by position, and
+would rather flip a coin than write rotation cases? Treap.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+A BST is determined by the \emph{order} keys arrive in; a treap is determined by an order you
+\emph{invent}. Attach to each key $k$ a random priority $p(k)$, and insist that the tree satisfy two
+rules at once: BST on the keys (so the inorder is sorted) and heap on the priorities (so the root has the
+best priority). These pin down a unique tree: the root must be the max-priority key, and it splits the
+remaining keys into a left and a right block that recurse identically. Now the miracle -- because the
+priorities are random, ``root is the max-priority key'' means the root is a \emph{uniformly random} key,
+so the treap is distributed exactly like a BST built by inserting keys in random order: balanced to
+depth $\bigO{\log n}$ in expectation (\thmref{c06-exptheight}). You get AVL's height without AVL's
+\emph{work}: nothing is ever rotated deliberately; you simply re-roll nothing and maintain the heap
+invariant, and randomness does the balancing.
+
+The second idea is the load-bearing one. To edit a treap you never rotate -- you \texttt{split} it at a
+key (or a position) into two treaps and \texttt{merge} two treaps whose keys are already all-comparable
+back into one. Insert becomes ``split at $x$, merge the left, a fresh node, and the right''; erase is
+``split around $x$, drop the middle, merge the rest.'' And if you index nodes not by a stored key but by
+their inorder \emph{position} (which $\mathit{size}(\mathit{left})$ gives you for free), the same two
+routines turn the treap into a dynamic array: cut out a range, paste it elsewhere, or -- with a lazy flag
+-- reverse it in place. That is \propref{c06-implicit}, the crown of this section.
+
+\begin{definition}{Treap = BST on keys, heap on random priorities}{c06-treap}
+Each node holds a key $k$ and a priority $p$ drawn independently at random (assume distinct, an event of
+probability $1$). The tree is a \term{treap} if it is a binary search tree on the $k$'s \emph{and} a
+max-heap on the $p$'s (every node's priority exceeds its children's). Given a set of distinct
+key/priority pairs there is \textbf{exactly one} treap: its root is the maximum-priority key, and its two
+subtrees are the treaps of the keys below and above it. Building it is the Cartesian-tree construction,
+which we take as a black box here (\chref{c26}).
+\end{definition}
+
+\noindent\textbf{In plain words.} Two orderings, one tree: sorted by key left-to-right, best-priority on
+top. The randomness that decides \emph{who becomes root} is the same randomness that makes the shape
+balanced -- you never touch it again.
+
+\begin{theorem}{A treap has height $\bigO{\log n}$ in expectation}{c06-exptheight}
+For $n$ keys with i.i.d.\ continuous priorities, the treap's height $H_n$ satisfies
+$\mathbb{E}[H_n] = \bigO{\log n}$ (and, in fact, $H_n \sim c\,\lg n$ with high probability).
+\end{theorem}
+\begin{proofbox}[Treap $\equiv$ random BST]
+The max-priority key is uniformly one of the $n$ keys, so it is the root with each rank equally likely;
+conditioned on the root being rank $K$, the left and right subtrees are treaps on $K-1$ and $n-K$ keys
+with independent random priorities. That is \emph{precisely} the recursion for a binary search tree built
+by inserting keys in uniformly random order (the first inserted -- here the max priority -- is the root).
+It is classical that a random BST has expected height $\bigO{\log n}$ (equivalently $\sim 4.311\,\ln n$):
+the depth of a fixed key is the number of its \emph{ancestors}, and a key is an ancestor of $x$ iff it is
+the first (highest priority) among the interval it spans, an event of probability $1/j$, so expected depth
+$= \sum_j 1/j = \bigO{\log n}$; a union/marked argument lifts this to the height. Since the treap and the
+random BST are the same distribution, so is their height. \end{proofbox}
+\begin{insightbox}
+This is the whole selling point: \emph{you do not balance a treap, you \textbf{sample} it.} There are no
+balance factors and no rotation cases -- insert and delete re-establish the heap property automatically
+through \texttt{split}/\texttt{merge} (\defref{c06-splitmerge}). The price is that the bound is
+\emph{expected}, not worst-case: an astronomically unlucky coin flip could give a tall tree. In contests a
+64-bit priority makes this risk nil; when you need a hard guarantee, pay AVL's case work instead.
+\end{insightbox}
+
+\subsection{The universal toolkit: split and merge}
+
+\begin{definition}{\texttt{split} and \texttt{merge}}{c06-splitmerge}
+\emph{$\texttt{merge}(a,b)$} --- precondition: every key of $a$ is less than every key of $b$ (both are
+treaps). It returns the treap on $a\cup b$: compare the roots' priorities; the winner becomes the root and
+recursively merges into its free (right/left) child, then updates aggregate fields.
+\emph{$\texttt{split}(t,k,a,b)$} --- cut treap $t$ into $a$ = keys $\le k$ (or first $k$ positions, in the
+implicit form) and $b$ = the rest, both treaps, by walking the search path for $k$ and re-threading.
+Both run down a single root-to-leaf path, hence expected $\bigO{\log n}$.
+\end{definition}
+
+\begin{lemma}{\texttt{merge} preserves the treap invariants}{c06-mergevalid}
+If $a$ and $b$ are treaps with $\max(a.\text{keys}) < \min(b.\text{keys})$, then $\texttt{merge}(a,b)$ is
+the unique treap on $a\cup b$: it stays a BST (all $a$ precede all $b$ in inorder) and a heap (the winner
+of the two root priorities is placed on top, and recursion applies the same rule). Dually,
+$\texttt{split}$ returns two valid treaps whose inorder is $t$'s inorder cut at the boundary.
+\end{lemma}
+\begin{proofbox}
+In $\texttt{merge}(a,b)$ suppose $a.\mathit{pri} > b.\mathit{pri}$ (max-heap). Then $a.\mathit{root}$ is the
+highest-priority key of $a\cup b$ (as it already beat all of $a$, and $b$'s top lost to it), so the heap
+rule forces it to be the treap's root; by the BST rule all $b$'s keys, being larger than every $a$-key,
+must lie in the right subtree, and $b$ attaches into $a.\mathit{root}$'s right -- the recursive
+$\texttt{merge}(a.\mathit{right}, b)$ is the identical problem one level down. Induction gives the full
+tree; the $\texttt{upd}$ of aggregate fields keeps sizes/sums correct. $\texttt{split}$ is the inverse
+re-threading along $k$'s search path: subtrees wholly below $k$ are handed to $a$, wholly above to $b$, and
+each handed-over pointer keeps a BST block intact and a heap subtree untouched. \end{proofbox}
+
+\begin{lstlisting}[caption={Treap node, aggregate update, and merge -- the two rules maintained by recursion, no rotations}, label={lst:c06-treap}]
+mt19937 rng(chrono::steady_clock::now().time_since_epoch().count());
+struct Node { int key, pri, sz; Node *l, *r;
+    Node(int k) : key(k), pri(rng()), sz(1), l(nullptr), r(nullptr) {} };
+
+int  SZ(Node* t) { return t ? t->sz : 0; }
+void upd(Node* t) { if (t) t->sz = 1 + SZ(t->l) + SZ(t->r); }
+
+// Precondition: every key in a < every key in b.
+Node* merge(Node* a, Node* b){
+    if (!a) return b;
+    if (!b) return a;
+    if (a->pri > b->pri) { a->r = merge(a->r, b); upd(a); return a; } // a's root is global max-pri
+    else                 { b->l = merge(a, b->l); upd(b); return b; }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Split by key (and its implicit by-position variant) -- cut a treap into two valid treaps}, label={lst:c06-split}]
+// a gets keys <= k, b gets keys > k.
+void splitKey(Node* t, int k, Node*& a, Node*& b){
+    if (!t) { a = b = nullptr; return; }
+    if (t->key <= k) { splitKey(t->r, k, t->r, b); a = t; upd(a); }  // t in a, its right splits
+    else             { splitKey(t->l, k, a, t->l); b = t; upd(b); }  // t in b, its left splits
+}
+// IMPLICIT split: a gets the first cnt positions (inorder), b the rest.
+void splitPos(Node* t, int cnt, Node*& a, Node*& b){
+    if (!t) { a = b = nullptr; return; }
+    if (SZ(t->l) >= cnt) { splitPos(t->l, cnt, a, t->l); b = t; upd(b); }
+    else                 { splitPos(t->r, cnt - SZ(t->l) - 1, t->r, b); a = t; upd(a); }
+}
+\end{lstlisting}
+
+\noindent Every keyed operation is two calls deep. \texttt{insert(x)}: split into $L,R$ with
+\texttt{splitKey(root,x,L,R)}, then merge $L$, a fresh node, and $R$. \texttt{erase(x)}: split out
+$\{x\}$ into its own treap and \texttt{merge} the two sides around it. \texttt{rank(x)}: split at $x$,
+read $\texttt{SZ}(L)$. All expected $\bigO{\log n}$, all rotation-free -- contrast the four cases of
+\coderef{c06-avlrot}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape]
+  % left: treap on 1..7 with lucky priorities = balanced twin
+  \node[troot] (r4) at (0,0)    {$4$};
+  \node[tnode] (r2) at (-1.6,-1.3) {$2$};
+  \node[tnode] (r6) at (1.6,-1.3)  {$6$};
+  \node[tleaf] (r1) at (-2.4,-2.6) {$1$};
+  \node[tleaf] (r3) at (-0.8,-2.6) {$3$};
+  \node[tleaf] (r5) at (0.8,-2.6)  {$5$};
+  \node[tleaf] (r7) at (2.4,-2.6)  {$7$};
+  \draw (r4) -- (r2); \draw (r4) -- (r6); \draw (r2) -- (r1); \draw (r2) -- (r3);
+  \draw (r6) -- (r5); \draw (r6) -- (r7);
+  \node[annot, align=left, font=\scriptsize] at (0,1.1) {treap on $1..7$ (max-pri root $4$)};
+  % arrow
+  \draw[flow, double] (3.6,-1.3) -- (5.0,-1.3) node[midway, above, font=\scriptsize] {splitPos(t,3)};
+  % right: a = {1,2,3}, b = {4,5,6,7}
+  \node[tnode] (a2) at (6.4,-0.4) {$2$};
+  \node[tleaf] (a1) at (5.6,-1.7) {$1$};
+  \node[tleaf] (a3) at (7.2,-1.7) {$3$};
+  \draw (a2) -- (a1); \draw (a2) -- (a3);
+  \node[annot, font=\scriptsize] at (6.4,0.4) {$a$ = first $3$};
+  \node[tnode] (b4) at (10.2,-0.4) {$4$};
+  \node[tnode] (b6) at (11.4,-1.7) {$6$};
+  \node[tleaf] (b5) at (10.6,-3.0) {$5$};
+  \node[tleaf] (b7) at (12.2,-3.0) {$7$};
+  \draw (b4) -- (b6); \draw (b6) -- (b5); \draw (b6) -- (b7);
+  \node[annot, align=left, font=\scriptsize] at (9.9,0.4) {$b$ = rest (positions $4..7$)};
+\end{tikzpicture}
+\caption{Implicit \texttt{splitPos} cuts a sequence-treap by \emph{position}, not value: splitting the
+treap at $\mathit{cnt}=3$ hands the first three inorder keys $\{1,2,3\}$ to $a$ and $\{4,5,6,7\}$ to $b$,
+each still a valid treap (\lemref{c06-mergevalid}). Merging $a$ and $b$ back restores the original -- so
+``delete a range'', ``paste after position $k$'', ``reverse $[l,r]$'' are all a split, a local edit, and a
+merge. This is the dynamic-array superpower of \propref{c06-implicit}.}\label{fig:c06-splitfig}
+\end{figure}
+
+\subsection{Implicit keys: the treap as a dynamic sequence}
+
+\begin{proposition}{Implicit keys make a treap a dynamic array}{c06-implicit}
+Suppose no key is stored, and a node's logical index is its inorder position, recovered as
+$\mathit{idx}(v)=\texttt{SZ}(v.l)$ at the root. Then $\texttt{splitPos}$ cuts the sequence at an
+\emph{index} and $\texttt{merge}$ concatenates two sequences, so a treap supports, each in expected
+$\bigO{\log n}$: insert at position, erase at position, extract/concat a range, and (with one lazy flag
+swapping children) reverse a range -- operations no keyed BST offers directly.
+\end{proposition}
+\begin{proofbox}
+With implicit indexing the BST rule is replaced by the invariant ``inorder = sequence order,'' which
+$\texttt{splitPos}$/ $\texttt{merge}$ maintain because they only ever re-thread along inorder boundaries
+($\texttt{merge}$ still requires one sequence to precede the other, which is exactly concatenation). The
+heap-on-priorities rule is untouched, so balance is still $\bigO{\log n}$ expected
+(\thmref{c06-exptheight}) regardless of the positions you edit. $\texttt{SZ}$ tells you, at any node, how
+many elements lie to its left, so a descent by count finds the $k$-th position in $\bigO{h}$. Reversing
+$[l,r]$ is: split to isolate the $r-l+1$ middle nodes, toggle a lazy ``reverse'' flag on its root (flip
+left/right children, mark children to be flipped on push), and merge back -- the flag makes it $\bigO{\log
+n}$ rather than touching every element. \end{proofbox}
+
+\begin{lstlisting}[caption={Implicit sequence treap -- insert/erase by position and a lazy range reverse (skeleton)}, label={lst:c06-imp}]
+struct Node { int pri, sz, val; bool rev; Node *l, *r; /* ... */ };
+void push(Node* t){                       // propagate a pending reverse before descending
+    if (t && t->rev){ swap(t->l, t->r);
+        if (t->l) t->l->rev ^= 1; if (t->r) t->r->rev ^= 1; t->rev = false; }
+}
+// every recursion (splitPos / merge / upd) calls push(t) first -- lazy reverse stays O(log n).
+Node* insert(Node* t, int pos, int val){  // insert val before current position pos
+    Node *a, *b; splitPos(t, pos, a, b);
+    return merge(merge(a, new Node(val)), b);
+}
+Node* erase(Node* t, int pos){            // delete the element at position pos
+    Node *a, *mid, *b; splitPos(t, pos, a, mid); splitPos(mid, 1, mid, b);
+    return merge(a, b);                   // mid is dropped
+}
+Node* reverse(Node* t, int lo, int hi){   // reverse positions [lo, hi)
+    Node *a, *m, *b; splitPos(t, hi, m, b); splitPos(m, lo, a, m);
+    if (m) m->rev ^= 1;                   // O(1) lazy flip on the isolated block
+    return merge(merge(a, m), b);
+}
+\end{lstlisting}
+
+\noindent\textbf{Lazy note.} The reverse flag is a one-line taste of \emph{lazy propagation}; its full
+theory (push/pull discipline, when aggregates survive a pending flip) is \chref{c15}. For LC 307 below we
+need no laziness -- only $\mathit{sum}$ augmentation, updated in the very same \texttt{upd} call that
+maintains $\mathit{sz}$.
+
+\subsection{Worked Example}
+
+\begin{example}{A lucky draw, a split, and a mutable range sum}{c06-treap-run}
+\emph{Treap on $C$.} Draw priorities so that key $4$ is the max, then $2$ the max of $\{1,2,3\}$ and $6$
+the max of $\{5,6,7\}$. The unique treap is exactly the balanced twin $4\to(2\to(1,3),\,6\to(5,7))$ of
+\figref{c06-chain} -- but AVL had to \emph{rotate four times} to reach it (\exref{c06-avl-run}), whereas
+here the coin flip simply \emph{lands} there, and any other distinct-priority draw is also fine (still
+$\bigO{\log n}$ expected). No cases were inspected.\\
+\emph{Split/merge on the sequence.} Treat that treap as the sequence $[1,2,3,4,5,6,7]$.
+$\texttt{splitPos}(t,3)$ yields $a=[1,2,3]$ and $b=[4,5,6,7]$ (\figref{c06-splitfig}); inserting $99$ at
+position $1$ is $\texttt{merge}(a.\text{first }1,\ \text{node }99,\ \text{rest})$ giving
+$[1,99,2,3]\Vert[4,5,6,7]$; $\texttt{merge}(a,b)$ restores order.\\
+\emph{LC 307 micro-run} on $[1,3,5]$: build a treap with $\mathit{sum}$ fields (root sum $9$).
+$\texttt{sumRange}(0,2)$: split into $a=[]$, $\text{mid}=[1,3,5]$, $b=[]$; answer $\texttt{mid->sum}=9$;
+merge back. $\texttt{update}(1,2)$: split to isolate position $1$, set its value $3\to2$, $\texttt{upd}$
+recomputes sums ($\text{mid->sum}$ was $3$, node value $2$; the root sum becomes $1+2+5=8$); merge.
+$\texttt{sumRange}(0,2)$ now returns $8$ -- matching the official example.
+\end{example}
+
+\begin{tracebox}[One \texttt{update}(1,2) then \texttt{sumRange}(0,2) on the array $1,3,5$, by position]
+Start $[1,3,5]$, $\mathit{sz}=(3)$, root $\mathit{sum}=9$.\\
+\texttt{update(1,2)}: \texttt{splitPos(root,1, a, b)} $\Rightarrow$ $a=[1]$, $b=[3,5]$;
+\texttt{splitPos(b,1, mid, c)} $\Rightarrow$ $mid=[3]$, $c=[5]$; set $mid->val=2$, \texttt{upd}
+$\Rightarrow$ $mid$ sum $=2$; \texttt{root}=merge($a$,merge($mid$,$c$))$=[1,2,5]$, root sum $=8$.\\
+\texttt{sumRange(0,2)}: \texttt{splitPos(root,0, a, b)} $\Rightarrow$ $a=[]$, $b=[1,2,5]$;
+\texttt{splitPos(b,3, mid, c)} $\Rightarrow$ $mid=[1,2,5]$, $c=[]$; answer $=\texttt{mid->sum}=8$;
+merge back. \checkmark
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Min-heap vs max-heap priorities} is pure convention; just be consistent in
+        \texttt{merge}'s comparison. What matters is that the priority is independent of the key. \hfill\lv{4}
+  \item \textbf{Deterministic priorities from the key's hash} -- no RNG, still ``random enough'' and
+        reproducible; a common contest trick to avoid flaky \code{rand}. \hfill\lv{4}
+  \item \textbf{Persistent treap} -- since \texttt{split}/\texttt{merge} copy $\bigO{\log n}$ nodes along
+        the path, path-copying yields a \emph{functional} set/map with history. \hfill\lv{5}
+  \item \textbf{Splay instead of random} -- \secref{c06-splay} reaches $\bigO{\log n}$ amortised
+        \emph{deterministically} by rotating accessed nodes to the root, but without split/merge's clean
+        algebra. \hfill\lv{4}--\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c06-treaps-pitfalls}
+
+\begin{warningbox}[Trap 1 -- \texttt{merge} with overlapping key ranges]
+\lemref{c06-mergevalid}'s precondition ``all keys of $a$ $<$ all keys of $b$'' is a \emph{contract}. Merge
+two treaps that interleave and the BST rule silently breaks -- you lose or duplicate keys. In the implicit
+setting the contract is ``$a$'s whole sequence precedes $b$'s''; only use \texttt{merge} to concatenate in
+order.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2 -- forgetting \texttt{upd} after re-threading]
+Both \texttt{split} and \texttt{merge} change $\mathit{sz}$ (and $\mathit{sum}$, and any aggregate) on the
+path. Skip the \texttt{upd(t)} on the way back and sizes go stale -- the \emph{next} \texttt{splitPos}
+counts positions wrong and cuts mid-subtree. Update \emph{after} recursion, at the node you return, exactly
+as in \coderef{c06-treap} and \coderef{c06-split}.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- the implicit \texttt{splitPos} off-by-one]
+When the left subtree has $\texttt{SZ}(t.l) \ge \mathit{cnt}$ elements the cut lies inside $t.l$; otherwise
+you recurse into $t.r$ asking for $\mathit{cnt} - \texttt{SZ}(t.l) - 1$ (subtract the left block \emph{and}
+$t$ itself). A slipped $-1$ produces a range query that is one element long or short -- a \textbf{WA} that
+survives small hand-tests and fails hidden ones.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The anchor is LeetCode 307, the canonical ``mutable range sum'' -- chosen to be solved with the
+\emph{implicit treap} rather than the more common Fenwick/segment tree, so that split/merge and the
+$\mathit{sum}$ augmentation are exercised end to end. (A Fenwick tree \chref{c14} is the shorter,
+deterministic solution here; the point of doing it as a treap is to prove the toolkit generalises.)
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c06-rpmq}{Range Sum Query -- Mutable}{LeetCode 307}
+  {https://leetcode.com/problems/range-sum-query-mutable/}{LC Medium L3}
+  {implicit treap, split/merge by position, subtree-sum augmentation, point update and range query}
+
+\begin{problemstatement}[Range Sum Query -- Mutable]
+Implement a class \code{NumArray} over an integer array \code{nums} supporting two operations, called up
+to $3\cdot 10^{4}$ times on an array of length up to $3\cdot 10^{4}$ with values in $[-100,100]$:
+\texttt{update(index, val)} sets \code{nums[index]} to \code{val}, and \texttt{sumRange(left, right)}
+returns the sum of \code{nums[left..right]} (inclusive). Both should be $\bigO{\log n}$.\\
+\emph{Example:} \code{NumArray([1,3,5])}; \code{sumRange(0,2)} $=9$; \code{update(1,2)}; \code{sumRange(0,2)}
+$=8$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+Model the array as an implicit treap keyed by \emph{position}; each node carries its subtree $\mathit{sum}$.
+\peek{To sum positions $[\mathit{left},\mathit{right}]$, you want that block to be a single subtree so its
+stored $\mathit{sum}$ is the answer. Which two operations isolate a contiguous block of positions?}
+\nudge{Two \texttt{splitPos}: first cut at \code{left}, then cut the remainder at
+\code{right-left+1}. The middle treap \emph{is} the range; read \code{mid->sum}, then \texttt{merge} the
+three back. For \texttt{update}, isolate the one position as a size-$1$ treap and change its value.}
+\fullhint{Store \code{sum} and \code{sz}; \texttt{upd(t)} sets
+\code{sum = SM(l) + val + SM(r)} and \code{sz}. \texttt{sumRange}:
+\code{splitPos(root,left,a,b); splitPos(b,right-left+1,mid,c); ans=SM(mid);
+root=merge(a,merge(mid,c));}. \texttt{update}:
+\code{splitPos(root,index,a,b); splitPos(b,1,mid,c); mid->val=val; upd(mid);
+root=merge(a,merge(mid,c));}. Expected $\bigO{\log n}$ per call by \thmref{c06-exptheight}.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+We must maintain a sequence under point writes and answer contiguous-range sums, both fast. A plain array
+gives $\bigO{1}$ update but $\bigO{n}$ sum (or $\bigO{1}$ sum via prefix arrays but $\bigO{n}$ update when
+a value changes all downstream prefixes). We want $\bigO{\log n}$ for \emph{both}. The implicit treap fits
+because a range is a contiguous run of \emph{positions}, and \texttt{splitPos} isolates a position range
+into one subtree; if each node caches its subtree sum, the answer is that one cached value -- no traversal.
+Update is ``isolate the single position, rewrite it, fix sums on the way back up.''
+
+\solstep{Key Observations}
+\begin{observation}
+A subtree of an implicit treap corresponds to a \emph{contiguous slice} of the sequence, because inorder =
+sequence order. So caching $\mathit{sum}$ per node answers every range-sum-in-a-subtree instantly.
+\end{observation}
+\begin{observation}
+$\texttt{splitPos}(\cdot,\mathit{left})$ then $\texttt{splitPos}(\cdot,\mathit{right}-\mathit{left}+1)$
+cuts exactly $[\mathit{left},\mathit{right}]$ into the middle treap; merging the three pieces back restores
+the whole array. Point update is the same cut to width $1$.
+\end{observation}
+\begin{observation}
+Since priorities are random, the tree has expected height $\bigO{\log n}$ (\thmref{c06-exptheight}) and each
+split/merge walks one path -- so both operations are expected $\bigO{\log n}$ with \emph{no} balancing code
+and no lazy propagation (values, not ranges, change here).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Rebuild a prefix-sum array after every update.}
+{$\bigO{n}$ per update, and up to $3\cdot 10^{4}$ updates $\Rightarrow$ $\bigO{nq}\sim 9\cdot 10^{8}$,
+borderline \tle and against the $\bigO{\log n}$ goal. Prefix sums only pay off when updates are rare.}
+\deadend{Do it as a keyed treap with $\mathit{key}=\mathit{index}$.}
+{Works, but you must keep the indices as literal keys and they never renumber -- fine for \emph{this}
+problem since positions are fixed. The implicit (position) view is used here because it generalises to
+insert/erase/reverse, which the keyed view cannot do without re-keying every node.}
+\aha{Use an implicit treap keyed by subtree size; augment each node with $\mathit{sum}$. Range sum $=$ two
+splits + read middle sum + two merges; update $=$ split to width $1$, rewrite, merge back. All $\bigO{\log
+n}$ expected, all rotation-free.}
+\end{thinkbox}
+
+\solstep{Solution}
+Build the treap by merging nodes in order (each new element appended on the right), maintaining $\mathit{sz}$
+and $\mathit{sum}$ in a single \texttt{upd}. \texttt{update(index,val)}: split the root at $\mathit{index}$
+into $a,b$; split $b$ at $1$ into $mid,c$; set $mid$'s value to $\mathit{val}$ and \texttt{upd} it; reassemble
+\texttt{root=merge(a,merge(mid,c))}. \texttt{sumRange(left,right)}: split at $\mathit{left}$; split the tail
+at $\mathit{right}-\mathit{left}+1$; read \texttt{SM(mid)}; reassemble. Sums are $\bigO{1}$ to read because
+every subtree is a contiguous slice (\thmref{c06-exptheight} keeps the pieces logarithmic in depth).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Sums are exact and positions are preserved]
+Invariant: for every node $t$, $\mathit{sz}(t)$ equals the number of sequence elements in $t$'s subtree and
+$\mathit{sum}(t)$ equals the sum of their values, in inorder. \texttt{upd} establishes it from the children,
+and \texttt{merge}/\texttt{splitPos} call \texttt{upd} on exactly the re-threaded nodes (Trap~2), so the
+invariant holds after every operation; untouched subtrees keep correct fields by the induction hypothesis.
+Because inorder equals sequence order and \texttt{splitPos}(t,k,a,b) is defined to put the first $k$
+positions in the left result, after \texttt{splitPos(root,left,a,b)} and
+\texttt{splitPos(b,right-left+1,mid,c)} the treap $mid$'s inorder is \emph{precisely} the slice
+$\mathit{nums[left..right]}$ (a contiguous slice, so by the invariant its root's $\mathit{sum}$ is the sum of
+that slice). Thus the returned \texttt{SM(mid)} is the correct range sum; merging $a,mid,c$ back in that
+order restores the identical sequence (\lemref{c06-mergevalid}), leaving the structure ready for the next
+call. \texttt{update} isolates a width-$1$ $mid$ whose inorder is exactly $\mathit{nums[index]}$; rewriting
+its value and \texttt{upd}-ing makes every ancestor's $\mathit{sum}$ reflect the change, and re-merging
+restores the sequence. Hence all answers equal the array's true range sums. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Range Sum Query -- Mutable via an implicit, sum-augmented treap (LeetCode 307)}, label={lst:c06-rpmq-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+mt19937 rng(chrono::steady_clock::now().time_since_epoch().count());
+
+struct Node { int val, pri, sz, sum; Node *l, *r;
+    Node(int v) : val(v), pri(rng()), sz(1), sum(v), l(nullptr), r(nullptr) {} };
+int  SZ(Node* t){ return t ? t->sz : 0; }
+int  SM(Node* t){ return t ? t->sum : 0; }
+void upd(Node* t){ if(t){ t->sz = 1+SZ(t->l)+SZ(t->r); t->sum = SM(t->l)+t->val+SM(t->r); } }
+
+Node* merge(Node* a, Node* b){
+    if(!a) return b; if(!b) return a;
+    if(a->pri > b->pri){ a->r = merge(a->r, b); upd(a); return a; }
+    else               { b->l = merge(a, b->l); upd(b); return b; }
+}
+void splitPos(Node* t, int cnt, Node*& a, Node*& b){   // a = first cnt positions
+    if(!t){ a=b=nullptr; return; }
+    if(SZ(t->l) >= cnt){ splitPos(t->l, cnt, a, t->l); b=t; upd(b); }
+    else               { splitPos(t->r, cnt-SZ(t->l)-1, t->r, b); a=t; upd(a); }
+}
+
+class NumArray {
+    Node* root = nullptr;
+public:
+    NumArray(vector<int>& nums){
+        for (int v : nums) { Node* t = new Node(v); root = merge(root, t); }
+    }
+    void update(int index, int val){
+        Node *a, *mid, *b;
+        splitPos(root, index, a, mid);
+        splitPos(mid, 1, mid, b);      // mid is exactly position index
+        mid->val = val; upd(mid);
+        root = merge(a, merge(mid, b));
+    }
+    int sumRange(int left, int right){
+        Node *a, *mid, *b;
+        splitPos(root, left, a, mid);
+        splitPos(mid, right-left+1, mid, b);   // mid is nums[left..right]
+        int res = SM(mid);
+        root = merge(a, merge(mid, b));
+        return res;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official example, array $1,3,5$]
+Constructor merges $[1]$, then $[1,3]$, then $[1,3,5]$; whichever becomes root, its $\mathit{sum}=9$.\\
+\texttt{sumRange(0,2)}: \texttt{splitPos(root,0, a, mid)} $\Rightarrow$ $a=\emptyset$, $mid=[1,3,5]$;
+\texttt{splitPos(mid,3, mid, b)} $\Rightarrow$ $mid=[1,3,5]$, $b=\emptyset$; $res=\mathit{SM}(mid)=9$;
+merge back. Returns $\boxed{9}$.\\
+\texttt{update(1,2)}: \texttt{splitPos(root,1, a, mid)} $\Rightarrow$ $a=[1]$, $mid=[3,5]$;
+\texttt{splitPos(mid,1, mid, b)} $\Rightarrow$ $mid=[3]$, $b=[5]$; $mid->val=2$, $mid->sum=2$;
+rebuild $[1,2,5]$ with root sum $8$.\\
+\texttt{sumRange(0,2)}: isolate $[1,2,5]$, $\mathit{SM}=8$, restore. Returns $\boxed{8}$. \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Build $\bigO{n\log n}$ expected ($n$ appends, each a $\bigO{\log n}$ merge); a tighter linear build via a
+Cartesian stack exists but is \chref{c26}'s tool. Each \texttt{update} and \texttt{sumRange} does two splits
+and two merges, each expected $\bigO{\log n}$ by \thmref{c06-exptheight}, so $\bigO{\log n}$ per call,
+$\bigO{q\log n}$ overall ($q\le 3\cdot 10^{4}$). Memory $\bigO{n}$ nodes. Deterministic rivals Fenwick
+\chref{c14} / segment tree \chref{c13} do the same $\bigO{\log n}$ with less code \emph{for this problem};
+the treap earns its keep the moment you also need insert/erase/reverse by position. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+(1) The $-1$ in \texttt{splitPos}(t->r, \texttt{cnt-SZ(t->l)-1}, ...) (Trap~3). (2) \texttt{upd} after every
+re-thread (Trap~2). (3) If a whole-array \texttt{sumRange} is queried often, reading the root's $\mathit{sum}$
+without splitting is a valid $\bigO{1}$ shortcut when $\mathit{left}=0,\mathit{right}=n-1$. \emph{Variants:}
+swap $\mathit{sum}$ for \emph{any} associative aggregate (min, max) to get range-min under updates; swap the
+values for the four-tuple $(\mathit{total},\mathit{pref},\mathit{suff},\mathit{best})$ and you have the
+max-subarray monoid -- exactly the CSES 1190 practice below.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \textbf{Randomise, don't rebalance.} Heap-ordered random priorities make the treap a random BST
+        with expected height $\bigO{\log n}$ -- no balance factors, no rotation cases (\thmref{c06-exptheight}).
+  \item \textbf{Split and merge are the whole algebra.} Insert, erase, rank, and range extraction are
+        two-line compositions (\defref{c06-splitmerge}, \lemref{c06-mergevalid}).
+  \item \textbf{Index by size, get a dynamic array.} Implicit keys turn the treap into a sequence with
+        insert/delete/reverse by position -- and sum-augmentation answers range queries instantly
+        (\propref{c06-implicit}, \probref{c06-rpmq}).
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Range reverse / rotate} a subarray by isolating it and toggling the lazy flag -- see the
+        lazy-propagation chapter \chref{c15} for discipline.
+  \item \textbf{Ordered statistics} -- keyed treap with $\mathit{sz}$ gives rank and select in $\bigO{\log n}$,
+        replacing a Fenwick over a \emph{dynamic} key set.
+  \item \textbf{Rope / editor buffers} -- concatenating and splitting sequences is \texttt{merge}/\texttt{split}
+        verbatim; this is why editors use treap-family trees.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you read the middle treap's cached aggregate \emph{without} descending into it? (A range should be
+        one subtree -- \thmref{c06-exptheight} keeps it shallow anyway.)
+  \item In \texttt{splitPos}, did you subtract the left block \emph{and} the node when going right? (Trap~3.)
+  \item After editing a value, did you \texttt{upd} the isolated node before re-merging? (Trap~2.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Subarray Sum Queries}{CSES 1190}
+    {https://cses.fi/problemset/task/1190}{CSES · L3}
+    {Point updates on an array; after each, print the maximum subarray sum (empty allowed, i.e.\ at least
+    $0$). An implicit treap where each node stores the monoid $(\mathit{total},\mathit{pref},\mathit{suff},
+    \mathit{best})$ answers the whole-array query as \texttt{root->best}; \texttt{merge} combines two
+    children's tuples in constant time, and an update is the LC 307 isolate-rewrite-merge. The same problem is
+    the classic segment-tree monoid application (\chref{c13}) -- solve it \emph{both} ways to feel why the
+    treap's split/merge is more flexible (you can also \emph{insert} positions, which a segment tree cannot).}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 8.3 Treaps, Split/Merge, Implicit Keys]
+A treap is a BST on keys and a heap on random priorities, hence uniquely determined and, being a random BST,
+of expected height $\bigO{\log n}$ (\defref{c06-treap}, \thmref{c06-exptheight}) -- balance by sampling, not
+rotating. Two rotation-free routines do everything: \texttt{merge} (needs all of $a$ before all of $b$) and
+\texttt{split} (\defref{c06-splitmerge}, \lemref{c06-mergevalid}); insert/erase/rank are one-liners over them.
+Index by subtree size instead of stored keys and the treap becomes a dynamic sequence -- insert, delete,
+reverse a range by position (\propref{c06-implicit}, \coderef{c06-imp}). Cache a $\mathit{sum}$ per node and
+range sums come free, which is LC 307 done the treap way (\probref{c06-rpmq}).
+\selftest{
+  \item Why is the treap on $n$ random priorities distributed like a random BST, and what height follows?
+  \item State \texttt{merge}'s precondition and what breaks if you violate it (Trap~1).
+  \item Give the split/merge recipe to isolate positions $[\mathit{lo},\mathit{hi})$ and reverse them in
+        $\bigO{\log n}$.
+  \item In LC 307, why can you read \texttt{mid->sum} without traversing $mid$?
+  \item Name a deterministic structure that solves LC 307 in less code, and one it \emph{cannot} extend to.
+}
+\end{recallbox}

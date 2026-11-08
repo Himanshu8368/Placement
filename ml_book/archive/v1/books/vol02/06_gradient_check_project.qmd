@@ -1,0 +1,90 @@
+---
+title: "Project: a gradient-checking harness"
+---
+
+# Project: a gradient-checking harness
+
+**Reference question.** How do you certify a derivative before you trust a training run?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Check | Compare an analytic gradient with a central difference on a tiny problem. |
+| Central | $\partial_j L(\theta) \approx (L(\theta + \varepsilon e_j) - L(\theta - \varepsilon e_j)) / (2\varepsilon)$. |
+| Relative gap | $\|g_a - g_n\| / (1 + \|g_a\|)$, not a raw difference. |
+| Where | On a one-example or tiny-batch problem in float64, with a deterministic loss. |
+| Not a proof | Agreement at one point does not prove the code is right at every point. |
+
+## Theory
+
+A training run can decrease a loss for the wrong reason, or fail because the gradient is transposed. The cheap insurance is a finite-difference check on a problem small enough that $d$ extra loss evaluations are irrelevant. Central differences cancel the even part of the Taylor error and are worth the extra evaluation.
+
+The harness belongs in the repository next to the model, and it should fail loudly. Relative error protects you when the gradient is large. You also test a point where the gradient is supposed to be zero, and a point where a constraint or a kink makes the classical gradient the wrong object. ReLU at exactly zero is a bad place to demand agreement unless you define the subgradient you implemented.
+
+This project is the template for every later model you write by hand. Library autodiff still deserves a check against a hand derivative on one layer, because the bug is often in the loss reduction, the mask, or the parameter you forgot to register.
+
+## Derivation
+
+Taylor expansion gives
+
+$$L(\theta + \varepsilon e_j) = L + \varepsilon g_j + \tfrac{1}{2}\varepsilon^2 H_{jj} + O(\varepsilon^3),$$
+
+$$L(\theta - \varepsilon e_j) = L - \varepsilon g_j + \tfrac{1}{2}\varepsilon^2 H_{jj} + O(\varepsilon^3).$$
+
+Subtract and divide by $2\varepsilon$: the constant and the second-order term cancel, and the leading error is $O(\varepsilon^2)$. Forward differences leave an $O(\varepsilon)$ error. That is why the experiment should show central differences winning as $\varepsilon$ decreases, until roundoff, which is about $\mathrm{eps}_{\mathrm{mach}} / \varepsilon$ in the subtraction, starts to grow.
+
+## Code
+
+```python
+import numpy as np
+
+def central_grad(loss, theta, eps=1e-6):
+    grad = np.zeros_like(theta, dtype=float)
+    for j in range(theta.size):
+        step = np.zeros_like(theta, dtype=float)
+        step[j] = eps
+        grad[j] = (loss(theta + step) - loss(theta - step)) / (2.0 * eps)
+    return grad
+
+def relative_gap(a, b):
+    return float(np.linalg.norm(a - b) / (1.0 + np.linalg.norm(a)))
+```
+
+## Experiment
+
+**Hypothesis.** For $L(\theta) = \lVert X\theta - y \rVert_2^2$, the relative gap between $2 X^\top (X\theta - y)$ and the central difference is smallest at a moderate $\varepsilon$ and worse for both very large and very small $\varepsilon$.
+
+**Protocol.** Use $n = 8$, $d = 3$, float64, and $\varepsilon \in \{10^{-2}, 10^{-4}, 10^{-6}, 10^{-8}\}$.
+
+**Metric.** Relative gap at each $\varepsilon$.
+
+**Decision rule.** $10^{-5}$ to $10^{-6}$ should be clearly better than $10^{-2}$. If every $\varepsilon$ is bad, the analytic formula is wrong. If only the smallest $\varepsilon$ is bad, you are seeing roundoff, and the formula may still be right.
+
+## Project
+
+**Deliverable.** A harness that registers several losses: a quadratic, least squares, and logistic loss on a linear logit (you may implement the logistic gradient from $\sigma(x^\top \theta) - y$ times $x$). The harness prints a table of relative gaps and exits with a nonzero status if any gap at $\varepsilon = 10^{-6}$ exceeds $10^{-6}$.
+
+**Constraints.** Include one deliberately wrong gradient and show that the harness catches it.
+
+**Rubric.** The command is one line, the table is saved, and the failure case is documented in the lab note.
+
+## Depth tracks
+
+**Beginner.** Check $L(\theta) = \theta_1^2 + 3\theta_2$ only.
+
+**University.** Complete the harness including the intentional bug.
+
+**Research.** Add a complex-step or a two-sided check on a matrix-shaped parameter using the Frobenius pairing, and document the kink you refuse to test with a classical gradient.
+
+## Failure modes
+
+- Testing in float32 and treating noise as a bug.
+- Checking only shapes, not values.
+- Disabling the harness in the training configuration and never turning it back on.
+
+## See also
+
+Volume 09, where this harness is the acceptance test for a hand-written backward pass.

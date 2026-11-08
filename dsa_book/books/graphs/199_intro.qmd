@@ -1,0 +1,1279 @@
+# Introduction to Graphs {#sec-gr}
+
+::: {.callout-note title="Sources"}
+**`graph_book` ch. 1** (five lessons, five patterns) · **CLRS** §22.1 (representations) · **CPH** ch. 11–12 · **CP-Algorithms** *Graph representations*, *Depth-first search*, *Breadth-first search*.
+
+**Coverage:** vertices and edges, simple and multi graphs, the handshake · walks, paths, cycles, components, trees, bipartite graphs, functional graphs · adjacency lists, matrices, and implicit neighbours · the first depth-first and breadth-first walks · a graph model written down before the code · degrees, reachability, grid flood fills, shortest paths on an implicit state graph, and cycles in a graph where every vertex has one outgoing arc.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Read a drawing as a set of pairs, and store those pairs so a later search is linear in the input.
+- Count degrees, and answer a question that is only a formula on those counts.
+- Mark a vertex when it is discovered, and know which vertices a source can reach.
+- Treat a grid cell, a number, or a lock code as a vertex whose neighbours are computed, not stored.
+- Follow a functional graph until the walk repeats, and read the cycle off the timestamps.
+:::
+
+```{python}
+#| include: false
+import random
+import sys
+from collections import deque
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import gr199_traces as Traces
+
+random.seed(0)
+
+G1 = [(1, 2), (1, 3), (2, 3), (3, 4), (4, 5), (4, 6), (5, 6)]
+G3 = [(1, 2), (1, 4), (2, 3), (2, 5), (4, 5), (5, 6)]
+
+
+def undirected(n, edges, one=True):
+    adj = [[] for _ in range(n + (1 if one else 0))]
+    for u, v in edges:
+        adj[u].append(v)
+        adj[v].append(u)
+    return adj
+```
+
+## Why this matters
+
+A graph is the right model whenever the input is "things, and a relation between them." A road joins two cities. A trust statement points from one person to another. A grid cell touches the cell beside it. A button press turns one number into another. Once the relation is a set of pairs, the same four tools answer most of the questions in this chapter: a degree counter, a search that marks vertices as they are discovered, a queue that measures distance in edges, and a walk that stops at the first repeated vertex.
+
+The drawing on a whiteboard is a picture of the graph. The graph itself is the pair $(V, E)$. Two drawings of the same pairs are the same graph.
+
+## Vertices and edges {#sec-gr-vert}
+
+$V$ is the set of vertices, $E$ the set of edges. An undirected edge $\{u, v\}$ is stored as the two arcs $(u, v)$ and $(v, u)$, because a walk may cross it either way. A directed edge is one arc. The phrases "u trusts v", "u points to v", "from room u you can enter room v", and "$a_i$ is next after $i$" are all arcs $u \to v$.
+
+A weight lives on the edge. The path with the fewest edges and the path with the smallest total weight can be different paths. On the sample below, $S \to B \to T$ uses two edges and weight $6$. $S \to A \to B \to T$ uses three edges and weight $4$.
+
+```{python}
+#| label: gr-weight
+W = {("S", "A"): 2, ("S", "B"): 5, ("A", "T"): 7, ("B", "T"): 1, ("A", "B"): 1}
+hop = W[("S", "B")] + W[("B", "T")]
+cheap = W[("S", "A")] + W[("A", "B")] + W[("B", "T")]
+assert (hop, cheap) == (6, 4)
+```
+
+::: {#fig-gr-weight}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "S": (0.0, 1.3, "S", "green"),
+        "A": (3.4, 2.6, "A", "indigo"),
+        "B": (3.4, 0.0, "B", "indigo"),
+        "T": (6.8, 1.3, "T", "amber"),
+    }, [("S", "A", "2"), ("S", "B", "5"), ("A", "B", "1"), ("A", "T", "7"), ("B", "T", "1")],
+       w=1.05, h=0.7)
+V.show(draw)
+```
+
+Five undirected edges. The two-edge route $S, B, T$ weighs $6$. The three-edge route $S, A, B, T$ weighs $4$.
+
+:::
+
+A **simple** graph has no self-loop and no second edge between the same pair. The detector normalises each undirected pair so the smaller endpoint comes first. A loop increments the loop count and is not inserted. A pair already present increments the parallel count.
+
+```{python}
+def classify(edges):
+    loops = parallel = 0
+    seen = set()
+    for u, v in edges:
+        if u > v:
+            u, v = v, u
+        if u == v:
+            loops += 1
+            continue
+        if (u, v) in seen:
+            parallel += 1
+        else:
+            seen.add((u, v))
+    return loops, parallel
+
+
+raw = [(1, 2), (2, 3), (3, 2), (3, 3), (3, 4), (4, 1)]
+assert classify(raw) == (1, 1)
+assert classify(G1) == (0, 0)
+```
+
+## Vocabulary {#sec-gr-vocab}
+
+The **degree** of $v$ is the number of edge ends at $v$. On an undirected simple graph the handshaking lemma says
+
+$$
+\sum_{v \in V} \deg(v) = 2|E|.
+$$ {#eq-gr-handshake}
+
+The left side is even, so the number of odd-degree vertices is even. A self-loop contributes two to that sum: both ends sit at the same vertex. In a digraph the sum of in-degrees equals the sum of out-degrees equals $|E|$.
+
+The running graph $G_1$ has edges $1\!-\!2$, $1\!-\!3$, $2\!-\!3$, $3\!-\!4$, $4\!-\!5$, $4\!-\!6$, $5\!-\!6$. So $n = 6$, $m = 7$, degrees $(2, 2, 3, 3, 2, 2)$, and the odd vertices are $3$ and $4$.
+
+```{python}
+def degrees(n, edges):
+    deg = [0] * (n + 1)
+    for u, v in edges:
+        deg[u] += 1
+        deg[v] += 1
+    return deg[1:]
+
+
+g1 = degrees(6, G1)
+assert g1 == [2, 2, 3, 3, 2, 2]
+assert sum(g1) == 2 * len(G1)
+assert [i + 1 for i, d in enumerate(g1) if d % 2] == [3, 4]
+
+
+def loop_degree(n, edges):
+    deg = [0] * (n + 1)
+    for u, v in edges:
+        if u == v:
+            deg[u] += 2
+        else:
+            deg[u] += 1
+            deg[v] += 1
+    return deg
+
+
+assert loop_degree(1, [(1, 1)]) == [0, 2]
+
+
+def arc_sums(n, arcs):
+    inn = out = 0
+    for u, v in arcs:
+        out += 1
+        inn += 1
+    return inn, out, len(arcs)
+
+
+assert arc_sums(3, [(1, 2), (2, 3), (3, 1)]) == (3, 3, 3)
+```
+
+::: {#fig-gr-g1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    deg = degrees(6, G1)
+    V.array(ax, p, deg, colors={2: "amber", 3: "amber"}, label="deg",
+            note="odd degrees at 3 and 4")
+V.show(draw)
+```
+
+Degrees of $G_1$, indexed from $1$ in the text and from $0$ in this row of six cells. The sum is $14 = 2 \cdot 7$.
+
+:::
+
+A **walk** may repeat vertices and edges. A **path** does not repeat vertices. An undirected **cycle** has length at least $3$. A directed cycle may have length $1$ (a self-loop) or $2$. The length of a walk is the number of edges, which is one less than the number of vertices in the list.
+
+A graph is **connected** when every vertex is reachable from every other. A **component** is a maximal connected piece. For $n \ge 1$ the following are equivalent, and @sec-tr develops them for rooted trees: connected and acyclic; connected with $n - 1$ edges; acyclic with $n - 1$ edges. Any two of "connected", "acyclic", and "$n - 1$ edges" imply the third. A forest of $k$ trees on $n$ vertices has $n - k$ edges.
+
+A graph is **bipartite** when its vertices split into two sets with every edge crossing the cut. That happens exactly when there is no odd cycle. A **functional** graph gives every vertex out-degree exactly $1$, so it has $n$ arcs. It is never a DAG: every component is one cycle with trees directed into the cycle. The map $f = (2, 3, 4, 2, 4, 5, 6, 9, 8)$ on vertices $1..9$ has cycles $\{2, 3, 4\}$ and $\{8, 9\}$.
+
+```{python}
+def is_bipartite(n, edges):
+    adj = undirected(n, edges)
+    color = [-1] * (n + 1)
+    for s in range(1, n + 1):
+        if color[s] != -1:
+            continue
+        color[s] = 0
+        q = deque([s])
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if color[v] == -1:
+                    color[v] = color[u] ^ 1
+                    q.append(v)
+                elif color[v] == color[u]:
+                    return False
+    return True
+
+
+assert is_bipartite(3, [(1, 2), (2, 3), (3, 1)]) is False
+assert is_bipartite(4, [(1, 2), (2, 3), (3, 4), (4, 1)]) is True
+
+
+def cycles_of(nxt):
+    """nxt[1..n] is the unique successor. Return the cycle vertex-sets."""
+    n = len(nxt) - 1
+    when = [-1] * (n + 1)
+    time = 0
+    found = []
+    for s in range(1, n + 1):
+        if when[s] != -1:
+            continue
+        start = time
+        v = s
+        while when[v] == -1:
+            when[v] = time
+            time += 1
+            v = nxt[v]
+        if when[v] >= start:
+            cyc = []
+            u = v
+            while True:
+                cyc.append(u)
+                u = nxt[u]
+                if u == v:
+                    break
+            found.append(set(cyc))
+    return found
+
+
+f = [0, 2, 3, 4, 2, 4, 5, 6, 9, 8]
+assert cycles_of(f) == [{2, 3, 4}, {8, 9}]
+```
+
+## Storing a graph {#sec-gr-store}
+
+The default store is an adjacency list: for each vertex, the list of its neighbours, in the order the edges were read. $G_2$ is undirected, weighted, $n = 5$, $m = 5$, with edges $(1, 2, 4)$, $(1, 3, 1)$, $(2, 3, 2)$, $(3, 4, 7)$, $(4, 5, 3)$. Each undirected edge is pushed at both ends. A directed edge is pushed once.
+
+An adjacency matrix is the right store when the algorithm touches pairs, and when $n \lesssim 5000$. At $n = 2 \cdot 10^5$ the matrix has $4 \cdot 10^{10}$ entries and cannot be allocated. Contest graphs are $1$-indexed: allocate $n + 1$ slots and leave index $0$ unused. LeetCode graphs in this chapter are $0$-indexed: allocate $n$ slots. Between test cases, build the lists inside the test, or clear only the vertices that appeared. Zeroing a global array of length $2 \cdot 10^5$ on each of $10^4$ tests is a timeout by itself.
+
+A grid does not store its edges. The neighbours of $(r, c)$ are computed, and the bounds are checked before the index. The flat id of a cell is $r \cdot C + c$.
+
+```{python}
+def weighted_lists(n, edges):
+    adj = [[] for _ in range(n + 1)]
+    for u, v, w in edges:
+        adj[u].append((v, w))
+        adj[v].append((u, w))
+    return [row[:] for row in adj[1:]]
+
+
+g2 = [(1, 2, 4), (1, 3, 1), (2, 3, 2), (3, 4, 7), (4, 5, 3)]
+assert weighted_lists(5, g2) == [
+    [(2, 4), (3, 1)],
+    [(1, 4), (3, 2)],
+    [(1, 1), (2, 2), (4, 7)],
+    [(3, 7), (5, 3)],
+    [(4, 3)],
+]
+assert (2 * 10**5) ** 2 > 10**10
+assert 3 * 8 + 5 == 29  # id of row 3, column 5, width 8
+```
+
+::: {#fig-gr-lists}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    rows = weighted_lists(5, g2)
+    assert rows[0] == [(2, 4), (3, 1)]
+    V.trace(ax, p, [
+        dict(values=[f"{v}:{w}" for v, w in row], label=str(i + 1), cell_w=1.15)
+        for i, row in enumerate(rows)
+    ], gap=2.3)
+
+V.show(draw)
+```
+
+The adjacency lists of the weighted sample. Each undirected edge is stored at both ends, so $(1, 2, 4)$ appears as `2:4` on vertex $1$ and as `1:4` on vertex $2$.
+
+:::
+
+## The first walk {#sec-gr-walk}
+
+$G_3$ has $n = 7$, $m = 6$, start $s = 1$, and edges $1\!-\!2$, $1\!-\!4$, $2\!-\!3$, $2\!-\!5$, $4\!-\!5$, $5\!-\!6$. Vertex $7$ is isolated. In input order the lists are $1\!: 2, 4$; $2\!: 1, 3, 5$; $3\!: 2$; $4\!: 1, 5$; $5\!: 2, 4, 6$; $6\!: 5$; $7\!:$.
+
+Depth-first search from $s$ is a function of one argument. Mark $u$ before looking at its neighbours. There is no parent argument in this walk: the mark is what stops the walk from stepping back. The discovery order on $G_3$ is $1, 2, 3, 5, 4, 6$.
+
+Breadth-first search marks a vertex when it is pushed, and sets $\mathrm{dist}[s] = 0$ before the loop. The order is $1, 2, 4, 3, 5, 6$, and the distances are $0, 1, 2, 1, 2, 3, -1$. If $\mathrm{dist}[s]$ is left at $-1$, the neighbours of $s$ are treated as undiscovered, they receive distance $0$, and $s$ is pushed again.
+
+An explicit stack with a neighbour cursor $it[u]$ produces the same depth-first order. Each vertex is expanded once. Each undirected edge is looked at twice, once from each end, so the walk is $\Theta(n + m)$. A path of $10^6$ vertices is a job for the queue or the explicit stack. A recursive depth-first search of that depth overflows the call stack.
+
+```{python}
+def dfs_order(n, edges, s):
+    adj = undirected(n, edges)
+    seen = [False] * (n + 1)
+    order = []
+
+    def dfs(u):
+        seen[u] = True
+        order.append(u)
+        for v in adj[u]:
+            if not seen[v]:
+                dfs(v)
+
+    dfs(s)
+    return order
+
+
+def dfs_stack(n, edges, s):
+    adj = undirected(n, edges)
+    seen = [False] * (n + 1)
+    it = [0] * (n + 1)
+    st = [s]
+    seen[s] = True
+    order = [s]
+    while st:
+        u = st[-1]
+        if it[u] == len(adj[u]):
+            st.pop()
+            continue
+        v = adj[u][it[u]]
+        it[u] += 1
+        if not seen[v]:
+            seen[v] = True
+            order.append(v)
+            st.append(v)
+    return order
+
+
+def bfs_walk(n, edges, s):
+    adj = undirected(n, edges)
+    dist = [-1] * (n + 1)
+    dist[s] = 0
+    q = deque([s])
+    order = []
+    while q:
+        u = q.popleft()
+        order.append(u)
+        for v in adj[u]:
+            if dist[v] == -1:
+                dist[v] = dist[u] + 1
+                q.append(v)
+    return order, dist[1:]
+
+
+assert dfs_order(7, G3, 1) == [1, 2, 3, 5, 4, 6]
+assert dfs_stack(7, G3, 1) == [1, 2, 3, 5, 4, 6]
+assert bfs_walk(7, G3, 1) == ([1, 2, 4, 3, 5, 6], [0, 1, 2, 1, 2, 3, -1])
+
+path = [(i, i + 1) for i in range(1, 400)]
+assert dfs_order(400, path, 1) == dfs_stack(400, path, 1) == list(range(1, 401))
+```
+
+::: {#fig-gr-bfs}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    order, dist = bfs_walk(7, G3, 1)
+    V.trace(ax, p, [
+        {"values": order, "label": "order", "colors": {0: "green"}},
+        {"values": dist, "label": "dist", "colors": {6: "muted"}},
+    ])
+V.show(draw)
+```
+
+Breadth-first search from $1$ on $G_3$. Vertex $7$ stays at distance $-1$.
+
+:::
+
+::: {#fig-gr-bfs-film}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    adj = undirected(7, G3)
+    dist = [-1] * 8
+    dist[1] = 0
+    q = deque([1])
+    shots = []
+    while q:
+        shots.append(list(q))
+        for _ in range(len(q)):
+            u = q.popleft()
+            for v in adj[u]:
+                if dist[v] == -1:
+                    dist[v] = dist[u] + 1
+                    q.append(v)
+    assert shots == [[1], [2, 4], [3, 5], [6]]
+    V.trace(ax, p, [
+        {"values": row, "label": f"step {i + 1}", "colors": {0: "green"}}
+        for i, row in enumerate(shots)
+    ])
+V.show(draw)
+```
+
+The queue at the start of each round, from the same search. Step 1 is the source. Step 2 is its two neighbours. Step 3 is the next layer, and step 4 is $6$, three edges out. Each row is one distance.
+
+:::
+
+::: {#fig-gr-dfs}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    order = dfs_order(7, G3, 1)
+    assert order == [1, 2, 3, 5, 4, 6]
+    V.array(ax, p, order, label="DFS", colors={0: "green", 5: "amber"})
+
+V.show(draw)
+```
+
+Depth-first discovery from $1$ on the same graph. The walk finishes the branch $2, 3, 5$ before it records $4$. Vertex $7$ is never discovered.
+
+:::
+
+## Modelling {#sec-gr-model}
+
+Write six lines before any code.
+
+1. What is a vertex?
+2. What is an edge, and is it directed?
+3. Is it weighted, and are parallel edges allowed?
+4. What is the question, in those words?
+5. How large are $|V|$ and $|E|$, from the constraints?
+6. Is the graph a tree, a grid, a DAG, or a function?
+
+A grid cell has four neighbours (up, down, left, right) or eight (those plus the diagonals). The same picture answers different questions under the two rules. Numbers under the moves $x \to x + 1$ and $x \to 3x$ are vertices of an implicit graph. Breadth-first search from $1$, with a parent pointer, rebuilds a shortest sequence. One shortest sequence from $1$ to $31$ is $1, 3, 9, 10, 30, 31$: five moves. Bound the states before coding. Here every useful value is at most the target, because neither move decreases a positive integer.
+
+A $1000 \times 1000$ grid has about $10^6$ vertices and about $2 \cdot 10^6$ edges. A queue handles that. A recursive flood of a snake of length $10^6$ does not.
+
+```{python}
+def fewest_moves(target):
+    dist = {1: 0}
+    parent = {1: None}
+    q = deque([1])
+    while q:
+        x = q.popleft()
+        if x == target:
+            path = []
+            while x is not None:
+                path.append(x)
+                x = parent[x]
+            return dist[target], path[::-1]
+        for y in (x + 1, 3 * x):
+            if y > target or y in dist:
+                continue
+            dist[y] = dist[x] + 1
+            parent[y] = x
+            q.append(y)
+    return None
+
+
+assert fewest_moves(31) == (5, [1, 3, 9, 10, 30, 31])
+assert fewest_moves(1) == (0, [1])
+```
+
+::: {#fig-gr-model}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "v": (0.0, 2.2, "vertex?", "indigo"),
+        "e": (3.6, 2.2, "edge? directed?", "indigo"),
+        "q": (7.2, 2.2, "the question", "amber"),
+        "s": (1.8, 0.0, "|V| and |E|", "green"),
+        "h": (5.4, 0.0, "tree, grid, function?", "green"),
+    }, [("v", "e", ""), ("e", "q", ""), ("q", "h", ""), ("q", "s", "")], w=2.5, h=0.75)
+V.show(draw)
+```
+
+The graph model, filled in before the pattern is chosen.
+
+:::
+
+## Pattern 1: Degrees and counting {#sec-gr-p1}
+
+**Where we are.** The lessons built a graph, stored it and walked it once. The patterns grow from that walk one idea at a time: count degrees without walking (this pattern), walk to find what is reachable (Pattern 2), walk a grid whose edges are never stored (Pattern 3), walk states that are generated as you go (Pattern 4), and follow the single arc out of every vertex (Pattern 5).
+
+**Template.** One pass over the edge list. Undirected: `deg[u]++` and `deg[v]++`. Directed: an in-counter and an out-counter. The answer is a formula on those counters. No search.
+
+**Recognition.** The question names a count of neighbours, a sum of degrees, or a vertex whose in-degree and out-degree have prescribed values. The limits may be large, and the answer does not depend on which component a vertex sits in.
+
+**Cost.** $O(n + m)$ time, $O(n)$ memory. When the formula needs "is this pair an edge?", add a matrix if $n$ is a few hundred, or a hash set of pairs.
+
+::: {.callout-important title="Pattern template"}
+Count every edge end once. Then read the answer off the array. A shared edge between the two vertices you are scoring has been counted twice, so subtract one.
+:::
+
+{{< include ../problems/lc-0997-find-the-town-judge/problem.qmd >}}
+
+[**From one vertex to a pair.** The Town Judge reads the in-degree and out-degree of one vertex. Maximal Network Rank scores a pair of vertices, and an edge between the two must be counted once, not twice.]{.flow-bridge}
+
+
+{{< include ../problems/lc-1615-maximal-network-rank/problem.qmd >}}
+
+## Pattern 2: Reachability {#sec-gr-p2}
+
+**From counting edges to following them.** Degrees answer questions about one vertex at a time. Whether $t$ can be reached from $s$ depends on whole paths, so we walk: mark a vertex when it is first pushed, and stop when nothing new can be reached.
+
+**Template.** Build the adjacency lists. From the source, push a vertex only when it is still unmarked, and mark it at that moment. The search ends when the stack or queue is empty, or when the target is popped.
+
+**Recognition.** "Can you get from $s$ to $t$?", "which vertices are reachable from $s$?", "does every vertex get visited if we start at $0$?". The edges may be directed. Direction decides which way the list is filled.
+
+**Cost.** $O(n + m)$ time and memory. A matrix is the wrong store at $n \le 2 \cdot 10^5$. A recursive search is the wrong control flow on a path of that length.
+
+::: {.callout-important title="Pattern template"}
+Mark on discovery. An undirected edge is stored twice. A directed edge is stored once, in the direction the statement allows you to walk.
+:::
+
+{{< include ../problems/lc-1971-find-if-path-exists-in-graph/problem.qmd >}}
+
+[**From undirected to directed.** Find if Path Exists walks an undirected edge list. In Keys and Rooms the keys in a room are directed arcs, and the question is whether one walk from room 0 reaches every room.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0841-keys-and-rooms/problem.qmd >}}
+
+## Pattern 3: Grids as graphs {#sec-gr-p3}
+
+**From stored edges to computed ones.** In a grid the edges are never stored: a cell's neighbours are computed when it is visited. One flood fill from each unvisited free cell finds the components.
+
+**Template.** A cell is a vertex. Its neighbours are the four cells that share a side, generated at the moment of the visit, after a bounds check. One flood fill, started from every free cell that is still unmarked, is one component. Mark the cell when it is pushed.
+
+**Recognition.** The input is a matrix of characters or numbers, and the question is a count of regions, a size of a region, or a property of the region that contains a given cell. Eight neighbours is a different graph: diagonal cells become adjacent.
+
+**Cost.** $O(RC)$ time. The recursion depth is the length of the longest snake of free cells. At $R, C \le 50$ that fits in the call stack. At $1000 \times 1000$ it does not; use a queue.
+
+::: {.callout-important title="Pattern template"}
+The flat index of cell $(r, c)$ in a grid with $C$ columns is $r \cdot C + c$. Check the four bounds before reading the neighbour.
+:::
+
+::: {#fig-gr-anim-rooms}
+
+```{python}
+#| echo: false
+fr_g = ["#.#...", "#.#.##", "###..#", "..#.##"]
+fr_R, fr_C = len(fr_g), len(fr_g[0])
+fr_room = [[0] * fr_C for _ in range(fr_R)]
+fr_frames, fr_caps, rooms = [[row[:] for row in fr_room]], ["walls (#) and free cells (.): nothing visited yet"], 0
+for r in range(fr_R):
+    for c in range(fr_C):
+        if fr_g[r][c] == "." and not fr_room[r][c]:
+            rooms += 1
+            fr_room[r][c] = rooms
+            q, size = deque([(r, c)]), 0
+            while q:
+                y, x = q.popleft()
+                size += 1
+                for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < fr_R and 0 <= nx < fr_C and fr_g[ny][nx] == "." and not fr_room[ny][nx]:
+                        fr_room[ny][nx] = rooms
+                        q.append((ny, nx))
+            fr_frames.append([row[:] for row in fr_room])
+            fr_caps.append(f"cell ({r}, {c}) is free and unvisited: flood fill room {rooms} ({size} cells)")
+assert rooms == 3 and len(fr_frames) == rooms + 1
+fr_col = {1: "cyan", 2: "amber", 3: "green"}
+
+def fr_frame(ax, p, k):
+    room = fr_frames[k]
+    cells = [[("#" if fr_g[r][c] == "#" else (str(room[r][c]) if room[r][c] else ".")) for c in range(fr_C)] for r in range(fr_R)]
+    colors = {(r, c): fr_col[room[r][c]] for r in range(fr_R) for c in range(fr_C) if room[r][c]}
+    colors.update({(r, c): "muted" for r in range(fr_R) for c in range(fr_C) if fr_g[r][c] == "#"})
+    V.grid(ax, p, cells, colors=colors)
+
+V.animate(fr_frame, len(fr_frames), captions=fr_caps, interval=1300)
+del r, c, rooms, q, size, y, x, dy, dx, ny, nx                # keep the chapter's namespace clean
+```
+
+Counting Rooms as a graph. The scan reads the grid row by row; every free cell that no fill has reached starts a new flood fill, which paints its whole room before the scan continues. The number of fills is the number of rooms.
+
+:::
+
+{{< include ../problems/cses-1192-counting-rooms/problem.qmd >}}
+
+[**From counting components to measuring them.** Counting Rooms counts the flood fills. Max Area of Island also returns the size of each fill and keeps the largest.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0695-max-area-of-island/problem.qmd >}}
+
+## Pattern 4: Implicit state graphs {#sec-gr-p4}
+
+**From cells to any state.** A grid cell is one kind of state. Any situation with legal moves is a graph whose vertices are generated as you go, and breadth-first search gives the fewest moves.
+
+**Template.** A state is a vertex. A legal move is an edge, computed from the state, never stored up front. Breadth-first search gives the fewest moves. The state space is bounded before the queue is allocated: every state the search is willing to push has an index in a range you chose from the constraints.
+
+**Recognition.** The input is a number, a tuple, or a short string, and the output is a distance under a handful of edits. Building an adjacency list of "all pairs that differ by one move" is the same search with a huge constant.
+
+**Cost.** $O(S \cdot b)$ time, where $S$ is the number of states you allow and $b$ is the number of moves from one state. For the lock, $S = 10^4$ and $b = 8$.
+
+::: {.callout-important title="Pattern template"}
+Generate the neighbours inside the search. Set the distance of the start to $0$ before the loop. Reject a neighbour that falls outside the bound you proved.
+:::
+
+{{< include ../problems/cf-520b-two-buttons/problem.qmd >}}
+
+[**From numbers to strings with forbidden states.** Two Buttons has one number per state and two moves. Open the Lock has four-digit strings, eight moves from each, and dead ends that must never enter the queue.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0752-open-the-lock/problem.qmd >}}
+
+## Pattern 5: Functional graphs {#sec-gr-p5}
+
+**From many arcs to exactly one.** In every graph so far a vertex could have any number of arcs. When each vertex has exactly one, a walk has no choices, so every walk ends in a cycle, and the questions become where the cycle starts and how long it is.
+
+**Template.** Every vertex has out-degree one, so the graph is a single array `nxt[v]`. It has $n$ arcs. Every component is one cycle with trees directed into that cycle. Follow the unique arc. A vertex repeated on the current walk is the entrance of the cycle.
+
+**Recognition.** The statement gives, for each index, exactly one successor: the next student, the next room, `edges[i]`, `nums[i]`. There is nothing to build except that array.
+
+**Cost.** $O(n)$ time. Three colours, or one timestamp array, are enough when memory is linear. When the array is read-only and only a constant number of integers may be kept, two pointers walk the same functional graph (@sec-gr-p5-duplicate). The counting argument that finds the same value by pigeonhole is @sec-pf-p4-duplicate.
+
+::: {.callout-important title="Pattern template"}
+From each unvisited start, walk until the successor is already stamped. If that stamp belongs to the current walk, the vertices from the stamp to the end are the cycle. A stamp from an earlier walk means this walk has fallen into an old component.
+:::
+
+::: {#fig-gr-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "a": (0.0, 2.2, "1", "indigo"),
+        "f": (0.0, 0.2, "6", "indigo"),
+        "b": (2.8, 1.2, "2", "indigo"),
+        "c": (5.4, 1.2, "3", "violet"),
+        "d": (8.0, 2.2, "4", "violet"),
+        "e": (8.0, 0.2, "5", "violet"),
+    }, [("a", "b", ""), ("f", "b", ""), ("b", "c", ""), ("c", "d", ""), ("d", "e", ""), ("e", "c", "")],
+       w=0.9, h=0.65)
+V.show(draw)
+```
+
+One arrow leaves every vertex. Walks from $1$ and from $6$ both end on the cycle $3, 4, 5$.
+
+:::
+
+{{< include ../problems/cf-1020b-badge/problem.qmd >}}
+
+[**From one walk per start to one pass for all.** Badge can afford a fresh walk from every start. Longest Cycle in a Graph must find all cycles in $O(n)$, so it stamps each vertex once, and some vertices have no arc at all.]{.flow-bridge}
+
+
+{{< include ../problems/lc-2360-longest-cycle-in-a-graph/problem.qmd >}}
+
+[**From a stored graph to one hidden in the input.** Both problems so far may mark visited vertices. Find the Duplicate must leave the array unchanged and use $O(1)$ memory, so two pointers find the cycle's entrance without marking anything.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0287-find-the-duplicate-number/problem.qmd >}}
+
+**Looking back.** All five patterns are one walk with a different supply of edges: none needed (degrees), stored lists (reachability), computed from a cell (grids), computed from a state (implicit graphs), and exactly one per vertex (functional graphs). The rest of the volume keeps the walk and adds what it records: distances, orders, components and costs.
+
+## Pattern map
+
+| When the statement looks like this | Pattern | First move |
+| --- | --- | --- |
+| A count of neighbours, or a vertex with prescribed in- and out-degree | Degrees | One pass of counters |
+| "Can $s$ reach $t$?" or "what does $s$ reach?" | Reachability | Mark on push, lists, queue or stack |
+| A matrix of cells and regions that share a side | Grid | Flood, index $r \cdot C + c$ |
+| A number or a short code, and a few edits | Implicit states | Bound the states, then BFS |
+| Exactly one successor per vertex | Functional | Timestamps, or peel the in-degree $0$ vertices. Read-only and $O(1)$ memory: two pointers (@sec-gr-p5-duplicate) |
+
+## Pitfalls
+
+- An undirected edge is pushed at both ends. A directed edge is pushed once, in the direction the statement walks.
+- $\mathrm{dist}[s] = 0$ is set before the loop. A source left at $-1$ gives its neighbours distance $0$ and is pushed again.
+- Mark a vertex when it is discovered. Marking when it is popped lets one cell enter the queue twice; the $2 \times 2$ island then measures $5$.
+- The degree sum counts a self-loop twice. The number of odd-degree vertices is even.
+- A matrix at $n = 2 \cdot 10^5$ cannot be allocated. Lists are the default. The flat grid index uses the column count.
+- Two Buttons needs the state $2\max(n, m)$. The window $\max(n, m)$ misses $3 \to 6 \to 5$.
+- The downward roll of a lock wheel is $(g + 9) \bmod 10$.
+- On a functional graph, a cycle vertex answers itself. A stamp from an earlier walk is an old component, not a new cycle.
+- Phase 2 of the tortoise-and-hare walk restarts at the same vertex phase 1 started from, which is $0$. Restarting at `nums[0]` leaves the two pointers a constant distance apart on the cycle.
+
+## Exercises
+
+::: {.callout-note collapse="true" title="[E] Centre of a star"}
+[LC 1791 · Find Center of Star Graph](https://leetcode.com/problems/find-center-of-star-graph/){difficulty="Easy"}. The centre is the shared endpoint of the first two edges. In a star every edge touches it, so those two edges already name it. Scanning all degrees also works and is more code.
+
+The first two edges of `[[1, 2], [2, 3], [4, 2]]` share the endpoint $2$.
+
+```{python}
+def find_center(edges):
+    a, b = edges[0]
+    return a if a in edges[1] else b
+
+assert find_center([[1, 2], [2, 3], [4, 2]]) == 2
+assert find_center([[1, 2], [5, 1], [1, 3], [1, 4]]) == 1
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Importance of roads"}
+[LC 2285 · Maximum Total Importance of Roads](https://leetcode.com/problems/maximum-total-importance-of-roads/){difficulty="Medium"}. A city's value is added once per incident road, so the total is $\sum_v \mathrm{value}(v) \cdot \deg(v)$. Sort the cities by degree and assign $1..n$ in that order.
+
+Five cities with those six roads total $43$.
+
+```{python}
+def maximum_importance(n, roads):
+    deg = [0] * n
+    for u, v in roads:
+        deg[u] += 1
+        deg[v] += 1
+    deg.sort()
+    return sum(d * (i + 1) for i, d in enumerate(deg))
+
+assert maximum_importance(5, [[0, 1], [1, 2], [2, 3], [0, 2], [1, 3], [2, 4]]) == 43
+assert maximum_importance(5, [[0, 3], [2, 4], [1, 3]]) == 20
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Destroying bridges"}
+[CF 1944A · Destroying Bridges](https://codeforces.com/problemset/problem/1944/A){rating="800"}. The islands begin as a complete graph. An adversary deletes at most $k$ edges to minimise the component of island $1$. If $k \ge n - 1$ the answer is $1$: the $n - 1$ edges at island $1$ can all go. Otherwise the answer is $n$.
+
+The sample pairs $(n, k)$ answer $2, 1, 4, 1, 5, 1$.
+
+```{python}
+def destroy(n, k):
+    return 1 if k >= n - 1 else n
+
+assert [destroy(n, k) for n, k in [(2, 0), (2, 1), (4, 1), (5, 10), (5, 3), (4, 4)]] == [2, 1, 4, 1, 5, 1]
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Island perimeter"}
+[LC 463 · Island Perimeter](https://leetcode.com/problems/island-perimeter/){difficulty="Easy"}. Each land cell contributes $4$, and each side shared by two land cells is subtracted twice, once from each cell. The sample perimeter is $16$. No search is required.
+
+```{python}
+def island_perimeter(grid):
+    land = shared = 0
+    for r, row in enumerate(grid):
+        for c, cell in enumerate(row):
+            if cell != 1:
+                continue
+            land += 1
+            if r and grid[r - 1][c] == 1:
+                shared += 1
+            if c and grid[r][c - 1] == 1:
+                shared += 1
+    return 4 * land - 2 * shared
+
+assert island_perimeter([[0, 1, 0, 0], [1, 1, 1, 0], [0, 1, 0, 0], [1, 1, 0, 0]]) == 16
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Flood fill"}
+[LC 733 · Flood Fill](https://leetcode.com/problems/flood-fill/){difficulty="Easy"}. The component is the 4-connected cells whose colour equals the colour of $(sr, sc)$, including that cell. Paint them the new colour. If the new colour equals the old one, return the image unchanged: otherwise the flood never sees a boundary.
+
+Painting $(1, 1)$ with colour $2$ fills the side-connected $1$s and leaves the corner $1$.
+
+```{python}
+def flood_fill(image, sr, sc, color):
+    image = [row[:] for row in image]
+    old = image[sr][sc]
+    if old == color:
+        return image
+    R, C = len(image), len(image[0])
+    q = deque([(sr, sc)])
+    image[sr][sc] = color
+    while q:
+        r, c = q.popleft()
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < R and 0 <= nc < C and image[nr][nc] == old:
+                image[nr][nc] = color
+                q.append((nr, nc))
+    return image
+
+assert flood_fill([[1, 1, 1], [1, 1, 0], [1, 0, 1]], 1, 1, 2) == [[2, 2, 2], [2, 2, 0], [2, 0, 1]]
+assert flood_fill([[0, 0], [0, 0]], 0, 0, 0) == [[0, 0], [0, 0]]
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] The lakes"}
+[CF 1829E · The Lakes](https://codeforces.com/problemset/problem/1829/E){rating="1100"}. A lake is a 4-connected component of positive depths, and its volume is the sum of those depths. The same flood as Counting Rooms, adding the depth instead of adding one. The answer is the largest volume, or $0$ when every cell is $0$.
+
+A ring of sixteen $1$s around a $5$ whose neighbours are $0$ has volume $16$.
+
+```{python}
+def lake_volume(grid):
+    g = [row[:] for row in grid]
+    R, C = len(g), len(g[0])
+    best = 0
+    for sr in range(R):
+        for sc in range(C):
+            if g[sr][sc] == 0:
+                continue
+            q = deque([(sr, sc)])
+            volume = g[sr][sc]
+            g[sr][sc] = 0
+            while q:
+                r, c = q.popleft()
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < R and 0 <= nc < C and g[nr][nc]:
+                        volume += g[nr][nc]
+                        g[nr][nc] = 0
+                        q.append((nr, nc))
+            best = max(best, volume)
+    return best
+
+ring = [
+    [1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 1],
+    [1, 0, 5, 0, 1],
+    [1, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1],
+]
+assert lake_volume(ring) == 16
+assert lake_volume([[0, 0], [0, 0]]) == 0
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Count sub-islands"}
+[LC 1905 · Count Sub Islands](https://leetcode.com/problems/count-sub-islands/){difficulty="Medium"}. Flood each island of `grid2`. It is a sub-island when every land cell of that flood is also land in `grid1`. Record the failure during the flood, and still finish the flood so the island is not counted twice.
+
+The two official pairs of grids have $3$ and $2$ sub-islands.
+
+```{python}
+def count_sub(grid1, grid2):
+    g2 = [row[:] for row in grid2]
+    R, C = len(g2), len(g2[0])
+    cnt = 0
+    for sr in range(R):
+        for sc in range(C):
+            if g2[sr][sc] != 1:
+                continue
+            inside = True
+            q = deque([(sr, sc)])
+            g2[sr][sc] = 0
+            while q:
+                r, c = q.popleft()
+                if grid1[r][c] == 0:
+                    inside = False
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = r + dr, c + dc
+                    if 0 <= nr < R and 0 <= nc < C and g2[nr][nc] == 1:
+                        g2[nr][nc] = 0
+                        q.append((nr, nc))
+            cnt += inside
+    return cnt
+
+g1 = [[1, 1, 1, 0, 0], [0, 1, 1, 1, 1], [0, 0, 0, 0, 0], [1, 0, 0, 0, 0], [1, 1, 0, 1, 1]]
+g2 = [[1, 1, 1, 0, 0], [0, 0, 1, 1, 1], [0, 1, 0, 0, 0], [1, 0, 1, 1, 0], [0, 1, 0, 1, 0]]
+h1 = [[1, 0, 1, 0, 1], [1, 1, 1, 1, 1], [0, 0, 0, 0, 0], [1, 1, 1, 1, 1], [1, 0, 1, 0, 1]]
+h2 = [[0, 0, 0, 0, 0], [1, 1, 1, 1, 1], [0, 1, 0, 1, 0], [0, 1, 0, 1, 0], [1, 0, 0, 0, 1]]
+assert count_sub(g1, g2) == 3 and count_sub(h1, h2) == 2
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Vertices that reach the whole DAG"}
+[LC 1557 · Minimum Number of Vertices to Reach All Nodes](https://leetcode.com/problems/minimum-number-of-vertices-to-reach-all-nodes/){difficulty="Medium"}. In a DAG the unique minimum set is the set of vertices with in-degree $0$. Every other vertex is reached from one of them along a path that starts at an in-degree-$0$ vertex.
+
+Six vertices and the arcs $0 \to 1$, $0 \to 2$, $2 \to 5$, $3 \to 4$, $4 \to 2$ have sources $0$ and $3$.
+
+```{python}
+def sources(n, edges):
+    indeg = [0] * n
+    for _, v in edges:
+        indeg[v] += 1
+    return [i for i in range(n) if indeg[i] == 0]
+
+assert sources(6, [[0, 1], [0, 2], [2, 5], [3, 4], [4, 2]]) == [0, 3]
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] New Year transportation"}
+[CF 500A · New Year Transportation](https://codeforces.com/problemset/problem/500/A){rating="1000"}. From cell $i$ there is one portal, to $i + a_i$. The graph is a path of portals. Start at $1$ and walk while the current cell is at most $t$. You can reach $t$ when the walk lands on it. Overshooting $t$ is a no.
+
+Jumps $1, 2, 1, 2, 1, 2, 1$ land on cell $4$ and jump over cell $5$.
+
+```{python}
+def reaches(a, t):
+    i = 1
+    while i < t:
+        i += a[i - 1]
+    return i == t
+
+assert reaches([1, 2, 1, 2, 1, 2, 1], 4) is True
+assert reaches([1, 2, 1, 2, 1, 1, 1], 5) is False
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] How many pairs can tour"}
+[AC abc204_c · Tour](https://atcoder.jp/contests/abc204/tasks/abc204_c). Directed graph, $N \le 2000$. From each origin run a search and add the number of cities you reach, including the origin. The sum over origins is the number of ordered pairs.
+
+Roads $1 \to 2$, $2 \to 3$, $3 \to 2$ have reach sets of size $3$, $2$ and $2$, so $7$ pairs.
+
+```{python}
+def tour(n, edges):
+    adj = [[] for _ in range(n)]
+    for u, v in edges:
+        adj[u - 1].append(v - 1)
+    total = 0
+    for s in range(n):
+        seen = [False] * n
+        seen[s] = True
+        st = [s]
+        cnt = 1
+        while st:
+            u = st.pop()
+            for v in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    cnt += 1
+                    st.append(v)
+        total += cnt
+    return total
+
+assert tour(3, [(1, 2), (2, 3), (3, 2)]) == 7
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Point every road toward city 0"}
+[LC 1466 · Reorder Routes to Make All Paths Lead to the City Zero](https://leetcode.com/problems/reorder-routes-to-make-all-paths-lead-to-the-city-zero/){difficulty="Medium"}. The underlying graph is a tree. Root it at $0$. An original arc that points from parent to child is going the wrong way and costs one reversal. Arcs that already point toward the parent cost nothing.
+
+The tree with arcs $0 \to 1 \to 3 \leftarrow 2$, $4 \to 0$ and $4 \to 5$ needs $3$ reversals.
+
+```{python}
+def min_reorder(n, connections):
+    adj = [[] for _ in range(n)]
+    for u, v in connections:
+        adj[u].append((v, 1))
+        adj[v].append((u, 0))
+    seen = [False] * n
+    seen[0] = True
+    st = [0]
+    flips = 0
+    while st:
+        u = st.pop()
+        for v, cost in adj[u]:
+            if not seen[v]:
+                seen[v] = True
+                flips += cost
+                st.append(v)
+    return flips
+
+assert min_reorder(6, [[0, 1], [1, 3], [2, 3], [4, 0], [4, 5]]) == 3
+assert min_reorder(5, [[1, 0], [1, 2], [3, 2], [3, 4]]) == 2
+assert min_reorder(3, [[1, 0], [2, 0]]) == 0
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] From A to B"}
+[CF 727A · Transformation: from A to B](https://codeforces.com/problemset/problem/727/A){rating="1000"}. The moves are $x \to 2x$ and $x \to 10x + 1$, and $b$ is the target. Walk backwards from $b$: a trailing $1$ undoes $10x + 1$ when the prefix is at least $a$, and an even number undoes a doubling. Any other shape is impossible. The forward search also works; $b \le 10^9$ but the numbers that can appear are the ancestors of $b$, a short chain.
+
+$2$ reaches $162$ by $2, 4, 8, 81, 162$. Nothing reaches $42$ from $4$.
+
+```{python}
+def path_ab(a, b):
+    path = []
+    x = b
+    while x > a:
+        path.append(x)
+        if x % 2 == 0:
+            x //= 2
+        elif x % 10 == 1 and x // 10 >= a:
+            x //= 10
+        else:
+            return None
+    if x != a:
+        return None
+    path.append(a)
+    path.reverse()
+    return path
+
+assert path_ab(2, 162) == [2, 4, 8, 81, 162]
+assert path_ab(4, 42) is None
+assert path_ab(100, 40021) == [100, 200, 2001, 4002, 40021]
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Water and jug"}
+[LC 365 · Water and Jug Problem](https://leetcode.com/problems/water-and-jug-problem/){difficulty="Medium"}. States are pairs (amount in the first jug, amount in the second), at most $(x + 1)(y + 1)$ of them. Breadth-first search from $(0, 0)$ with the six pours. The same reachability is Bézout's identity: a positive target is reachable when it is at most $x + y$ and $\gcd(x, y)$ divides it. Target $0$ is reachable immediately.
+
+$(3, 5, 4)$ is reachable, $(2, 6, 5)$ is not, and $(1, 2, 3)$ fills both jugs.
+
+```{python}
+def can_measure(x, y, z):
+    if z == 0:
+        return True
+    a, b = x, y
+    while b:
+        a, b = b, a % b
+    return a != 0 and z <= x + y and z % a == 0
+
+assert can_measure(3, 5, 4) and not can_measure(2, 6, 5)
+assert can_measure(1, 2, 3) and can_measure(1, 1, 0)
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Array nesting"}
+[LC 565 · Array Nesting](https://leetcode.com/problems/array-nesting/){difficulty="Medium"}. `nums` is a permutation, so the graph is a disjoint union of cycles. The answer is the longest cycle. Stamp vertices as you walk, and skip a start that is already stamped. $O(n)$.
+
+`[5, 4, 0, 3, 1, 6, 2]` has a cycle of length $4$.
+
+```{python}
+def array_nesting(nums):
+    seen = [False] * len(nums)
+    best = 0
+    for s in range(len(nums)):
+        if seen[s]:
+            continue
+        v, length = s, 0
+        while not seen[v]:
+            seen[v] = True
+            length += 1
+            v = nums[v]
+        best = max(best, length)
+    return best
+
+assert array_nesting([5, 4, 0, 3, 1, 6, 2]) == 4
+assert array_nesting([0, 1, 2]) == 1
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Closest node to two starts"}
+[LC 2359 · Find Closest Node to Given Two Nodes](https://leetcode.com/problems/find-closest-node-to-given-two-nodes/){difficulty="Medium"}. Out-degree at most one. Walk from each start and record distances, stopping if a vertex repeats. Among vertices reached by both, minimise the larger of the two distances, and on a tie take the smallest index.
+
+From $0$ and $1$ on `[2, 2, 3, -1]` both walks reach vertex $2$ at distance $1$.
+
+```{python}
+def closest(edges, a, b):
+    def walk(s):
+        dist, v, step = {}, s, 0
+        while v != -1 and v not in dist:
+            dist[v] = step
+            step += 1
+            v = edges[v]
+        return dist
+
+    da, db = walk(a), walk(b)
+    best = None
+    for v in da.keys() & db.keys():
+        score = max(da[v], db[v])
+        if best is None or score < best[0] or score == best[0] and v < best[1]:
+            best = (score, v)
+    return -1 if best is None else best[1]
+
+assert closest([2, 2, 3, -1], 0, 1) == 2
+assert closest([1, 2, -1], 0, 2) == 2
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Where the cycle begins"}
+[LC 142 · Linked List Cycle II](https://leetcode.com/problems/linked-list-cycle-ii/){difficulty="Medium"}. Each node has one `next` pointer, or none. The same two phases start at `head`. If the hare reaches null during phase 1, there is no cycle and the answer is null. Otherwise phase 2, with one pointer back at `head`, meets at the first node of the cycle. `head` itself may lie on the cycle, in which case the tail length is $0$ and phase 2 meets immediately.
+
+A tail of one node meets at the second node. A list with no `next` cycle returns nothing. A cycle through the head meets at the head.
+
+```{python}
+class Node:
+    def __init__(self, val):
+        self.val = val
+        self.next = None
+
+def cycle_start(head):
+    slow = fast = head
+    while fast and fast.next:
+        slow = slow.next
+        fast = fast.next.next
+        if slow is fast:
+            break
+    else:
+        return None
+    slow = head
+    while slow is not fast:
+        slow = slow.next
+        fast = fast.next
+    return slow
+
+nodes = [Node(3), Node(2), Node(0), Node(-4)]
+for left, right in zip(nodes, nodes[1:]):
+    left.next = right
+nodes[3].next = nodes[1]
+assert cycle_start(nodes[0]) is nodes[1]
+lone, nxt = Node(1), Node(2)
+lone.next = nxt
+assert cycle_start(lone) is None
+c1, c2 = Node(1), Node(2)
+c1.next = c2
+c2.next = c1
+assert cycle_start(c1) is c1
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Happy number"}
+[LC 202 · Happy Number](https://leetcode.com/problems/happy-number/){difficulty="Easy"}. The successor of $x$ is the sum of the squares of its decimal digits. The graph is functional and implicit. $1$ is a self-loop. Floyd from $n$ meets at $1$ exactly when the walk reaches that loop; every other cycle is a no. $19$ is happy. $2$ is not.
+
+```{python}
+def is_happy(n):
+    def nxt(x):
+        return sum(int(d) * int(d) for d in str(x))
+
+    slow, fast = nxt(n), nxt(nxt(n))
+    while slow != fast:
+        slow, fast = nxt(slow), nxt(nxt(fast))
+    return slow == 1
+
+assert is_happy(19) and not is_happy(2)
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Circular array loop"}
+[LC 457 · Circular Array Loop](https://leetcode.com/problems/circular-array-loop/){difficulty="Medium"}. The arc from $i$ is $(i + \texttt{nums}[i]) \bmod n$. A cycle counts only when its length is greater than $1$ and every step on it has the same sign as $\texttt{nums}[i]$. Floyd from each start, refusing a step whose sign flipped, then clear the explored vertices so the whole scan stays linear.
+
+`[2, -1, 1, 2, 2]` has a forward cycle of length $3$. `[-1, 2]` does not, and neither does `[-2, 1, -1, -2, -2]`.
+
+```{python}
+def circular_array_loop(nums):
+    n = len(nums)
+
+    def nxt(i):
+        return (i + nums[i]) % n
+
+    seen = [False] * n
+    for s in range(n):
+        if seen[s]:
+            continue
+        sign = nums[s] > 0
+        index, path, v = {}, [], s
+        while v not in index and not seen[v] and (nums[v] > 0) == sign and nums[v] != 0:
+            index[v] = len(path)
+            path.append(v)
+            v = nxt(v)
+        if v in index and len(path) - index[v] > 1:
+            return True
+        for u in path:
+            seen[u] = True
+    return False
+
+assert circular_array_loop([2, -1, 1, 2, 2]) is True
+assert circular_array_loop([-1, 2]) is False
+assert circular_array_loop([-2, 1, -1, -2, -2]) is False
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Teleporter"}
+[AC abc167_d · Teleporter](https://atcoder.jp/contests/abc167/tasks/abc167_d). One teleporter per town, $K \le 10^{18}$. Walk until you repeat, which splits the route into a tail and a cycle. If $K$ lands in the tail, the answer is that town. Otherwise step $(K - \text{tail length}) \bmod \text{cycle length}$ from the entrance.
+
+Towns $3, 2, 4, 1$ and $K = 5$ land on town $4$.
+
+```{python}
+def teleporter(a, k):
+    first, order, v = {}, [], 1
+    while v not in first:
+        first[v] = len(order)
+        order.append(v)
+        v = a[v - 1]
+    mu = first[v]
+    lam = len(order) - mu
+    if k < mu:
+        return order[k]
+    return order[mu + (k - mu) % lam]
+
+assert teleporter([3, 2, 4, 1], 5) == 4
+```
+:::
+
+## Interview questions
+
+::: {.callout-note collapse="true" title="Why is the sum of degrees even?"}
+Each edge has two ends, so the sum is $2|E|$. A self-loop contributes both ends at one vertex. An even sum forces an even number of odd degrees.
+:::
+
+::: {.callout-note collapse="true" title="When do you allocate a matrix?"}
+When the algorithm looks at pairs and $n \lesssim 5000$. At $n = 2 \cdot 10^5$ the matrix does not fit. The default store is an adjacency list, $1$-indexed in contests ($n + 1$ slots) and $0$-indexed on the LeetCode problems of this chapter.
+:::
+
+::: {.callout-note collapse="true" title="What do you set before the BFS loop?"}
+$\mathrm{dist}[s] = 0$, and $s$ is already in the queue, marked. A source left at the sentinel $-1$ makes its own neighbours look undiscovered.
+:::
+
+::: {.callout-note collapse="true" title="Why mark on the way in?"}
+A vertex then enters the queue once. Marking on the way out allows two neighbours to push the same cell. The $2 \times 2$ island measures $5$ under that bug and $4$ under the push-time mark.
+:::
+
+::: {.callout-note collapse="true" title="Connected, acyclic, n − 1 edges: how many do you test?"}
+Any two imply the third, for $n \ge 1$. The practical test is "$n - 1$ edges, and one search from vertex $1$ visits everyone." @sec-tr records the same fact for rooted trees.
+:::
+
+::: {.callout-note collapse="true" title="What does a functional graph look like?"}
+$n$ vertices, $n$ arcs, out-degree $1$ everywhere. Every component is a cycle with trees directed into it. It contains a cycle, so it is not a DAG.
+:::
+
+::: {.callout-note collapse="true" title="Why is the Two Buttons window twice the larger endpoint?"}
+$3 \to 5$ is the walk $3 \to 6 \to 5$. The state $6$ is larger than both endpoints. The window $\max(n, m)$ leaves the distance at $-1$.
+:::
+
+::: {.callout-note collapse="true" title="How do you roll a lock wheel down from 0?"}
+The next digit is $(g + 9) \bmod 10$. At $g = 0$ that is $9$. The C++ expression `(g - 1) % 10` is negative at $0$, and the place-value update writes a different code.
+:::
+
+::: {.callout-note collapse="true" title="Badge: why does a cycle vertex answer itself?"}
+The walk from that vertex repeats when it returns to the start. The first repeated student on the walk from $3$ in $2 \to 3 \to 2$ is $3$. Copying the entrance of the cycle onto every cycle vertex answers $2$ for all three, and the sample wants $2, 2, 3$.
+:::
+
+::: {.callout-note collapse="true" title="Why does a boolean visited array invent a cycle?"}
+It cannot tell "repeated on this walk" from "visited in a previous component." On `[1, 0, 3, 1]` the cycle $\{0, 1\}$ is stamped first. The tail $2 \to 3 \to 1$ then hits an old stamp. Subtracting that old stamp reports length $3$. The start-time test rejects it and leaves the answer at $2$.
+:::
+
+::: {.callout-note collapse="true" title="Four neighbours or eight?"}
+Four: shared sides only. The diagonal plan `.#` / `#.` is two rooms. Eight: the same plan is one room, because the floors touch at a corner. A $1000 \times 1000$ checkerboard is $500000$ rooms under the four-neighbour rule.
+:::
+
+::: {.callout-note collapse="true" title="Why does the duplicate equal the cycle entrance?"}
+Index $i$ points at `nums[i]`, and every value is in $1..n$, so nothing points at $0$. The walk from $0$ therefore has a tail. The entrance is reached from the last tail vertex and from the last cycle vertex: two indices hold that value. Phase 1 meets on the cycle after a multiple of the cycle length. Phase 2 restarts at $0$, and the two pointers meet at that entrance after exactly the tail length. Restarting at `nums[0]` keeps a constant gap, so the loop does not finish.
+:::
+
+::: {.callout-note collapse="true" title="What do you write down before coding?"}
+The vertex, the edge and its direction, whether it is weighted, the question in those words, $|V|$ and $|E|$ from the constraints, and the shape: tree, grid, DAG, or one successor per vertex. The pattern is usually the shape.
+:::
+
+## Summary
+
+- A graph is the pair $(V, E)$. The picture is one drawing of those pairs.
+- $\sum \deg(v) = 2|E|$. Directed in-degrees sum to the same $|E|$ as out-degrees.
+- A tree is a connected graph with $n - 1$ edges. A functional graph is $n$ arcs of out-degree $1$, each component a cycle with trees into it.
+- Store lists. Store a matrix only for small $n$. Compute grid neighbours; index them by $r \cdot C + c$.
+- Mark on discovery. Set the source distance before the loop. The walk is $\Theta(n + m)$.
+- Degrees are a formula. Reachability is a search. A grid is a flood. A puzzle on numbers or codes is a search on a bounded implicit graph. One successor per vertex is a timestamp walk.
+- On a read-only array of $n + 1$ values in $1..n$, index $i$ points at `nums[i]`. The duplicate is the entrance of the cycle reached from $0$ (@sec-gr-p5-duplicate).
+
+## Practice ladder
+
+By the idea the problem is practising. Fill in the graph model before you code.
+
+**Degrees.**
+
+- [AC abc061_b · Counting Roads](https://atcoder.jp/contests/abc061/tasks/abc061_b)
+- [AC abc343_b · Adjacency Matrix](https://atcoder.jp/contests/abc343/tasks/abc343_b)
+- [AC abc287_c · Path Graph?](https://atcoder.jp/contests/abc287/tasks/abc287_c)
+- [CF 1797A · Li Hua and Maze](https://codeforces.com/problemset/problem/1797/A){rating="800"}
+- [CF 1905B · Begginer's Zelda](https://codeforces.com/problemset/problem/1905/B){rating="1100"}
+- [CF 116B · Little Pigs and Wolves](https://codeforces.com/problemset/problem/116/B){rating="1100"}
+- [CF 129B · Students and Shoelaces](https://codeforces.com/problemset/problem/129/B){rating="1200"}
+- [CF 330B · Road Construction](https://codeforces.com/problemset/problem/330/B){rating="1300"}
+- [CF 1475C · Ball in Berland](https://codeforces.com/problemset/problem/1475/C){rating="1400"}
+- [CF 1548A · Web of Lies](https://codeforces.com/problemset/problem/1548/A){rating="1400"}
+
+**Reachability.**
+
+- [LC 1361 · Validate Binary Tree Nodes](https://leetcode.com/problems/validate-binary-tree-nodes/){difficulty="Medium"}
+- [LC 3310 · Remove Methods From Project](https://leetcode.com/problems/remove-methods-from-project/){difficulty="Medium"}
+- [AC abc226_c · Martial artist](https://atcoder.jp/contests/abc226/tasks/abc226_c)
+- [AC abc277_c · Ladder Takahashi](https://atcoder.jp/contests/abc277/tasks/abc277_c)
+- [CF 1559C · Mocha and Hiking](https://codeforces.com/problemset/problem/1559/C){rating="1200"}
+- [LC 3532 · Path Existence Queries in a Graph I](https://leetcode.com/problems/path-existence-queries-in-a-graph-i/){difficulty="Medium"}
+- [CF 2056B · Find the Permutation](https://codeforces.com/problemset/problem/2056/B){rating="1300"}
+- [CF 1106D · Lunar New Year and a Wander](https://codeforces.com/problemset/problem/1106/D){rating="1500"}
+
+**Grids.**
+
+- [CF 1598A · Computer Game](https://codeforces.com/problemset/problem/1598/A){rating="800"}
+- [LC 1034 · Coloring A Border](https://leetcode.com/problems/coloring-a-border/){difficulty="Medium"}
+- [CF 1948C · Arrow Path](https://codeforces.com/problemset/problem/1948/C){rating="1300"}
+- [AC abc351_d · Grid and Magnet](https://atcoder.jp/contests/abc351/tasks/abc351_d)
+- [CF 2034C · Trapped in the Witch's Labyrinth](https://codeforces.com/problemset/problem/2034/C){rating="1400"}
+
+**One successor, or a short chain of moves.**
+
+- [CF 939A · Love Triangle](https://codeforces.com/problemset/problem/939/A){rating="800"}
+- [CF 115A · Party](https://codeforces.com/problemset/problem/115/A){rating="900"}
+- [CF 1968D · Permutation Game](https://codeforces.com/problemset/problem/1968/D){rating="1300"}
+- [CF 977D · Divide by three, multiply by two](https://codeforces.com/problemset/problem/977/D){rating="1400"}
+- [AC abc357_e · Reachability in Functional Graph](https://atcoder.jp/contests/abc357/tasks/abc357_e)
+
+## Further reading
+
+- [CPH — ch. 11, 12 and 16: graphs, traversal and successor graphs](https://cses.fi/book/book.pdf) — graph terminology, adjacency lists and matrices, DFS and BFS, and Floyd's cycle finding on functional graphs, all at contest level.
+- [Erickson — *Algorithms*, ch. 5: Basic Graph Algorithms](https://jeffe.cs.illinois.edu/teaching/algorithms/book/05-graphs.pdf) — definitions, representations and whatever-first search, the general walk that this chapter's stack and queue versions specialise.
+- [Sedgewick and Wayne — *Algorithms*, §4.1: Undirected Graphs](https://algs4.cs.princeton.edu/41graph/) — the adjacency-list API, DFS and BFS with full Java code, and connected components.
+- [CP-Algorithms — Breadth-first search](https://cp-algorithms.com/graph/breadth-first-search.html) — BFS with distances and path recovery, and its uses on implicit state graphs.
+- [CP-Algorithms — Depth First Search](https://cp-algorithms.com/graph/depth-first-search.html) — entry and exit times, edge classification and the problems DFS solves.
+- [USACO Guide — Flood Fill](https://usaco.guide/silver/flood-fill) — grids as graphs, with iterative fills that avoid deep recursion.
+- [Wikipedia — Cycle detection](https://en.wikipedia.org/wiki/Cycle_detection) — Floyd's tortoise and hare and Brent's algorithm, with the $\mu$ and $\lambda$ notation used in @sec-gr-p5-duplicate.

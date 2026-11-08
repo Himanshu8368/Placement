@@ -1,0 +1,1214 @@
+# Depth-First Search {#sec-df}
+
+::: {.callout-note title="Sources"}
+**`graph_book` ch. 2** (five lessons, five patterns) · **CLRS** §22.3 · **CPH** ch. 12 · **CP-Algorithms** *Depth-first search*.
+
+**Coverage:** the call stack, three ways to write the search · colours and entry/exit times · the parenthesis test · tree, back, forward and cross edges · a cycle from a back edge · subtree sums on the way out and values pushed on the way in · a command as a contiguous block of the preorder · backtracking that restores the mark · a search started at the target on the reversed graph.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Write the search recursively, or with an explicit stack and a cursor per vertex, and choose by the depth the input allows.
+- Timestamp the walk and test ancestry in constant time.
+- Name the four kinds of directed edge, and read a cycle off a back edge.
+- Add a subtree answer on the way out, and push a value to the children on the way in.
+- Enumerate simple paths when the graph is tiny, and start a search at the place you want to reach.
+:::
+
+This chapter builds on @sec-gr. There you stored a graph as adjacency lists, marked each vertex the first time you reached it, and wrote the first recursive walk. Here we keep that same walk and pay attention to *when* things happen in it: what we can write down the moment we enter a vertex, and what we can write down the moment we leave it.
+
+```{python}
+#| include: false
+import random
+import sys
+from collections import deque
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import gr200_traces as Traces
+
+random.seed(0)
+
+
+def graph_line(ax, p, a, b, *, w, h, color="muted", style="-", label="", lw=1.4):
+    """A line or arrow between two box centres a=(x, y) and b, trimmed to the box borders."""
+    (x0, y0), (x1, y1) = a, b
+    dx, dy = x1 - x0, y1 - y0
+    t = min((w / 2) / abs(dx) if dx else 9e9, (h / 2) / abs(dy) if dy else 9e9)
+    V.arrow(ax, p, x0 + t * dx, y0 + t * dy, x1 - t * dx, y1 - t * dy, color=color, style=style, lw=lw)
+    if label:
+        V.text(ax, p, (x0 + x1) / 2, (y0 + y1) / 2 + 0.32, label, size=9, color=color)
+
+
+def children_of(n, parents, start=2):
+    """parents lists the parent of vertices start, start+1, ... ."""
+    ch = [[] for _ in range(n + 1)]
+    for i, p in enumerate(parents, start=start):
+        ch[p].append(i)
+    return ch
+```
+
+## The call stack {#sec-df-stack}
+
+A recursive search is the call stack. The frame for $u$ is created when the walk enters $u$, and it is destroyed when every neighbour has been tried. Between those two moments the frames above $u$ are exactly the path from the root of this search to $u$.
+
+Three writings of the same walk:
+
+1. **Recursion.** The definition. Right while the longest path fits in the call stack.
+2. **An explicit stack and a cursor** `it[u]`. The cursor remembers which neighbour of $u$ is next, so the stack holds vertices rather than frames. This is the form for a path of length $10^5$ when the call stack is only a few megabytes. Some judges raise the stack limit to the memory limit, and there a recursion of depth $2 \cdot 10^5$ usually fits; with a default stack of a few megabytes it typically does not.
+3. **A precomputed order.** When the graph is a tree, a parent-before-child order (a BFS, or the preorder) lets a later loop push a value down, and the reverse of a child-before-parent order lets a loop add a subtree up. No recursion at all.
+
+```{python}
+def dfs_rec(n, adj, s):
+    seen = [False] * (n + 1)
+    order = []
+
+    def go(u):
+        seen[u] = True
+        order.append(u)
+        for v in adj[u]:
+            if not seen[v]:
+                go(v)
+
+    go(s)
+    return order
+
+
+def dfs_cursor(n, adj, s):
+    seen = [False] * (n + 1)
+    it = [0] * (n + 1)
+    seen[s] = True
+    st = [s]
+    order = [s]
+    while st:
+        u = st[-1]
+        if it[u] == len(adj[u]):
+            st.pop()
+            continue
+        v = adj[u][it[u]]
+        it[u] += 1
+        if not seen[v]:
+            seen[v] = True
+            order.append(v)
+            st.append(v)
+    return order
+
+
+chain = [[] for _ in range(8)]
+for i in range(1, 7):
+    chain[i].append(i + 1)
+assert dfs_rec(7, chain, 1) == dfs_cursor(7, chain, 1) == list(range(1, 8))
+```
+
+::: {#fig-df-stack}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+
+    V.trace(ax, p, [
+        dict(values=[1, 2, 3, 4], label="enter 4", colors={3: "amber"}),
+        dict(values=[1, 2, 3], label="4 returned"),
+        dict(values=[1], label="back at 1", colors={0: "green"}),
+    ], gap=2.5)
+
+V.show(draw)
+```
+
+The call stack on the chain $1 \to 2 \to 3 \to 4$. The top frame is the current vertex. When $4$ returns, the frame is destroyed and $3$ is current again. The frames under it are the path from the start.
+
+:::
+
+## Colours and timestamps {#sec-df-time}
+
+Give every vertex a colour and two times.
+
+- **White** ($0$): the search has not entered it.
+- **Gray** ($1$): the search is inside it. The gray vertices are the current root path.
+- **Black** ($2$): the search has left it.
+
+`tin[u]` is the time of entry, `tout[u]` the time of exit. The clock advances on both events, so the interval $[\mathrm{tin}(u), \mathrm{tout}(u)]$ contains the intervals of every descendant and of nothing else. That is the parenthesis theorem: $u$ is an ancestor of $v$ in this search exactly when
+
+$$
+\mathrm{tin}(u) \le \mathrm{tin}(v) \quad\text{and}\quad \mathrm{tout}(v) \le \mathrm{tout}(u).
+$$ {#eq-df-paren}
+
+On the arcs $1 \to 2 \to 3 \to 4$, $4 \to 2$ and $1 \to 3$, the entry times are $1, 2, 3, 4$ and the exit times are $8, 7, 6, 5$. Vertex $2$ contains $3$ and $4$. Vertex $4$ does not contain $2$.
+
+```{python}
+def stamp(n, arcs, s=1):
+    adj = [[] for _ in range(n + 1)]
+    for u, v in arcs:
+        adj[u].append(v)
+    tin = [0] * (n + 1)
+    tout = [0] * (n + 1)
+    color = [0] * (n + 1)
+    kinds = []
+    clock = 0
+
+    def go(u):
+        nonlocal clock
+        color[u] = 1
+        clock += 1
+        tin[u] = clock
+        for v in adj[u]:
+            if color[v] == 0:
+                kinds.append((u, v, "tree"))
+                go(v)
+            elif color[v] == 1:
+                kinds.append((u, v, "back"))
+            elif tin[u] < tin[v]:
+                kinds.append((u, v, "forward"))
+            else:
+                kinds.append((u, v, "cross"))
+        color[u] = 2
+        clock += 1
+        tout[u] = clock
+
+    go(s)
+    return tin, tout, kinds
+
+
+def ancestor(tin, tout, u, v):
+    return tin[u] <= tin[v] and tout[v] <= tout[u]
+
+
+ARCS = [(1, 2), (2, 3), (3, 4), (4, 2), (1, 3)]
+tin, tout, kinds = stamp(4, ARCS)
+assert tin[1:] == [1, 2, 3, 4]
+assert tout[1:] == [8, 7, 6, 5]
+assert ancestor(tin, tout, 2, 4) and not ancestor(tin, tout, 4, 2)
+assert kinds == [(1, 2, "tree"), (2, 3, "tree"), (3, 4, "tree"), (4, 2, "back"), (1, 3, "forward")]
+```
+
+::: {#fig-df-time}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    tin, tout, _ = stamp(4, ARCS)
+    V.trace(ax, p, [
+        {"values": tin[1:], "label": "tin", "colors": {0: "green"}},
+        {"values": tout[1:], "label": "tout", "colors": {1: "amber", 2: "amber", 3: "amber"}},
+    ])
+V.show(draw)
+```
+
+Entry and exit times on $1 \to 2 \to 3 \to 4$. The interval of $2$ is $[2, 7]$ and holds $3$ and $4$.
+
+:::
+
+::: {#fig-df-anim-colors}
+
+```{python}
+#| echo: false
+cl_adj = [[] for _ in range(5)]
+for u, v in ARCS:
+    cl_adj[u].append(v)
+cl_color, cl_tin, cl_tout = [0] * 5, [0] * 5, [0] * 5
+cl_kind, cl_path, cl_clock, cl_snaps = {}, [], [0], []
+CL_NAME = ["white", "gray", "black"]
+
+
+def cl_snap(caption, hot=None):
+    cl_snaps.append((cl_color[:], cl_tin[:], cl_tout[:], dict(cl_kind), cl_path[:], hot, caption))
+
+
+def cl_go(u):
+    cl_color[u] = 1
+    cl_clock[0] += 1
+    cl_tin[u] = cl_clock[0]
+    cl_path.append(u)
+    cl_snap(f"enter {u} at time {cl_tin[u]}: {u} turns gray and joins the root path")
+    for v in cl_adj[u]:
+        if cl_color[v] == 0:
+            cl_kind[(u, v)] = "tree"
+            cl_go(v)
+        else:
+            k = "back" if cl_color[v] == 1 else ("forward" if cl_tin[u] < cl_tin[v] else "cross")
+            cl_kind[(u, v)] = k
+            cl_snap(f"arc {u} → {v}: {v} is {CL_NAME[cl_color[v]]}, so this is a {k} edge", hot=(u, v))
+    cl_color[u] = 2
+    cl_clock[0] += 1
+    cl_tout[u] = cl_clock[0]
+    cl_path.pop()
+    cl_snap(f"exit {u} at time {cl_tout[u]}: every arc of {u} is tried, so {u} turns black")
+
+
+cl_go(1)
+st_tin, st_tout, st_kinds = stamp(4, ARCS)
+assert cl_tin == st_tin and cl_tout == st_tout
+assert sorted((u, v, k) for (u, v), k in cl_kind.items()) == sorted(st_kinds)
+assert len(cl_snaps) == 10 and cl_color[1:] == [2, 2, 2, 2]
+
+CL_POS = {1: (0.0, 2.2), 2: (3.4, 0.0), 3: (6.8, 2.2), 4: (10.2, 0.0)}
+CL_PAINT = {0: "muted", 1: "amber", 2: "indigo"}
+CL_EDGE = {"tree": "green", "back": "red", "forward": "amber", "cross": "violet"}
+
+
+def cl_frame(ax, p, k):
+    color, tin, tout, kind, path, hot, _ = cl_snaps[k]
+    for u, v in ARCS:
+        kd = kind.get((u, v))
+        graph_line(ax, p, CL_POS[u], CL_POS[v], w=2.0, h=0.8, style="-|>",
+                   color=CL_EDGE[kd] if kd else "muted", label=kd or "", lw=2.4 if hot == (u, v) else 1.4)
+    V.flow(ax, p, {u: (*CL_POS[u], f"{u}   {tin[u] or '·'} / {tout[u] or '·'}", CL_PAINT[color[u]])
+                   for u in CL_POS}, [], w=2.0, h=0.8)
+    V.stack(ax, p, path, x=12.6, y=-0.4, title="gray path", color="amber", w=1.1)
+
+
+V.animate(cl_frame, len(cl_snaps), captions=[c for *_, c in cl_snaps], interval=1300)
+```
+
+The search on the arcs $1 \to 2 \to 3 \to 4$, $4 \to 2$ and $1 \to 3$, one event per frame. Each box shows the vertex and its entry / exit times; white is grey-blue, gray is amber, black is indigo. The gray vertices are exactly the stack on the right, the current root path. The arc $4 \to 2$ arrives while $2$ is still gray, so it is a back edge and closes a cycle; $1 \to 3$ arrives after $3$ is black and was entered later, so it is a forward edge.
+
+:::
+
+::: {#fig-df-paren}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+
+    V.intervals(ax, p, [
+        (1, 8, "1", "green"),
+        (2, 7, "2", "indigo"),
+        (3, 6, "3", "amber"),
+        (4, 5, "4", "pink"),
+    ])
+
+V.show(draw)
+```
+
+The same times as nested intervals. The bar of $2$ runs from entry $2$ to exit $7$ and contains $3$ and $4$. The bar of $4$ does not contain $2$.
+
+:::
+
+## The DFS tree and the four edges {#sec-df-tree}
+
+The edges the search follows into a white vertex are the **tree edges**. They form a tree on each visited component, rooted at the start. Every other edge falls into one of three classes, read off the colour and the times of its head:
+
+| Head of $u \to v$ | Class | What it says |
+| --- | --- | --- |
+| Gray | Back | $v$ is an ancestor of $u$. This edge closes a directed cycle. |
+| Black, and $\mathrm{tin}(u) < \mathrm{tin}(v)$ | Forward | $v$ is a descendant of $u$, and the tree already has another route. |
+| Black, and $\mathrm{tin}(v) < \mathrm{tin}(u)$ | Cross | The two vertices are incomparable in this tree. |
+
+A directed graph has a cycle exactly when some search, over every unvisited start, follows an edge into a gray vertex. An edge into a black vertex is a forward or a cross edge, and it does not close a cycle of this walk. On an undirected graph the same test skips the parent: the edge back to the vertex that discovered $u$ is the tree edge seen from the other end, and any other edge into a visited vertex is a back edge.
+
+```{python}
+assert stamp(3, [(1, 2), (1, 3), (2, 3)])[2] == [(1, 2, "tree"), (2, 3, "tree"), (1, 3, "forward")]
+tin_c, tout_c, kinds_c = stamp(3, [(1, 2), (1, 3), (3, 2)])
+assert kinds_c == [(1, 2, "tree"), (1, 3, "tree"), (3, 2, "cross")]
+assert ancestor(tin_c, tout_c, 1, 2) and not ancestor(tin_c, tout_c, 3, 2)
+```
+
+The second search finishes $2$ before it enters $3$, so $3 \to 2$ meets a black vertex entered earlier. That is a cross edge. Vertex $3$ is not an ancestor of $2$, and the digraph $1 \to 2$, $1 \to 3$, $3 \to 2$ has no directed cycle.
+
+::: {#fig-df-kinds}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+
+    _, _, kinds = stamp(4, ARCS)
+    _, _, cross = stamp(3, [(1, 2), (1, 3), (3, 2)])
+    row = list(kinds) + [k for k in cross if k[2] == "cross"]
+    paint = {"tree": "green", "back": "red", "forward": "amber", "cross": "violet"}
+    V.trace(ax, p, [
+        dict(values=[f"{u}->{v}" for u, v, _ in row], cell_w=1.35,
+             colors={i: paint[k] for i, (*_, k) in enumerate(row)}),
+        dict(values=[k for *_, k in row], cell_w=1.35,
+             colors={i: paint[k] for i, (*_, k) in enumerate(row)}),
+    ], gap=2.4)
+
+V.show(draw)
+```
+
+Every arc of the running digraph, then the cross arc $3 \to 2$ from the second example. Tree edges are the ones that entered a white vertex. The back edge lands on gray. Forward and cross land on black.
+
+:::
+
+## Cycles {#sec-df-cyc}
+
+**Undirected.** Skip the parent. A visited neighbour is the other end of a back edge. The cycle is that neighbour, then the parent pointers back to the current vertex, then the neighbour again. In a simple graph the cycle has at least three distinct vertices. A self-loop or a second edge between the same pair is a cycle by itself; the parent test does not see a self-loop as a parent, and a parallel edge is a second neighbour equal to the parent.
+
+**Directed.** Three colours. An edge into a gray vertex closes the cycle. An edge into a black vertex does not. The cycle is the gray path from the head back to the tail, closed by the edge. The shortest directed cycle here has two vertices, the pair of opposing arcs.
+
+The reconstruction walks parent pointers, so each vertex records the tree edge that discovered it. The printed cycle may start at any of its vertices; both CSES problems accept any valid route.
+
+::: {#fig-df-anim-cycle}
+
+```{python}
+#| echo: false
+cy_edges = [(1, 2), (1, 3), (3, 4), (3, 5), (5, 1)]
+cy_adj = [[] for _ in range(6)]
+for a, b in cy_edges:
+    cy_adj[a].append(b)
+    cy_adj[b].append(a)
+for row in cy_adj:
+    row.sort()
+cy_seen, cy_par, cy_snaps, cy_found = [False] * 6, [0] * 6, [], []
+
+
+def cy_snap(caption, at, back=None, route=()):
+    cy_snaps.append((cy_seen[:], cy_par[:], at, back, list(route), caption))
+
+
+def cy_go(u, parent):
+    cy_seen[u], cy_par[u] = True, parent
+    cy_snap(f"enter {u}" + (f" from {parent}: parent[{u}] = {parent}" if parent else ", the start"), u)
+    for v in cy_adj[u]:
+        if v == parent:
+            continue
+        if cy_seen[v]:
+            cy_found.append((u, v))
+            cy_snap(f"{u} sees {v}, already visited and not its parent: a back edge", u, back=(u, v))
+            return True
+        if cy_go(v, u):
+            return True
+    cy_snap(f"{u} has no unvisited neighbour except its parent: return to {parent}", parent)
+    return False
+
+
+assert cy_go(1, 0)
+u, v = cy_found[0]
+route, x = [], u
+while x != v:
+    route.append(x)
+    x = cy_par[x]
+route += [v, u]
+assert route == [5, 3, 1, 5]
+cy_snap("walk the parent pointers from 5 back to 1, then close with the back edge: 5 3 1 5", None, back=(u, v), route=route)
+assert len(cy_snaps) == 9
+
+CY_POS = {1: (3.4, 3.0), 2: (0.0, 3.0), 3: (3.4, 0.0), 4: (0.0, 0.0), 5: (6.8, 1.5)}
+
+
+def cy_frame(ax, p, k):
+    seen, par, at, back, route, _ = cy_snaps[k]
+    on_route = set(zip(route, route[1:]))
+    for a, b in cy_edges:
+        if par[b] == a and seen[b] or par[a] == b and seen[a]:
+            child, up = (b, a) if par[b] == a and seen[b] else (a, b)
+            hit = (child, up) in on_route
+            graph_line(ax, p, CY_POS[child], CY_POS[up], w=0.9, h=0.75, style="-|>",
+                       color="red" if hit else "green", label="parent", lw=2.4 if hit else 1.4)
+        elif back and {a, b} == set(back):
+            graph_line(ax, p, CY_POS[back[0]], CY_POS[back[1]], w=0.9, h=0.75, style="-|>",
+                       color="red", label="back", lw=2.4)
+        else:
+            graph_line(ax, p, CY_POS[a], CY_POS[b], w=0.9, h=0.75, style="-", color="muted")
+    nodes = {}
+    for w_, (x_, y_) in CY_POS.items():
+        c = "amber" if w_ == at else ("red" if w_ in route else ("indigo" if seen[w_] else "muted"))
+        nodes[w_] = (x_, y_, str(w_), c)
+    V.flow(ax, p, nodes, [], w=0.9, h=0.75)
+
+
+V.animate(cy_frame, len(cy_snaps), captions=[c for *_, c in cy_snaps], interval=1200)
+```
+
+Cycle detection on the undirected graph with edges $1\!-\!2$, $1\!-\!3$, $3\!-\!4$, $3\!-\!5$, $5\!-\!1$. Every tree edge leaves a parent pointer (green arrow, child to parent). The dead ends $2$ and $4$ return without finding anything. At $5$, the neighbour $1$ is visited and is not the parent, so the edge is a back edge, and the parent chain $5, 3, 1$ plus that edge is the printed route.
+
+:::
+
+## The toolbox {#sec-df-box}
+
+Five questions, five places to write the answer.
+
+1. **On entry.** Record `tin`, push the vertex onto the current path, mark it gray.
+2. **On a tree edge, the way down.** Pass a value to the child: a depth, a sum of the root path, a counter that the whole subtree should receive.
+3. **On exit.** The children's answers exist. Add them into $u$: a size, a balance, a list of the $K$ largest values. Record `tout` and paint $u$ black.
+4. **On the way back out of a dead end.** Restore anything the call borrowed: a grid cell set to $0$, a vertex unmarked so another simple path may use it.
+5. **From the other end.** Reverse every arc and search from the vertices you want to reach. A vertex that shows up can reach the target in the original graph.
+
+```{python}
+def sizes_of(n, parents):
+    ch = children_of(n, parents)
+    sz = [1] * (n + 1)
+
+    def go(u):
+        for v in ch[u]:
+            go(v)
+            sz[u] += sz[v]
+
+    go(1)
+    return sz[1:]
+
+
+assert sizes_of(4, [1, 1, 2]) == [4, 2, 1, 1]
+```
+
+::: {#fig-df-box}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "in": (0.0, 1.2, "enter: tin, gray", "green"),
+        "down": (4.0, 1.2, "tree edge: push down", "indigo"),
+        "out": (8.2, 1.2, "exit: add children", "amber"),
+    }, [("in", "down", ""), ("down", "out", "")], w=2.8, h=0.75)
+V.show(draw)
+```
+
+One call. The value going down is known at entry. The subtree value is known at exit.
+
+:::
+
+## Pattern 1: Cycle detection {#sec-df-p1}
+
+**Where we are.** The toolbox named five moments in one call. The patterns use them one at a time: an edge whose head is still gray, seen during the scan of the neighbours (this pattern); a value added into the parent on exit (Pattern 2); the entry and exit times read together as an interval (Pattern 3); an undo on the way out, so a later path may reuse a vertex (Pattern 4); and a search started from the other end (Pattern 5).
+
+**Template.** Search every unvisited vertex. Undirected: ignore the parent, and a visited neighbour closes a cycle. Directed: an edge to a gray vertex closes a cycle; an edge to a black vertex does not. Rebuild the cycle from the parent array.
+
+**Recognition.** "Print a round trip", "does this directed graph have a cycle?", a self-loop or a pair of opposing arcs. The answer is one cycle, not the count of all of them.
+
+**Cost.** $O(n + m)$. One parent integer per vertex.
+
+::: {.callout-important title="Pattern template"}
+Gray means "on the current root path". A directed back edge lands on gray. A forward or cross edge lands on black.
+:::
+
+{{< include ../problems/cses-1669-round-trip/problem.qmd >}}
+
+[**From undirected to directed.** Skipping the parent is no longer enough. On one-way arcs, an arc into a visited vertex closes a cycle only when that vertex is still **gray**, so the two-state mark becomes three colours.]{.flow-bridge}
+
+{{< include ../problems/cses-1678-round-trip-ii/problem.qmd >}}
+
+## Pattern 2: Subtree aggregation {#sec-df-p2}
+
+**From an edge to a value.** Pattern 1 only looked at the colour at the far end of an edge. Here every call returns something — a count, a size, a balance — and the parent adds its children's answers on exit. @fig-df-anim-balance shows the sums returning up the tree.
+
+**Template.** Root the tree. On the way out, each child has already returned its answer; add that answer into the parent. On the way in, a value known at the parent is added into the child before the child walks any further.
+
+**Recognition.** "For every subtree, a sum, a size, a count." The parent array of a rooted tree, or an unrooted tree you root at $1$. When every parent has a smaller index than its child, a loop from $n$ down to $2$ is the post-order.
+
+**Cost.** $O(n)$ after the children lists exist. A path of length $2 \cdot 10^5$ wants the index loop or an explicit stack.
+
+::: {.callout-important title="Pattern template"}
+Children first, then the parent. A loop from $2$ up to $n$ adds a vertex before its own children have arrived.
+:::
+
+::: {#fig-df-anim-balance}
+
+```{python}
+#| echo: false
+wb_par, wb_s = [1, 1, 2, 3, 3, 5], "WBBWWBW"
+wb_n = len(wb_s)
+wb_ch = children_of(wb_n, wb_par)
+wb_val = {v: (1 if wb_s[v - 1] == "W" else -1) for v in range(1, wb_n + 1)}
+wb_events = []                       # (vertex, subtree sum) in the order the calls return
+
+
+def wb_go(u):
+    t = wb_val[u] + sum(wb_go(c) for c in wb_ch[u])
+    wb_events.append((u, t))
+    return t
+
+
+wb_go(1)
+assert [u for u, _ in wb_events] == [4, 2, 7, 5, 6, 3, 1]
+assert sum(t == 0 for _, t in wb_events) == 2
+
+
+def wb_frame(ax, p, k):
+    done = dict(wb_events[: k + 1])
+    cur = wb_events[k][0]
+
+    def build(u):
+        if u == cur:
+            color = "amber"
+        elif u in done:
+            color = "green" if done[u] == 0 else "indigo"
+        else:
+            color = "muted"
+        note = f"sum {sgn(done[u])}" if u in done else None
+        return V.Node(f"{u} {wb_s[u - 1]}", [build(c) for c in wb_ch[u]], color=color,
+                      filled=u in done, note=note)
+
+    V.tree(ax, p, build(1), dx=1.6, dy=1.5, size=10)
+
+
+sgn = lambda t: f"{t:+d}" if t else "0"
+wb_caps = []
+for u, t in wb_events:
+    parts = [f"{wb_val[u]:+d}"] + [f"({sgn(dict(wb_events)[c])})" for c in wb_ch[u]]
+    wb_caps.append(f"exit {u}: {' + '.join(parts)} = {sgn(t)}" + (" — balanced" if t == 0 else ""))
+wb_caps[-1] += f"; {sum(t == 0 for _, t in wb_events)} balanced subtrees in all"
+V.animate(wb_frame, len(wb_events), captions=wb_caps, interval=1100)
+```
+
+The White-Black sample (`WBBWWBW`, parents `1 1 2 3 3 5`), one return per frame. White counts $+1$ and black $-1$. A vertex can report its subtree sum only after all of its children have returned theirs; the amber vertex has just returned, and a green vertex is balanced (sum $0$).
+
+:::
+
+{{< include ../problems/cf-1676g-white-black-balanced-subtrees/problem.qmd >}}
+
+[**From one sum to a product of pieces.** White-Black only adds the children's counts. Highest Score also needs the piece **above** a vertex, of size $n - \mathrm{sz}[v]$, which is known only after every size is in.]{.flow-bridge}
+
+{{< include ../problems/lc-2049-count-nodes-with-the-highest-score/problem.qmd >}}
+
+[**From up to down.** Both problems so far moved values from children to parents on exit. Ki pushes a counter from a parent into every descendant, so the value is added on the way **in**, along a parent-before-child order.]{.flow-bridge}
+
+{{< include ../problems/ac-abc138_d-ki/problem.qmd >}}
+
+## Pattern 3: Entry and exit times {#sec-df-p3}
+
+**From one answer per subtree to questions about it.** Pattern 2 computed one fixed number per subtree. When the questions arrive later — "the $k$-th vertex under $u$", "descendants at depth $d$" — store the entry and exit times instead: the subtree becomes an interval of the preorder, and each query becomes a lookup.
+
+**Template.** One preorder writes `tin`, `tout`, depth and subtree size. A question about "who lies under $u$" becomes a question about an interval of that order (@eq-df-paren).
+
+**Recognition.** The $k$-th vertex in a subtree, the number of descendants at a given depth, a connected piece of a grid that must survive. The parenthesis test is the check.
+
+**Cost.** $O(n)$ to stamp, then $O(1)$ or $O(\log n)$ per query. At $n, q \le 2 \cdot 10^5$ the arrays replace a fresh search per query.
+
+::: {.callout-important title="Pattern template"}
+The subtree of $u$ is the contiguous block of the preorder that starts at $u$ and has length $\mathrm{sz}[u]$. The same vertices are those $v$ with $\mathrm{tin}(u) \le \mathrm{tin}(v) \le \mathrm{tout}(u)$.
+:::
+
+{{< include ../problems/cf-1006e-military-problem/problem.qmd >}}
+
+[**From one position to a count.** Military Problem reads a single position inside $u$'s block. Count Descendants asks how many vertices of depth $D$ fall inside the block, so each depth keeps its entry times, already sorted, and the count is two binary searches.]{.flow-bridge}
+
+{{< include ../problems/ac-abc202_e-count-descendants/problem.qmd >}}
+
+[**From a given tree to a grid.** Maze gives no tree at all, but the search builds one. Every prefix of its discovery order is connected, so keeping the first $s - k$ cells and walling the rest is always legal.]{.flow-bridge}
+
+{{< include ../problems/cf-377a-maze/problem.qmd >}}
+
+## Pattern 4: Backtracking {#sec-df-p4}
+
+**From one walk to every walk.** Patterns 1–3 enter each vertex once, so its mark stays on for good. Backtracking wants every simple path, so the mark comes off on the way out and a different path may use the vertex again.
+
+**Template.** The path is a stack. Step to a neighbour, record it, recurse, then undo the record. On a DAG the undo of a visited mark is unnecessary: no walk returns to an ancestor. On a grid that has cycles, the mark has to come off on the way out, or a later path will treat a cell of this path as blocked.
+
+**Recognition.** "All simple paths", "the best path that does not repeat a cell", $n \le 15$ or at most $25$ gold cells. The output may be exponential. The state is the path, not a distance.
+
+**Cost.** Proportional to the number of partial paths. A DAG on $n \le 15$ finishes. The bound of $25$ gold cells is what makes the grid search finish.
+
+::: {.callout-important title="Pattern template"}
+Push, recurse, pop. A mark that outlives the call blocks a cell the next path was allowed to use.
+:::
+
+{{< include ../problems/lc-0797-all-paths-from-source-to-target/problem.qmd >}}
+
+[**From a DAG to a grid with cycles.** On a DAG no path can come back, so the path needs no visited mark at all. The gold grid has cycles: a cell is emptied on entry and refilled on exit, or a later path finds it blocked.]{.flow-bridge}
+
+{{< include ../problems/lc-1219-path-with-maximum-gold/problem.qmd >}}
+
+## Pattern 5: Reverse the search {#sec-df-p5}
+
+**From the source to the target.** Every pattern so far searches forward from where the walk starts. When the question is who can **reach** a place, one search backwards from that place, along reversed arcs, answers for every source at once.
+
+**Template.** The question is "who can reach $t$?". Reverse every arc and search from $t$. The vertices you reach are exactly the vertices that reach $t$ in the original graph. On a grid the same idea starts at the exit, or at every border cell that must stay free, and walks against the allowed direction.
+
+**Recognition.** Ancestors of a node, "can everyone reach the exit?", a region that touches the border and therefore must stay. One search from the target replaces a search from every source.
+
+**Cost.** One reversed search is $O(n + m)$. Doing it once per vertex is $O(n(n + m))$, which at $n \le 1000$ is the ancestor problem's budget.
+
+::: {.callout-important title="Pattern template"}
+Reverse the arcs. Search from the place you want to arrive at. A vertex found by that search can reach the target.
+:::
+
+{{< include ../problems/lc-2192-all-ancestors-of-a-node-in-a-directed-acyclic-graph/problem.qmd >}}
+
+[**From reversing arcs to fixing the graph first.** Ancestors runs one reversed search per vertex on the graph as given. Solve The Maze must first change the graph — wall every empty cell next to a bad person — and then a single search from the exit checks every good person at once.]{.flow-bridge}
+
+{{< include ../problems/cf-1365d-solve-the-maze/problem.qmd >}}
+
+**Looking back.** Five patterns, one recursive call. Every answer was written at one of its moments — while scanning the neighbours, on entry, along a tree edge, on exit, or on the way back out — or by starting the same call from the other end. The colours and the timestamps are simply the record of which moment each vertex has reached, and that record is what turns a walk into an algorithm.
+
+## Pattern map
+
+| When the statement looks like this | Pattern | First move |
+| --- | --- | --- |
+| Print a cycle, or decide that a digraph is a DAG | Back edge | Gray means the root path; skip the parent on an undirected edge |
+| A sum, size or count on every subtree | Exit | Children return first. Parents with smaller indices: loop from $n$ down to $2$ |
+| The $k$-th vertex under $u$, or descendants at a depth | Times | One preorder. The subtree is an interval |
+| All simple paths, or a best path on a tiny grid | Backtracking | Push, recurse, restore |
+| Who can reach the exit, or the ancestors of $v$ | Reverse | Search from the target on the reversed arcs |
+
+## Pitfalls
+
+- The parent of an undirected search is the tree edge seen from the child. Counting it builds a cycle of length $2$ on every tree.
+- A directed edge into a black vertex is forward or cross. The cycle test is "the head is gray".
+- Subtree sums move from the leaves toward the root. A loop from $2$ up to $n$ adds a vertex before its children have arrived, and the sample then reports $1$ balanced subtree.
+- The index loop for sizes needs every parent index smaller than the child. A LeetCode parent array may point at a larger index, and the product is a $64$-bit integer.
+- A pending addition is pushed down a parent-before-child order. Recursion on the path of length $2 \cdot 10^5$ is the case that order replaces.
+- $[\mathrm{tin}(u), \mathrm{tout}(u)]$ includes $u$. A query whose depth equals $\mathrm{dep}[u]$ counts $u$.
+- On a DAG the path stack needs no visited array. On a grid the mark comes off on the way out.
+- Ancestors are the vertices that reach $v$. The search runs on the reversed arcs and leaves $v$ itself out of the list.
+- A good person standing next to a bad person cannot be separated by walls. With no good person, walling the exit is allowed.
+
+## Exercises
+
+::: {.callout-note collapse="true" title="[M] Same label in the subtree"}
+[LC 1519 · Number of Nodes in the Sub-Tree With the Same Label](https://leetcode.com/problems/number-of-nodes-in-the-sub-tree-with-the-same-label/){difficulty="Medium"}. Each child returns a count of $26$ letters; the answer at a vertex is that letter's count after the children have been added.
+
+```{python}
+def same_label(n, edges, labels):
+    adj = [[] for _ in range(n)]
+    for u, v in edges:
+        adj[u].append(v)
+        adj[v].append(u)
+    ans = [0] * n
+
+    def go(u, p):
+        cnt = [0] * 26
+        cnt[ord(labels[u]) - 97] = 1
+        for v in adj[u]:
+            if v != p:
+                for i, x in enumerate(go(v, u)):
+                    cnt[i] += x
+        ans[u] = cnt[ord(labels[u]) - 97]
+        return cnt
+
+    go(0, -1)
+    return ans
+
+assert same_label(7, [[0, 1], [0, 2], [1, 4], [1, 5], [2, 3], [2, 6]], "abaedcd") == [2, 1, 1, 1, 1, 1, 1]
+assert same_label(4, [[0, 1], [1, 2], [0, 3]], "bbbb") == [4, 2, 1, 1]
+assert same_label(5, [[0, 1], [0, 2], [1, 3], [0, 4]], "aabab") == [3, 2, 1, 1, 1]
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Cut even components"}
+[CF 982C · Cut 'em all!](https://codeforces.com/problemset/problem/982/C){rating="1500"}. If $n$ is odd the answer is $-1$; otherwise every non-root vertex whose subtree has even size is one cut.
+
+```{python}
+def even_cuts(n, edges):
+    if n % 2:
+        return -1
+    adj = [[] for _ in range(n + 1)]
+    for a, b in edges:
+        adj[a].append(b)
+        adj[b].append(a)
+    parent = [0] * (n + 1)
+    order = [1]
+    i = 0
+    while i < len(order):
+        u = order[i]
+        i += 1
+        for v in adj[u]:
+            if v != parent[u]:
+                parent[v] = u
+                order.append(v)
+    sz = [1] * (n + 1)
+    cuts = 0
+    for u in reversed(order):
+        if u != 1 and sz[u] % 2 == 0:
+            cuts += 1
+        if parent[u]:
+            sz[parent[u]] += sz[u]
+    return cuts
+
+assert even_cuts(4, [(1, 3), (1, 4), (4, 2)]) == 1
+assert even_cuts(3, [(1, 2), (2, 3)]) == -1
+assert even_cuts(2, [(1, 2)]) == 0
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Fuel to the capital"}
+[LC 2477 · Minimum Fuel Cost to Report to the Capital](https://leetcode.com/problems/minimum-fuel-cost-to-report-to-the-capital/){difficulty="Medium"}. The road above a subtree of $s$ people is crossed by $\lceil s / \mathrm{seats} \rceil$ cars, and those lower bounds add.
+
+```{python}
+def fuel(roads, seats):
+    n = len(roads) + 1
+    adj = [[] for _ in range(n)]
+    for a, b in roads:
+        adj[a].append(b)
+        adj[b].append(a)
+    parent = [-1] * n
+    order = [0]
+    i = 0
+    while i < len(order):
+        u = order[i]
+        i += 1
+        for v in adj[u]:
+            if v != parent[u]:
+                parent[v] = u
+                order.append(v)
+    sz = [1] * n
+    total = 0
+    for u in reversed(order):
+        if u:
+            total += (sz[u] + seats - 1) // seats
+            sz[parent[u]] += sz[u]
+    return total
+
+assert fuel([[0, 1], [0, 2], [0, 3]], 5) == 3
+assert fuel([[3, 1], [3, 2], [1, 0], [0, 4], [0, 5], [4, 6]], 2) == 7
+assert fuel([], 1) == 0
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Alyona and the tree"}
+[CF 682C · Alyona and the Tree](https://codeforces.com/problemset/problem/682/C){rating="1600"}. The heaviest path that ends at $u$ and goes upward is $\max(\mathrm{best}[\mathrm{parent}], 0) + c$; a vertex that exceeds $a_u$ drops, with its subtree.
+
+```{python}
+def alyona(n, a, edges):
+    adj = [[] for _ in range(n + 1)]
+    for u, v, w in edges:
+        adj[u].append((v, w))
+        adj[v].append((u, w))
+    parent = [0] * (n + 1)
+    best = [0] * (n + 1)
+    order = [1]
+    i = kept = 0
+    while i < len(order):
+        u = order[i]
+        i += 1
+        kept += 1
+        for v, w in adj[u]:
+            if v == parent[u]:
+                continue
+            parent[v] = u
+            best[v] = max(best[u], 0) + w
+            if best[v] > a[v]:
+                continue
+            order.append(v)
+    return n - kept
+
+assert alyona(1, [0, 5], []) == 0
+assert alyona(2, [0, 0, 1], [(1, 2, 3)]) == 1
+assert alyona(2, [0, 0, 5], [(1, 2, 3)]) == 0
+assert alyona(3, [0, 10, 10, 0], [(1, 2, -5), (2, 3, 4)]) == 1
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Word search"}
+[LC 79 · Word Search](https://leetcode.com/problems/word-search/){difficulty="Medium"}. Mark the cell, try the four neighbours for the next letter, and restore the letter on the way out.
+
+```{python}
+def exist(board, word):
+    b = [row[:] for row in board]
+    R, C = len(b), len(b[0])
+
+    def match(i, r, c):
+        if not (0 <= r < R and 0 <= c < C) or b[r][c] != word[i]:
+            return False
+        if i + 1 == len(word):
+            return True
+        keep = b[r][c]
+        b[r][c] = "#"
+        ok = any(match(i + 1, r + dr, c + dc) for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+        b[r][c] = keep
+        return ok
+
+    return any(match(0, r, c) for r in range(R) for c in range(C))
+
+board = [["A", "B", "C", "E"], ["S", "F", "C", "S"], ["A", "D", "E", "E"]]
+assert exist(board, "ABCCED") and exist(board, "SEE") and not exist(board, "ABCB")
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] One-stroke path"}
+[AC abc054_c · One-stroke Path](https://atcoder.jp/contests/abc054/tasks/abc054_c). From vertex $1$, a path that has marked $N$ vertices is one Hamiltonian path; the mark comes off on the way out.
+
+```{python}
+def one_stroke(n, edges):
+    adj = [[] for _ in range(n + 1)]
+    for a, b in edges:
+        adj[a].append(b)
+        adj[b].append(a)
+    ans = 0
+
+    def go(u, seen):
+        nonlocal ans
+        if seen == (1 << (n + 1)) - 2:
+            ans += 1
+            return
+        for v in adj[u]:
+            if seen >> v & 1:
+                continue
+            go(v, seen | (1 << v))
+
+    go(1, 1 << 1)
+    return ans
+
+assert one_stroke(3, [(1, 2), (2, 3), (3, 1)]) == 2
+assert one_stroke(3, [(1, 2), (2, 3)]) == 1
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Permutation transformation"}
+[CF 1490D · Permutation Transformation](https://codeforces.com/problemset/problem/1490/D){rating="1200"}. The maximum of a segment is the root of that segment, and the two sides are called at depth one greater.
+
+```{python}
+def depths(a):
+    d = [0] * len(a)
+
+    def go(l, r, dep):
+        if l > r:
+            return
+        m = max(range(l, r + 1), key=lambda i: a[i])
+        d[m] = dep
+        go(l, m - 1, dep + 1)
+        go(m + 1, r, dep + 1)
+
+    go(0, len(a) - 1, 0)
+    return d
+
+assert depths([3, 5, 2, 1, 4]) == [1, 0, 2, 3, 1]
+assert depths([1]) == [0]
+assert depths([4, 3, 1, 2]) == [0, 1, 3, 2]
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Minimum score of a path"}
+[LC 2492 · Minimum Score of a Path Between Two Cities](https://leetcode.com/problems/minimum-score-of-a-path-between-two-cities/){difficulty="Medium"}. A path may repeat roads, so the answer is the lightest road in the component of city $1$.
+
+```{python}
+def min_score(n, roads):
+    adj = [[] for _ in range(n + 1)]
+    for a, b, w in roads:
+        adj[a].append((b, w))
+        adj[b].append((a, w))
+    seen = [False] * (n + 1)
+    seen[1] = True
+    st = [1]
+    best = 10**18
+    while st:
+        u = st.pop()
+        for v, w in adj[u]:
+            best = min(best, w)
+            if not seen[v]:
+                seen[v] = True
+                st.append(v)
+    return best
+
+assert min_score(4, [[1, 2, 9], [2, 3, 6], [2, 4, 5], [1, 4, 7]]) == 5
+assert min_score(4, [[1, 2, 2], [1, 3, 4], [3, 4, 7]]) == 2
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Gold rush"}
+[CF 1829D · Gold Rush](https://codeforces.com/problemset/problem/1829/D){rating="1000"}. A pile divisible by $3$ splits into one third and two thirds; $m$ is reachable when some pile equals it.
+
+```{python}
+def gold_rush(n, m):
+    if n == m:
+        return True
+    if n < m or n % 3:
+        return False
+    return gold_rush(n // 3, m) or gold_rush(2 * n // 3, m)
+
+assert gold_rush(1, 1) and gold_rush(3, 1) and gold_rush(6, 2) and gold_rush(6, 4) and gold_rush(9, 1)
+assert not gold_rush(4, 2) and not gold_rush(5, 1) and not gold_rush(2, 1)
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Surrounded regions"}
+[LC 130 · Surrounded Regions](https://leetcode.com/problems/surrounded-regions/){difficulty="Medium"}. Search from every border `O`, mark what it reaches, then flip every unmarked `O`.
+
+```{python}
+def surrounded(board):
+    g = [row[:] for row in board]
+    R, C = len(g), len(g[0])
+
+    def walk(r, c):
+        if not (0 <= r < R and 0 <= c < C) or g[r][c] != "O":
+            return
+        g[r][c] = "S"
+        for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            walk(r + dr, c + dc)
+
+    for r in range(R):
+        walk(r, 0)
+        walk(r, C - 1)
+    for c in range(C):
+        walk(0, c)
+        walk(R - 1, c)
+    for r in range(R):
+        for c in range(C):
+            g[r][c] = "O" if g[r][c] == "S" else ("X" if g[r][c] == "O" else g[r][c])
+    return g
+
+board = [["X", "X", "X", "X"], ["X", "O", "O", "X"], ["X", "X", "O", "X"], ["X", "O", "X", "X"]]
+assert surrounded(board) == [["X", "X", "X", "X"], ["X", "X", "X", "X"], ["X", "X", "X", "X"], ["X", "O", "X", "X"]]
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Pacific Atlantic"}
+[LC 417 · Pacific Atlantic Water Flow](https://leetcode.com/problems/pacific-atlantic-water-flow/){difficulty="Medium"}. From each ocean's border, walk to a neighbour of height at least the current cell; a cell reached by both walks is an answer.
+
+```{python}
+def pacific(h):
+    R, C = len(h), len(h[0])
+
+    def reach(starts):
+        seen = set(starts)
+        st = list(starts)
+        while st:
+            r, c = st.pop()
+            for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < R and 0 <= nc < C and (nr, nc) not in seen and h[nr][nc] >= h[r][c]:
+                    seen.add((nr, nc))
+                    st.append((nr, nc))
+        return seen
+
+    pac = reach([(r, 0) for r in range(R)] + [(0, c) for c in range(C)])
+    atl = reach([(r, C - 1) for r in range(R)] + [(R - 1, c) for c in range(C)])
+    return sorted(list(p) for p in pac & atl)
+
+heights = [[1, 2, 2, 3, 5], [3, 2, 3, 4, 4], [2, 4, 5, 3, 1], [6, 7, 1, 4, 5], [5, 1, 1, 2, 4]]
+assert pacific(heights) == [[0, 4], [1, 3], [1, 4], [2, 2], [3, 0], [3, 1], [4, 0]]
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Lakes in Berland"}
+[CF 723D · Lakes in Berland](https://codeforces.com/problemset/problem/723/D){rating="1600"}. A lake is a component of `.` that misses the border; fill the smallest lakes until $k$ remain.
+
+```{python}
+def lakes(grid, k):
+    g = [list(row) for row in grid]
+    n, m = len(g), len(g[0])
+    seen = [[False] * m for _ in range(n)]
+    comps = []
+    for r in range(n):
+        for c in range(m):
+            if g[r][c] != "." or seen[r][c]:
+                continue
+            cells, border, st = [], False, [(r, c)]
+            seen[r][c] = True
+            while st:
+                x, y = st.pop()
+                cells.append((x, y))
+                border = border or x in (0, n - 1) or y in (0, m - 1)
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < n and 0 <= ny < m and g[nx][ny] == "." and not seen[nx][ny]:
+                        seen[nx][ny] = True
+                        st.append((nx, ny))
+            if not border:
+                comps.append(cells)
+    comps.sort(key=len)
+    filled = 0
+    for cells in comps[: max(0, len(comps) - k)]:
+        for x, y in cells:
+            g[x][y] = "*"
+            filled += 1
+    return filled, ["".join(row) for row in g]
+
+grid = ["*****", "*.*.*", "*****", "*...*", "*****"]
+filled, out = lakes(grid, 1)
+assert filled == 2 and out[3] == "*...*"
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Valera and elections"}
+[CF 369C · Valera and Elections](https://codeforces.com/problemset/problem/369/C){rating="1600"}. On the way out, if the road above $v$ is a problem and nobody below was elected, elect $v$.
+
+```{python}
+def elect(n, edges):
+    adj = [[] for _ in range(n + 1)]
+    for u, v, bad in edges:
+        adj[u].append((v, bad))
+        adj[v].append((u, bad))
+    chosen = []
+
+    def go(u, p, bad_edge):
+        covered = False
+        for v, b in adj[u]:
+            if v != p and go(v, u, b):
+                covered = True
+        if bad_edge and not covered:
+            chosen.append(u)
+            return True
+        return covered
+
+    go(1, 0, 0)
+    return chosen
+
+assert sorted(elect(5, [(1, 2, 1), (2, 3, 0), (1, 4, 0), (4, 5, 1)])) == [2, 5]
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Sum in the tree"}
+[CF 1098A · Sum in the tree](https://codeforces.com/problemset/problem/1098/A){rating="1600"}. An erased sum becomes the minimum sum among its children, or the parent's sum at a leaf; a negative $a_v$ prints $-1$.
+
+```{python}
+def tree_sum(n, parent, s):
+    ch = [[] for _ in range(n + 1)]
+    par = [0] * (n + 1)
+    for i, p in enumerate(parent, start=2):
+        ch[p].append(i)
+        par[i] = p
+    s = s[:]
+    for v in range(1, n + 1):
+        if s[v] == -1:
+            s[v] = s[par[v]] if not ch[v] else min(s[c] for c in ch[v])
+    total = 0
+    for v in range(1, n + 1):
+        a = s[v] - (0 if v == 1 else s[par[v]])
+        if a < 0:
+            return -1
+        total += a
+    return total
+
+assert tree_sum(3, [1, 2], [0, 1, -1, 0]) == -1
+assert tree_sum(3, [1, 2], [0, 1, -1, 3]) == 3
+assert tree_sum(1, [], [0, 5]) == 5
+```
+:::
+
+::: {.callout-note collapse="true" title="[M] Subtree k-th maximum"}
+[AC abc239_e · Subtree K-th Max](https://atcoder.jp/contests/abc239/tasks/abc239_e). Each subtree keeps its $20$ largest values; a query reads that list.
+
+```{python}
+def kth(n, edges, values, queries):
+    adj = [[] for _ in range(n + 1)]
+    for a, b in edges:
+        adj[a].append(b)
+        adj[b].append(a)
+    top = [None] * (n + 1)
+
+    def go(u, p):
+        bag = [values[u]]
+        for v in adj[u]:
+            if v != p:
+                bag.extend(go(v, u))
+        bag.sort(reverse=True)
+        top[u] = bag[:20]
+        return top[u]
+
+    go(1, 0)
+    return [top[v][k - 1] for v, k in queries]
+
+assert kth(3, [(1, 2), (1, 3)], [0, 5, 1, 4], [(1, 2), (2, 1), (3, 1)]) == [4, 1, 4]
+```
+:::
+
+::: {.callout-note collapse="true" title="[E] Remembering the days"}
+[AC abc317_c · Remembering the Days](https://atcoder.jp/contests/abc317/tasks/abc317_c). From every town, extend a simple path and restore the mark; the answer is the largest sum of road lengths.
+
+```{python}
+def longest(n, edges):
+    w = [[0] * (n + 1) for _ in range(n + 1)]
+    for a, b, c in edges:
+        w[a][b] = w[b][a] = c
+    best = 0
+
+    def go(u, seen, dist):
+        nonlocal best
+        best = max(best, dist)
+        for v in range(1, n + 1):
+            if w[u][v] and not seen[v]:
+                seen[v] = True
+                go(v, seen, dist + w[u][v])
+                seen[v] = False
+
+    for s in range(1, n + 1):
+        seen = [False] * (n + 1)
+        seen[s] = True
+        go(s, seen, 0)
+    return best
+
+assert longest(4, [(1, 2, 10), (2, 3, 20), (3, 4, 30), (1, 4, 100)]) == 150
+```
+:::
+
+## Interview questions
+
+::: {.callout-note collapse="true" title="What are the gray vertices?"}
+The root path of the current call. A directed edge into a gray vertex closes a cycle. A vertex turns black when its call returns, and an edge into a black vertex does not close a cycle.
+:::
+
+::: {.callout-note collapse="true" title="State the parenthesis theorem."}
+$u$ is an ancestor of $v$ in this search when $\mathrm{tin}(u) \le \mathrm{tin}(v)$ and $\mathrm{tout}(v) \le \mathrm{tout}(u)$. The interval of $u$ contains the intervals of its descendants and of nobody else.
+:::
+
+::: {.callout-note collapse="true" title="Name the four directed edges."}
+Tree: the head was white. Back: the head is gray. Forward: the head is black and was entered after the tail. Cross: the head is black and was entered before the tail.
+:::
+
+::: {.callout-note collapse="true" title="Why does the undirected search skip the parent?"}
+The road back to the vertex that discovered $u$ is the tree edge, looked at from the child. Counting it produces a cycle of length $2$ on every tree edge. Any other visited neighbour is a real back edge.
+:::
+
+::: {.callout-note collapse="true" title="When is the index loop a post-order?"}
+When every parent has a smaller index than its child. Scanning from $n$ down to $1$ then meets the children first. Scanning upward hands a vertex to its parent before those children have been added.
+:::
+
+::: {.callout-note collapse="true" title="Where does a subtree value get added?"}
+On the way out, after the recursive calls. A size, a colour balance, a product of component sizes: each of them exists once the children have returned.
+:::
+
+::: {.callout-note collapse="true" title="Where does a pushed value get added?"}
+On the way in, before the children run, or in a separate parent-before-child order such as a BFS from the root. Ki records the operation at $p$ and lets one such pass carry it through the subtree.
+:::
+
+::: {.callout-note collapse="true" title="Why is the k-th soldier one array lookup?"}
+The command is a DFS that always takes the smallest child index, so the receivers under $u$ are a contiguous block of one global preorder, of length $\mathrm{sz}[u]$, starting at $u$.
+:::
+
+::: {.callout-note collapse="true" title="Why does a DAG need no visited array for path listing?"}
+A walk cannot return to an ancestor, so the path stack cannot repeat a vertex. The same program on a grid must clear the mark on the way out.
+:::
+
+::: {.callout-note collapse="true" title="Who are the ancestors of v?"}
+The vertices that reach $v$. Reverse the arcs and search from $v$. Leave $v$ itself out of the list, and emit the marks in index order.
+:::
+
+::: {.callout-note collapse="true" title="When is walling the exit allowed?"}
+When there is no good person. A bad neighbour of the exit is sealed by walling the exit. A good person next to a bad person cannot be sealed at all, because neither of those two cells may become a wall.
+:::
+
+::: {.callout-note collapse="true" title="Recursive or explicit stack?"}
+Recursion while the depth fits. A path of $10^5$ vertices can overflow a call stack of a few megabytes. A cursor on an explicit stack, or a parent-before-child array, computes the same sums.
+:::
+
+## Summary
+
+- Gray vertices are the root path. A directed back edge lands on gray. The undirected test skips the parent and then uses the same idea.
+- $\mathrm{tin}$ and $\mathrm{tout}$ are a parenthesis (@eq-df-paren). The subtree is that interval, and it is also the block of the preorder of length $\mathrm{sz}[u]$.
+- Tree, back, forward, cross: white, gray, black-and-later, black-and-earlier.
+- Add subtree answers on the way out. Push known values on the way in. Parents with smaller indices make the downward index loop a post-order.
+- Backtracking restores what the call borrowed. A DAG's path listing borrows only the stack.
+- "Who reaches the target?" is a search from the target on the reversed arcs. The unreversed walk this chapter started from is @sec-gr.
+
+## Practice ladder
+
+By the idea the problem is practising.
+
+**The shape of the recursion.**
+
+- [CF 1829D · Gold Rush](https://codeforces.com/problemset/problem/1829/D){rating="1000"}
+- [CF 2184C · Huge Pile](https://codeforces.com/problemset/problem/2184/C){rating="1100"}
+- [CF 1490D · Permutation Transformation](https://codeforces.com/problemset/problem/1490/D){rating="1200"}
+- [CF 2086C · Disappearing Permutation](https://codeforces.com/problemset/problem/2086/C){rating="1300"}
+- [LC 2492 · Minimum Score of a Path Between Two Cities](https://leetcode.com/problems/minimum-score-of-a-path-between-two-cities/){difficulty="Medium"}
+
+**Up the tree and down the tree.**
+
+- [CF 369C · Valera and Elections](https://codeforces.com/problemset/problem/369/C){rating="1600"}
+- [CF 1098A · Sum in the tree](https://codeforces.com/problemset/problem/1098/A){rating="1600"}
+- [CF 1851E · Nastya and Potions](https://codeforces.com/problemset/problem/1851/E){rating="1500"}
+- [CF 2195E · Idiot First Search](https://codeforces.com/problemset/problem/2195/E){rating="1500"}
+- [AC abc239_e · Subtree K-th Max](https://atcoder.jp/contests/abc239/tasks/abc239_e)
+- [AC abc315_e · Prerequisites](https://atcoder.jp/contests/abc315/tasks/abc315_e)
+
+**Orders, grids, and the reversed walk.**
+
+- [CF 1735C · Phase Shift](https://codeforces.com/problemset/problem/1735/C){rating="1400"}
+- [CF 2027C · Add Zeros](https://codeforces.com/problemset/problem/2027/C){rating="1500"}
+- [AC abc378_d · Count Simple Paths](https://atcoder.jp/contests/abc378/tasks/abc378_d)
+- [AC abc284_e · Count Simple Paths](https://atcoder.jp/contests/abc284/tasks/abc284_e)
+- [CF 1608C · Game Master](https://codeforces.com/problemset/problem/1608/C){rating="1700"}
+- [CF 2018C · Tree Pruning](https://codeforces.com/problemset/problem/2018/C){rating="1700"}
+
+## Further reading
+
+- [R. E. Tarjan, *Depth-First Search and Linear Graph Algorithms*](https://doi.org/10.1137/0201010) (SIAM J. Computing, 1972): the paper that made DFS trees and edge classes a tool.
+- [CP-Algorithms: Depth First Search](https://cp-algorithms.com/graph/depth-first-search.html): colours, entry and exit times, edge classification and applications.
+- [CP-Algorithms: Checking a graph for acyclicity and finding a cycle](https://cp-algorithms.com/graph/finding-cycle.html): the three-colour cycle search with reconstruction.
+- [Depth-first search](https://en.wikipedia.org/wiki/Depth-first_search) on Wikipedia: orders, the DFS tree, and iterative versions.
+- [Competitive Programmer's Handbook](https://cses.fi/book/book.pdf) (Laaksonen), ch. 12 and 14: graph traversal and tree algorithms in contest style.
+- [USACO Guide: Graph Traversal](https://usaco.guide/silver/graph-traversal): DFS and BFS on graphs and grids, with graded practice.

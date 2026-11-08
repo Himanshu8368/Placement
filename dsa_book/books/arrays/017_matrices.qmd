@@ -1,0 +1,1587 @@
+# Matrices & 2D Arrays {#sec-mat}
+
+<!--
+Author-facing provenance (not rendered): Chapter 17 of the arrays volume, per outline.yml
+("Matrices & 2D Arrays"): Traversal orders; Rotate and transpose in place; In-place marking;
+Fix two rows, solve in 1D; Matrix invariants and parity. Source plan: array_book ch. 11
+(planned only: lessons A1-A5, patterns P1-P5 with LC 54/498/48/1886/73/289/363).
+Part A holds lessons A1-A6 (sec-mat-a1..a6); Part B patterns P1-P5 (sec-mat-p1..p5) include
+13 registry write-ups homed here: lc-0054, lc-0498, lc-0867, lc-0048, cf-1703e, lc-0073,
+lc-0289, lc-1074, lc-0363, lc-1572, cf-263a, cf-1660e, cf-1438c. Step boards of the first
+eight come from books/traces/arr017_traces.py. Cards reused from other chapters: LC 304 and
+LC 1292 (sec-pref), LC 560 (sec-pref). Grid DP lives in sec-gd, grid BFS in sec-gr-p3.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** Appendix D (matrices and their operations) · **CPH** (Laaksonen, *Competitive Programmer's Handbook*) ch. 9 (2-D prefix sums) and ch. 29 (rotating coordinates, Manhattan distance) · **CP-Algorithms**: *Finding the largest zero submatrix* · **Wikipedia**: *Row- and column-major order*, *In-place matrix transposition*, *Maximum subarray problem*, *Mutilated chessboard problem*, *Chebyshev distance* · **LeetCode** 48, 54, 73, 289, 363, 498, 867, 1074, 1572 · **Codeforces** 263A, 1438C, 1660E, 1703E.
+
+**Coverage:** row-major layout, flattening, neighbour loops and loop order · spiral, snake, boundary-layer, diagonal and anti-diagonal traversals · transpose and the eight symmetries of a square, rotation of squares and rectangles, transpose-plus-reverse and four-cycles in place, in-place rectangular transpose by cycles · in-place marking with the first row and column and with spare bits · fixing two rows and collapsing the band to a 1-D kernel (Kadane, prefix-sum hash, sorted set, pair counting) · coordinate invariants: diagonal keys, checkerboard parity, wrapped diagonals, rotation orbits, the $u = i+j$, $v = i-j$ rotation, quantities an operation cannot change.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Flatten a grid to a line and back, $(i,j) \leftrightarrow i\cdot C+j$, write neighbour loops with a direction array, and pick the loop order that the cache likes (@sec-mat-a1).
+- Write spiral, snake, boundary, diagonal and anti-diagonal traversals that handle $1\times n$, $n\times 1$ and $1\times 1$ grids with no special cases (@sec-mat-a2).
+- Transpose and rotate in place — transpose then reverse, or four-cell cycles — and say exactly which transforms need a square grid (@sec-mat-a3).
+- Store bookkeeping inside the matrix itself, in its first row and column or in spare bits of each cell, and order the passes so no flag is read after it is overwritten (@sec-mat-a4).
+- Turn a "best or count over sub-rectangles" question into $O(R^2)$ one-dimensional questions by fixing two rows and collapsing the band, and choose the 1-D kernel the question needs (@sec-mat-a5).
+- Answer grid questions with no traversal at all by finding the quantity that a move or an operation cannot change: a diagonal key, a checkerboard colour, a wrapped diagonal, a rotation orbit (@sec-mat-a6).
+:::
+
+```{python}
+#| include: false
+import bisect
+import math
+import random
+import sys
+from collections import defaultdict
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import arr017_traces as Traces
+
+random.seed(0)
+```
+
+## Why this matters {#sec-mat-why}
+
+Grids are everywhere: images, game boards, spreadsheets, maps, the DP tables of later chapters. Interviews like them because they test index discipline — one wrong `n-1-i` and a rotation becomes a mirror — and contests like them because a single observation about coordinates often replaces a whole simulation.
+
+::: {.callout-note title="In plain words"}
+A matrix is an array of arrays, and nothing more. The computer stores it as one long line, row after row (@sec-arr-2d), so every 2-D question is secretly a question about a 1-D array with a coordinate dictionary. This chapter cashes that in four ways. **Walk** the cells in a useful order (spirals, diagonals). **Move** the cells — a rotation is just a permutation of positions. **Write notes into the matrix itself** instead of allocating flag arrays. **Collapse** one dimension: fix two rows, squash the band between them into one array, and reuse a 1-D tool you already trust. And sometimes you do not walk at all, because a quantity such as $i+j$ or its parity already tells you the answer.
+:::
+
+This chapter builds on the row-major layout and the cache argument of @sec-arr (@sec-arr-2d, @sec-arr-cache), on 1-D rotation by reversals and by cycles (@sec-arr-p3, @sec-part-p5), on prefix sums and their 2-D form (@sec-pref, @sec-pref-2d), and on the marking tricks of the previous chapter, @sec-idx. Two big families of grid problems have their own homes and are only pointed at here: grid dynamic programming, where each cell's answer comes from its neighbours (@sec-gd), and grid searches such as flood fill and shortest paths, where the grid is a graph (@sec-gr-p3). The next chapter, @sec-ds, turns from reading arrays to designing data structures on top of them.
+
+**Constraint signals.** $R, C \le 10$ to $100$ with "in place" or "$O(1)$ extra space" points at the transforms and markers of this chapter; $R, C \le 100$ to $500$ with "sub-rectangle" points at $O(R^2C)$ fix-two-rows (P4); $n \le 2000$ or $\sum n^2 \le 4\cdot 10^6$ with free shifts or rotations points at an invariant that turns the search into one $O(n^2)$ count (P5).
+
+## Part A — Lessons
+
+Six lessons, each one tool. A1 is the coordinate system; A2 walks it; A3 moves cells around in it; A4 writes notes into it; A5 collapses one of its dimensions; A6 reads answers off it without walking.
+
+## A1. Row-major storage, flattening and neighbours {#sec-mat-a1}
+
+::: {.callout-note title="In plain words"}
+Memory is one long ribbon of cells. An $R\times C$ matrix is stored by writing row 0, then row 1, then row 2 along that ribbon. So cell $(i,j)$ sits at position $i\cdot C+j$: skip $i$ whole rows of $C$ cells, then $j$ more. Reading along a row touches neighbouring cells of the ribbon (fast); reading down a column jumps $C$ cells each step (slow).
+:::
+
+**The coordinate map.** For a matrix with $C$ columns stored in **row-major** order,
+$$\text{flat}(i, j) = i\cdot C + j,\qquad \text{unflat}(k) = (\,\lfloor k / C\rfloor,\; k \bmod C\,)$$ {#eq-mat-flat}
+is a bijection between $\{0..R-1\}\times\{0..C-1\}$ and $\{0..RC-1\}$. Both directions use $C$, the number of **columns** — dividing by $R$ is the classic slip (@sec-arr-2d). Everything in this chapter moves between the two views for free.
+
+```{python}
+def flat(i, j, cols):
+    return i * cols + j
+
+
+def unflat(k, cols):
+    return divmod(k, cols)          # (k // cols, k % cols)
+
+
+for _R, _C in [(3, 4), (1, 7), (5, 1), (2, 2)]:
+    for i in range(_R):
+        for j in range(_C):
+            assert unflat(flat(i, j, _C), _C) == (i, j)
+    assert sorted(flat(i, j, _C) for i in range(_R) for j in range(_C)) == list(range(_R * _C))
+```
+
+**Lists of lists and the aliasing trap.** In Python a matrix is a list of row lists (in C++ a `vector<vector<int>>`). Build it with a comprehension. `[[0] * C] * R` makes $R$ references to *one* row, so writing one cell writes a whole column.
+
+```{python}
+bad = [[0] * 3] * 2
+bad[0][0] = 7
+assert bad[1][0] == 7               # both "rows" are the same list
+good = [[0] * 3 for _ in range(2)]
+good[0][0] = 7
+assert good[1][0] == 0
+```
+
+**Neighbours with a direction array.** Almost every grid loop asks "which cells touch $(i,j)$?". Write the offsets once, as data, and filter by bounds; never write four nearly identical `if` blocks.
+
+```{python}
+DIRS4 = [(0, 1), (1, 0), (0, -1), (-1, 0)]                  # right, down, left, up: clockwise
+DIRS8 = DIRS4 + [(1, 1), (1, -1), (-1, 1), (-1, -1)]        # plus the four diagonal neighbours
+
+
+def neighbours(i, j, R, C, dirs=DIRS4):
+    for di, dj in dirs:
+        a, b = i + di, j + dj
+        if 0 <= a < R and 0 <= b < C:
+            yield a, b
+
+
+assert sorted(neighbours(0, 0, 3, 3)) == [(0, 1), (1, 0)]              # a corner has 2
+assert len(list(neighbours(0, 1, 3, 3))) == 3                           # an edge cell has 3
+assert len(list(neighbours(1, 1, 3, 3, DIRS8))) == 8
+assert sum(len(list(neighbours(i, j, 3, 4))) for i in range(3) for j in range(4)) == 2 * (3 * 3 + 2 * 4)
+```
+
+The last line is a useful check: every side-adjacent pair is counted from both ends, and a $3\times 4$ grid has $3\cdot 3$ horizontal and $2\cdot 4$ vertical pairs. Keeping the four directions in **clockwise order** has a bonus: "turn right" is `d = (d + 1) % 4`, which the spiral walk of @sec-mat-p1-spiral uses. When bounds checks clutter a hot loop, pad the grid with a border of sentinel cells instead (@sec-arr-sentinel).
+
+**Loop order is a performance decision.** `for i: for j:` walks the ribbon forward; `for j: for i:` jumps $C$ cells per step. Both visit every cell once, but @sec-arr-cache showed that memory arrives in cache lines of typically 64 bytes, sixteen 4-byte `int`s. The cell below counts the misses of a tiny simulated cache (four lines, least-recently-used eviction) on a $64\times 64$ `int` grid:
+
+```{python}
+def misses(order, C, line_cells=16, capacity=4):
+    cache, miss = [], 0
+    for i, j in order:
+        line = (i * C + j) // line_cells
+        if line in cache:
+            cache.remove(line)
+        else:
+            miss += 1
+            if len(cache) == capacity:
+                cache.pop(0)
+        cache.append(line)
+    return miss
+
+
+_N = 64
+row_major = [(i, j) for i in range(_N) for j in range(_N)]
+col_major = [(i, j) for j in range(_N) for i in range(_N)]
+assert misses(row_major, _N) == _N * _N // 16        # one miss per line: 256
+assert misses(col_major, _N) == _N * _N              # every read misses: 4096
+```
+
+Same $\Theta(RC)$ work, sixteen times the misses — exactly the number of cells per line. On real hardware the gap also depends on prefetching and cache size, but the direction is always the same: put the index that moves along a row (`j`) in the inner loop. If an algorithm truly needs columns, transpose once (@sec-mat-a3) and then read rows.
+
+```cpp
+// fragment - a row-major flat grid; keep j in the inner loop
+for (int i = 0; i < R; ++i)
+    for (int j = 0; j < C; ++j)
+        use(g[i * C + j]);          // consecutive j -> consecutive addresses
+// Swapping the two loops reads the same g[i * C + j] with i innermost:
+// each step jumps C cells, so almost every read touches a new cache line.
+```
+
+::: {#fig-mat-a1-order}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a1_rm = [[str(i * 4 + j + 1) for j in range(4)] for i in range(3)]
+a1_cm = [[str(j * 3 + i + 1) for j in range(4)] for i in range(3)]
+a1_rowcol = {(i, j): ["green", "cyan", "violet"][i] for i in range(3) for j in range(4)}
+
+
+def draw(ax, p):
+    V.grid(ax, p, a1_rm, x=0.0, colors=a1_rowcol)
+    V.grid(ax, p, a1_cm, x=5.6, colors=a1_rowcol)
+    V.text(ax, p, 2.0, 1.6, "row-major visit order", size=9, color="muted")
+    V.text(ax, p, 7.6, 1.6, "column-major visit order", size=9, color="muted")
+    V.array(ax, p, [i * 4 + j + 1 for i in range(3) for j in range(4)], x=0.0, y=-4.0,
+            colors={k: ["green", "cyan", "violet"][k // 4] for k in range(12)}, index=False)
+    V.text(ax, p, 6.0, -4.9, "memory: one row after another; column-major jumps 4 cells per step",
+           size=9, color="muted")
+V.show(draw)
+```
+
+A $3\times 4$ grid, coloured by row, with the order in which each loop nest visits the cells. Row-major visits $1, 2, 3, \dots$ along the memory ribbon below; column-major visits the first cell of every row before the second cell of any, so consecutive visits are a full row (four cells) apart.
+
+:::
+
+**Complexity.** Any full sweep is $\Theta(RC)$ time and $O(1)$ extra space. Loop order changes the constant, by up to the number of cells per cache line, not the order of growth.
+
+## A2. Traversal orders: spiral, snake, boundary, diagonals {#sec-mat-a2}
+
+::: {.callout-note title="In plain words"}
+"Read the matrix in a special order" almost always means one of two things. Either you hold **four walls** (`top`, `bottom`, `left`, `right`), walk one edge, and pull that wall in — the spiral. Or you group cells by a **key that is constant along the line you want**: $i+j$ is constant along an anti-diagonal (top-right to bottom-left), $i-j$ along a diagonal (top-left to bottom-right). One lap of the spiral is the boundary layer.
+:::
+
+**Spiral order.** Walk the top row left to right, the right column top to bottom, the bottom row right to left, the left column bottom to top; move each wall in after its edge, and repeat while the walls have not crossed. The two **re-tests** before the return edges (`top <= bottom` before the bottom row, `left <= right` before the left column) are what stop a single leftover row or column from being read twice.
+
+```{python}
+def spiral_coords(R, C):
+    top, bottom, left, right = 0, R - 1, 0, C - 1
+    out = []
+    while top <= bottom and left <= right:
+        out += [(top, j) for j in range(left, right + 1)]
+        top += 1
+        out += [(i, right) for i in range(top, bottom + 1)]
+        right -= 1
+        if top <= bottom:
+            out += [(bottom, j) for j in range(right, left - 1, -1)]
+            bottom -= 1
+        if left <= right:
+            out += [(i, left) for i in range(bottom, top - 1, -1)]
+            left += 1
+    return out
+
+
+def spiral_order(M):
+    if not M or not M[0]:
+        return []
+    return [M[i][j] for i, j in spiral_coords(len(M), len(M[0]))]
+
+
+assert spiral_order([[1, 2, 3], [4, 5, 6], [7, 8, 9]]) == [1, 2, 3, 6, 9, 8, 7, 4, 5]
+assert spiral_order([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]) == [1, 2, 3, 4, 8, 12, 11, 10, 9, 5, 6, 7]
+assert spiral_order([[1, 2, 3]]) == [1, 2, 3]          # 1 x n
+assert spiral_order([[1], [2], [3]]) == [1, 2, 3]      # n x 1
+assert spiral_order([[]]) == [] and spiral_order([[1]]) == [1]
+for _r in range(1, 7):
+    for _c in range(1, 7):
+        _cells = spiral_coords(_r, _c)
+        assert sorted(_cells) == [(i, j) for i in range(_r) for j in range(_c)]   # each cell once
+        assert all(abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1 for a, b in zip(_cells, _cells[1:]))
+```
+
+The last assertion checks something easy to forget: consecutive spiral cells are always side neighbours, so the spiral really is a walk.
+
+::: {#fig-mat-a2-spiral}
+
+```{python}
+#| echo: false
+a2_R, a2_C = 3, 4
+a2_vals = [[i * a2_C + j + 1 for j in range(a2_C)] for i in range(a2_R)]
+a2_cells = [[str(v) for v in r] for r in a2_vals]
+a2_frames = []                      # (cell, walls at the moment the cell is emitted)
+_t, _b, _l, _r = 0, a2_R - 1, 0, a2_C - 1
+while _t <= _b and _l <= _r:
+    for _j in range(_l, _r + 1):
+        a2_frames.append(((_t, _j), (_t, _b, _l, _r), "top row, left to right"))
+    _t += 1
+    for _i in range(_t, _b + 1):
+        a2_frames.append(((_i, _r), (_t, _b, _l, _r), "right column, downward"))
+    _r -= 1
+    if _t <= _b:
+        for _j in range(_r, _l - 1, -1):
+            a2_frames.append(((_b, _j), (_t, _b, _l, _r), "bottom row, right to left"))
+        _b -= 1
+    if _l <= _r:
+        for _i in range(_b, _t - 1, -1):
+            a2_frames.append(((_i, _l), (_t, _b, _l, _r), "left column, upward"))
+        _l += 1
+assert [c for c, _, _ in a2_frames] == spiral_coords(a2_R, a2_C)
+assert [a2_vals[i][j] for (i, j), _, _ in a2_frames] == [1, 2, 3, 4, 8, 12, 11, 10, 9, 5, 6, 7]
+
+
+def a2_frame(ax, p, k):
+    col = {a2_frames[s][0]: "green" for s in range(k)}
+    col[a2_frames[k][0]] = "amber"
+    V.grid(ax, p, a2_cells, colors=col)
+    out = ", ".join(str(a2_vals[i][j]) for (i, j), _, _ in a2_frames[:k + 1])
+    V.text(ax, p, 0.0, -2.7, f"out = [{out}]", size=9, color="muted", ha="left")
+
+
+a2_caps = []
+for (i, j), (t, b, l, r), edge in a2_frames:
+    a2_caps.append(f"{edge}: emit {a2_vals[i][j]} at ({i},{j}); walls top={t} bottom={b} left={l} right={r}")
+V.animate(a2_frame, len(a2_frames), captions=a2_caps, interval=750)
+```
+
+The spiral on a $3\times 4$ grid, one emitted cell per frame (amber = just emitted, green = already emitted). The first lap reads ten cells. In the second lap only the middle row `6 7` is left: after the top edge `top` passes `bottom`, so the re-test skips the bottom edge, and the left edge is empty, so nothing is read twice.
+
+:::
+
+**Snake (boustrophedon) order.** Rows alternate direction: left to right on even rows, right to left on odd rows. It is the order of a printer head or a lawnmower, and it appears whenever consecutive cells of the walk must be neighbours but a spiral is not required.
+
+```{python}
+def snake_coords(R, C):
+    return [(i, j if i % 2 == 0 else C - 1 - j) for i in range(R) for j in range(C)]
+
+
+assert [4 * i + j + 1 for i, j in snake_coords(3, 4)] == [1, 2, 3, 4, 8, 7, 6, 5, 9, 10, 11, 12]
+```
+
+**Boundary layers (rings).** Cell $(i,j)$ belongs to ring
+$$\text{ring}(i,j) = \min(i,\; j,\; R-1-i,\; C-1-j),$$ {#eq-mat-ring}
+its distance to the nearest edge. There are $\lceil \min(R,C)/2 \rceil$ rings, and the spiral is the rings read from the outside in. Ring $t$ is a rectangle of height $h = R-2t$ and width $w = C-2t$; it has $2h + 2w - 4$ cells, unless it is a single row ($w$ cells) or a single column ($h$ cells). "Rotate the border by one", "sum each layer" and "peel the matrix" problems all start here.
+
+```{python}
+def ring(i, j, R, C):
+    return min(i, j, R - 1 - i, C - 1 - j)
+
+
+def ring_size(t, R, C):
+    h, w = R - 2 * t, C - 2 * t
+    return w if h == 1 else h if w == 1 else 2 * h + 2 * w - 4
+
+
+for _r in range(1, 7):
+    for _c in range(1, 7):
+        _rings = [ring(i, j, _r, _c) for i, j in spiral_coords(_r, _c)]
+        assert _rings == sorted(_rings)                          # spiral = rings outside-in
+        _nr = (min(_r, _c) + 1) // 2
+        assert max(_rings) == _nr - 1
+        assert [_rings.count(t) for t in range(_nr)] == [ring_size(t, _r, _c) for t in range(_nr)]
+```
+
+**Diagonals ($i-j$ constant) and anti-diagonals ($i+j$ constant).** Moving one step down-right keeps $i-j$; moving one step down-left keeps $i+j$. So grouping cells by the right key lists the lines. Both keys take $R+C-1$ values: $i-j \in [-(C-1),\, R-1]$ and $i+j \in [0,\, R+C-2]$. For anti-diagonal $s$ the rows run from $\max(0, s-(C-1))$ to $\min(s, R-1)$, with $j = s - i$.
+
+```{python}
+def diagonals(M):
+    R, C = len(M), len(M[0])
+    return [[M[i][i - d] for i in range(R) if 0 <= i - d < C] for d in range(-(C - 1), R)]
+
+
+def anti_diagonals(M):
+    R, C = len(M), len(M[0])
+    return [[M[i][s - i] for i in range(max(0, s - (C - 1)), min(R - 1, s) + 1)]
+            for s in range(R + C - 1)]
+
+
+a2_M = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+assert diagonals(a2_M) == [[3], [2, 6], [1, 5, 9], [4, 8], [7]]
+assert anti_diagonals(a2_M) == [[1], [2, 4], [3, 5, 7], [6, 8], [9]]
+for _ in range(100):
+    _r, _c = random.randint(1, 6), random.randint(1, 6)
+    _M = [[i * _c + j for j in range(_c)] for i in range(_r)]
+    assert sorted(v for g in diagonals(_M) for v in g) == list(range(_r * _c))
+    assert sorted(v for g in anti_diagonals(_M) for v in g) == list(range(_r * _c))
+    assert len(diagonals(_M)) == len(anti_diagonals(_M)) == _r + _c - 1
+```
+
+::: {#fig-mat-a2-orders}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def _rank_grid(coords, R, C):
+    g = [[""] * C for _ in range(R)]
+    for k, (i, j) in enumerate(coords):
+        g[i][j] = str(k + 1)
+    return g
+
+
+def _zigzag_coords(R, C):
+    out = []
+    for s in range(R + C - 1):
+        band = [(i, s - i) for i in range(max(0, s - (C - 1)), min(R - 1, s) + 1)]
+        out += band[::-1] if s % 2 == 0 else band
+    return out
+
+
+a2_orders = [("snake", snake_coords(3, 4)), ("spiral", spiral_coords(3, 4)), ("diagonal zig-zag", _zigzag_coords(3, 4))]
+for _name, _co in a2_orders:
+    assert sorted(_co) == [(i, j) for i in range(3) for j in range(4)]
+
+
+def draw(ax, p):
+    for k, (name, co) in enumerate(a2_orders):
+        x = 5.4 * k
+        ends = {co[0]: "green", co[-1]: "amber"}
+        if name == "diagonal zig-zag":
+            ends.update({(i, j): ("cyan" if (i + j) % 2 else "violet") for i in range(3) for j in range(4)
+                         if (i, j) not in ends})
+        V.grid(ax, p, _rank_grid(co, 3, 4), x=x, colors=ends)
+        V.text(ax, p, x + 2.0, 1.6, name, size=9, color="muted")
+V.show(draw)
+```
+
+Three orders on one $3\times 4$ grid; each cell shows when it is visited (green = first, amber = last). The snake flips direction every row; the spiral walks four walls inward; the zig-zag of Diagonal Traverse (@sec-mat-p1-diag) reads anti-diagonal bands $i+j = 0, 1, \dots$, upward on even bands (violet) and downward on odd ones (cyan).
+
+:::
+
+```cpp
+// fragment - spiral order with four walls and the two re-tests
+vector<int> spiral(const vector<vector<int>>& a) {
+    vector<int> out;
+    if (a.empty() || a[0].empty()) return out;
+    int top = 0, bottom = (int)a.size() - 1, left = 0, right = (int)a[0].size() - 1;
+    while (top <= bottom && left <= right) {
+        for (int j = left; j <= right; ++j) out.push_back(a[top][j]);
+        ++top;
+        for (int i = top; i <= bottom; ++i) out.push_back(a[i][right]);
+        --right;
+        if (top <= bottom) { for (int j = right; j >= left; --j) out.push_back(a[bottom][j]); --bottom; }
+        if (left <= right) { for (int i = bottom; i >= top; --i) out.push_back(a[i][left]); ++left; }
+    }
+    return out;
+}
+```
+
+**Complexity.** Every traversal emits each of the $RC$ cells once: $\Theta(RC)$ time. The spiral keeps four integers and the diagonal loops two, so $O(1)$ extra space beyond the output. The shapes $1\times n$, $n\times 1$ and $1\times 1$ need no special code: the re-tests and the band bounds already cover them.
+
+## A3. Transpose, rotate and reflect {#sec-mat-a3}
+
+::: {.callout-note title="In plain words"}
+A **transpose** flips a matrix across its main diagonal: row $i$, column $j$ goes to row $j$, column $i$. A **$90^\circ$ clockwise rotation** is a transpose followed by reversing every row. Both only *move* cells, so they are permutations of positions. On a square grid you can perform them in place with swaps; on a rectangle the shape changes ($R\times C$ becomes $C\times R$) and the easy route is a new grid.
+:::
+
+**Transpose of a square, in place.** Swap `M[i][j]` with `M[j][i]` for $i < j$ only. Each off-diagonal pair is exchanged once and the diagonal stays put; looping over all $i, j$ would swap every pair twice and change nothing.
+
+```{python}
+def transpose(M):
+    n = len(M)
+    assert all(len(r) == n for r in M)          # in place needs a square
+    A = [row[:] for row in M]
+    for i in range(n):
+        for j in range(i + 1, n):
+            A[i][j], A[j][i] = A[j][i], A[i][j]
+    return A
+
+
+a3_M = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+assert transpose(a3_M) == [[1, 4, 7], [2, 5, 8], [3, 6, 9]]
+assert transpose(transpose(a3_M)) == a3_M       # an involution: doing it twice is the identity
+```
+
+**Rotation as transpose + reverse.** Transposing sends $(i,j)$ to $(j,i)$; reversing each row then sends column $i$ to column $n-1-i$. Together $(i,j) \to (j, n-1-i)$, the clockwise quarter turn. Read the other way round, the rotated grid at $(i,j)$ holds
+$$\text{rot}_{90}(M)[i][j] = M[n-1-j][i].$$ {#eq-mat-rot}
+
+```{python}
+def rotate90(M):
+    return [row[::-1] for row in transpose(M)]
+
+
+def rotate180(M):
+    return [row[::-1] for row in M][::-1]
+
+
+def rotate270(M):
+    return transpose(M)[::-1]                   # transpose, then reverse the ORDER of the rows
+
+
+assert rotate90(a3_M) == [[7, 4, 1], [8, 5, 2], [9, 6, 3]]
+assert rotate270(a3_M) == [[3, 6, 9], [2, 5, 8], [1, 4, 7]]
+for _ in range(300):
+    n = random.randint(1, 5)
+    M = [[random.randint(0, 9) for _ in range(n)] for _ in range(n)]
+    R9 = rotate90(M)
+    assert all(R9[i][j] == M[n - 1 - j][i] for i in range(n) for j in range(n))
+    assert rotate90(rotate90(rotate90(rotate90(M)))) == M
+    assert rotate180(M) == rotate90(rotate90(M))
+    assert rotate270(M) == rotate90(rotate180(M))
+```
+
+**The eight symmetries of a square.** Four rotations and four reflections map a square grid onto itself; together they form the *dihedral group* $D_4$. Each is one index formula and one cheap in-place recipe built from three moves: transpose, reverse each row, reverse the order of the rows.
+
+| Transform | `new[i][j] =` | In place |
+|---|---|---|
+| identity | `M[i][j]` | nothing |
+| rotate $90^\circ$ clockwise | `M[n-1-j][i]` | transpose, then reverse each row |
+| rotate $180^\circ$ | `M[n-1-i][n-1-j]` | reverse row order, then reverse each row |
+| rotate $90^\circ$ counter-clockwise | `M[j][n-1-i]` | transpose, then reverse row order |
+| mirror left–right | `M[i][n-1-j]` | reverse each row |
+| mirror top–bottom | `M[n-1-i][j]` | reverse row order |
+| transpose (main diagonal) | `M[j][i]` | swap over $i<j$ |
+| anti-transpose (other diagonal) | `M[n-1-j][n-1-i]` | transpose, then rotate $180^\circ$ |
+
+```{python}
+D4 = {
+    "id": lambda M, n, i, j: M[i][j],
+    "rot90": lambda M, n, i, j: M[n - 1 - j][i],
+    "rot180": lambda M, n, i, j: M[n - 1 - i][n - 1 - j],
+    "rot270": lambda M, n, i, j: M[j][n - 1 - i],
+    "mirror_lr": lambda M, n, i, j: M[i][n - 1 - j],
+    "mirror_tb": lambda M, n, i, j: M[n - 1 - i][j],
+    "transpose": lambda M, n, i, j: M[j][i],
+    "anti": lambda M, n, i, j: M[n - 1 - j][n - 1 - i],
+}
+
+
+def apply(name, M):
+    n = len(M)
+    return [[D4[name](M, n, i, j) for j in range(n)] for i in range(n)]
+
+
+_M = [[4 * i + j for j in range(4)] for i in range(4)]
+assert len({str(apply(k, _M)) for k in D4}) == 8                 # eight different grids
+assert apply("rot90", _M) == rotate90(_M) and apply("rot270", _M) == rotate270(_M)
+assert apply("mirror_lr", _M) == [r[::-1] for r in _M]
+assert apply("mirror_tb", _M) == _M[::-1]
+assert apply("anti", _M) == rotate180(transpose(_M))
+assert apply("rot90", _M) == apply("transpose", apply("mirror_tb", _M))   # reverse rows first, then transpose
+```
+
+The last line is worth remembering because it is the usual source of sign errors: *reverse the row order, then transpose* is also the clockwise turn, while *transpose, then reverse the row order* is counter-clockwise. When unsure, check the corner: clockwise sends the top-left value to the top-right.
+
+**Rectangles.** For an $R\times C$ grid the clockwise turn is a $C\times R$ grid with `rot[j][R-1-i] = M[i][j]`. In Python that is `zip(*M[::-1])`: reverse the rows, then read columns.
+
+```{python}
+def rotate90_rect(M):
+    return [list(col) for col in zip(*M[::-1])]
+
+
+for _ in range(200):
+    _r, _c = random.randint(1, 5), random.randint(1, 5)
+    _A = [[random.randint(0, 9) for _ in range(_c)] for _ in range(_r)]
+    _B = rotate90_rect(_A)
+    assert len(_B) == _c and len(_B[0]) == _r
+    assert all(_B[j][_r - 1 - i] == _A[i][j] for i in range(_r) for j in range(_c))
+```
+
+**Why the in-place transpose is easy only for squares.** On a square, cell $(i,j)$ and cell $(j,i)$ simply trade places: the permutation is made of swaps. On an $R\times C$ grid stored flat, the value at flat index $p = iC + j$ must move to $q = jR + i$ in the $C\times R$ result. That is still a permutation of the same $RC$ slots, but its cycles can be long (for a $2\times 3$ grid one cycle is $1 \to 2 \to 4 \to 3 \to 1$), so in-place requires following cycles, as the juggling rotation of @sec-part-p5 does. Exercise 13 writes it out. Rotation inherits the same story through its transpose step.
+
+**The four-cycle view.** A clockwise turn moves the four cells
+$$(i,j) \to (j,\, n-1-i) \to (n-1-i,\, n-1-j) \to (n-1-j,\, i) \to (i,j)$$ {#eq-mat-orbit}
+around one **orbit**. Every cell is in exactly one orbit of four, except the centre of an odd grid, which is an orbit of one. So a rotation can also be done by visiting one representative per orbit and moving its four values one step, with one temporary — no transpose at all (Rotate Image, @sec-mat-p2-rotate). Orbits matter beyond rotation: a grid that looks the same after a quarter turn is exactly a grid that is constant on every orbit (Mirror Grid, @sec-mat-p2-mirror).
+
+::: {#fig-mat-a3-rotate}
+
+```{python}
+#| echo: false
+a3_n = 4
+a3_A = [[4 * i + j + 1 for j in range(a3_n)] for i in range(a3_n)]
+a3_states = [([r[:] for r in a3_A], {}, "start: 4x4 grid, rotate 90 degrees clockwise in place")]
+_A = [r[:] for r in a3_A]
+for _i in range(a3_n - 1):
+    _hl = {}
+    for _j in range(_i + 1, a3_n):
+        _A[_i][_j], _A[_j][_i] = _A[_j][_i], _A[_i][_j]
+        _hl[(_i, _j)] = "cyan"
+        _hl[(_j, _i)] = "cyan"
+    a3_states.append(([r[:] for r in _A], _hl,
+                      f"transpose, i={_i}: swap row {_i} right of the diagonal with column {_i} below it"))
+for _i in range(a3_n):
+    _A[_i].reverse()
+    a3_states.append(([r[:] for r in _A], {(_i, j): "green" for j in range(a3_n)},
+                      f"reverse row {_i}: " + " ".join(str(v) for v in _A[_i])))
+assert a3_states[3][0] == [list(c) for c in zip(*a3_A)]            # after the transpose
+assert a3_states[-1][0] == rotate90(a3_A)                          # final grid = M[n-1-j][i]
+
+
+def a3_frame(ax, p, k):
+    grid_, hl, _ = a3_states[k]
+    V.grid(ax, p, [[str(v) for v in r] for r in grid_], colors=hl)
+
+
+V.animate(a3_frame, len(a3_states), captions=[c for _, _, c in a3_states], interval=1000)
+```
+
+Rotating a $4\times 4$ grid in place. Frames 2–4 transpose it one row at a time: each frame swaps the part of row $i$ right of the diagonal with the part of column $i$ below it (cyan), so only $6$ swaps are made and the diagonal $1, 6, 11, 16$ never moves. Frames 5–8 reverse the rows (green). The final grid's top row `13 9 5 1` is the old first column read upward — a clockwise quarter turn.
+
+:::
+
+```cpp
+// fragment - rotate 90 degrees clockwise in place: transpose, then reverse each row
+void rotate90(vector<vector<int>>& a) {
+    int n = (int)a.size();
+    for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j)
+            swap(a[i][j], a[j][i]);
+    for (int i = 0; i < n; ++i)
+        reverse(a[i].begin(), a[i].end());
+}
+```
+
+**Complexity.** Every transform touches each of the $n^2$ cells a constant number of times: $\Theta(n^2)$ time. The swap and reverse recipes and the four-cycle use $O(1)$ extra space; the rectangle versions allocate the $\Theta(RC)$ result unless you follow cycles.
+
+## A4. Writing notes inside the matrix {#sec-mat-a4}
+
+::: {.callout-note title="In plain words"}
+Many grid tasks need a note per row, per column, or per cell: "this row must be wiped", "this cell's old value was 1". The obvious notes are extra arrays. The in-place trick is to find **storage the matrix is not using** — its own first row and column, or spare bits in each cell — and keep the notes there. The price is ordering: a note must be read before anything overwrites it.
+:::
+
+This is the 2-D form of the previous chapter's marking tricks (@sec-idx), where a sign bit or an out-of-range value inside the array recorded "seen".
+
+**Headers as flag arrays: set matrix zeroes.** "If a cell is $0$, set its whole row and column to $0$." Two boolean arrays `rows[R]`, `cols[C]` cost $O(R+C)$. For $O(1)$, let `M[0][j]` mean "column $j$ must go" and `M[i][0]` mean "row $i$ must go". Row 0 and column 0 are now flag storage, so whether *they themselves* contain a zero is saved first in two booleans; the corner `M[0][0]` could not say which of the two it means.
+
+1. Save `zero_row0` and `zero_col0`.
+2. **Mark:** for every interior zero $(i,j)$ with $i, j \ge 1$, set `M[i][0] = 0` and `M[0][j] = 0`.
+3. **Wipe the interior** from those flags.
+4. Wipe row 0 and column 0 from the saved booleans — **last**, because steps 2 and 3 still read them.
+
+```{python}
+def set_zeroes(M):
+    if not M or not M[0]:
+        return M
+    R, C = len(M), len(M[0])
+    zero_row0 = any(M[0][j] == 0 for j in range(C))
+    zero_col0 = any(M[i][0] == 0 for i in range(R))
+    for i in range(1, R):                       # mark the headers
+        for j in range(1, C):
+            if M[i][j] == 0:
+                M[i][0] = 0
+                M[0][j] = 0
+    for i in range(1, R):                       # wipe the interior from the headers
+        for j in range(1, C):
+            if M[i][0] == 0 or M[0][j] == 0:
+                M[i][j] = 0
+    if zero_row0:                               # the headers themselves, last
+        for j in range(C):
+            M[0][j] = 0
+    if zero_col0:
+        for i in range(R):
+            M[i][0] = 0
+    return M
+
+
+def brute_zero(M):
+    R, C = len(M), len(M[0])
+    rows = {i for i in range(R) for j in range(C) if M[i][j] == 0}
+    cols = {j for j in range(C) for i in range(R) if M[i][j] == 0}
+    return [[0 if (i in rows or j in cols) else M[i][j] for j in range(C)] for i in range(R)]
+
+
+assert set_zeroes([[1, 1, 1], [1, 0, 1], [1, 1, 1]]) == [[1, 0, 1], [0, 0, 0], [1, 0, 1]]
+assert set_zeroes([[0, 1], [1, 1]]) == [[0, 0], [0, 1]]
+for _ in range(300):
+    _r, _c = random.randint(1, 5), random.randint(1, 5)
+    _M = [[random.randint(0, 3) for _ in range(_c)] for _ in range(_r)]
+    assert set_zeroes([row[:] for row in _M]) == brute_zero(_M)
+```
+
+::: {#fig-mat-a4}
+
+```{python}
+#| echo: false
+a4_in = [[1, 1, 1, 1], [1, 0, 1, 1], [1, 1, 1, 0], [0, 1, 1, 1]]
+a4_steps = []
+
+
+def _snap(A, col, cap):
+    a4_steps.append(([[str(v) for v in r] for r in A], col, cap))
+
+
+_A = [r[:] for r in a4_in]
+_R, _C = 4, 4
+_snap(_A, {(i, j): "red" for i in range(_R) for j in range(_C) if _A[i][j] == 0}, "input: zeros at (1,1), (2,3), (3,0)")
+_zr = any(_A[0][j] == 0 for j in range(_C))
+_zc = any(_A[i][0] == 0 for i in range(_R))
+_snap(_A, {(3, 0): "red"}, f"save booleans: zero_row0={_zr}, zero_col0={_zc} (the 0 at (3,0) is in column 0)")
+_hl = {}
+for _i in range(1, _R):
+    for _j in range(1, _C):
+        if _A[_i][_j] == 0:
+            _A[_i][0] = 0
+            _A[0][_j] = 0
+            _hl[(_i, 0)] = "amber"
+            _hl[(0, _j)] = "amber"
+_snap(_A, _hl, "mark: each interior zero writes 0 into its row header and its column header")
+_hl = {}
+for _i in range(1, _R):
+    for _j in range(1, _C):
+        if (_A[_i][0] == 0 or _A[0][_j] == 0) and _A[_i][_j] != 0:
+            _A[_i][_j] = 0
+            _hl[(_i, _j)] = "green"
+_snap(_A, _hl, "wipe the interior: a cell goes to 0 if its row or column header is 0")
+_hl = {}
+if _zr:
+    for _j in range(_C):
+        _A[0][_j] = 0
+        _hl[(0, _j)] = "cyan"
+if _zc:
+    for _i in range(_R):
+        _A[_i][0] = 0
+        _hl[(_i, 0)] = "cyan"
+_snap(_A, _hl, "last: zero_col0 is true, so column 0 is wiped; row 0 keeps its flags only")
+assert _A == brute_zero(a4_in) == set_zeroes([r[:] for r in a4_in])
+
+
+def a4_frame(ax, p, k):
+    cells, col, _ = a4_steps[k]
+    V.grid(ax, p, cells, colors=col)
+
+
+V.animate(a4_frame, len(a4_steps), captions=[c for _, _, c in a4_steps], interval=1100)
+```
+
+The header scheme on a $4\times 4$ grid. Red: the original zeros. Amber: header cells turned into flags by the two interior zeros. Green: interior cells wiped from the flags. Cyan: column 0, wiped last from the saved boolean because the original zero at $(3,0)$ sits in the header itself. Row 0 keeps the values its flags left — exactly the cells in doomed columns.
+
+:::
+
+**Squeezing out one boolean.** `M[0][0]` can carry row 0's flag if column 0 gets its own boolean `col0`. Then the wipe must run **from the bottom-right corner upward**, so row 0 (whose flags every row reads) is wiped last of all, and column 0 is wiped row by row after that row's interior. It saves one variable at the cost of a subtler order — the kind of follow-up interviewers like.
+
+```{python}
+def set_zeroes_one_flag(M):
+    R, C = len(M), len(M[0])
+    col0 = False
+    for i in range(R):
+        if M[i][0] == 0:
+            col0 = True
+        for j in range(1, C):
+            if M[i][j] == 0:
+                M[i][0] = 0                       # row i (row 0 uses M[0][0])
+                M[0][j] = 0
+    for i in range(R - 1, -1, -1):                # bottom-up: row 0, the flag row, goes last
+        for j in range(C - 1, 0, -1):
+            if M[i][0] == 0 or M[0][j] == 0:
+                M[i][j] = 0
+        if col0:
+            M[i][0] = 0
+    return M
+
+
+for _ in range(400):
+    _r, _c = random.randint(1, 5), random.randint(1, 5)
+    _M = [[random.randint(0, 3) for _ in range(_c)] for _ in range(_r)]
+    assert set_zeroes_one_flag([row[:] for row in _M]) == brute_zero(_M)
+```
+
+**Spare bits: two states per cell.** When the note is per *cell* — "what was this cell before this round?" — there is no header to borrow, but a cell holding `0` or `1` uses one bit of an integer. Store the new value in bit 1 and keep reading bit 0 (`v & 1`) until every cell is decided; a final pass shifts right. That is the whole of Game of Life (@sec-mat-p3-life). The same idea underlies every in-place simulation: the next state may be written only where the current state can still be recovered.
+
+```cpp
+// fragment - set matrix zeroes with O(1) extra space (header row and column as flags)
+void setZeroes(vector<vector<int>>& a) {
+    int R = (int)a.size(), C = (int)a[0].size();
+    bool row0 = false, col0 = false;
+    for (int j = 0; j < C; ++j) if (a[0][j] == 0) row0 = true;
+    for (int i = 0; i < R; ++i) if (a[i][0] == 0) col0 = true;
+    for (int i = 1; i < R; ++i)
+        for (int j = 1; j < C; ++j)
+            if (a[i][j] == 0) { a[i][0] = 0; a[0][j] = 0; }
+    for (int i = 1; i < R; ++i)
+        for (int j = 1; j < C; ++j)
+            if (a[i][0] == 0 || a[0][j] == 0) a[i][j] = 0;
+    if (row0) for (int j = 0; j < C; ++j) a[0][j] = 0;
+    if (col0) for (int i = 0; i < R; ++i) a[i][0] = 0;
+}
+```
+
+**Complexity.** Two or three sweeps, $\Theta(RC)$ time, $O(1)$ extra space. The asymptotic gain over boolean arrays is only $O(R + C)$ memory; the real lesson is the discipline of separating "record" passes from "act" passes.
+
+## A5. Fix two rows, solve 1D on the columns between them {#sec-mat-a5}
+
+::: {.callout-note title="In plain words"}
+A sub-rectangle is chosen by four numbers: top, bottom, left, right. Trying them all is $O(R^2C^2)$ rectangles. Instead, **fix the top and bottom rows**. Every column between them then contributes one number, the sum of its cells in that band. The band becomes a single array, and a rectangle with these rows is just a contiguous piece of that array — a 1-D problem you already know how to solve.
+:::
+
+The 1-D engine for "largest sum" is **Kadane's algorithm** (@sec-dpi-p5): the best subarray ending at position $k$ either extends the best one ending at $k-1$ or starts fresh at $k$. This version also returns where the winning run starts and ends, so the reduction can report the rectangle.
+
+```{python}
+def max_subarray(a):
+    best = cur = a[0]
+    bi = bj = cs = 0
+    for k in range(1, len(a)):
+        x = a[k]
+        if x > cur + x:
+            cur, cs = x, k                       # restart at k
+        else:
+            cur = cur + x                        # extend
+        if cur > best:
+            best, bi, bj = cur, cs, k
+    return best, bi, bj
+
+
+assert max_subarray([-2, 1, -3, 4, -1, 2, 1, -5, 4]) == (6, 3, 6)   # [4,-1,2,1]
+assert max_subarray([-5, -2, -9]) == (-2, 1, 1)                       # all negative: least bad
+```
+
+**Collapse the band, then run Kadane.** For a fixed `top`, start `col` at zeros and add one row at a time as `bottom` moves down. Each step costs $O(C)$, so the column sums of every band are maintained without recomputation.
+
+```{python}
+def max_submatrix(M):
+    R, C = len(M), len(M[0])
+    best = rect = None
+    for top in range(R):
+        col = [0] * C
+        for bottom in range(top, R):
+            for j in range(C):
+                col[j] += M[bottom][j]          # fold one more row into the band
+            s, l, r = max_subarray(col)
+            if best is None or s > best:
+                best, rect = s, (top, bottom, l, r)
+    return best, rect
+
+
+def brute_max_submatrix(M):
+    R, C = len(M), len(M[0])
+    return max(sum(M[i][j] for i in range(t, b + 1) for j in range(l, r + 1))
+               for t in range(R) for b in range(t, R) for l in range(C) for r in range(l, C))
+
+
+a5_M = [[1, -2, -3, 1], [1, 3, -2, 1], [-5, -1, 4, -1], [1, 2, -3, 1]]
+assert max_submatrix(a5_M) == (4, (1, 1, 0, 1))
+assert max_submatrix(a5_M)[0] == brute_max_submatrix(a5_M)
+for _ in range(150):
+    _r, _c = random.randint(1, 4), random.randint(1, 4)
+    _M = [[random.randint(-5, 5) for _ in range(_c)] for _ in range(_r)]
+    _s, (_t, _b, _l, _rr) = max_submatrix(_M)
+    assert _s == brute_max_submatrix(_M)
+    assert _s == sum(_M[i][j] for i in range(_t, _b + 1) for j in range(_l, _rr + 1))
+```
+
+::: {#fig-mat-a5-fix}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a5_top, a5_bot = 1, 2
+a5_band = [sum(a5_M[i][j] for i in range(a5_top, a5_bot + 1)) for j in range(4)]
+a5_s, a5_l, a5_r = max_subarray(a5_band)
+assert a5_band == [-4, 2, 2, 0] and (a5_s, a5_l, a5_r) == (4, 1, 2)
+
+
+def draw(ax, p):
+    hl = {(i, j): "cyan" for i in range(a5_top, a5_bot + 1) for j in range(4)}
+    hl.update({(i, j): "green" for i in range(a5_top, a5_bot + 1) for j in range(a5_l, a5_r + 1)})
+    V.grid(ax, p, [[str(v) for v in r] for r in a5_M], colors=hl,
+           row_labels=["", "top", "bottom", ""])
+    for j in range(4):
+        V.arrow(ax, p, j + 0.5, -3.15, j + 0.5, -4.05, color="muted")
+    V.array(ax, p, a5_band, x=0.0, y=-5.2, label="col", index=False,
+            colors={j: ("green" if a5_l <= j <= a5_r else "cyan") for j in range(4)})
+    V.text(ax, p, 4.5, -4.7, f"Kadane on col: best {a5_s}, columns {a5_l}..{a5_r}",
+           size=9, color="muted", ha="left")
+    V.text(ax, p, 4.5, 0.5, "fix two rows ...", size=9, color="muted", ha="left")
+    V.text(ax, p, 4.5, -3.6, "... collapse each column of the band", size=9, color="muted", ha="left")
+V.show(draw)
+```
+
+Fix two rows, collapse to 1-D. With top $= 1$ and bottom $= 2$ (cyan band), each column folds into one number, giving `col = [-4, 2, 2, 0]`. Kadane picks columns $1..2$ (green) with sum $4$: the green $2\times 2$ block in the grid is the best rectangle whose rows are exactly $1..2$. Repeating this for all $10$ row pairs finds the overall best.
+
+:::
+
+::: {#fig-mat-a5-collapse}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def _a5_rows(M, top):
+    C = len(M[0])
+    rows, col = [], [0] * C
+    for bottom in range(top, len(M)):
+        col = [col[j] + M[bottom][j] for j in range(C)]
+        s, l, r = max_subarray(col)
+        rows.append({"values": list(col), "label": f"rows {top}..{bottom}",
+                     "colors": {j: "green" for j in range(l, r + 1)}, "note": f"best = {s}"})
+    return rows
+
+
+a5_rows = _a5_rows(a5_M, 0)
+assert [rr["values"] for rr in a5_rows] == [[1, -2, -3, 1], [2, 1, -5, 2], [-3, 0, -1, 1], [-2, 2, -4, 2]]
+
+
+def draw(ax, p):
+    V.trace(ax, p, a5_rows, gap=2.2)
+V.show(draw)
+```
+
+All four bands with top row $0$, as the bottom edge moves down. Each array is the previous one plus one more row; the green run is that band's Kadane answer. None beats $4$ — the best rectangle starts at row $1$, which is why the outer loop must try every top row.
+
+:::
+
+**Choosing the kernel.** The band loop never changes; the 1-D question inside it does.
+
+| Question about rectangles | 1-D question on `col` | Kernel | Total |
+|---|---|---|---|
+| largest sum | largest subarray sum | Kadane (@sec-dpi-p5) | $O(R^2C)$ |
+| how many have sum $= t$ | subarrays with sum $= t$ | prefix sums + hash map (@sec-pref-hash) | $O(R^2C)$ |
+| largest sum $\le k$ | largest subarray sum $\le k$ | prefix sums + sorted set | $O(R^2 C\log C)$ |
+| how many have all four corners $= 1$ | pairs of columns with both cells $1$ | count $c$, add $\binom{c}{2}$ | $O(R^2C)$ |
+
+The last row shows that the "array" need not be sums at all — it can be any per-column fact about the two fixed rows:
+
+```{python}
+def corner_rectangles(G):
+    R, C = len(G), len(G[0])
+    total = 0
+    for top in range(R):
+        for bottom in range(top + 1, R):
+            c = sum(1 for j in range(C) if G[top][j] and G[bottom][j])
+            total += c * (c - 1) // 2              # any two such columns close a rectangle
+    return total
+
+
+def corner_rectangles_brute(G):
+    R, C = len(G), len(G[0])
+    return sum(1 for a in range(R) for b in range(a + 1, R) for x in range(C) for y in range(x + 1, C)
+               if G[a][x] and G[a][y] and G[b][x] and G[b][y])
+
+
+assert corner_rectangles([[1, 1, 1], [1, 1, 1]]) == 3
+for _ in range(200):
+    _r, _c = random.randint(1, 5), random.randint(1, 5)
+    _G = [[random.randint(0, 1) for _ in range(_c)] for _ in range(_r)]
+    assert corner_rectangles(_G) == corner_rectangles_brute(_G)
+```
+
+**Which dimension to fix.** The cost is $O(R^2C)$ if you fix rows and $O(C^2R)$ if you fix columns, so fix pairs along the *shorter* side: $O(\min(R,C)^2 \max(R,C))$. Transpose first if needed (@sec-mat-a3). **Where 2-D prefix sums fit.** The band sums could also come from the column prefix sums of @sec-pref-2d; that table is the right tool when the questions are *queries* about given rectangles rather than a search over all of them. Two such problems are solved in full in @sec-pref:
+
+{{< include ../problems/lc-0304-range-sum-query-2d-immutable/card.qmd >}}
+
+{{< include ../problems/lc-1292-maximum-side-length-of-a-square-with-sum-less-than-o/card.qmd >}}
+
+```cpp
+// fragment - max-sum sub-rectangle: fix (top, bottom), fold columns, Kadane
+long long maxSubmatrix(const vector<vector<int>>& a) {
+    int R = (int)a.size(), C = (int)a[0].size();
+    long long best = LLONG_MIN;
+    for (int top = 0; top < R; ++top) {
+        vector<long long> col(C, 0);
+        for (int bottom = top; bottom < R; ++bottom) {
+            for (int j = 0; j < C; ++j) col[j] += a[bottom][j];
+            long long cur = col[0], run = col[0];      // Kadane over the column sums
+            for (int j = 1; j < C; ++j) {
+                cur = max(col[j], cur + col[j]);
+                run = max(run, cur);
+            }
+            best = max(best, run);
+        }
+    }
+    return best;
+}
+```
+
+**Complexity.** $O(R^2)$ bands, each folded and scanned in $O(C)$ (times the kernel's own cost): $O(R^2C)$ time and $O(C)$ extra space for Kadane, the hash map and the pair count. The four-loop search it replaces is $O(R^2C^2)$ even with $O(1)$ rectangle sums.
+
+## A6. Coordinate invariants and parity {#sec-mat-a6}
+
+::: {.callout-note title="In plain words"}
+An **invariant** is a number that a move or an operation cannot change. On a grid the useful ones are simple functions of the coordinates: $i + j$, $i - j$, their parity, $(j - i) \bmod n$. Once you know what a move preserves, you often know the answer without simulating anything — or you know it is impossible.
+:::
+
+**Diagonal keys.** A step down-right $(+1,+1)$ keeps $i - j$; a step down-left $(+1,-1)$ keeps $i + j$. So a chess bishop never leaves the diagonal and anti-diagonal through its square, and "sum of everything a bishop attacks" is one diagonal sum plus one anti-diagonal sum minus the shared cell — precompute a sum per key and answer each cell in $O(1)$. The same keys drive the diagonal traversals of @sec-mat-a2 and the two diagonals of Matrix Diagonal Sum (@sec-mat-p5-diagsum).
+
+**Checkerboard parity.** Colour cell $(i,j)$ by $(i + j) \bmod 2$. A step to a side neighbour changes $i + j$ by exactly one, so it **always changes the colour**. Three consequences:
+
+- Any walk of side steps from $(i_1,j_1)$ to $(i_2,j_2)$ has length with the parity of $(i_1+j_1) - (i_2+j_2)$. A walk that returns to its start has even length.
+- A domino (two side-adjacent cells) always covers one cell of each colour. The classic *mutilated chessboard* — an $8\times 8$ board with two opposite corners removed — has $30$ cells of one colour and $32$ of the other, so it cannot be tiled by dominoes, however you try.
+- Side-adjacent cells can be forced to differ by making every value's parity equal to its cell's colour (Engineer Artem, @sec-mat-p5-artem).
+
+```{python}
+def colour(i, j):
+    return (i + j) % 2
+
+
+for _ in range(300):                                   # random side-step walks
+    i = j = 0
+    steps = random.randint(0, 30)
+    for _s in range(steps):
+        di, dj = random.choice(DIRS4)
+        i, j = i + di, j + dj
+    assert (steps - (i + j)) % 2 == 0                  # length has the parity of the key change
+
+_board = [(i, j) for i in range(8) for j in range(8) if (i, j) not in [(0, 0), (7, 7)]]
+assert sum(colour(i, j) == 0 for i, j in _board) == 30
+assert sum(colour(i, j) == 1 for i, j in _board) == 32  # unequal colours: no domino tiling
+```
+
+**Invariants of an operation.** The same reasoning works for operations on values. Suppose one operation adds $1$ to two side-adjacent cells. It adds $1$ to one cell of each colour, so
+$$D = \sum_{\text{colour } 0} a_{ij} - \sum_{\text{colour } 1} a_{ij}$$
+never changes. If the target grid has a different $D$, no sequence of operations reaches it — a one-line impossibility proof that no search could give.
+
+```{python}
+def colour_diff(G):
+    return sum(v if colour(i, j) == 0 else -v for i, row in enumerate(G) for j, v in enumerate(row))
+
+
+_G = [[random.randint(0, 5) for _ in range(4)] for _ in range(3)]
+_d0 = colour_diff(_G)
+for _ in range(200):                                    # apply random operations
+    i, j = random.randrange(3), random.randrange(4)
+    a, b = random.choice(list(neighbours(i, j, 3, 4)))
+    _G[i][j] += 1
+    _G[a][b] += 1
+    assert colour_diff(_G) == _d0
+```
+
+**Wrapped diagonals.** If all rows and columns of an $n\times n$ grid are shifted cyclically together (the grid is a torus), cell $(i,j)$ moves to $((i+a) \bmod n,\, (j+b) \bmod n)$, and its key $(j - i) \bmod n$ changes by the constant $b - a$ for *every* cell. So the $n$ wrapped diagonals move as whole blocks and their contents never mix — the key to Matrix and Shifts (@sec-mat-p5-shifts).
+
+**Rotation orbits.** A quarter turn splits a square grid into orbits of four cells (@eq-mat-orbit), plus the centre when $n$ is odd. A grid unchanged by the turn is exactly a grid constant on each orbit, so "make it symmetric" problems decide each orbit independently (Mirror Grid, @sec-mat-p2-mirror). Whether a centre exists is decided by the **parity of $n$** — the same parity that decides whether the two diagonals of a square share a cell.
+
+**Rotating the coordinates: Manhattan becomes Chebyshev.** Put $u = i + j$ and $v = i - j$. Then
+$$|\Delta i| + |\Delta j| = \max(|\Delta u|, |\Delta v|).$$ {#eq-mat-uv}
+Manhattan distance (side steps) turns into Chebyshev distance (king moves) in the rotated coordinates, where the two axes separate. "The farthest point in Manhattan distance" becomes "the extreme values of $u$ and $v$", four numbers maintained in $O(1)$ each.
+
+```{python}
+for _ in range(500):
+    i1, j1, i2, j2 = (random.randint(-20, 20) for _ in range(4))
+    du, dv = (i1 + j1) - (i2 + j2), (i1 - j1) - (i2 - j2)
+    assert abs(i1 - i2) + abs(j1 - j2) == max(abs(du), abs(dv))
+
+_pts = [(random.randint(0, 50), random.randint(0, 50)) for _ in range(40)]
+_q = (17, 23)
+_far = max(abs(_q[0] - a) + abs(_q[1] - b) for a, b in _pts)
+_us = [a + b for a, b in _pts]
+_vs = [a - b for a, b in _pts]
+_qu, _qv = _q[0] + _q[1], _q[0] - _q[1]
+assert _far == max(_qu - min(_us), max(_us) - _qu, _qv - min(_vs), max(_vs) - _qv)
+```
+
+::: {#fig-mat-a6}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a6_n = 5
+a6_par = [[str(i + j) for j in range(a6_n)] for i in range(a6_n)]
+a6_wrap = [[str((j - i) % a6_n) for j in range(a6_n)] for i in range(a6_n)]
+a6_pal = ["indigo", "cyan", "green", "amber", "pink"]
+
+
+def draw(ax, p):
+    V.grid(ax, p, a6_par, x=0.0,
+           colors={(i, j): ("indigo" if (i + j) % 2 == 0 else "amber") for i in range(a6_n) for j in range(a6_n)})
+    V.grid(ax, p, a6_wrap, x=6.4,
+           colors={(i, j): a6_pal[(j - i) % a6_n] for i in range(a6_n) for j in range(a6_n)})
+    V.text(ax, p, 2.5, 1.6, "i + j, coloured by its parity", size=9, color="muted")
+    V.text(ax, p, 8.9, 1.6, "(j - i) mod 5: wrapped diagonals", size=9, color="muted")
+V.show(draw)
+```
+
+Two invariants on a $5\times 5$ grid. Left: each cell shows $i+j$; the colour is its parity, so every side step changes colour and every anti-diagonal has one colour. Right: each cell shows $(j - i) \bmod 5$; a cyclic shift of the whole grid moves every cell by the same amount, so each colour class (a wrapped diagonal) moves as one block.
+
+:::
+
+**Complexity.** An invariant costs one $O(RC)$ pass to compute (often less), and it usually replaces a search over moves or operations that would be exponential or $O(RC)$ *per* candidate.
+
+## Part B — Patterns
+
+Each pattern names the move its problems share, gives the template, and then solves at least two problems in full. Every problem is a short ladder of solution forms, brute force first, with Python and C++ for every form and the official samples asserted in the code.
+
+## Pattern 1: Traversal orders — walk the shape, not the indices {#sec-mat-p1}
+
+**Where we are.** The five patterns climb one idea at a time. P1 only **reads** the cells in an order. P2 **moves** cells: a rotation is a permutation of positions. P3 **writes notes** into the matrix while reading it. P4 **collapses** one dimension so a 1-D tool can finish. P5 **skips the walk**: an invariant of the coordinates gives the answer directly.
+
+**Recognise it.** "Return the elements in spiral / zig-zag / diagonal order", "fill the matrix in spiral order", "print the boundary", "traverse layer by layer". Small grids ($m \cdot n \le 10^4$), linear time expected.
+
+::: {.callout-important title="Template"}
+A traversal is a **cursor plus a stop rule**, not a pile of special cases.
+
+- **Spiral:** four walls `top, bottom, left, right`; walk an edge, move its wall in, and re-test `top <= bottom` / `left <= right` before the two return edges (@sec-mat-a2).
+- **Direction walk:** a clockwise direction array; turn (`d = (d+1) % 4`) when the next cell is off-grid or already seen (@sec-mat-a1).
+- **Diagonal bands:** for $s = 0 .. R+C-2$, rows $i = \max(0, s-C+1) .. \min(s, R-1)$, $j = s - i$; flip the direction by the parity of $s$.
+
+**Invariant:** before each step, the unread cells form one known shape (a rectangle of walls, a set of bands $> s$).
+:::
+
+**Complexity.** $\Theta(RC)$ time; $O(1)$ extra space for walls and bands, $O(RC)$ for a visited grid.
+
+{{< include ../problems/lc-0054-spiral-matrix/problem.qmd >}}
+
+[**From walls to a band index.** The spiral carries four shrinking boundaries; Diagonal Traverse carries one integer, the band $s = i + j$, and reads each band in the direction its parity dictates.]{.flow-bridge}
+
+{{< include ../problems/lc-0498-diagonal-traverse/problem.qmd >}}
+
+## Pattern 2: Rotate and transpose — the grid is a permutation {#sec-mat-p2}
+
+**From reading cells to moving them.** P1 visited cells in a new order but left them where they were. Now the cells themselves move: a transpose or a rotation sends every position to another position, so it is a *permutation* of the $RC$ slots (@sec-mat-a3). The questions become which permutation, whether the shape changes, and whether there is room for a second grid.
+
+**Recognise it.** "Rotate the image / matrix by $90^\circ$", "in place", "transpose", "flip", "is one grid a rotation of the other", "make the grid symmetric under rotation".
+
+::: {.callout-important title="Template"}
+- **Formula first:** write `new[i][j]` as an index expression (@sec-mat-a3's table). For a rectangle, allocate the $C\times R$ result.
+- **In place on a square:** compose transpose (swap over $i<j$), reverse each row and reverse the row order — clockwise is transpose then reverse each row.
+- **Or move orbits:** for ring $i < \lfloor n/2 \rfloor$ and $j = i .. n-2-i$, rotate the four cells of @eq-mat-orbit with one temporary.
+- **Symmetry questions:** decide each orbit independently.
+:::
+
+**Complexity.** $\Theta(RC)$ time; $O(1)$ extra in place on squares, $\Theta(RC)$ for a rectangle's new grid.
+
+::: {#fig-mat-p2-cycle}
+
+```{python}
+#| echo: false
+p2_n = 4
+p2_A = [[p2_n * i + j + 1 for j in range(p2_n)] for i in range(p2_n)]
+p2_states = [([r[:] for r in p2_A], {}, "start: one representative per orbit, top edge of each ring")]
+_A = [r[:] for r in p2_A]
+for _i in range(p2_n // 2):
+    for _j in range(_i, p2_n - 1 - _i):
+        _orb = [(_i, _j), (_j, p2_n - 1 - _i), (p2_n - 1 - _i, p2_n - 1 - _j), (p2_n - 1 - _j, _i)]
+        _vals = [_A[a][b] for a, b in _orb]
+        _A[_i][_j], _A[_j][p2_n - 1 - _i], _A[p2_n - 1 - _i][p2_n - 1 - _j], _A[p2_n - 1 - _j][_i] = \
+            _A[p2_n - 1 - _j][_i], _A[_i][_j], _A[_j][p2_n - 1 - _i], _A[p2_n - 1 - _i][p2_n - 1 - _j]
+        p2_states.append(([r[:] for r in _A], {c: "amber" for c in _orb},
+                          f"ring {_i}, j={_j}: orbit {_vals[0]}->{_vals[1]}->{_vals[2]}->{_vals[3]}->{_vals[0]} moves one step clockwise"))
+assert _A == rotate90(p2_A) and len(p2_states) == 5
+
+
+def p2_frame(ax, p, k):
+    grid_, hl, _ = p2_states[k]
+    done = {}
+    for s in range(1, k):
+        done.update({c: "green" for c in p2_states[s][1]})
+    done.update(hl)
+    V.grid(ax, p, [[str(v) for v in r] for r in grid_], colors=done)
+
+
+V.animate(p2_frame, len(p2_states), captions=[c for _, _, c in p2_states], interval=1100)
+```
+
+The four-cycle rotation of a $4\times 4$ grid. Each frame moves one orbit (amber) one step clockwise, so its four cells reach their final values at once; green orbits are finished. The outer ring has three orbits, the inner ring one, and $4 \cdot 4 = 16$ cells are each written exactly once.
+
+:::
+
+{{< include ../problems/lc-0867-transpose-matrix/problem.qmd >}}
+
+[**From a new grid to the same grid.** A rectangle's transpose has a new shape, so it needs new memory. A square's rotation keeps the shape, so the same $n^2$ slots can be shuffled in place — two reversible passes, or one pass of four-cycles.]{.flow-bridge}
+
+{{< include ../problems/lc-0048-rotate-image/problem.qmd >}}
+
+[**From performing the rotation to demanding symmetry.** Rotate Image moved every orbit one step. Mirror Grid never moves anything: it asks for a grid that a rotation cannot change, which means every orbit must be constant, and each orbit is fixed on its own.]{.flow-bridge}
+
+{{< include ../problems/cf-1703e-mirror-grid/problem.qmd >}}
+
+## Pattern 3: In-place marking — the matrix keeps its own notes {#sec-mat-p3}
+
+**From moving cells to writing on them.** P2's cells kept their values and changed places. Here cells keep their places but must carry extra information while a pass is still reading them: "this row is doomed", "this cell was alive". With no room for a second grid, the notes go into storage the matrix does not need (@sec-mat-a4).
+
+**Recognise it.** "In place", "$O(1)$ extra space", "update all cells simultaneously", and a rule where one cell's new value depends on *old* values elsewhere.
+
+::: {.callout-important title="Template"}
+1. **Find spare storage:** the first row and column (one flag per line), spare high bits of each cell (one extra state per cell), or impossible values such as negatives.
+2. **Record pass:** compute every note from *original* values only; save anything the notes will overwrite (the `row0` / `col0` booleans).
+3. **Act pass:** apply the notes, reading each note before anything overwrites it; restore or decode last.
+
+**Invariant:** until the act pass, the original value of every cell is still recoverable.
+:::
+
+**Complexity.** $\Theta(RC)$ time per round, $O(1)$ extra space.
+
+{{< include ../problems/lc-0073-set-matrix-zeroes/problem.qmd >}}
+
+[**From one flag per line to one extra state per cell.** Set Matrix Zeroes needed a single bit per row and per column, so the header row and column were enough. Game of Life needs the old value of every cell while the new values are written, so the notes move into a spare bit of each cell.]{.flow-bridge}
+
+{{< include ../problems/lc-0289-game-of-life/problem.qmd >}}
+
+## Pattern 4: Fix two rows, solve in 1D {#sec-mat-p4}
+
+**From notes inside the grid to one dimension less.** P1–P3 handled every cell individually. Questions about **sub-rectangles** have $O(R^2C^2)$ candidates, too many to visit one by one. The reduction of @sec-mat-a5 fixes the top and bottom rows, folds the band into one column-sum array, and hands it to a 1-D kernel.
+
+**Recognise it.** "Sub-matrix / sub-rectangle" with a sum condition — largest, count equal to a target, largest not exceeding $k$ — and $R, C \le$ a few hundred.
+
+::: {.callout-important title="Template"}
+```
+for top in 0..R-1:
+    col = [0] * C
+    for bottom in top..R-1:
+        col[j] += M[bottom][j] for every j        # the band, in O(C)
+        answer ⊕= kernel(col)                      # 1-D question on the band
+```
+Kernel by question: Kadane (largest sum), prefix sums + hash map (count of sum $= t$), prefix sums + sorted set (largest sum $\le k$). Loop pairs over the shorter side.
+
+**Invariant:** after adding row `bottom`, `col[j]` is the sum of column $j$ over rows `top..bottom`, so a rectangle with exactly these rows is a contiguous run of `col`.
+:::
+
+**Complexity.** $O(\min(R,C)^2 \cdot \max(R,C))$ times the kernel's per-element cost; $O(\max(R,C))$ extra space.
+
+The 1-D kernel for counting is solved in full in @sec-pref:
+
+{{< include ../problems/lc-0560-subarray-sum-equals-k/card.qmd >}}
+
+{{< include ../problems/lc-1074-number-of-submatrices-that-sum-to-target/problem.qmd >}}
+
+[**From an exact target to a ceiling.** Counting sums equal to a target needs one hash lookup per prefix. "Largest sum not above $k$" needs the *nearest* earlier prefix on one side of a bound, so the hash map becomes a sorted set.]{.flow-bridge}
+
+{{< include ../problems/lc-0363-max-sum-of-rectangle-no-larger-than-k/problem.qmd >}}
+
+## Pattern 5: Matrix invariants and parity — read the answer off the coordinates {#sec-mat-p5}
+
+**From collapsing a dimension to not walking at all.** P4 still looked at every band. Some grid questions need no traversal of candidates at all: the answer is a statement about coordinates — a diagonal is $i = j$ or $i + j = n-1$, a distance is $|r - r_0| + |c - c_0|$, a free shift preserves $(j - i) \bmod n$, a side step flips $(i + j) \bmod 2$ (@sec-mat-a6). Find the invariant, evaluate it once, and handle the one place it double-counts or breaks.
+
+**Recognise it.** Free operations ("any number of shifts / rotations at no cost"), "minimum number of moves" on an empty grid, "adjacent cells must differ", "is it possible", a fixed small grid, or symmetric structures where the parity of $n$ matters.
+
+::: {.callout-important title="Template"}
+1. Ask what a move or operation **cannot change**: $i+j$, $i-j$, $(i+j) \bmod 2$, $(j-i) \bmod n$, the orbit of a cell, a weighted sum of values.
+2. Group the cells by that quantity; the problem usually splits into independent groups.
+3. Solve each group by a formula (majority, count, distance), and watch for the **overlap** two identities both claim — whose existence is often decided by the parity of a dimension.
+:::
+
+**Complexity.** One $O(RC)$ pass, often less; the invariant replaces a search.
+
+{{< include ../problems/lc-1572-matrix-diagonal-sum/problem.qmd >}}
+
+[**From a summed identity to a distance identity.** Diagonal Sum adds the cells two relations select. Beautiful Matrix reads a single coordinate and measures it: the answer is the Manhattan distance to the centre, and the rest of the grid is irrelevant.]{.flow-bridge}
+
+{{< include ../problems/cf-263a-beautiful-matrix/problem.qmd >}}
+
+[**From a fixed coordinate to an invariant of free moves.** Beautiful Matrix measured one cell. Matrix and Shifts allows unlimited free shifts, so no single position matters — only the quantity a shift cannot change, the wrapped diagonal $(j - i) \bmod n$.]{.flow-bridge}
+
+{{< include ../problems/cf-1660e-matrix-and-shifts/problem.qmd >}}
+
+[**From diagonals to colours.** Shifts preserved the wrapped diagonals. A side step preserves nothing about the cell, but it always flips the colour $(i + j) \bmod 2$ — and that one parity bit is enough to keep every pair of neighbours apart.]{.flow-bridge}
+
+{{< include ../problems/cf-1438c-engineer-artem/problem.qmd >}}
+
+**Looking back.** Every pattern in this chapter is the same move: stop thinking of a matrix as a picture and treat it as a flat array plus a coordinate dictionary. Traversals choose an order on that dictionary; transforms are permutations of it; markers are spare storage in it; the fix-two-rows reduction deletes one of its dimensions; and invariants are functions of it that the problem's moves cannot change. When a grid problem looks two-dimensional and hard, ask which of these five views makes it one-dimensional or trivial.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Return the elements in spiral order"; $1\times n$ edge cases | Four walls, re-test before the return edges | @sec-mat-p1-spiral |
+| "Diagonal / zig-zag order" | Band index $s = i+j$, direction by parity of $s$ | @sec-mat-p1-diag |
+| "Transpose an $R\times C$ matrix" | `T[j][i] = a[i][j]` into a new $C\times R$ grid | @sec-mat-p2-transpose |
+| "Rotate $90^\circ$ in place" | Transpose + reverse each row, or four-cycles | @sec-mat-p2-rotate |
+| "Same after rotation / make symmetric" | Rotation orbits, fix each by majority | @sec-mat-p2-mirror |
+| "Zero the row and column of every zero, $O(1)$ space" | First row and column as flags, two saved booleans | @sec-mat-p3-zeroes |
+| "Update all cells simultaneously, in place" | Old state in bit 0, new state in bit 1 | @sec-mat-p3-life |
+| "Number of sub-matrices summing to target" | Fix two rows + prefix-sum hash map | @sec-mat-p4-submatrix |
+| "Largest rectangle sum not exceeding $k$" | Fix two rows + sorted set of prefixes | @sec-mat-p4-nolarger |
+| "Largest sub-rectangle sum" | Fix two rows + Kadane | @sec-mat-a5 |
+| "Sum both diagonals of a square" | $i = j$ and $i+j = n-1$, centre once if $n$ odd | @sec-mat-p5-diagsum |
+| "Minimum moves of a cell on an empty grid" | Manhattan distance | @sec-mat-p5-beautiful |
+| "Free cyclic shifts, then pay per change" | Wrapped diagonals $(j-i) \bmod n$ | @sec-mat-p5-shifts |
+| "Adjacent cells must differ", "+1 allowed" | Checkerboard parity $(i+j) \bmod 2$ | @sec-mat-p5-artem |
+| "Max / min Manhattan distance to many points" | Rotate to $u = i+j$, $v = i-j$ | @sec-mat-a6 |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **`[[0] * C] * R` in Python.** All rows are one list; writing a cell writes a whole column. Build grids with a comprehension (@sec-mat-a1).
+- **Dividing by $R$ in `unflat`.** Both directions of the row-major map use $C$, the number of columns (@eq-mat-flat).
+- **Column-major loops on a large grid.** `for j: for i:` jumps $C$ cells per read and misses the cache on almost every access; keep `j` innermost or transpose once (@sec-mat-a1).
+- **Missing the spiral's re-tests.** Without `if top <= bottom` and `if left <= right` before the return edges, a leftover single row or column is emitted twice (@sec-mat-a2).
+- **Off-by-one in the diagonal ranges.** There are $R+C-1$ diagonals of each kind; anti-diagonal $s$ starts at row $\max(0, s-(C-1))$, not $\max(0, s-C)$ (@sec-mat-a2).
+- **Transposing over the whole square.** Swapping for all $i, j$ swaps every pair twice and leaves the grid unchanged; loop $j$ from $i+1$ (@sec-mat-a3).
+- **Mixing up the reversals.** Transpose then reverse *each row* is clockwise; transpose then reverse the *row order* is counter-clockwise; reverse the row order *then* transpose is clockwise again. Check where the top-left corner lands (@sec-mat-a3).
+- **Reading a flag after overwriting it.** In set-matrix-zeroes, save the `row0` / `col0` booleans first and wipe row 0 and column 0 last; in Game of Life, count neighbours with `& 1` (@sec-mat-a4).
+- **Not resetting `col` for each new top row.** The band accumulator must start at zero for every `top`; carrying it over adds rows above the band (@sec-mat-a5).
+- **Sliding window on negative cells.** A window needs monotone sums; with negative values use the prefix-sum hash or sorted set (@sec-mat-p4).
+- **Forgetting the parity of $n$.** The centre exists only for odd $n$: it is the double-counted cell of the two diagonals and the one-cell orbit of a rotation (@sec-mat-a6).
+- **Unwrapped keys under cyclic shifts.** $j - i$ and $j - i \pm n$ are the same wrapped diagonal; in C++ normalise `((j - i) % n + n) % n` (@sec-mat-p5-shifts).
+:::
+
+## Exercises
+
+**1. [E] For a $4\times 5$ matrix stored row-major, compute $\text{flat}(2,3)$ and $\text{unflat}(17)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\text{flat}(2,3) = 2\cdot 5 + 3 = 13$. $\text{unflat}(17) = (\lfloor 17/5 \rfloor, 17 \bmod 5) = (3, 2)$. Check: row 3 occupies flat positions $15..19$, and $17$ is its third cell, column $2$ (@eq-mat-flat).
+:::
+
+**2. [E] Trace the spiral on $[[1,2,3],[4,5,6]]$ (a $2\times 3$). Which re-test stops a double read?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Top row $1,2,3$, then `top = 1`. Right column: only $M[1][2] = 6$, then `right = 1`. `top <= bottom` ($1 \le 1$) holds, so the bottom row right to left gives $5, 4$, then `bottom = 0`. `left <= right` ($0 \le 1$) holds, but the left column runs `range(bottom=0, top-1=0, -1)`, which is empty. The loop condition `top <= bottom` now fails. Result $[1,2,3,6,5,4]$. Here the left-edge loop is empty by its own bounds; on an $n\times 1$ grid it is the `left <= right` re-test that stops the column from being read a second time, upward (@sec-mat-a2).
+:::
+
+**3. [E] How many cells does the outer ring of an $R\times C$ grid have when $R, C \ge 2$? List the ring of the $4\times 4$ grid of $1..16$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Four edges share four corners: $2R + 2C - 4$. For $4\times 4$ that is $12$: $[1,2,3,4,8,12,16,15,14,13,9,5]$ (top row, right column, bottom row reversed, left column reversed), each corner once. This is `ring_size(0, 4, 4)` in @sec-mat-a2.
+:::
+
+**4. [E] Do the cells $(0,2), (1,1), (2,0)$ lie on a diagonal ($i - j$ constant) or an anti-diagonal ($i + j$ constant)?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Anti-diagonal: $i + j = 2$ for all three, while $i - j = -2, 0, 2$. They run from the top-right to the bottom-left (@sec-mat-a2).
+:::
+
+**5. [E] How many clockwise quarter turns restore an $n\times n$ matrix? What does one quarter turn do to the shape of an $R\times C$ matrix?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Four: each turn moves every cell one step around its orbit of length $4$ (or $1$ for the centre), so four turns return every cell, and fewer do not in general (the stress test in @sec-mat-a3 checks `rotate90` four times is the identity). On an $R\times C$ grid one turn produces a $C\times R$ grid, which is why it cannot be done by swaps inside the original $R\times C$ layout (@sec-mat-a3).
+:::
+
+**6. [M] Transpose is its own inverse, but a quarter turn needs four applications. Explain with reflections.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A transpose is a reflection across the main diagonal, and any reflection undone by itself. A quarter turn is a transpose followed by "reverse each row", a reflection across the vertical middle line. Composing two reflections whose mirror lines meet at angle $\theta$ gives a rotation by $2\theta$; the main diagonal and the vertical line meet at $45^\circ$, so the composition is a $90^\circ$ rotation, which needs four applications to come back. In index form, $\text{rot}[i][j] = M[n-1-j][i]$ applied four times returns $M[i][j]$ (@sec-mat-a3).
+:::
+
+**7. [M] Run `set_zeroes` on $[[0]]$ and on $[[1,0]]$. What are the two saved booleans, and why do the mark and wipe loops do nothing?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[[0]]$: `zero_row0 = zero_col0 = True`. The mark and wipe loops run over `range(1, R)` $\times$ `range(1, C)`, empty for one row or one column, and the final passes give $[[0]]$. $[[1,0]]$: `zero_row0 = True`, `zero_col0 = False`; the interior is empty, and wiping row 0 gives $[[0,0]]$. In a $1\times C$ or $R\times 1$ grid there is no interior, so the two saved booleans do all the work (@sec-mat-a4).
+:::
+
+**8. [M] In the header scheme, what goes wrong if row 0 is wiped *before* the interior?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Row 0 holds the column flags `M[0][j]`. If `zero_row0` is true and row 0 is set to all zeros first, every column looks flagged and the interior wipe zeroes the whole matrix. Symmetrically, wiping column 0 early flags every row. Hence the order: save the booleans, mark, wipe the interior from the flags, and only then wipe row 0 and column 0 (@sec-mat-a4).
+:::
+
+**9. [M] Give the spiral order of $[[1,2,3,4],[5,6,7,8],[9,10,11,12]]$ and the wall values at the start of the second lap.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Lap 1: top $1,2,3,4$; right $8, 12$; bottom reversed $11, 10, 9$; left $5$. The walls are then `top = 1, bottom = 1, left = 1, right = 2`. Lap 2: top row $6, 7$, then `top = 2`; the right column `range(2, 2)` is empty and `right = 1`; `top <= bottom` fails, so no bottom edge; `left <= right` holds but the left column `range(1, 1, -1)` is empty. Result $[1,2,3,4,8,12,11,10,9,5,6,7]$, all $12$ cells once — the animation in @fig-mat-a2-spiral shows exactly these frames.
+:::
+
+**10. [M] Estimate the cache misses of a row-major and a column-major sweep of a $1000\times 1000$ `int` grid with 64-byte lines and a cache far smaller than a column's worth of lines. State the assumptions.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Assume 4-byte `int`s (16 per line), a contiguous row-major grid, and no prefetching. Row-major: one miss per line, $10^6 / 16 = 62\,500$. Column-major: consecutive reads are $4000$ bytes apart, always on different lines, and by the time the sweep returns to a line for the next column it has been evicted, so about $10^6$ misses — sixteen times more. The simulation in @sec-mat-a1 shows the same factor on $64\times 64$. Real hardware prefetchers soften but do not remove the gap.
+:::
+
+**11. [M] For the matrix `a5_M` of @sec-mat-a5, give the maximum sub-rectangle sum and all rectangles that reach it. Why can the bands with top row $0$ not find it?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The maximum is $4$. A brute-force enumeration finds six rectangles with sum $4$: rows $1..1$ cols $0..1$ ($1+3$); rows $1..2$ cols $1..2$ and cols $1..3$; rows $1..3$ cols $1..1$ and cols $1..3$; and the single cell $(2,2)$. All start at row $1$ or $2$. The bands with top row $0$ (@fig-mat-a5-collapse) have Kadane bests $1, 3, 1, 2$ — row $0$ drags every band down — so the outer loop must try every top row.
+:::
+
+**12. [M] Derive $\text{rot}_{90}(M)[i][j] = M[n-1-j][i]$ from "transpose, then reverse each row", and check it on the top-left corner of $[[1,2,3],[4,5,6],[7,8,9]]$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+After the transpose $A[i][j] = M[j][i]$. Reversing row $i$ puts column $n-1-j$ at column $j$: $\text{rot}[i][j] = A[i][n-1-j] = M[n-1-j][i]$. At $(0,0)$ this is $M[2][0] = 7$, and indeed the rotated grid starts `7 4 1`: the top-left receives the bottom-left value, a clockwise turn (@eq-mat-rot).
+:::
+
+**13. [H] Transpose an $R\times C$ matrix stored as one flat row-major list *in place*, using $O(1)$ extra memory besides a few counters. Why is the square case easy?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $N = RC$. The value at flat index $p = iC + j$ belongs at $q = jR + i$ in the $C\times R$ result. For $0 < p < N-1$ this is $q = pR \bmod (N-1)$, because $pR = iCR + jR \equiv i + jR \pmod{N-1}$ when $CR = N \equiv 1$. Positions $0$ and $N-1$ stay. The map is a permutation, so it splits into cycles; rotate each cycle once. To avoid a visited array, rotate a cycle only from its **leader**, its smallest index: walk the cycle from $s$ and skip it if some element is smaller than $s$. That costs extra time (up to $O(N \cdot \text{cycle length})$) instead of memory. On a square, $q$ is just the swap partner of $p$, every cycle has length $1$ or $2$, and the $i < j$ swap loop of @sec-mat-a3 is the whole algorithm.
+
+```{python}
+def transpose_flat_inplace(a, R, C):
+    N = R * C
+    if N <= 2:
+        return a
+    for s in range(1, N - 1):
+        p = (s * R) % (N - 1)                  # is s the smallest index of its cycle?
+        while p > s:
+            p = (p * R) % (N - 1)
+        if p < s:
+            continue
+        val, p = a[s], s
+        while True:                            # carry values around the cycle
+            q = (p * R) % (N - 1)
+            a[q], val = val, a[q]
+            p = q
+            if p == s:
+                break
+    return a
+
+
+for _ in range(300):
+    _r, _c = random.randint(1, 6), random.randint(1, 6)
+    _a = list(range(_r * _c))
+    _want = [_a[i * _c + j] for j in range(_c) for i in range(_r)]    # C x R, row-major
+    assert transpose_flat_inplace(_a[:], _r, _c) == _want
+```
+:::
+
+**14. [H] Make set-matrix-zeroes use one extra boolean instead of two. Which cell carries the second flag, and what order of wiping makes it safe?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Keep `col0` for "column 0 must be wiped" and let `M[0][0]` be row 0's flag, like every other `M[i][0]`. While scanning, a zero in column 0 sets `col0`, and a zero at $(i,j)$ with $j \ge 1$ sets `M[i][0]` and `M[0][j]`. Then wipe **bottom-up**: row 0 is the row of column flags, so it must be the last row whose cells change, and within each row the interior is wiped from the flags before `M[i][0]` is cleared by `col0`. `set_zeroes_one_flag` in @sec-mat-a4 implements this and is stress-tested against the brute force. One boolean is the minimum for this layout: `M[0][0]` can hold only one of the two facts "row 0 has a zero" and "column 0 has a zero".
+:::
+
+**15. [H] Adapt @sec-mat-a5 from "maximum sum" to "number of sub-matrices with sum equal to target". What replaces Kadane, and what is the total cost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Keep the band loop and the column-sum array. Inside, count subarrays of `col` with sum $t$: sweep the prefix sum $S$, add `cnt[S - t]`, then `cnt[S] += 1`, starting from `cnt[0] = 1` (@sec-pref-hash). That is $O(C)$ per band, so $O(R^2C)$ overall with $O(C)$ space — the same envelope as Kadane. This is exactly LC 1074, solved in @sec-mat-p4-submatrix.
+:::
+
+**16. [H] Find the $k$-th cell (0-based) of the spiral order of an $R\times C$ grid without generating the order. What does it cost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The spiral is the rings read from the outside in (@eq-mat-ring). Subtract ring sizes `ring_size(t)` from $k$ until $k$ falls inside ring $t$. Ring $t$ is the rectangle with corners $(t,t)$ and $(R-1-t, C-1-t)$ of height $h$ and width $w$; walk its four sides by arithmetic: the top side has $w$ cells, the right side $h-1$, the bottom side $w-1$ (if $h > 1$), and the left side $h-2$ (if $w > 1$). Cost $O(\min(R,C))$ for the ring search, or $O(1)$ by solving a quadratic for the ring.
+
+```{python}
+def spiral_kth(R, C, k):
+    t = 0
+    while k >= ring_size(t, R, C):
+        k -= ring_size(t, R, C)
+        t += 1
+    h, w = R - 2 * t, C - 2 * t
+    if k < w:
+        return (t, t + k)                                # top side
+    k -= w
+    if k < h - 1:
+        return (t + 1 + k, t + w - 1)                    # right side
+    k -= h - 1
+    if h > 1 and k < w - 1:
+        return (t + h - 1, t + w - 2 - k)                # bottom side
+    k -= w - 1
+    return (t + h - 2 - k, t)                            # left side
+
+
+for _r in range(1, 7):
+    for _c in range(1, 7):
+        assert [spiral_kth(_r, _c, k) for k in range(_r * _c)] == spiral_coords(_r, _c)
+```
+:::
+
+**17. [E] A token walks by side steps (up, down, left, right) from $(0,0)$ to $(3,4)$, possibly revisiting cells. Can the walk have exactly $10$ steps? $11$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The colour $(i+j) \bmod 2$ flips on every side step, and $(0+0)$ and $(3+4)$ differ in parity, so every walk has odd length. $11$ is possible (the shortest walk has $7$ steps, and a detour forward and back adds $2$ each time); $10$ never is (@sec-mat-a6).
+:::
+
+**18. [M] Can a $6\times 6$ board with the two cells $(0,0)$ and $(5,5)$ removed be tiled by $1\times 2$ dominoes? What about removing $(0,0)$ and $(0,5)$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$(0,0)$ and $(5,5)$ have $i+j = 0$ and $10$, both even, so the board loses two cells of one colour: $16$ against $18$. Each domino covers one of each colour, so no tiling exists. $(0,0)$ and $(0,5)$ have different colours, so the counts are $17$ and $17$ — the colouring argument no longer forbids a tiling, and one exists: row 0 keeps cells $1..4$, two horizontal dominoes; rows $1..5$ are a full $5\times 6$ block, three horizontal dominoes per row. Equal colour counts are necessary for a tiling but not sufficient in general, so when they match you still have to exhibit one (@sec-mat-a6).
+:::
+
+**19. [M] Given $p$ points on a grid, find for each query point the largest Manhattan distance to any of them in $O(1)$ after $O(p)$ preprocessing.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Store $\min$ and $\max$ of $u = i+j$ and of $v = i - j$ over the points. By @eq-mat-uv the farthest distance from $(i,j)$ is $\max(u_q - u_{\min},\; u_{\max} - u_q,\; v_q - v_{\min},\; v_{\max} - v_q)$ with $u_q = i+j$, $v_q = i-j$. The cell in @sec-mat-a6 checks this against brute force. CF 1689D (Lena and Matrix) is this idea applied to every cell of a grid.
+:::
+
+**20. [H] One operation picks a $2\times 2$ block and adds $1$ to all four cells. Which quantity is invariant, and when is a target grid reachable from the all-zero grid on an $R\times C$ board?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Every $2\times 2$ block contains two cells of each colour, so the colour difference $D$ of @sec-mat-a6 stays $0$: a target with $D \ne 0$ is unreachable. That is necessary, not sufficient. To decide exactly, notice that the operations are *forced*. Visit the block positions $(i,j)$, $i \le R-2$, $j \le C-2$, in row-major order. Cell $(i,j)$ is covered only by the blocks at $(i-1,j-1)$, $(i-1,j)$, $(i,j-1)$ and $(i,j)$, and the first three are already decided, so block $(i,j)$ must be used exactly "target minus what is already there" times. The target is reachable exactly when every forced count is non-negative and, at the end, the last row and the last column match too. $O(RC)$ time. Invariants prune quickly; the forced sweep decides.
+
+```{python}
+def reachable_2x2(T):
+    R, C = len(T), len(T[0])
+    cur = [[0] * C for _ in range(R)]
+    for i in range(R - 1):
+        for j in range(C - 1):
+            k = T[i][j] - cur[i][j]
+            if k < 0:
+                return False
+            for a, b in ((i, j), (i, j + 1), (i + 1, j), (i + 1, j + 1)):
+                cur[a][b] += k
+    return cur == T
+
+
+def reachable_brute(T, limit=3):
+    R, C = len(T), len(T[0])
+    blocks = [(i, j) for i in range(R - 1) for j in range(C - 1)]
+    def build(counts):
+        g = [[0] * C for _ in range(R)]
+        for (i, j), k in zip(blocks, counts):
+            for a, b in ((i, j), (i, j + 1), (i + 1, j), (i + 1, j + 1)):
+                g[a][b] += k
+        return g
+    from itertools import product
+    return any(build(cs) == T for cs in product(range(limit + 1), repeat=len(blocks)))
+
+
+for _ in range(200):
+    _r, _c = random.randint(2, 3), random.randint(2, 3)
+    _T = [[random.randint(0, 2) for _ in range(_c)] for _ in range(_r)]
+    assert reachable_2x2(_T) == reachable_brute(_T)
+    if reachable_2x2(_T):
+        assert colour_diff(_T) == 0                      # the invariant is necessary
+```
+:::
+
+## Interview questions
+
+**1. What is row-major flattening, and why is `for i: for j:` faster than `for j: for i:` on the same grid?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Row-major stores row 0, then row 1, …, so $(i,j)$ is at $i\cdot C + j$. With `j` in the inner loop consecutive reads are adjacent in memory and one cache line serves several of them; with `i` inner each read jumps $C$ cells and usually needs a new line. Same $\Theta(RC)$ operations, very different constants (@sec-mat-a1).
+:::
+
+**2. What is the difference between a transpose and a $90^\circ$ rotation, and which shapes allow each in place?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Transpose: $A[i][j] = M[j][i]$, a reflection across the main diagonal. Clockwise rotation: $\text{rot}[i][j] = M[n-1-j][i]$, a transpose followed by reversing each row. On a square both are done in place with swaps and reversals. On a rectangle both change the shape to $C\times R$; use a new grid, or the cycle-following transpose of a flat buffer (@sec-mat-a3).
+:::
+
+**3. Write the shrinking-wall spiral. Which two checks stop a leftover row or column from being emitted twice?**
+
+::: {.callout-note collapse="true" title="Answer"}
+After the top row (`top += 1`) and the right column (`right -= 1`), re-test `top <= bottom` before the bottom row and `left <= right` before the left column. These make $1\times n$, $n\times 1$ and centre cells work without special cases (@sec-mat-a2).
+:::
+
+**4. How do you group cells by diagonal and by anti-diagonal, and how many groups are there?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Key by $i - j$ for diagonals (top-left to bottom-right) and by $i + j$ for anti-diagonals. Each key takes $R + C - 1$ values. One $O(RC)$ pass fills the buckets; or loop over the key and compute each line's row range directly (@sec-mat-a2).
+:::
+
+**5. Set every row and column containing a zero to zero with $O(1)$ extra space. Why does the corner need special care?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Use row 0 as column flags and column 0 as row flags. `M[0][0]` would have to mean both "row 0 has a zero" and "column 0 has a zero", so save two booleans before marking, mark and wipe the interior, then wipe row 0 and column 0 last. (One boolean also works if you wipe bottom-up, @sec-mat-a4.)
+:::
+
+**6. Reduce "maximum-sum sub-rectangle" to 1-D. What is fixed, what is collapsed, and what does it cost?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Fix the top and bottom rows; collapse the band into column sums `col[j]`, grown one row at a time; run Kadane on `col`. $O(R^2)$ bands times $O(C)$ is $O(R^2C)$ time, $O(C)$ space; fix pairs along the shorter side (@sec-mat-a5).
+:::
+
+**7. Rotate an $n\times n$ matrix clockwise in place without the transpose. What is the basic move?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A four-cycle: $(i,j) \to (j,n-1-i) \to (n-1-i,n-1-j) \to (n-1-j,i) \to (i,j)$. For each ring $i < \lfloor n/2 \rfloor$ and each $j$ from $i$ to $n-2-i$, move those four values one step with one temporary. Each cell is written once; the odd centre never moves (@eq-mat-orbit).
+:::
+
+**8. Sum both diagonals of an $n\times n$ matrix in one pass. What is the trap?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Add `M[i][i] + M[i][n-1-i]` for each row $i$. When $n$ is odd the centre is on both diagonals ($i = n-1-i$ at $i = (n-1)/2$) and is added twice; subtract it once, or skip the second term when $n-1-i = i$. $O(n)$ time, $O(1)$ space (@sec-mat-p5-diagsum).
+:::
+
+**9. A matrix is sorted non-increasingly along every row and every column. Count its negative numbers faster than $O(RC)$.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Staircase walk from the top-right corner. At $(i,j)$: if $M[i][j] < 0$, every cell below it in column $j$ is also negative, so add $R - i$ and move left; otherwise move down. Each step leaves a row or a column for good, so $O(R + C)$ time and $O(1)$ space. It uses the sortedness that a plain traversal ignores (LeetCode 1351).
+:::
+
+**10. Rotate only the border of a matrix by one position clockwise. Which tools combine?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Read the outer ring into a list with the first lap of the spiral (@sec-mat-a2), rotate that list by one (move the last element to the front), and write it back along the same coordinates. Rotating every ring by $k$ (LeetCode 1914) is the same per ring, with $k$ reduced modulo the ring size.
+:::
+
+**11. You must transpose an $R\times C$ matrix but may use only $O(1)$ extra memory. Possible? At what cost?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Yes: on a flat buffer the transpose is the permutation $p \mapsto pR \bmod (RC-1)$, and you rotate each of its cycles in place, starting each cycle only from its smallest index so no visited array is needed. The code is harder than the square's swaps and can take more than linear time to find cycle leaders; it pays off only when memory truly cannot grow (exercise 13).
+:::
+
+**12. How does the fix-two-rows reduction change for "count sub-matrices with sum = target" and for "largest sum $\le k$"?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The band loop is unchanged; only the 1-D kernel changes. Counting: prefix sums with a hash map, adding `cnt[S - target]` per column ($O(R^2C)$, @sec-mat-p4-submatrix). Bounded maximum: prefix sums in a sorted set, looking up the smallest earlier prefix $\ge S - k$ ($O(R^2C\log C)$, @sec-mat-p4-nolarger).
+:::
+
+**13. How do you find the $k$-th element of a spiral without building the whole order?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Subtract ring sizes ($2h + 2w - 4$, or $h$ or $w$ for a one-thick ring) until $k$ falls inside ring $t$, then decide by arithmetic which side of that ring holds it. $O(\min(R,C))$ per query (exercise 16).
+:::
+
+**14. Design an iterator that flattens a 2-D vector, with `next()` and `hasNext()`. What state do you keep?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A row index $r$ and a column index $c$. Keep the invariant "if any element remains, $(r, c)$ points at it": after each `next()` advance $c$, and while $c$ is past the end of row $r$ move to the next row and reset $c = 0$ (this also skips empty rows). `hasNext()` is then $r <$ number of rows. Nothing is copied (LeetCode 251, a premium problem).
+:::
+
+**15. Why can't a mutilated chessboard (two opposite corners removed) be tiled with dominoes? What general tool does the proof use?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Opposite corners have the same colour in the checkerboard colouring $(i+j) \bmod 2$, so the board has $30$ cells of one colour and $32$ of the other, while every domino covers one cell of each. The tool is an **invariant**: find a quantity every piece or move preserves, and compare it with the target (@sec-mat-a6).
+:::
+
+**16. Many problems ask for the largest Manhattan distance between points. What transformation makes it easy?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Rotate the coordinates: $u = x + y$, $v = x - y$. Then $|\Delta x| + |\Delta y| = \max(|\Delta u|, |\Delta v|)$, so the largest distance is $\max(u_{\max} - u_{\min},\, v_{\max} - v_{\min})$, two linear scans (@eq-mat-uv).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Flatten:** $\text{flat}(i,j) = iC + j$, $\text{unflat}(k) = (k \div C,\, k \bmod C)$; keep `j` in the inner loop; neighbours from a clockwise direction array.
+- **Spiral:** walls `top, bottom, left, right`; walk an edge, move its wall, re-test `top <= bottom` / `left <= right` before the return edges. Rings: $\min(i, j, R-1-i, C-1-j)$.
+- **Diagonals:** key $i - j$ (down-right) or $i + j$ (down-left); $R + C - 1$ of each; band $s$ has rows $\max(0, s-C+1) .. \min(s, R-1)$.
+- **Rotate clockwise:** `new[i][j] = M[n-1-j][i]`; in place, transpose ($i<j$ swaps) then reverse each row, or four-cycles over ring $i < \lfloor n/2 \rfloor$, $j = i..n-2-i$. Counter-clockwise: transpose then reverse the row order. Rectangle: `zip(*M[::-1])`.
+- **In-place notes:** flags in row 0 / column 0 with the two saved booleans, or a new state in bit 1 read as `v & 1`; record pass first, act pass second, headers last.
+- **Fix two rows:** `for top: col = 0; for bottom: col += row[bottom]; kernel(col)` — Kadane, prefix hash, or sorted set; $O(\min^2 \cdot \max)$.
+- **Invariants:** $i \pm j$, $(i+j) \bmod 2$, $(j-i) \bmod n$, rotation orbits, $u = i+j$ / $v = i-j$; mind the centre when $n$ is odd.
+:::
+
+- A matrix is a flat array plus a coordinate dictionary; every technique in the chapter is a way of using that dictionary (@sec-mat-a1).
+- Traversals never change the $\Theta(RC)$ cost; they change what you know while walking — the unread region is a rectangle of walls, or the bands above $s$ (@sec-mat-a2).
+- Transforms are permutations of positions. On a square they decompose into swaps and reversals or into four-cycles, so they run in place; on a rectangle the shape changes (@sec-mat-a3).
+- In-place marking trades memory for ordering: notes live in spare storage, and every note is read before anything overwrites it (@sec-mat-a4).
+- Fixing two rows turns any "sub-rectangle" search into $O(R^2)$ one-dimensional problems; choose the 1-D kernel by the question (@sec-mat-a5).
+- An invariant of the moves or operations often decides a grid problem with no search: diagonal keys, checkerboard parity, wrapped diagonals, rotation orbits (@sec-mat-a6).
+- The parity of $n$ decides whether a centre exists — the double-counted diagonal cell and the one-cell orbit of a rotation.
+- Grid problems whose cells depend on neighbours are DP (@sec-gd); grids explored by reachability are graphs (@sec-gr-p3). This chapter is everything that is neither.
+
+## Practice ladder
+
+Ordered by concept, following the lessons. Problems solved in full above are not repeated here.
+
+::: {.practice}
+- [CF 954C · Matrix Walk](https://codeforces.com/problemset/problem/954/C){rating="1700"} — cell $(i,j)$ holds $y(i-1)+j$; recover a width $y$ that makes a given walk legal. The flatten map of @sec-mat-a1 run backwards.
+- [LC 566 · Reshape the Matrix](https://leetcode.com/problems/reshape-the-matrix/){difficulty="Easy"} — refill an $r\times c$ grid in row-major order through the flat index (@sec-mat-a1).
+- [LC 59 · Spiral Matrix II](https://leetcode.com/problems/spiral-matrix-ii/){difficulty="Medium"} — write $1..n^2$ along the spiral instead of reading (@sec-mat-p1).
+- [LC 885 · Spiral Matrix III](https://leetcode.com/problems/spiral-matrix-iii/){difficulty="Medium"} — an outward spiral from any cell that leaves the grid; the direction-walk form (@sec-mat-p1-spiral).
+- [CF 1995A · Diagonals](https://codeforces.com/problemset/problem/1995/A){rating="800"} — place $k$ chips to occupy the fewest anti-diagonals; count the cells per $i+j$ band (@sec-mat-a2).
+- [LC 1424 · Diagonal Traverse II](https://leetcode.com/problems/diagonal-traverse-ii/){difficulty="Medium"} — zig-zag-free diagonal order on ragged rows; buckets by $i+j$ (@sec-mat-p1-diag).
+- [CF 173C · Spiral Maximum](https://codeforces.com/problemset/problem/173/C){rating="1900"} — the best-sum spiral pattern in a grid; spiral rings plus 2-D prefix sums (@sec-mat-a2, @sec-pref-2d).
+- [CF 1772B · Matrix Rotation](https://codeforces.com/problemset/problem/1772/B){rating="800"} — can some rotation of a $2\times 2$ grid make rows and columns increasing? Try the four rotations (@sec-mat-p2).
+- [LC 1886 · Determine Whether Matrix Can Be Obtained By Rotation](https://leetcode.com/problems/determine-whether-matrix-can-be-obtained-by-rotation/){difficulty="Easy"} — compare against the four rotation formulas without building copies (@sec-mat-a3).
+- [CF 1426B · Symmetric Matrix](https://codeforces.com/problemset/problem/1426/B){rating="900"} — tile a symmetric square with $2\times 2$ tiles; transpose symmetry decides it (@sec-mat-a3).
+- [CF 1422B · Nice Matrix](https://codeforces.com/problemset/problem/1422/B){rating="1300"} — make every row and column a palindrome; orbits of two reflections, each set to its median (@sec-mat-p2-mirror).
+- [CF 400C · Inna and Huge Candy Matrix](https://codeforces.com/problemset/problem/400/C){rating="1500"} — compose many rotations and flips of a huge grid and track single cells; the $D_4$ table, with counts reduced modulo $4$ and $2$ (@sec-mat-a3).
+- [CF 486B · OR in Matrix](https://codeforces.com/problemset/problem/486/B){rating="1300"} — recover a matrix from row-or-column ORs; flag whole rows and columns, then verify (@sec-mat-p3).
+- [CF 1864D · Matrix Cascade](https://codeforces.com/problemset/problem/1864/D){rating="1700"} — each flip affects a widening cone below; carry pending flips down the rows as marks (@sec-mat-p3).
+- [LC 560 · Subarray Sum Equals K](https://leetcode.com/problems/subarray-sum-equals-k/){difficulty="Medium"} — the 1-D kernel inside the band loop (@sec-mat-p4).
+- [CF 1323B · Count Subrectangles](https://codeforces.com/problemset/problem/1323/B){rating="1500"} — $c_{ij} = a_i b_j$ makes the 2-D count a product of two 1-D run counts (@sec-mat-p4).
+- [CF 1060C · Maximum Subrectangle](https://codeforces.com/problemset/problem/1060/C){rating="1600"} — again $c_{ij} = a_i b_j$: best sum per length in each array, then combine (@sec-mat-p4).
+- [CF 375B · Maximum Submatrix 2](https://codeforces.com/problemset/problem/375/B){rating="1600"} — rows may be reordered; fix the left column and sort the run lengths of ones (@sec-mat-a5).
+- [CF 333D · Characteristics of Rectangles](https://codeforces.com/problemset/problem/333/D){rating="2100"} — maximise the smallest corner; binary search plus fix two rows (@sec-mat-p4-nolarger).
+- [LC 766 · Toeplitz Matrix](https://leetcode.com/problems/toeplitz-matrix/){difficulty="Easy"} — is every $i-j$ diagonal constant? (@sec-mat-a6).
+- [CF 1676D · X-Sum](https://codeforces.com/problemset/problem/1676/D){rating="1000"} — best bishop square; one sum per $i-j$ and per $i+j$ key (@sec-mat-a6).
+- [CF 1520C · Not Adjacent Matrix](https://codeforces.com/problemset/problem/1520/C){rating="1000"} — fill $1..n^2$ with no consecutive numbers side by side; a checkerboard construction (@sec-mat-a6).
+- [CF 1366C · Palindromic Paths](https://codeforces.com/problemset/problem/1366/C){rating="1500"} — every path visits the layers $i+j$ in order; match layer $s$ with layer $n+m-2-s$ (@sec-mat-a6).
+- [CF 1016D · Vasya And The Matrix](https://codeforces.com/problemset/problem/1016/D){rating="1800"} — rebuild a matrix from row XORs and column XORs; the XOR of all rows must equal the XOR of all columns, an invariant (@sec-mat-a6).
+- [CF 1208C · Magic Grid](https://codeforces.com/problemset/problem/1208/C){rating="1800"} — arrange $0..n^2-1$ so every row and column has the same XOR; build from $4\times 4$ blocks (@sec-mat-a6).
+- [CF 1689D · Lena and Matrix](https://codeforces.com/problemset/problem/1689/D){rating="1900"} — the cell minimising the farthest Manhattan distance to black cells; rotate to $u, v$ (@eq-mat-uv).
+:::
+
+## Further reading
+
+- [Wikipedia — Row- and column-major order](https://en.wikipedia.org/wiki/Row-_and_column-major_order) — the address arithmetic of @sec-mat-a1, its generalisation to more dimensions, and which languages use which order.
+- [Wikipedia — In-place matrix transposition](https://en.wikipedia.org/wiki/In-place_matrix_transposition) — the cycle structure of the rectangular transpose (exercise 13) and the cache-friendly algorithms for it.
+- [Wikipedia — Maximum subarray problem](https://en.wikipedia.org/wiki/Maximum_subarray_problem) — Kadane's algorithm, the 1-D kernel of @sec-mat-a5, and its 2-D version.
+- [CP-Algorithms — Finding the largest zero submatrix](https://cp-algorithms.com/dynamic_programming/zero_matrix.html) — the other way to search rectangles: fix the bottom row and solve a histogram with a stack in $O(RC)$.
+- [Wikipedia — Mutilated chessboard problem](https://en.wikipedia.org/wiki/Mutilated_chessboard_problem) — the checkerboard-colouring invariant of @sec-mat-a6, its history, and Gomory's theorem on when tilings do exist.
+- [Wikipedia — Chebyshev distance](https://en.wikipedia.org/wiki/Chebyshev_distance) — the $45^\circ$ rotation that turns Manhattan distance into Chebyshev distance (@eq-mat-uv).
+- [Wikipedia — Dihedral group](https://en.wikipedia.org/wiki/Dihedral_group) — the eight symmetries of a square from @sec-mat-a3 as a group, and why rotations and reflections compose the way they do.
+- [Wikipedia — Conway's Game of Life](https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life) — the rules behind @sec-mat-p3-life, still lifes and oscillators to test an implementation on.

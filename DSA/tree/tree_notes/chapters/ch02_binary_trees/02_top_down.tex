@@ -1,285 +1,1095 @@
 % !TEX root = ../../tree_notes.tex
 % =====================================================================
-%  2.2  Top-Down Recursion: carrying state down            sec:c02-topdown
-%  Exports: def:c02-topdown  lst:c02-topdown-tmpl
-%           prob:c02-root-numbers  prob:c02-path-sum-ii  prob:c02-even-grandparent
+%  2.2  Top-Down: Carrying State Down                     sec:c02-topdown
+%  Exports: def:c02-carried  def:c02-trail  def:c02-rootprefix
+%           thm:c02-topdown-cost  cor:c02-byvalue
+%           lst:c02-td-skeleton  ex:c02-td-S
+%           prob:c02-path-sum-ii  prob:c02-sum-numbers
+%           prob:c02-grandparent  prob:c02-anc-diff  prob:c02-path-sum-iii
 % =====================================================================
-\section{Top-Down Recursion: Carrying State Down}\label{sec:c02-topdown}
+\section{Top-Down: Carrying State Down}\label{sec:c02-topdown}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Name the four cases a binary-tree recursion must distinguish, and the
+        exact call count of the clean skeleton. (\secref{c02-model})
+  \item On the running example $R$: which node is skewed, and what did
+        \code{binaryTreePaths} emit there -- and why nothing more?
+        (\probref{c02-paths})
+  \item In \probref{c02-second-min}, which promise let us stop descending, and
+        what sentinel did the leaf return? (\secref{c02-model})
+\end{enumerate}
+\end{previouslybox}
 
 \begin{topicintro}
-In a \term{top-down} recursion the answer at a node needs information that only its
-\emph{ancestors} know -- the depth so far, the running value of the path, a grandparent
-pointer -- so we pass that state \emph{in} as a function parameter and refine it on the
-way down. This is the mirror image of the height recursion of \secref{c01-anatomy} (which
-pulled values \emph{up}); here the values flow from the root to the leaves.
+Sometimes what a node needs to know lies \emph{above} it: its depth, the path
+from the root, the sum accumulated so far, the nearest larger ancestor. The
+top-down pattern answers the call by adding one parameter to the skeleton of
+\secref{c02-model} and pushing it \emph{down} the calls -- each node receives an
+\emph{answer about its ancestry} instead of computing one about its descendants.
+It is the pattern behind every ``path'' problem, and -- with a hashmap bolted on
+-- behind the sneakiest medium on the list: Path Sum III.
 
-\textbf{Prerequisites.} \secref{c02-model} (the structural-recursion skeleton and the
-\nil{} base case) and \defref{c01-rooted} (ancestor, parent, depth).
+\textbf{Prerequisites.} \secref{c02-model} (skeleton, \code{BASE} discipline);
+\probref{c02-paths} (the accumulator preview).
 
 \textbf{After this section you can}
 \begin{itemize}[nosep]
-  \item spot a top-down problem: the answer depends on the path \emph{above} the node;
-  \item thread an accumulator, a depth, or ancestor pointers through the recursion;
-  \item backtrack a shared path buffer correctly (push before, pop after) so siblings do
-        not contaminate each other;
-  \item solve root-to-leaf numbers, all paths with a target sum, and the
-        even-grandparent sum in one clean DFS.
+  \item fill SLOT 2 of the skeleton with carried state and keep it correct on
+        branching trees (the undo contract);
+  \item choose between copy-on-descent and trail-and-undo, and price both;
+  \item recognise a ``starting anywhere'' path question and rescue it from
+        $O(n^2)$ with prefix sums on the root path;
+  \item know, for each lab problem, \emph{where} the answer is read (every node?
+        leaves only? a fixed ancestor distance away?).
 \end{itemize}
 \end{topicintro}
 
-\usedin{Chapter 11 (LCA via parent pointers), Chapter 12 (binary lifting carries an
-ancestor table down) and Chapter 16 (HLD passes a head node in)}{almost every "path from
-the root" or "as a function of depth" query is a top-down DFS; getting the parameter-passing
-habit now pays off in all of them.}
+\begin{recognitionbox}[Pattern card -- top-down carry]
+\reckey{``root-to-leaf path\ldots'', ``sum of all root-to-leaf numbers'', ``for
+each node, its ancestors / grandparent / the max along the path'', ``count paths
+in the tree'' -- the answer lives \emph{at} a node but is built from what is
+\emph{above} it.}
+\recuse{
+  \item the data a node needs is on the rootward side of it (path, depth, running
+        sum, ancestor extrema) -- \probref{c02-sum-numbers},
+        \probref{c02-anc-diff};
+  \item complete objects are assembled along a descent and emitted at
+        boundaries (leaves, targets) -- \probref{c02-path-sum-ii};
+  \item the question counts paths \emph{starting anywhere}: carry root-prefix
+        sums and query a hashmap per node -- \probref{c02-path-sum-iii}.
+}
+\recnotuse{
+  \item the node's answer is computable from its \emph{descendants} alone
+        (subtree sums, heights, tilts) -- that is the up direction,
+        \secref{c02-bottomup};
+  \item a global optimum whose candidate mixes \emph{both} child subtrees at a
+        node (diameter, max path sum) -- bottom-up with a cross term, see
+        \secref{c02-bottomup};
+  \item the path must satisfy a property \emph{and} you may start mid-tree, but
+        values are non-negative and monotone -- a sliding window wants in; on
+        trees that is rare, but check before hashing prefixes.
+}
+One-line test: \emph{draw an arrow from the information to the node that consumes
+it -- if the arrow points away from the root, the state travels down, and this is
+your pattern.}
+\end{recognitionbox}
 
 \subsection{Intuition}
 
-\begin{analogybox}[Hiking with a running logbook]
-Descending a trail from the summit, each camp writes down how many hours it has been since
-the top and the list of camps already passed. It does not have to re-count from the bottom:
-the number simply arrives from the camp above, gets incremented, and is passed on. That
-incremented logbook is the carried state of a top-down DFS.
-\end{analogybox}
-
-Consider turning root-to-leaf digits into numbers. When you stand at a node you already know
-the value of everything above you (the partial number); you push one more digit down and
-add up at the leaves. The information clearly flows downward.
+The skeleton of \secref{c02-model} has a slot marked ``SLOT 2: extra carried
+state'' in \coderef{c02-skeleton}. Filling it changes the \emph{contract} of a
+call: instead of ``tell me about your subtree'', the parent asks ``here is
+everything I know about the path down to you -- tell me about yourself.''
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[diagram]
-  \node[troot] (r) at (0,0) {$4$};
-  \node[tnode] (l) at (-1.7,-1.4) {$9$};
-  \node[tnode] (c) at (1.7,-1.4) {$0$};
-  \node[tleaf] (a) at (-2.5,-2.8) {$5$};
-  \node[tleaf] (b) at (-0.9,-2.8) {$1$};
-  \draw[tedge] (r) -- (l); \draw[tedge] (r) -- (c);
-  \draw[tedge] (l) -- (a); \draw[tedge] (l) -- (b);
-  \node[annot, text=primaryblue] at (0,0.9) {$\text{acc}=4$};
-  \node[annot, text=primaryblue] at (-1.9,-1.0) {$49$};
-  \node[annot, text=primaryblue] at (-2.9,-2.4) {$495$};
-  \node[annot, text=primaryblue] at (0.1,-2.4) {$491$};
-  \node[annot, text=primaryblue] at (2.2,-1.0) {$40$};
+\begin{tikzpicture}[diagram, scale=0.92, transform shape]
+  \node[troot] (r) at (0,0) {$1$};
+  \node[tnode] (a) at (-1.7,-1.5) {$2$};
+  \node[tnode] (b) at (1.7,-1.5) {$3$};
+  \node[tleaf] (c) at (-2.6,-3) {$4$};
+  \node[tleaf] (d) at (-0.8,-3) {$5$};
+  \node[tnode] (e) at (1.7,-3) {$6$};
+  \draw[tedge] (r) -- (a); \draw[tedgehl] (r) -- (b);
+  \draw[tedge] (a) -- (c); \draw[tedgehl] (a) -- (d);
+  \draw[tedgehl] (b) -- (e);
+  \node[annot, font=\scriptsize, anchor=south] at (0.35,0.15) {$S=1$};
+  \node[annot, font=\scriptsize, anchor=south] at (-1.35,-1.35) {$S=3$};
+  \node[annot, font=\scriptsize, anchor=south] at (2.1,-1.35) {$S=4$};
+  \node[annot, font=\scriptsize, anchor=north] at (-2.6,-3.18) {$S=7$};
+  \node[annot, font=\scriptsize, anchor=north, text=accentorange] at (-0.8,-3.18) {$S=8$};
+  \node[annot, font=\scriptsize, anchor=north, text=accentorange] at (2.15,-3.18) {$S=10$};
+  \node[annot, align=left, font=\scriptsize] at (4.6,-1.5)
+    {at node 5 the carried sum is\\$1{+}2{+}5 = 8$; entering the\\call, $5$ is added;\\
+     \textbf{leaving} it, $5$ is removed\\again -- else $3$'s branch\\would inherit
+     $2$'s child};
 \end{tikzpicture}
-\caption{The accumulator $\text{acc}=\text{acc}\times 10+\text{val}$ flows down. Leaves read
-$495,491,40$; the answer is their sum $1026$. Nothing flows back up.}\label{fig:c02-topdown}
+\caption{Carried state $S$ (running root-path sum) flowing down $R$ on a
+\textbf{failed} probe for target $8$ (see \probref{c02-path-sum-ii} for the real
+question). Highlighted edges mark the two branches whose calls \emph{must not}
+contaminate each other: $[1,2,5]$ ends at the orange $S{=}8$ node and unwinds
+before $[1,3]$ descends.}\label{fig:c02-carry}
 \end{figure}
 
-\subsection{Definition}
+The picture exposes the one genuinely new hazard of top-down recursion: the state
+is \emph{shared furniture on the call stack}. A vector path or hashmap lives in
+one memory location while sibling subtrees run one after the other; anything a
+call adds, it must remove before returning, or its sibling inherits rubbish.
 
-\begin{definition}{Top-down recursion}{c02-topdown}
-A recursion $f(\text{node},\ \text{state})$ where \emph{state} is derived from the ancestors
-and passed \emph{into} the call. The node computes (or records) its answer from
-$\text{state}\cup\{\text{node}\}$, then calls its children with an updated state. It is
-correct when the state at a node is exactly the information the path from the root to that
-node provides; when state is mutated in place, it must be \term{restored} before the second
-child so siblings see the same input.
+\subsection{Definitions and Notation}
+
+\begin{definition}{Carried state}{c02-carried}
+The \term{carried state} of a top-down recursion is the extra argument
+$\mathit{st}(v)$ each call receives, computed by the parent from
+$\mathit{st}(\mathit{parent})$ and the edge traversed. Formally the pattern
+supplies a function $\mathit{extend}(\mathit{st}, u, v)$ with
+$\mathit{st}(v) = \mathit{extend}(\mathit{st}(u), u, v)$ for every edge $u\to v$,
+and an initial value $\mathit{st}(\mathit{root})$.
 \end{definition}
 
-\subsection{The Template}
+\noindent\textbf{In plain words.} Carried state is a backpack passed from parent
+to child: each node may repack it (\code{st + v->val}, \code{push\_back},
+\code{depth+1}) before handing it down, and questions \emph{about the ancestry}
+are answered by reading the backpack, never the subtree.
 
-\begin{lstlisting}[caption={General top-down skeleton: refine the carried state, recurse, and undo any in-place change}, label={lst:c02-topdown-tmpl}]
-// State is whatever the path above contributes: depth, an accumulator, a vector, ancestors.
-void topDown(TreeNode* r, State& s) {
-    if (r == nullptr) return;             // base case: the n+1 null links (Lemma 2.1)
-    record(s, r);                         // answer this node using the state that arrived
-    s.extend(r);                          // refine state for the children (e.g. s.val += ...)
-    topDown(r->left,  s);
-    topDown(r->right, s);
-    s.undo(r);                            // back-track: leave s as you found it for siblings
+\begin{definition}{Trail, undo, emission}{c02-trail}
+In the \term{trail-and-undo} implementation, a call appends its node to a shared
+buffer (the \term{trail}) just before descending and \term{undoes} -- pops,
+decrements, or erases -- the append immediately after the child calls return. The
+moment a completed object (path, number) is written to the answer list is the
+\term{emission}.
+\end{definition}
+
+\noindent\textbf{In plain words.} Two disciplines buy the same correctness:
+\emph{copy} the backpack for each child (cheap for numbers, wasteful for long
+strings), or \emph{share} one backpack and be scrupulous about cleaning up on the
+way out. The second is faster; the first forgets less. Emission is always a
+leaf-boundary (or target-boundary) event -- know yours before coding.
+
+\begin{definition}{Root-prefix sum}{c02-rootprefix}
+For a node $v$ on the root path $u_0 \to u_1 \to \cdots \to u_k = v$, the
+\term{root-prefix sums} are $P_i = \sum_{j=0}^{i} u_j\to\mathit{val}$, including
+$P_{-1} = 0$ at the imaginary parent of the root. The sum of the values on the
+downward segment $a \to b$ (with $a$ an ancestor of $b$) equals
+$P(b) - P(\mathit{parent}(a))$.
+\end{definition}
+
+\noindent\textbf{In plain words.} Every node carries ``the running total from the
+root to me.'' A path \emph{starting anywhere} and ending at $b$ is then
+``$b$'s total minus some ancestor's total'' -- so counting such paths is counting
+earlier prefix values, the prefix-sum trick from arrays transplanted onto a tree.
+
+\subsection{Cost of the Carry}
+
+\begin{theorem}{Top-Down Work Formula}{c02-topdown-cost}
+Let the carried state be updated at each node in $g$ time and read in $r$ time,
+with copying of the state to each child costing $c$. A top-down recursion over
+$n$ nodes takes $\bigO{n \cdot (g + r) + n \cdot c}$ (state per edge), and stack
+depth $h+1$.
+\end{theorem}
+\begin{proofbox}
+By \lemref{c02-visit-count} there are exactly $n$ node-calls; each performs one
+update ($g$), one read ($r$) and issues at most two state handoffs ($c$ each).
+Summing over calls gives the bound; depth is the longest descent, $h+1$.
+\end{proofbox}
+\begin{corollary}{Copy vs.\ trail}{c02-byvalue}
+Passing a scalar (sum, depth, flag) gives $c=\bigO{1}$: always copy. Passing a
+container of size $\Theta(h)$ costs $\bigO{h}$ per edge, i.e.\ $\bigO{nh}$ total;
+trail-and-undo restores $\bigO{n}$ at the price of the undo contract
+(\defref{c02-trail}).
+\end{corollary}
+
+\begin{insightbox}
+$O(nh)$ is invisible on LC's $n \le 100$ path problems and \emph{fatal} at
+$n = 10^{5}$ chains -- where $nh = n^{2}$. Decide by the constraint table, not by
+taste: copy for scalars, trail for containers, and say why in the interview.
+\end{insightbox}
+
+\subsection{The Skeleton}
+
+\begin{lstlisting}[caption={The top-down skeleton: SLOT 2 filled. Parents hand each child a finished fact about its own ancestry.}, label={lst:c02-td-skeleton}]
+void dfs(TreeNode* v, State st) {          // st passed down, never returned up
+    if (!v) return;                        // top-down often needs no value from BASE
+    apply(st, v->val);                     // extend: depth+1, S+v->val, push_back...
+    read_answer_here_if_boundary(v, st);   // emission test (leaf? target? every node?)
+    dfs(v->left,  st);                     // child sees ancestry INCLUDING v
+    dfs(v->right, st);
+    undo(st, v->val);                      // TRAIL-AND-UNDO: leave st as you found it
+}                                          // (by-value State: this line disappears)
+\end{lstlisting}
+
+\begin{complexitybox}
+Per \thmref{c02-topdown-cost}: $\bigO{n}$ for scalar carries; containers push
+toward $\bigO{nh}$ unless the undo contract keeps them shared. Space $\bigO{h}$
+plus answer output. The \code{undo} line is the whole discipline -- its absence
+is Pitfall \ref{c02-td-pit1}.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{The carried sum $S$ on $R$}{c02-td-S}
+With \code{apply}${}\,=\,S + v\to\mathit{val}$, the state at each node of $R$ is
+$S(1){=}1$, $S(2){=}3$, $S(3){=}4$, $S(4){=}7$, $S(5){=}8$, $S(6){=}10$
+(\figref{c02-carry}). Read them as membership tests: a root-to-leaf path sums to
+$7$ iff some \emph{leaf} shows $S=7$ -- here leaf $4$ does, so the path
+$1\text{-}2\text{-}4$ is the witness; no node shows $S=9$ at a leaf, so no
+root-to-leaf path sums to $9$.
+\end{example}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item State $=$ ``value of the grandparent'' (fixed hop-count): pass the last
+        two ancestors as parameters -- \probref{c02-grandparent}.      \hfill\lv{3}
+  \item State $=$ multimap of prefix sums: turns ``anywhere-to-leaf'' counts into
+        per-node lookups -- \probref{c02-path-sum-iii}.                \hfill\lv{4}
+  \item State $=$ path extrema as a \emph{monotone stack}: for
+        ``difference with an ancestor'' the stack shrinks amortised
+        $\bigO{1}$ per node; a plain parameter suffices when you only need
+        min/max -- \probref{c02-anc-diff}.                             \hfill\lv{3}
+  \item Contest twist ``and undo queries offline'': carry a mutable array, revert
+        after the subtree -- the DFS-order $+$ rollback philosophy behind
+        \chref{c21}'s offline queries.                                 \hfill\lv{5}
+  \item Bitmask carry for parity questions (values $\le 10$, ``can permute to a
+        palindrome''): XOR one bit per value into an \code{int} state --
+        practice item \emph{Pseudo-Palindromic Paths}.                 \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c02-td-pitfalls}
+
+\begin{warningbox}[Pitfall 1 -- the missing undo]\label{c02-td-pit1}
+Shared trail $+$ forgotten \code{pop\_back} $=$ every right sibling inherits its
+left sibling's node. The symptom is paths that ``bend upward'' (a path containing
+$4$ then $5$, siblings under $2$); no crash, just silent structural lies.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: trail extended, never retracted}, language=C++, basicstyle=\ttfamily\small]
+void dfs(TreeNode* v, vector<int>& path) {
+    path.push_back(v->val);
+    if (!v->left && !v->right) emit(path);
+    if (v->left)  dfs(v->left,  path);   // after returning from the call on 4,
+    if (v->right) dfs(v->right, path);   // path is [1,2,4] -- node 5 joins [1,2,4,5]: garbage
+}                                        // (and no pop_back anywhere to fix it)
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: leave the trail exactly as you found it}, language=C++, basicstyle=\ttfamily\small]
+void dfs(TreeNode* v, vector<int>& path) {
+    path.push_back(v->val);
+    if (!v->left && !v->right) emit(path);
+    if (v->left)  dfs(v->left,  path);
+    if (v->right) dfs(v->right, path);
+    path.pop_back();                     // undo: siblings and ancestors see a clean trail
 }
 \end{lstlisting}
 
-\vsbox{Top-down vs bottom-up}{Top-down (this section)}{Bottom-up (\secref{c02-bottomup})}{state
-flows \emph{in} as a parameter; answer often recorded at leaves or per node}{answer flows
-\emph{out} as a return value; combine children to build the parent's answer}
-
-\begin{complexitybox}
-A top-down DFS visits all $n$ nodes once -- $\bigO{n}$ -- with $\bigO{h}$ call-stack depth
-plus the size of the carried state. If the state is a path \emph{vector copied at every
-node}, you pay $\bigO{h}$ per copy and become $\bigO{n h}$; mutate-and-restore keeps it
-$\bigO{n}$ with one shared buffer.
-\end{complexitybox}
-
-\subsection{Worked Examples}
-
-\begin{example}{Tracing the accumulator on \figref{c02-topdown}}{c02-td-trace-ex}
-At the root $\text{acc}=4$. Left child $9$: $\text{acc}=4\cdot 10+9=49$. Its children $5,1$
-give $495,491$ (both leaves, so both are added). Right child $0$: $\text{acc}=40$ and it is
-itself a leaf. Sum $=495+491+40=1026$.
-\end{example}
-
-\begin{tracebox}
-For Path Sum II, the shared path buffer evolves as
-$[4]\to[4,9]\to[4,9,5]\ \text{(leaf: test)}\ \to[4,9]\to[4,9,1]\to[4]\to[4,0]$ --
-the \code{pop\_back} after each child is what stops node $1$ from seeing path $[4,9,5,1]$.
-\end{tracebox}
-
-\subsection{Common Pitfalls}
-
-\begin{warningbox}[Forgetting to undo shared state]
-If you push onto a shared \code{path} before the left child but forget to pop before
-recursing right, the right subtree inherits the left subtree's nodes. Every
-mutate-then-recurse needs a matching recurse-then-restore.
+\begin{warningbox}[Pitfall 2 -- emitting at the wrong boundary]
+``Root-to-\emph{leaf}'' questions emit only at \defref{c02-node-kinds} leaves;
+``paths \emph{ending} anywhere'' questions read the answer at every node.
+Mixing the two yields the classic off-by-one-family WA (compare
+\probref{c02-path-sum-ii}, leaf-only, with \probref{c02-path-sum-iii}, every
+node).
 \end{warningbox}
-
-\begin{warningbox}[Recomputing what you could carry]
-Passing the depth as a parameter is $\bigO{1}$ per node; re-walking from the root to find
-the depth at every node is $\bigO{h}$ each and turns an $\bigO{n}$ DFS into $\bigO{n h}$.
-If the value is already known on the way in, \emph{carry} it.
-\end{warningbox}
-
-\subsection{Solved Problems}
-
-\solvedproblem{c02-root-numbers}{Sum Root to Leaf Numbers}{LeetCode 129}
-  {https://leetcode.com/problems/sum-root-to-leaf-numbers/}{LC Medium}
-  {top-down accumulator, root-to-leaf}
-
-\begin{problemstatement}[Sum Root to Leaf Numbers]
-Each root-to-leaf path spells a decimal number by its node values (e.g.\ path
-$4\to9\to5$ is $495$). Return the sum of all such numbers. Leaves are nodes with no
-children.
-\end{problemstatement}
-
-\solstep{Understanding the Problem}
-The number for a path is built digit by digit from the root, so at a node we hold the
-partial value $\text{acc}$ and pass $10\cdot\text{acc}+\text{val}$ downward -- the flow of
-\figref{c02-topdown}. At a leaf the partial value is a complete number, so it is added to
-the total. This is a textbook top-down recursion (\defref{c02-topdown}).
-
-\solstep{Key Observations}
-\begin{observation}
-$\text{acc}_{\text{child}} = 10\cdot \text{acc}_{\text{parent}} + \text{child->val}$, with
-$\text{acc}_{\text{root}}=\text{root->val}$.
-\end{observation}
-\begin{observation}
-Only leaves contribute; an internal node's partial number is never added.
-\end{observation}
-
-\solstep{Implementation}
-\begin{lstlisting}[caption={Sum Root to Leaf Numbers (LeetCode 129)}, label={lst:c02-root-numbers}]
-class Solution {
-    int dfs(TreeNode* r, int acc) {
-        if (!r) return 0;
-        acc = acc * 10 + r->val;                 // carry refined value down
-        if (!r->left && !r->right) return acc;   // leaf: complete number
-        return dfs(r->left, acc) + dfs(r->right, acc);
-    }
-public:
-    int sumNumbers(TreeNode* root) { return dfs(root, 0); }
-};
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: a skewed node's null child ``reaches target'' with the parent's sum}, language=C++, basicstyle=\ttfamily\small]
+bool hasPathSum(TreeNode* r, int S) {        // LC 112 style, root-to-LEAF required
+    if (!r) return S == 0;                   // the null child of a skewed node
+}                                            // votes "yes" with leftover S = 0!
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: only a leaf may settle the question}, language=C++, basicstyle=\ttfamily\small]
+bool hasPathSum(TreeNode* r, int S) {
+    if (!r) return false;                    // nulls never decide anything
+    if (!r->left && !r->right) return S == r->val;   // leaf: final vote
+    return hasPathSum(r->left, S - r->val)
+        || hasPathSum(r->right, S - r->val);
+}
 \end{lstlisting}
 
-\solstep{Complexity}
-\begin{complexitybox}
-Time $\bigO{n}$, memory $\bigO{h}$. Because the accumulator is passed by \emph{value},
-no back-tracking is needed -- each child gets its own copy, which is the cheapest way to
-avoid the shared-state pitfall when the state is a single integer.
-\end{complexitybox}
+\begin{warningbox}[Pitfall 3 -- carrying a snapshot instead of a function]
+Passing ``the path so far'' \emph{by value} at $n = 10^{5}$, or forgetting that
+an \code{unordered\_map} prefix must be decremented \emph{on the way back up}
+(the map is shared even when the trail discipline is otherwise perfect), breaks
+correctness or the time limit per \thmref{c02-topdown-cost}.
+\end{warningbox}
+
+\subsection{Problem Lab (fully solved)}
+
+The lab walks the carry ladder: assemble and emit (\probref{c02-path-sum-ii}),
+fold the trail into a scalar (\probref{c02-sum-numbers}), carry a fixed hop of
+ancestry (\probref{c02-grandparent}), carry an extremum (\probref{c02-anc-diff}),
+then the capstone in which the carry is a whole hashmap
+(\probref{c02-path-sum-iii}).
 
 \solvedproblem{c02-path-sum-ii}{Path Sum II}{LeetCode 113}
-  {https://leetcode.com/problems/path-sum-ii/}{LC Medium}
-  {top-down, shared path buffer, backtracking}
+  {https://leetcode.com/problems/path-sum-ii/}{LC Medium L2}
+  {top-down trail and undo, leaf emission}
 
 \begin{problemstatement}[Path Sum II]
-Given a target sum, return every root-to-leaf path whose node values add to it. Each path
-is a list of values; a leaf ends a path.
+Given \code{root} and \code{targetSum} (values in $[-10^{5}, 10^{5}]$,
+$n \le 10^{3}$), return \emph{all} root-to-leaf paths whose values sum to the
+target, each path as the list of its node values.
 \end{problemstatement}
 
 \solstep{Understanding the Problem}
-Unlike \probref{c01-same-tree}, we must \emph{output} the paths, not just decide existence,
-so we carry the current path down. Carry the remaining budget too: subtract $\text{val}$ as
-we descend and a leaf with remaining $\text{val}$ is a hit. The path is shared state, so it
-must be restored (a push/pop DFS exactly as in \figref{c02-topdown}).
+This is \probref{c02-paths} with a filter that can only be evaluated from the
+carried trail: the trail descends, and at each \emph{leaf} the running sum
+decides emission. The sibling subtrees of every node share one buffer or pay
+copies -- \thmref{c02-topdown-cost} makes $n \le 10^{3}$ copy-legal, but the
+trail version is one line longer and always linear, so we build it.
 
 \solstep{Key Observations}
 \begin{observation}
-A leaf is on a valid path iff the target minus all strict ancestors equals its own value.
+A root-to-leaf path sum is exactly the carried $S$ at a leaf
+(\defref{c02-carried}, \exref{c02-td-S}); no post-hoc addition is needed.
 \end{observation}
 \begin{observation}
-Record a \emph{copy} of the path at the leaf; the live buffer keeps changing.
+Negatives are legal, so no pruning on ``sum already exceeded'' -- the
+LC 112 one-liner habit dies here.
 \end{observation}
+\begin{observation}
+The emitted list must be \emph{copied} into the answer
+(\code{out.push\_back(path)} snapshots it); a reference would be popped away by
+the undo.
+\end{observation}
+
+\solstep{Solution}
+\code{dfs(v, S)}: $S \mathrel{+}= v\to\mathit{val}$, push $v$; at a leaf with
+$S = \mathit{target}$, snapshot the trail; recurse on existing children; pop and
+report the \code{S} back to the parent by undo of the addition (\coderef{c02-path-sum-ii}
+keeps \code{S} by value, which is the same contract with less bookkeeping).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Structural induction with the \emph{trail invariant}: on entry to
+\code{dfs(v)}, \code{path} equals the root-to-parent path of $v$ and $S$ its sum.
+The push extends both, so during the body they are the root-to-$v$ path/sum; the
+leaf test therefore compares exactly $P(v)$ with the target. Children are called
+under the invariant because the pop/return restores state between the left and
+right descents. Emission copies a completed path; by \lemref{c02-visit-count}
+each leaf is tested once, so each qualifying path is included exactly once.
+\end{proofbox}
 
 \solstep{Implementation}
 \begin{lstlisting}[caption={Path Sum II (LeetCode 113)}, label={lst:c02-path-sum-ii}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
 class Solution {
-    vector<vector<int>> ans;
-    vector<int> path;
-    void dfs(TreeNode* r, int rem) {
-        if (!r) return;
-        path.push_back(r->val);                        // extend state
-        rem -= r->val;
-        if (!r->left && !r->right && rem == 0) ans.push_back(path);  // leaf hit
-        dfs(r->left, rem);
-        dfs(r->right, rem);
-        path.pop_back();                               // restore for siblings
+    void dfs(TreeNode* v, int S, vector<int>& path, vector<vector<int>>& out) {
+        S += v->val;
+        path.push_back(v->val);
+        if (!v->left && !v->right) {
+            if (S == 0) out.push_back(path);       // snapshot: target reached at a leaf
+        } else {
+            if (v->left)  dfs(v->left,  S, path, out);
+            if (v->right) dfs(v->right, S, path, out);
+        }
+        path.pop_back();                           // undo -- Pitfall 1 respected
     }
 public:
     vector<vector<int>> pathSum(TreeNode* root, int target) {
-        dfs(root, target);
-        return ans;
+        vector<vector<int>> out;
+        vector<int> path;
+        if (root) dfs(root, target, path, out);   // carry the "remaining" budget
+        return out;
     }
 };
 \end{lstlisting}
 
+\solstep{Trace}
+\begin{tracebox}[On $R$ with target $7$ (a hit) and target $8$ (the failed probe of \figref{c02-carry})]
+target $7$: enter $1$ ($S{=}1$), $2$ ($S{=}3$), $4$ ($S{=}7$, \textbf{leaf,
+emit $[1,2,4]$}), undo $4$; $5$ ($S{=}8\neq7$), undo $5$; undo $2$; $3$
+($S{=}4$), $6$ ($S{=}10$, leaf, no), undo $6$; undo $3$. Output:
+$\{[1,2,4]\}$. \ac\\
+target $8$: the leaf $5$ shows $S=8$ \emph{mid-way} at node $5$ -- but the
+emission test runs only at leaves and node $5$ \emph{is} a leaf: output
+$\{[1,2,5]\}$. Node $3$ showing $S=4$ proves nothing about $8$; internal
+nodes never vote.
+\end{tracebox}
+
 \solstep{Complexity}
 \begin{complexitybox}
-Time $\bigO{n}$ to visit nodes plus $\bigO{h}$ to copy each found path, worst case
-$\bigO{n\cdot h}$ when many paths qualify. Memory $\bigO{h}$ for the live path and stack
-(the answer itself can hold $\bigO{n\cdot h}$ values). The \code{pop\_back} is exactly the
-"undo shared state" rule -- without it the second child sees the first child's node.
+Time $\bigO{nh + P\cdot \ell}$: $\bigO{n}$ walk plus snapshot cost (path length
+$\ell \le h$ per emission, at most $n$ emissions). Space $\bigO{h}$ trail $+$
+output. Both fit $n\le10^{3}$ with room to spare; the by-value variant would
+trade the $\mathit{undo}$ line for the same $\bigO{nh}$.
 \end{complexitybox}
 
-\solvedproblem{c02-even-grandparent}{Sum of Nodes with Even-Valued Grandparent}{LeetCode 1315}
-  {https://leetcode.com/problems/sum-of-nodes-with-even-valued-grandparent/}{LC Medium}
-  {top-down, carrying ancestor pointers}
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Forgetting the leaf test's \code{else} branch -- recursing past the emission --
+double-emits when a leaf is also ``target'' internally. Variants: boolean only
+$=$ LC 112 (Ch.~1's practice set); \emph{anywhere}-starting
+$=$ \probref{c02-path-sum-iii}, next-but-two on this lab's ladder.
+\end{warningbox}
 
-\begin{problemstatement}[Even-Valued Grandparent Sum]
-Return the sum of values of nodes whose \emph{grandparent} (two levels up) has an even
-value. If no such node exists the sum is $0$.
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Emission is a \emph{boundary event}: decide the boundary (leaf? every
+        node? fixed hop?) before writing the walk.
+  \item The undo line is not decoration -- it is the invariant that makes every
+        sibling's answer correct.
+  \item With negative values allowed, ``prune when exceeded'' is illegal; the
+        carry must go all the way down.
+\end{enumerate}
+\end{insightbox}
+
+\solvedproblem{c02-sum-numbers}{Sum Root to Leaf Numbers}{LeetCode 129}
+  {https://leetcode.com/problems/sum-root-to-leaf-numbers/}{LC Medium L3}
+  {top-down positional carry, emission at leaves}
+
+\begin{problemstatement}[Sum Root to Leaf Numbers]
+Each root-to-leaf path spells a decimal number ($1\to2\to4$ spells $124$).
+Return the \emph{sum} of all such numbers; $n \le 3 \cdot 10^3$, values in
+$[0,9]$. On $R$: $124 + 125 + 136 = 385$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, 15 minutes]
+A fair attempt: adapt \probref{c02-paths} -- but refuse to build the strings.
+\peek{how do you extend ``the number so far'' when one more digit arrives?}
+\nudge{one scalar carried down; where does a finished number get added -- and
+what happens to unfinished ones at skewed nodes?}
+\fullhint{\code{cur = cur*10 + v}; add at leaves only. A by-value scalar makes
+the undo question vanish. Build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The full \probref{c02-paths} machinery (strings, vectors, snapshots) is
+overkill: a positional number is a \emph{scalar} the parent can hand over fully
+extended. The design question reduces to where a finished number is recognised
+-- at leaves -- and how much state to carry (exactly one \code{int}).
+
+\solstep{Key Observations}
+\begin{observation}
+Appending a digit is $x \mapsto 10x + d$: the path number obeys a
+one-integer recurrence, so the carry is scalar and
+\corref{c02-byvalue} licenses copy-on-descent at $\bigO{1}$ per edge.
+\end{observation}
+\begin{observation}
+The value range caps numbers at $10^{10}$ for $n = 3\cdot10^{3}$? No -- LC
+guarantees the total fits in a 32-bit \code{int}; but re-derive that before
+trusting it (the audit habit from \probref{c02-second-min}): max $n$ leaves is
+$n$, max number $\le 10^{n}$ in general, so \emph{the promise is load-bearing};
+use \code{long long} if the statement ever stops promising.
+\end{observation}
+\begin{observation}
+A skewed node contributes a \emph{prefix}, never a number -- only
+\defref{c02-node-kinds} leaves emit (Pitfall 2).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Reuse \probref{c02-paths} verbatim: collect the path strings, then
+\code{stoi} and sum.}{Works and is even inside limits -- but carries
+$\Theta(h)$ per edge for what could be one \code{int}: $\bigO{nh}$, needless
+allocations, and it teaches nothing.}
+\deadend{Accumulate \code{cur*10 + v} into a \emph{shared global} number, reset
+between branches.}{Resets are exactly the undo contract you are too lazy to
+write; the first branching node corrupts one of its two children.}
+\aha{the number-so-far is a \emph{value}, not a container: pass it by value and
+each branch owns its copy -- \corref{c02-byvalue} decides ``copy'' free of
+charge.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} paths then parse & reuse \probref{c02-paths}, \texttt{stoi} the leaves & $O(nh)$ & \ac \\
+2 & \lv{3} shared global number & one \texttt{cur}, mutate in place & $O(n)$ & \textcolor{warningred}{\ding{55}\ \textbf{WA}} \\
+3 & \lv{3} scalar by value & \texttt{cur = cur*10 + v}, add at leaves & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 fails structurally (no undo discipline); rungs 1 and 3 pass, and 3 is the
+solution: same answer, $\bigO{n}$, zero containers.
+
+\solstep{Solution}
+\code{dfs(v, cur)}: \code{cur = cur*10 + v->val}; leaf: \code{total += cur};
+else recurse to both children with the extended \code{cur}. Answer at root call
+$=0$ (empty tree contributes nothing; a single node adds its own value).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Trail invariant, structural induction]
+On entry to \code{dfs(v)}, \code{cur} equals the number spelled by the
+root-to-parent path (root call: $0$). Line 1 extends it with $v$'s digit, so in
+the body \code{cur} is the root-to-$v$ number; children calls therefore satisfy
+the invariant. At a leaf the body's \code{cur} is exactly the problem's number
+for that path, and by \lemref{c02-visit-count} each leaf -- each path -- is
+processed once, so the accumulator is the required sum.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Sum Root to Leaf Numbers (LeetCode 129)}, label={lst:c02-sum-numbers}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    void dfs(TreeNode* v, int cur, int& total) {
+        cur = cur * 10 + v->val;                   // scalar carry: by-value extension
+        if (!v->left && !v->right) { total += cur; return; }   // leaf: emit
+        if (v->left)  dfs(v->left,  cur, total);
+        if (v->right) dfs(v->right, cur, total);
+    }                                              // no undo needed: cur is a copy
+public:
+    int sumNumbers(TreeNode* root) {
+        int total = 0;
+        if (root) dfs(root, 0, total);
+        return total;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$]
+$1$: \code{cur}=1 $\to$ $2$: \code{cur}=12 $\to$ $4$: \code{cur}=124, leaf,
+total $=124$; $\to$ $5$: \code{cur}=125, leaf, total $=249$; back to $1$,
+$\to$ $3$: \code{cur}=13 $\to$ $6$: \code{cur}=136, leaf, total
+$=\mathbf{385}$. The copy-on-descent is visible: the call on $3$ starts from
+\code{cur}=1, never $125$ -- the undo that \emph{isn't} there did its job.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, space $\bigO{h}$ stack. Versus the ladder: rung 1 pays
+$\bigO{nh}$ and strings for the same arithmetic; rung 3 buys linearity by
+recognising the carry is a scalar (\thmref{c02-topdown-cost} with
+$g=r=\bigO{1}$, $c=\bigO{1}$).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Single node $7$ & leaf emits $7$ (not $07$, not $0$) \\
+Leading zeros on path & \code{cur*10+0} shifts correctly: $1,0,2 \mapsto 102$ \\
+All-zero chain & emits $0$; sum stays within promised \code{int} \\
+Empty tree & guarded; returns $0$ \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Adding \code{cur} at \emph{every} node answers a different question (sum of all
+root-path prefixes) -- one character of placement, a whole WA. Variant: binary
+digits ($x \mapsto 2x + d$) is LC 1022-class identical; ``number read
+leaf-to-root'' changes only the emission site's test.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Ask what the carry \emph{is} before choosing how to carry it -- a scalar
+        earns by-value copies; a container must earn them back with undo.
+  \item Positional accumulators ($\times 10$, $\times 2$) turn path-as-string
+        problems into one-line recurrences.
+  \item Emission-site errors are invisible on the sample when the sample is a
+        perfect tree; re-test mentally on $R$'s skewed node $3$.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item $n$ to $10^{5}$, chain-shaped: recursion depth $\to$ \textbf{RE}. The
+        swap: explicit stack of $(v, \mathit{cur})$ pairs -- the scalar carry
+        makes the iterative form a one-to-one translation (see the chapter-end
+        WA clinic's RE row).
+  \item Promise of \code{int}-fit removed: \code{cur} and \code{total} to
+        \code{long long}, and modulo if the statement grows one.
+  \item Values beyond $[0,9]$: the ``decimal'' interpretation breaks -- check
+        what the problem means by ``number'' before reusing the recurrence.
+\end{itemize}
+\end{hardeningbox}
+
+\solvedproblem{c02-grandparent}{Sum of Nodes with Even-Valued Grandparent}{LeetCode 1315}
+  {https://leetcode.com/problems/sum-of-nodes-with-even-valued-grandparent/}{LC Medium L3}
+  {fixed-hop ancestry carry}
+
+\begin{problemstatement}[Even Grandparent Sum]
+Sum the values of every node whose \emph{grandparent} exists and has an even
+value. $1 \le n \le 10^{5}$, values $\le 100$.
 \end{problemstatement}
 
 \solstep{Understanding the Problem}
-The predicate about a node depends on its grandparent -- pure ancestor information, so we
-carry grandparent and parent pointers down (\defref{c02-topdown}). At each node, if the
-carried grandparent has even value, add the node's value.
+The qualifying predicate mentions a node two hops up -- pure descendant
+information is useless, so the carry must hold ``my parent's value and my
+grandparent's value'' (or equivalently ``grandparent two levels back'').
+Emission happens at \emph{every} node whose carry says yes. The answer is a sum
+over the whole tree -- no leaf boundary at all.
+
+\solstep{Key Observations}
+\begin{observation}
+A fixed hop-count $k$ ancestry needs exactly $k$ scalar parameters (or a
+length-$k$ window); here $k=2$, so the carry is two pointers/values.
+\end{observation}
+\begin{observation}
+Nodes at depth $\le 1$ have no grandparent -- the base case contributes $0$
+automatically if we carry \code{gp = -1} sentinels.
+\end{observation}
+\begin{observation}
+$n \le 10^{5}$ with values $\le 100$: total sum $\le 10^{7}$, \code{int} is
+provably safe -- run the audit, don't sniff.
+\end{observation}
+
+\solstep{Solution}
+\code{dfs(v, p, gp)}: if \code{gp} is set and even, add \code{v->val}; recurse
+with shifted window \code{(v->val, p)}. Root call gets two sentinel nulls.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Invariant: on entry to \code{dfs(v)}, \code{p}, \code{gp} are the values of
+$v$'s parent and grandparent (or unset at depth $<2$) -- true at the root and
+preserved because the child call receives $(v, p)$, the shifted window. The
+body adds $v\to\mathit{val}$ exactly when the invariant says $v$'s grandparent
+is even, and every node runs the body once (\lemref{c02-visit-count}), so the
+accumulator is the required sum.
+\end{proofbox}
 
 \solstep{Implementation}
-\begin{lstlisting}[caption={Sum of Nodes with Even-Valued Grandparent (LeetCode 1315)}, label={lst:c02-even-grandparent}]
+\begin{lstlisting}[caption={Even Grandparent Sum (LeetCode 1315)}, label={lst:c02-grandparent}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
 class Solution {
-    int dfs(TreeNode* r, TreeNode* parent, TreeNode* grand) {
-        if (!r) return 0;
-        int total = (grand && grand->val % 2 == 0) ? r->val : 0;   // decide at this node
-        total += dfs(r->left,  r, parent);   // this node becomes parent, old parent becomes grand
-        total += dfs(r->right, r, parent);
-        return total;
+    int dfs(TreeNode* v, TreeNode* p, TreeNode* gp) {   // window of two ancestors
+        int ans = (gp && gp->val % 2 == 0) ? v->val : 0;
+        if (v->left)  ans += dfs(v->left,  v, p);
+        if (v->right) ans += dfs(v->right, v, p);
+        return ans;
     }
 public:
     int sumEvenGrandparent(TreeNode* root) { return dfs(root, nullptr, nullptr); }
 };
 \end{lstlisting}
 
+\solstep{Trace}
+\begin{tracebox}[On $R$]
+$1$ (no gp) $\to$ $2$ (gp unset: depth 1) $\to$ $4$: gp $=1$ odd, $+0$;
+$5$: gp $=1$ odd, $+0$; $3$: no gp; $6$: gp $=1$ odd, $+0$. Sum $=0$.
+Stretch: if node $2$ held $2$, then $4,5$ would see gp$=1$? No -- gp of $4$ is
+node $1$ regardless; changing $2$'s value affects $6$-style depth-$2$-of-$2$
+nodes only. Redraw $R$ with an extra child $7$ under $6$: then $7$'s gp is $2$,
+and an even $2$ adds $7$. This hop-indexing is the trace to redo until fluent.
+\end{tracebox}
+
 \solstep{Complexity}
 \begin{complexitybox}
-Time $\bigO{n}$, memory $\bigO{h}$. Carrying \code{parent}/\code{grand} as parameters beats
-storing them in a map: two pointers per call, updated for free on the way down. (A
-bottom-up variant returning grandchild sums also works -- see \secref{c02-bottomup}.)
+Time $\bigO{n}$, space $\bigO{h}$; carry is two pointers ($c=\bigO{1}$ per
+\thmref{c02-topdown-cost}). Chain-shaped $n=10^{5}$: the two-pointer window
+transliterates to an explicit stack without breaking a sweat.
 \end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Passing ``grandparent'' but recursing \code{dfs(child, v, v)} (off-by-one shift)
+makes every node its own grandparent's parent -- the sums come out parity-flipped
+on depth-2 nodes only, so small tests pass. Shift \emph{one} slot per level.
+Variant: ``parent odd and grandparent even'' is a three-slot window;
+general $k$ is a deque carry -- same shape.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Neighbourhood of the ancestry'' = fixed-size sliding window carried
+        down; the window width is the hop count, not the tree size.
+  \item Emission sites form a spectrum: leaves only $\to$ every node; place the
+        test where the \emph{predicate} is decidable.
+  \item Sentinels (unset parent) beat depth guards: the same code covers depths
+        $0,1$ for free.
+\end{enumerate}
+\end{insightbox}
+
+\solvedproblem{c02-anc-diff}{Maximum Difference Between Node and Ancestor}{LeetCode 1026}
+  {https://leetcode.com/problems/maximum-difference-between-node-and-ancestor/}{LC Medium L3}
+  {carrying an extremum of the ancestry}
+
+\begin{problemstatement}[Node--Ancestor Max Difference]
+Over all ancestor--descendant pairs $(a,d)$ ($a$ on the root-to-$d$ path,
+$a \neq d$), return the maximum $\left|a\to\mathit{val} - d\to\mathit{val}\right|$;
+$n \le 5000$, values $\le 10^5$.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+At the descendant end, the best partner anywhere above is an ancestry
+\emph{extremum}: $|x - a|$ is maximised by the min or the max along the path. So
+carry both, and every node votes with its own value against them -- an
+\emph{every-node emission} top-down walk. (Restating without the absolute value
+is the usual first slip: LC's pairs are ordered ancestor-minus-descendant, and
+both extremes are needed for the same reason.)
+
+\solstep{Key Observations}
+\begin{observation}
+The root-to-node path's $\min$ and $\max$ summarise \emph{all} ancestry values
+for this objective -- no other statistic composes.
+\end{observation}
+\begin{observation}
+The root itself has no ancestor to pair with: start the vote at depth $1$, or
+seed \code{mn=mx=root->val} and the vote is automatically $0$.
+\end{observation}
+\begin{observation}
+Two scalars carried: copy-on-descent, $\bigO{1}$ per edge
+(\corref{c02-byvalue}) -- hashmap/stack machinery would be over-engineering.
+\end{observation}
+
+\solstep{Solution}
+\code{dfs(v, mn, mx)}: vote with the two differences $|v\to\mathit{val}-\mathit{mn}|$
+and $|v\to\mathit{val}-\mathit{mx}|$; children receive
+\code{mn' = min(mn, v)}, \code{mx' = max(mx, v)}. Seed with the root's value and
+a global \code{ans}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Invariant: \code{mn}, \code{mx} at entry to \code{dfs(v)} bound the ancestor
+values of $v$ (seed: root's own, trivially; step: the child's window is the
+parent's window plus $v\to\mathit{val}$, min/max-extended exactly). For the fixed
+descendant $v$, $\max_{a}( |a - v\to\mathit{val}| )$ is attained at an endpoint
+of the interval of ancestry values, i.e.\ at $\mathit{mn}$ or $\mathit{mx}$
+(the absolute-deviation maximum over a finite set lives at a set extreme).
+Voting once per node and taking the running max covers every descendant
+exactly once.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Node--Ancestor Max Difference (LeetCode 1026)}, label={lst:c02-anc-diff}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    int ans = 0;
+    void dfs(TreeNode* v, int mn, int mx) {
+        ans = max({ans, abs(v->val - mn), abs(v->val - mx)});   // every-node vote
+        int lo = min(mn, v->val), hi = max(mx, v->val);         // extended window
+        if (v->left)  dfs(v->left,  lo, hi);
+        if (v->right) dfs(v->right, lo, hi);
+    }
+public:
+    int maxAncestorDiff(TreeNode* root) {
+        dfs(root, root->val, root->val);                        // seed: no ancestor yet
+        return ans;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$]
+$1$: window $(1,1)$, vote $0$. $2$: vote $|2-1| = 1$, window $(1,2)$.
+$4$: vote $|4-1| = \mathbf{3}$ (new max), window $(1,4)$. $5$: vote
+$|5-1| = 4$ -- \textbf{answer 4} comes from pair (ancestor $1$, descendant $5$).
+$3$: vote $2$; $6$: vote $5$? window at $6$ is $(1,3)$: $|6-1| = \mathbf{5}$.
+Final $\mathbf{5}$, pair $(1,6)$: the chain root--$3$--$6$ carries min $1$ all
+the way -- the trace shows \emph{why the min must survive branching}: it is
+copied, not shared, so no undo question arises.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, space $\bigO{h}$; two-int carry per \thmref{c02-topdown-cost}.
+Bottom-up alternative exists (each subtree reports its min/max/answer --
+preview of \secref{c02-bottomup}'s return channel) with identical cost; pick
+whichever direction's invariant you can prove faster under interview pressure.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Carrying only \code{mn} (``we want the biggest difference'') loses pairs like
+$(9,2)$ when the ancestry max is the better partner -- symmetric bug, common
+WA. Vote \emph{both} extremes. Variant: replace $|\cdot|$ by signed
+$\mathit{anc} - \mathit{desc}$ (LC 1026's actual phrasing) and the same code
+survives because both directions are in the max.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Summarise the ancestry by \emph{what the objective can attain}: extrema
+        for deviations, counts for parities, sums for prefix tests.
+  \item Every-node emission is the norm once the predicate is
+        ``$\exists$ ancestor\ldots''; leaves-only was the special case.
+  \item The bottom-up mirror of a top-down carry usually exists; knowing both
+        makes the next section's two-channel idea a corollary, not a leap.
+\end{enumerate}
+\end{insightbox}
+
+\solvedproblem{c02-path-sum-iii}{Path Sum III}{LeetCode 437}
+  {https://leetcode.com/problems/path-sum-iii/}{LC Medium L4}
+  {top-down prefix hashmap + undo, downward paths anywhere}
+
+\begin{problemstatement}[Path Sum III]
+Count paths that go \emph{strictly downward} (parent to child, any start, any
+end) with value-sum $\mathit{targetSum}$; values in $[-10^9, 10^9]$,
+$n \le 1000$, target in $[-10^9, 10^9]$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, 25 minutes]
+Fair first attempt: the two-nested-DFS brute is \emph{allowed} here -- find it,
+count its cost honestly, then ask what a node already knows about its ancestry.
+\peek{which quantity, known at $v$, expresses the sum of \emph{any} ancestor-to-$v$
+segment?}
+\nudge{root-prefix sums: segment $a \to v$ is $P(v) - P(\mathit{parent}(a))$. At
+$v$ you want how many ancestors with $P = P(v) - \mathit{target}$. Where can
+those live so each is one lookup?}
+\fullhint{A hashmap from prefix value to count, holding exactly the current
+root-path's prefixes -- insert before descending, erase (decrement) after.
+Count starts at $1$ for prefix $0$. The full build, including why the map must
+be \emph{unwound}, follows.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+A ``path'' here is any downward segment, not necessarily root-anchored or
+leaf-ending. The carried state must therefore summarise \emph{all suffixes} of
+the root path -- which, by \defref{c02-rootprefix}, is exactly the multiset of
+prefix sums along it. The question ``how many segments end at $v$ with sum $t$''
+becomes a lookup: \code{cnt[P(v) - t]}.
+
+\solstep{Key Observations}
+\begin{observation}
+Segment-sum identity (``prefix'' in the array sense). For nodes $a \preceq b$,
+$\sum_{x \in a \to b} x\to\mathit{val} = P(b) - P(\mathit{parent}(a))$.
+\end{observation}
+\begin{observation}
+So segments ending at $b$ with target sum correspond to ancestors $c$ (including
+the virtual node with $P=0$) with $P(c) = P(b) - t$ -- a count keyed by prefix
+value, i.e.\ a hashmap carried down.
+\end{observation}
+\begin{observation}
+The map describes the \emph{current} root path only; entries from finished
+siblings are wrong data. Decrement-on-return (undo) is not optional
+(\defref{c02-trail}).
+\end{observation}
+\begin{observation}
+Negatives and zero in the value range kill two-pointer/sliding-window habits:
+prefix order is not monotone, hashmap is the only summariser left.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Two nested DFS: start a \probref{c02-path-sum-ii}-style count at every
+node.}{$\bigO{nh}$ -- $\bigO{n}$ on balanced trees, $\bigO{n^{2}} = 10^{6}$ at
+$n = 1000$: accepted by LC's clock, but the interview follow-up ``and $n =
+10^{5}$?'' is a wall. Keep it as rung 1.}
+\deadend{One DFS carrying $S$ = root-path sum, count $S = t$ at every node.}
+{Counts only paths \emph{starting at the root} -- segment starts were the whole
+difficulty; this reads $6$ of \figref{c02-carry}'s world as ``no'' forever.}
+\deadend{Hashmap of every prefix seen so far in \emph{visit order}, never
+deleted.}{Cross-contamination: a prefix from the left subtree answers a lookup
+in the right subtree, counting segments that jump between branches -- silently
+over-counts. The map must be a \emph{path}, not a history.}
+\aha{carry the path itself \emph{as} its prefix multiset: insert your own prefix
+on the way down, remove it on the way up, and each node's lookup then ranges
+over exactly its ancestors' prefixes -- one hash per node, $\bigO{n}$ total.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} DFS from every node & nested walk, one \probref{c02-path-sum-ii} per start & $O(n^2)$ & \ac \\
+2 & \lv{3} one carry of $S$ & root-anchored prefixes only & $O(n)$ & \textcolor{warningred}{\ding{55}\ \textbf{WA}} \\
+3 & \lv{3} global prefix map & hashmap, never undone & $O(n)$ & \textcolor{warningred}{\ding{55}\ \textbf{WA}} \\
+4 & \lv{4} path-prefix map & map $+$ insert/erase around children & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rungs 2--3 are \emph{wrong}, not slow -- rung 2 answers a different question,
+rung 3 invents paths that leave the path. Rung 4 is the solution.
+
+\solstep{Solution}
+Maintain \code{cnt} = multiset of root-prefix sums of the current root-path
+(initialised with $P_{-1}=0$ once). At node $v$: compute $P(v) = P(\mathit{parent})
++ v\to\mathit{val}$; \code{ans += cnt[P(v) - t]}; insert $P(v)$; recurse both
+children; erase $P(v)$ (decrement, and let entries go back to zero -- do not
+\code{erase(key)} blindly if a value repeats up the path).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Trail invariant + segment identity]
+Invariant: during the body of \code{dfs(v)}, \code{cnt[x]} equals the number of
+nodes $c$ on the root-to-\emph{parent}$(v)$ path plus the virtual $P_{-1}=0$
+with $P(c) = x$. Base: root call holds $\{cnt[0]=1\}$. Step: the parent inserted
+its own prefix before the call and erases it after the return, and by
+\lemref{c02-visit-count} sibling subtrees run disjointly in time -- so the
+multiset is exactly the ancestor chain's, each time.
+Soundness: a vote \code{cnt[P(v)-t]} counts ancestors $c$ (virtual included,
+giving root-starting segments); Observation 1 turns each into a segment $c' \to
+v$ of sum $t$ with $c'$ the child of $c$ on the path -- a genuine downward
+path. Completeness: any valid path $a \to b$ is counted at the call of $b$, from
+$P(\mathit{parent}(a))$, which the invariant says is present. Uniqueness: the
+pair $(b, c)$ determines the path, so every path is counted once.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Path Sum III (LeetCode 437) -- prefix hashmap with undo}, label={lst:c02-path-sum-iii}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    unordered_map<long long, int> cnt;           // prefix sum -> multiplicity
+    long long ans = 0;
+    void dfs(TreeNode* v, long long P, long long t) {
+        P += v->val;
+        ans += cnt[P - t];        // ancestors whose prefix completes a path here
+        ++cnt[P];                 // I become an ancestor for my children
+        if (v->left)  dfs(v->left,  P, t);
+        if (v->right) dfs(v->right, P, t);
+        --cnt[P];                 // UNDO: I am no longer on their path (never leave
+    }                             //   stale multiplicity for a repeated prefix!)
+public:
+    int pathSum(TreeNode* root, int targetSum) {
+        cnt[0] = 1;                               // P_{-1}: root-starting paths
+        if (root) dfs(root, 0, targetSum);
+        return (int)ans;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$, target $4$]
+\begin{center}\small\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}lllll@{}}
+\textbf{node} & $P$ & \textbf{lookup }$P-4$ & \textbf{map before insert} & \textbf{ans} \\
+\toprule
+$1$ & $1$ & $-3$ & $\{0{:}1\}$ & $0$ \\
+$2$ & $3$ & $-1$ & $\{0{:}1,1{:}1\}$ & $0$ \\
+$4$ & $7$ & $3$  & $\{0{:}1,1{:}1,3{:}1\}$ & $\mathbf{+1}$ \\
+$5$ & $8$ & $4$  & $\{0{:}1,1{:}1,3{:}1\}$ (after undo of $7$) & $+0$ \\
+$3$ & $4$ & $0$  & $\{0{:}1,1{:}1\}$ (after undo of $3$) & $\mathbf{+1}$ \\
+$6$ & $10$ & $6$ & $\{0{:}1,1{:}1,4{:}1\}$ & $+0$ \\
+\bottomrule
+\end{tabular}\end{center}
+Total $\mathbf{2}$: $+1$ at node $4$ is the path $2\to4$ (lookup hit on $P(2)=3$),
+$+1$ at node $3$ is the path $1\to3$ (lookup hit on the seeded $P_{-1}=0$).
+Watch the \textbf{undo column}: at node $5$ the prefix $3$ is \emph{gone} (node
+$2$ finished), so the
+phantom path ``$2\to5$ sum $7$'' cannot be miscounted as $4$; and the
+root-starting hit at node $3$ exists only because $cnt[0]=1$ seeded the
+virtual prefix.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ expected (hash ops amortised $\bigO{1}$; \thmref{c02-topdown-cost}
+with $g{=}r{=}\bigO{1}$, $c{=}\bigO{1}$ amortised insert/erase). Space $\bigO{h}$
+map $+$ stack. Versus the ladder: rung 1's $\bigO{nh}$ survives $n{=}1000$;
+rung 4 is the $\bigO{n}$ answer that survives $n \sim 10^{5}$ chains -- and it
+is \emph{exact}, where the brute is also exact but slower. Hash worst case is
+$\bigO{n}$ per op: a paranoid judge (CF-style hacking) wants \code{map}
+($\bigO{\log h}$) or a splitmix hash -- the chapter-end WA clinic row CE/HA.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Node value $=$ target & own prefix lookup hits parent's prefix; counted \\
+$0$-valued nodes & repeated prefixes: multiplicity in the map, decrement in undo \\
+Target reached at an internal node & every node looks up -- no leaf restriction \\
+Negative segments & prefix values unsorted: hashmap unaffected \\
+All-$0$ chain, target $0$ & counts $\binom{n+1}{2}$: fits \code{long long}
+  accumulator, cast at return per LC's promise \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+The three deaths of this problem, in wild order: (1) \code{erase(key)} instead
+of \code{--cnt} when prefixes repeat (the all-zero chain punishes it); (2)
+forgetting the \code{cnt[0]=1} seed (root-starting paths vanish); (3) forgetting
+undo (the third dead end, verbatim). Reconstruct the invariant of the map
+\emph{out loud} from memory -- it is the whole problem statement restated in one
+line. Variants: paths leaf-to-anywhere $=$ move the lookup to the up channel
+(\secref{c02-bottomup}'s two-channel machinery); ``longest path with sum $t$''
+replaces \code{cnt[value]} by \code{first depth of value} -- same walk.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Sub-object \emph{starting anywhere}'' on a tree is the array prefix
+        trick with the array replaced by the current root path -- and a path is
+        shared furniture, so the hashmap obeys the undo contract too.
+  \item A wrong-but-plausible carry (root-only sums; never-deleted map) fails
+        \emph{silently} on samples; force yourself to trace one sibling
+        transition (node $5$ above) before submitting.
+  \item Choose the summariser of carried state from the \emph{objective}:
+        target-sum segments $\to$ prefix counts; deviation $\to$ extrema;
+        parity $\to$ bitmask. Same walk, different backpack.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item $n \to 10^{5}$ chain: depth RE -- iterative DFS needs the insert/erase
+        bracket \emph{split across two visits}: a \code{stage} flag per stack
+        frame, insert on first visit, erase on second. This is the general
+        conversion recipe for any undo-carry recursion.
+  \item Values $\pm10^{9}$: prefix sums need \code{long long} \emph{including in
+        the map key}; \code{int} keys overflow silently at $P \pm t$.
+  \item Adversarial hashmap (LC: never; CF hacking rounds: yes): splitmix64
+        hasher or \code{map} at $\bigO{\log n}$.
+\end{itemize}
+\end{hardeningbox}
 
 \subsection{Practice Problems}
 
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item State your carry in one sentence: ``at node $v$ my state equals \dots''
+        -- if you cannot, you have chosen none.
+  \item What does a call do \emph{on the way back up} that you have not written?
+        (The undo question, one line earlier than the bug.)
+  \item Is your emission at leaves, internal nodes or all nodes -- and which
+        sentence of the statement says so?
+  \item Is the state a scalar (copy) or a container (trail)? Check
+        \thmref{c02-topdown-cost} against the constraint on $n$.
+  \item Did the $P_{-1} = 0$-style base entry get seeded, if your map counts
+        prefixes?
+\end{itemize}
+\end{stuckbox}
+
 \begin{practiceset}
-  \practice{Cousins in Binary Tree}{LeetCode 993}
-    {https://leetcode.com/problems/cousins-in-binary-tree/}{LC Easy}
-    {carry (depth, parent) down; two nodes are cousins iff equal depth but different parents.}
   \practice{Count Good Nodes in Binary Tree}{LeetCode 1448}
-    {https://leetcode.com/problems/count-good-nodes-in-binary-tree/}{LC Medium}
-    {a node is good if no ancestor exceeds it; carry the max-so-far down and compare.}
-  \practice{Deepest Leaves Sum}{LeetCode 1302}
-    {https://leetcode.com/problems/deepest-leaves-sum/}{LC Medium}
-    {carry depth down and keep the current deepest level; add values when you reach a new max depth.}
-  \practicehh{All Nodes Distance K in Binary Tree}{LeetCode 863}
-    {https://leetcode.com/problems/all-nodes-distance-k-in-binary-tree/}{LC Medium}
-    {you must go up as well as down -- build parent pointers first, then BFS from the target.}
-    {treat the tree as an undirected graph via a parent map; a two-hop BFS reaches both descendants and ancestors within $K$.}
+    {https://leetcode.com/problems/count-good-nodes-in-binary-tree/}{LC Medium L2}
+    {carry the maximum ancestry value as a scalar; a node is ``good'' iff its own
+    value $\ge$ it -- vote at every node, no undo needed.}
+  \practice{Path Sum IV}{LeetCode 666}
+    {https://leetcode.com/problems/path-sum-iv/}{LC Medium L3}
+    {three-digit encoding builds the tree first (preview \secref{c02-transform});
+    then carry \code{cur*10 + v} of \probref{c02-sum-numbers} and add at leaves.}
+  \practice{Sum of Root To Leaf Binary Numbers}{LeetCode 1022}
+    {https://leetcode.com/problems/sum-of-root-to-leaf-binary-numbers/}{LC Easy L2}
+    {\probref{c02-sum-numbers} verbatim with $\times 2$; do it cold as a drill.}
+  \practice{Pseudo-Palindromic Paths}{LeetCode 1457}
+    {https://leetcode.com/problems/pseudo-palindromic-paths/}{LC Medium L4}
+    {carry a 10-bit parity mask (\code{1 << v}); a path is pseudo-palindromic
+    iff the mask has $\le 1$ bit set -- test with \code{mask \& (mask-1)}; the
+    mask is added on the way down and XOR-ed back on the way up (the undo
+    contract, \defref{c02-trail}).}
 \end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 2.2 Top-down carry]
+Fill SLOT 2: the backpack describes the ancestry, not the subtree. Scalars copy
+(\probref{c02-sum-numbers}); containers trail and \textbf{undo}
+(\probref{c02-path-sum-ii}, \probref{c02-path-sum-iii}). Emit at the boundary
+where the predicate becomes decidable -- say it before coding.
+\selftest{
+  \item State the trail invariant in one sentence; which line of
+        \coderef{c02-td-skeleton} enforces it?
+  \item Which summariser did each lab problem carry (number / window / extrema /
+        hashmap), and what sentence of the problem selected it?
+  \item Why does \probref{c02-path-sum-iii} need \code{cnt[0]=1} -- which paths
+        vanish without it?
+  \item On $R$: list the carried $S$ at every node from memory
+        (\figref{c02-carry}) and the answer to ``which leaf reaches $8$?''.
+  \item Write the top-down skeleton from memory, both call lines and the undo.
+}
+\end{recallbox}

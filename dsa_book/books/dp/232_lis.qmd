@@ -1,0 +1,982 @@
+# Subsequence DP (the LIS Family) {#sec-lis}
+
+::: {.callout-note title="Sources"}
+**`dp_book` ch. 4** (two ways to hold a subsequence, sort first, the value axis, counting without duplicates, then chains and antichains). A subsequence may skip. Kadane's "best block ending at $i$" (@sec-dpi-p5) is the contiguous special case, and the all-earlier look-back (@sec-od-look) is the $O(n^2)$ form of the same idea.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Choose between "the subsequence ends at $i$" and "take or skip, remembering a small summary".
+- Compute an LIS in $O(n^2)$ and in $O(n \log n)$, reconstruct one, and count how many have that length.
+- Sort a set so that a nesting chain becomes an LIS, including the tie-break that keeps equal keys from nesting.
+- Index a DP by the value, with a Fenwick tree or a segment tree after compression.
+- Count every subsequence, and count distinct strings, and see which one the statement asked for.
+- Turn "delete as few as possible" and "split into as few sequences as possible" into an LIS or an LDS.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from functools import lru_cache
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import dp232_traces as Traces
+random.seed(0)
+MOD = 10**9 + 7
+```
+
+## Why this matters
+
+@sec-gd gave each cell a second index. This chapter goes back to a single array and adds a different freedom: the chosen elements may **skip**. The previous chosen index is no longer a neighbour or a cell above, but any earlier index that is compatible, and most of the chapter is about finding that index fast.
+
+A subarray is a block. Between its first and last index, every element is present, so the previous chosen index is $i-1$. A subsequence keeps the order of the array and may skip, so the previous chosen index can be any earlier compatible index. There are $2^n$ subsequences. The DP never lists them. It keeps one number per ending index, or one number per summary of what has already been taken.
+
+The longest increasing subsequence is the template. Almost every problem in this chapter is that template with a different meaning of "may follow": a smaller value, a smaller envelope, a fixed step, a value inside a window of width $k$, a residue class. Once the compatibility test is written, the same two programs apply: the $O(n^2)$ table, and the $O(n \log n)$ tails array or value tree when the test is a comparison.
+
+## Lesson 1: two views of a subsequence {#sec-lis-views}
+
+On $a = [3, 1, 4, 1, 5, 9, 2, 6]$ the block $a[2..4]$ is the subarray $4, 1, 5$. The positions $1, 2, 4, 7$ are the subsequence $1, 4, 5, 6$, and it is increasing. Both objects use the same array. They are different states.
+
+::: {#fig-lis-views}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [3, 1, 4, 1, 5, 9, 2, 6]
+    V.trace(ax, p, [
+        dict(values=a, label="subarray", colors={2: "amber", 3: "amber", 4: "amber"}, cell_w=0.82, size=9),
+        dict(values=a, label="subsequence", colors={1: "green", 2: "green", 4: "green", 7: "green"}, cell_w=0.82, size=9),
+    ], gap=2.5)
+V.show(draw)
+```
+
+Amber is the block $a[2..4]$. Green is an increasing subsequence of length 4. The arrows of a subsequence DP always point at the previous chosen index, which need not be the neighbour.
+
+:::
+
+**View A.** $end[i]$ is the best subsequence whose last element is $a[i]$. The previous element is some $a[j]$ with $j < i$ and $a[j] < a[i]$:
+
+$$
+end[i] = 1 + \max\{end[j] : j < i,\ a[j] < a[i]\}, \qquad \text{answer} = \max_i end[i].
+$$
+
+The maximum of an empty set is 0, so a first element has length 1. This is Kadane with a longer arm. The look-back is every earlier index (@sec-od-look), which is $O(n^2)$. On the picture, $end = [1, 1, 2, 1, 3, 4, 2, 4]$. Parents from the last 6 walk back through 5, 4, 3.
+
+**View B.** Walk left to right and take or skip. A take is legal only when it fits what was already taken, so the state remembers a summary. For an LIS the summary is the last value:
+
+$$
+f(i, \mathrm{prev}) = \max\big(f(i+1, \mathrm{prev}),\ 1 + f(i+1, a[i])\ \text{if } a[i] > \mathrm{prev}\big).
+$$
+
+View A has $n$ states because the last value is $a[i]$ itself. View B has $n$ times the number of possible summaries. Use A when the constraint is a comparison with the previous chosen element. Use B when the constraint is a small fact about the whole chosen set: a remainder, the last letter, a stage in a pattern.
+
+```{python}
+def ends_at(a):
+    end = [1] * len(a)
+    for i in range(len(a)):
+        for j in range(i):
+            if a[j] < a[i]:
+                end[i] = max(end[i], end[j] + 1)
+    return end
+
+sample = [3, 1, 4, 1, 5, 9, 2, 6]
+assert ends_at(sample) == [1, 1, 2, 1, 3, 4, 2, 4]
+assert max(ends_at(sample)) == 4
+```
+
+## Lesson 2: sort first {#sec-lis-sort}
+
+A subsequence respects the array order. A set of envelopes does not have an order until you choose one. If "fits inside" can only happen when the width grows, sorting by width puts every legal predecessor earlier. The chain is then an LIS on the heights.
+
+The tie-break is the whole trick. Two envelopes of equal width do not nest, even when one is taller. Sort width ascending and, within a width, height descending. A later height is then strictly taller only when the width is strictly larger, so a strict LIS on the heights never chains two equal widths. Sorting the heights ascending as well lets $[1, 1]$ and $[1, 2]$ look nested. They are not.
+
+The same recipe covers cubes. Sort each cuboid's three dimensions, so the largest side is the height you will add, then sort the cuboids and take a weighted chain under $\le$ on all three coordinates. Rotation is free: the sort of the three sides is the best orientation.
+
+On the pairs $(2,5),\ (3,4),\ (5,7),\ (5,6),\ (6,8),\ (1,2),\ (4,6),\ (3,3)$ a chain must move strictly right and up. Sorting height ascending inside a width produces $2,5,3,4,6,6,7,8$, whose strict LIS has length 6 and uses both points of width 3. Sorting height descending produces $2,5,4,3,6,7,6,8$ and length 5, which is the longest real chain (@fig-lis-ties).
+
+::: {#fig-lis-ties}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    pairs = [(2, 5), (3, 4), (5, 7), (5, 6), (6, 8), (1, 2), (4, 6), (3, 3)]
+    up = [h for _, h in sorted(pairs)]
+    down = [h for _, h in sorted(pairs, key=lambda t: (t[0], -t[1]))]
+    assert up == [2, 5, 3, 4, 6, 6, 7, 8] and max(ends_at(up)) == 6
+    assert down == [2, 5, 4, 3, 6, 7, 6, 8] and max(ends_at(down)) == 5
+    V.trace(ax, p, [
+        dict(values=up, label="h up", cell_w=0.78, size=9,
+             colors={0: "amber", 2: "amber", 3: "amber", 4: "amber", 6: "amber", 7: "amber"},
+             note="length 6"),
+        dict(values=down, label="h down", cell_w=0.78, size=9,
+             colors={0: "green", 2: "green", 4: "green", 5: "green", 7: "green"},
+             note="length 5"),
+    ], gap=2.6)
+V.show(draw)
+```
+
+Amber takes both heights of width 3. Green takes one height from each width, and that chain has length 5.
+
+:::
+
+## Lesson 3: the value axis {#sec-lis-value}
+
+View A asks, for each $i$, for the best $end[j]$ among $j < i$ with $a[j]$ in some range of values. The index order is a loop. The value order is a data structure.
+
+A prefix maximum ("best among all smaller values") is a Fenwick tree or a segment tree on compressed ranks. A window ("best among values in $[a_i - k,\ a_i - 1]$") needs a segment tree, because the range has two ends. A count or a sum uses the same tree with $+$ at the nodes. A length together with a count uses a pair: the longer pair wins, and equal lengths add their counts.
+
+Query, then update. The element must not see itself. A strict comparison queries up to $a_i - 1$. A non-decreasing comparison queries up to $a_i$. Compressing the values is legal when only the order matters. It is illegal when the transition uses the numeric gap $a_i - a_j$.
+
+The tails array is the special case of this tree for an unweighted strict (or weak) LIS. $tails[k]$ is the smallest possible last value of an increasing subsequence of length $k + 1$. It stays sorted, so the slot for $a_i$ is a binary search. The length of $tails$ is the LIS. The contents of $tails$ are not an LIS: each slot may have been overwritten by a later, smaller end.
+
+The same sweep with a weight is a maximum-sum increasing subsequence. On $[3, 1, 4, 1, 5, 9, 2, 6]$ each value adds itself to the best sum stored at a strictly smaller value. @fig-lis-axis is that table after every insertion. The answer is $21 = 3 + 4 + 5 + 9$. When $6$ is processed, the query over $1..5$ finds $12$ and leaves the $21$ stored at $9$ untouched.
+
+::: {#fig-lis-axis}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [3, 1, 4, 1, 5, 9, 2, 6]
+    vals = sorted(set(a))
+    rank = {v: i for i, v in enumerate(vals)}
+    best = [0] * len(vals)
+    rows = []
+    ans = 0
+    for x in a:
+        before = best[:]
+        got = max(before[:rank[x]], default=0)
+        end = got + x
+        best = before[:]
+        best[rank[x]] = max(best[rank[x]], end)
+        ans = max(ans, end)
+        colors = {rank[x]: "green"}
+        if got:
+            colors[max(range(rank[x]), key=lambda i: before[i])] = "amber"
+        rows.append(dict(values=best, label=str(x), colors=colors, cell_w=0.72, size=8,
+                         note=f"end {end}"))
+    assert ans == 21 and best == [1, 3, 3, 7, 12, 18, 21]
+    V.array(ax, p, vals, y=2.6, index=False, label="value", cell_w=0.72, size=8)
+    V.trace(ax, p, rows, gap=2.35)
+V.show(draw)
+```
+
+Each row is the value-axis table after reading that element. Green is the cell just written. Amber, when the new element extends something, is the prefix maximum it used. The corner $21$ is the answer.
+
+:::
+
+A Fenwick tree answers the prefix maximum with a few blocks. Slot $k$ stores the maximum of values $(k - \mathrm{low}(k),\ k]$, where $\mathrm{low}(k)$ is the lowest set bit of $k$. The prefix $[1, 7]$ is slots $7$, then $6$, then $4$ (@fig-lis-fenwick). A point update at value $5$ walks $5 \to 6 \to 8$. Both walks are $O(\log m)$. The stored values only increase, which is what a running maximum needs. A window with two ends, such as $[a_i - k,\ a_i - 1]$, needs a segment tree instead.
+
+::: {#fig-lis-fenwick}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    blocks = [
+        (1, 1, 1, "muted", "1"), (3, 3, 1, "muted", "3"),
+        (5, 5, 1, "muted", "5"), (7, 7, 1, "amber", "7"),
+        (1, 2, 2, "muted", "2"), (5, 6, 2, "amber", "6"),
+        (1, 4, 3, "amber", "4"), (1, 8, 4, "indigo", "8"),
+    ]
+    for lo, hi, lev, color, lab in blocks:
+        V.box(ax, p, (lo - 1) * 1.05, lev * 1.2, (hi - lo + 1) * 1.05 - 0.1, 0.9,
+              lab, color=color, size=9)
+    for v in range(1, 9):
+        V.text(ax, p, (v - 1) * 1.05 + 0.48, 0.45, str(v), size=8, color="muted")
+    V.text(ax, p, 4.2, 6.3, "prefix [1, 7] = 7, then 6, then 4", size=9, color="amber")
+V.show(draw)
+```
+
+Amber blocks cover $[1, 7]$ without overlap. The wide indigo block is slot $8$, which a prefix of length $7$ does not touch. An update at $5$ climbs $5 \to 6 \to 8$.
+
+:::
+
+## Lesson 4: counting without duplicates {#sec-lis-count}
+
+"How many subsequences" has two meanings.
+
+Position sets are different when their indices differ, even if the values spell the same string. $[2, 2, 2, 2, 2]$ has five increasing subsequences of length 1, and the answer of "number of longest" is 5. The pair $(length, count)$ implements this: a strictly longer predecessor replaces the count, an equal length adds it.
+
+Distinct strings collapse those position sets. `aaa` has seven non-empty position sets and three distinct strings: `a`, `aa`, `aaa`. The state is then "subsequences ending with this letter", and a repeated letter replaces the old count of that letter instead of adding a second copy. Doubling the total and subtracting the previous count of this letter is the same update.
+
+The empty subsequence is a position set of length 0. The problems in this chapter that count strings do not include it.
+
+## Lesson 5: chains and antichains {#sec-lis-chain}
+
+Two complement questions are an LIS in disguise.
+
+Deleting the fewest elements so that what remains is strictly increasing keeps a longest increasing subsequence. The answer is $n - \mathrm{LIS}$. The same sentence with non-decreasing uses the longest non-decreasing subsequence. A mountain is the same complement: keep the longest mountain subsequence, and the removals are $n$ minus that length.
+
+Splitting into the fewest strictly increasing subsequences that cover every element is the length of the longest strictly decreasing subsequence. That is the chain/antichain fact used as a black box here: in this order, the minimum path cover by increasing chains equals the longest decreasing chain. Patience sorting's pile count is that number.
+
+Deal each value onto the leftmost pile whose top is at least it. Every pile is non-increasing from bottom to top, so an increasing subsequence takes at most one card from each pile. On $[3, 1, 4, 1, 5, 9, 2, 6]$ the deal opens four piles (@fig-lis-piles), and four is the LIS. The tops, read left to right, are the final tails array $[1, 2, 5, 6]$.
+
+::: {#fig-lis-piles}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [3, 1, 4, 1, 5, 9, 2, 6]
+    piles = []
+    for x in a:
+        for pile in piles:
+            if pile[-1] >= x:
+                pile.append(x)
+                break
+        else:
+            piles.append([x])
+    assert len(piles) == max(ends_at(a)) == 4
+    assert [pile[-1] for pile in piles] == [1, 2, 5, 6]
+    for i, pile in enumerate(piles):
+        V.stack(ax, p, pile, x=i * 2.3, y=0, title=f"pile {i}", color="indigo", w=1.5)
+V.show(draw)
+```
+
+Bottom card first. The four tops are the tails array. An increasing subsequence can take one card from each pile, so the LIS is 4.
+
+:::
+
+An increasing subsequence and a decreasing subsequence share at most one index, which is why a sequence of more than $rs$ distinct values has an increasing part of length $r + 1$ or a decreasing part of length $s + 1$.
+
+$K$-increasing is the complement on $k$ interleaved chains. Index $i$ is compared only with $i - k$, so the array falls into $k$ independent sequences, and each one wants a longest non-decreasing subsequence.
+
+## Pattern 1: LIS foundations {#sec-lis-p1}
+
+**Where we are.** The lessons gave two views of a subsequence: "it ends at $i$" and "take or skip with a small summary". The patterns climb one idea at a time: the plain LIS and its count (this pattern), objects that must be sorted before they form an array (Pattern 2), a "may follow" rule that needs one more fact, a direction or a difference (Pattern 3), a predecessor that lives in a window of values and needs a tree (Pattern 4), and finally the second view, take or skip with a remainder or a last letter as the summary (Pattern 5).
+
+**Recognise it.** The array order is already the order of the subsequence, and "may follow" is a comparison of values. You want the longest, one example of it, or the number of longest ones. The $O(n^2)$ table is the first program. The tails array is the program you ship when $n$ is $10^5$ and only the length (or one reconstruction) is required.
+
+::: {.callout-important title="Template"}
+$end[i] = 1 + \max\{end[j] : j < i,\ a[j] < a[i]\}$, and the answer is $\max_i end[i]$.
+
+$tails$ stays sorted. Place $a_i$ at the first tail that is $\ge a_i$ (strict) or $> a_i$ (non-decreasing). The slot index plus one is the length of the best subsequence ending at $i$. Reconstruct from parent indices stored at the moment of insertion, not by printing $tails$.
+:::
+
+Leave this pattern when the objects have no given order (@sec-lis-sort), when the comparison is a numeric window rather than "any smaller value" (@sec-lis-value), or when you are counting distinct strings (@sec-lis-count).
+
+::: {#fig-lis-anim-tails}
+
+```{python}
+#| echo: false
+import bisect
+tl_a = [10, 9, 2, 5, 3, 7, 101, 18]
+tl_states, tl_slots, tl = [], [], []
+for x in tl_a:
+    k = bisect.bisect_left(tl, x)          # first tail >= x (strict LIS)
+    if k == len(tl):
+        tl.append(x)
+    else:
+        tl[k] = x
+    tl_states.append(list(tl))
+    tl_slots.append(k)
+tl_end = []
+for i, x in enumerate(tl_a):                # the O(n^2) table, to check the slots
+    tl_end.append(1 + max([tl_end[j] for j in range(i) if tl_a[j] < x], default=0))
+assert [k + 1 for k in tl_slots] == tl_end and len(tl_states[-1]) == 4
+
+def tl_frame(ax, p, k):
+    V.array(ax, p, tl_a, label="a", colors={k: "indigo"}, dim=range(k + 1, len(tl_a)))
+    V.array(ax, p, tl_states[k], 0, -2.0, label="tails", colors={tl_slots[k]: "green"})
+
+tl_caps = []
+for i, (x, k) in enumerate(zip(tl_a, tl_slots)):
+    grew = len(tl_states[i]) > (len(tl_states[i - 1]) if i else 0)
+    what = "appended: a longer subsequence exists" if grew else f"replaces tails[{k}]: same length, smaller end"
+    tl_caps.append(f"{x} goes to slot {k}, {what}")
+tl_caps[-1] += "; LIS length = 4"
+V.animate(tl_frame, len(tl_a), captions=tl_caps, interval=1000)
+```
+
+The tails array on `[10,9,2,5,3,7,101,18]`, one element per frame. $tails[k]$ is the smallest value that ends an increasing subsequence of length $k+1$, so it stays sorted and each element costs one binary search. A replacement keeps the length and lowers the end, which only helps later elements. The final length is the LIS length, but $tails$ itself (`[2,3,7,18]`) need not be a subsequence of the input. The cell checks every slot against the $O(n^2)$ table.
+
+:::
+
+{{< include ../problems/lc-0300-longest-increasing-subsequence/problem.qmd >}}
+
+[**From the longest to how many.** LIS needs only the best length ending at each index. Counting the longest ones carries a count beside that length: a strictly longer predecessor replaces the count, and an equally long one adds to it.]{.flow-bridge}
+
+{{< include ../problems/lc-0673-number-of-longest-increasing-subsequence/problem.qmd >}}
+
+## Pattern 2: sort first {#sec-lis-p2}
+
+**From an array to a set.** In Pattern 1 the input order was the order of the subsequence. When the objects are a set you may arrange, there is no order yet. Sort by one key, and the chain becomes an LIS on the remaining keys; the tie-break decides whether equal keys may nest.
+
+**Recognise it.** The objects are a set. You may reorder them. One object may follow another only when every key grows. Sorting by one key turns the set into an array, and the chain is an LIS on the remaining keys. The tie-break decides whether equal keys are allowed to chain.
+
+::: {.callout-important title="Template"}
+Normalise a rotatable object by sorting its sides. Sort the objects by the first key ascending. If the chain is strict, sort the second key descending inside a tie, then run a strict LIS. If the chain allows equals, sort the second key ascending and use $\le$.
+
+The answer is $\max_i dp[i]$, not $dp[n - 1]$. A later object can be a dead end.
+:::
+
+Leave this pattern when the array order is already fixed (@sec-lis-p1), or when a numeric window on the values replaces the comparison (@sec-lis-p4).
+
+{{< include ../problems/lc-0354-russian-doll-envelopes/problem.qmd >}}
+
+[**From two keys to three, with weights.** Envelopes have two fixed sides and every envelope counts 1. Cuboids may be rotated, have three sides, and each one adds its height, so the sides are sorted inside every box first, and the chain becomes a weighted $O(n^2)$ LIS under $\le$ on all three coordinates.]{.flow-bridge}
+
+{{< include ../problems/lc-1691-maximum-height-by-stacking-cuboids/problem.qmd >}}
+
+## Pattern 3: structural subsequences {#sec-lis-p3}
+
+**From one comparison to one more fact.** Patterns 1 and 2 used a single test, "smaller value", between an element and its predecessor. Here the shape of the subsequence matters: a mountain rises and then falls, an arithmetic sequence keeps one step. The state grows by exactly the fact the next element needs, a direction or a difference.
+
+**Recognise it.** The subsequence is still chosen in array order, but "may follow" is no longer a single comparison with every smaller value. A mountain needs a rising arm and a falling arm. An arithmetic subsequence needs a common difference, and several differences can end at the same index. The state grows by exactly the fact the next element has to know.
+
+::: {.callout-important title="Template"}
+Ask what the next chosen element must be told. A direction, a difference, or the previous value is that fact. Put it in the state, and nothing else.
+
+A mountain is two LIS tables glued at a peak. An arithmetic subsequence is an LIS whose look-back is keyed by $a[i] - a[j]$.
+:::
+
+{{< include ../problems/lc-1671-minimum-number-of-removals-to-make-mountain-array/problem.qmd >}}
+
+[**From two fixed directions to any step.** A mountain needs only two tables, one per arm. An arithmetic subsequence can use any common difference, and one index can end several of them, so the difference itself becomes the second key of the state.]{.flow-bridge}
+
+{{< include ../problems/lc-1027-longest-arithmetic-subsequence/problem.qmd >}}
+
+## Pattern 4: value-indexed DP {#sec-lis-p4}
+
+**From scanning indices to querying values.** Every look-back so far either scanned earlier indices or binary-searched the tails. When the legal predecessor is "a value within $k$ below mine", the tails array cannot see the window. Index the DP by **value** and ask a Fenwick tree or a segment tree for the best in the window.
+
+**Recognise it.** The loop is still the array order, but the predecessor is "the best state whose value lies in a range", not "every earlier index I am willing to scan". $n = 10^5$ and a numeric window, or a weighted comparison, is this pattern. The tails array is not enough once the score is a sum, or the legal values are an interval with two endpoints.
+
+::: {.callout-important title="Template"}
+Process indices from left to right. Query the data structure for the best value in the legal range, write $dp[i]$, then update the structure at $a[i]$. Query before update, or the element extends itself.
+
+A prefix of the value axis is a Fenwick tree. A window $[L, R]$ is a segment tree. Strict is $[..., a_i - 1]$. Non-decreasing is $[..., a_i]$.
+:::
+
+{{< include ../problems/lc-2407-longest-increasing-subsequence-ii/problem.qmd >}}
+
+[**From one sequence to $k$ interleaved ones.** LIS II runs one value-indexed DP over the whole array. $K$-increasing compares $a[i]$ only with $a[i + k]$, so the array splits into $k$ independent chains, and each chain asks for its longest non-decreasing subsequence; the answer is what the chains do not keep.]{.flow-bridge}
+
+{{< include ../problems/lc-2111-minimum-operations-to-make-the-array-k-increasing/problem.qmd >}}
+
+## Pattern 5: take or skip, small state {#sec-lis-p5}
+
+**From where it ends to what it carries.** Patterns 1 to 4 all used the first view: the subsequence ends at $i$, and we searched for its predecessor. When "may follow" does not depend on the previous element at all, but on a summary of everything taken (a sum modulo 3, the last letter), the second view wins: walk the array once, take or skip, and keep one best value per summary.
+
+**Recognise it.** The order is the array order, and the decision at each element is take or skip. What the future needs is a small summary of the chosen elements: a remainder modulo 3, or the last letter so that duplicate strings can be removed. View B of @sec-lis-views is this pattern. The summary has to be small. "The full subset" is $2^n$ and is not a summary.
+
+::: {.callout-important title="Template"}
+$f(i, s)$ = best for the suffix starting at $i$, given summary $s$. Skip goes to $f(i + 1, s)$. Take goes to $f(i + 1, s')$, where $s'$ is the summary after accepting $a[i]$, and only when the take is legal.
+
+Fill in order of $i$. If one number can be taken only once, copy the previous row before you update, or a take will feed another take of the same element.
+:::
+
+::: {#fig-lis-anim-mod3}
+
+```{python}
+#| echo: false
+m3_a = [3, 6, 5, 1, 8]
+m3_best = [0, -math.inf, -math.inf]
+m3_rows = []
+for x in m3_a:
+    nxt = list(m3_best)                       # skip x
+    for r in range(3):
+        if m3_best[r] > -math.inf:
+            nxt[(r + x) % 3] = max(nxt[(r + x) % 3], m3_best[r] + x)   # take x
+    m3_best = nxt
+    m3_rows.append(list(m3_best))
+m3_brute = max(sum(s) for s in ([m3_a[i] for i in range(5) if mask >> i & 1] for mask in range(32)) if sum(s) % 3 == 0)
+assert m3_rows[-1][0] == m3_brute == 18
+
+def m3_fmt(v):
+    return "−∞" if v == -math.inf else str(v)
+
+def m3_frame(ax, p, k):
+    V.array(ax, p, m3_a, label="nums", colors={k: "indigo"}, dim=range(k + 1, len(m3_a)))
+    prev = [0, -math.inf, -math.inf] if k == 0 else m3_rows[k - 1]
+    changed = {r: "green" for r in range(3) if m3_rows[k][r] != prev[r]}
+    V.grid(ax, p, [[m3_fmt(v) for v in m3_rows[k]]], 0, -2.2, row_labels=["best"],
+           col_labels=["r = 0", "r = 1", "r = 2"], colors={(0, r): c for r, c in changed.items()}, cell_w=1.3)
+
+m3_caps = [f"take or skip {x}: best by remainder = [{', '.join(('-inf' if v == -math.inf else str(v)) for v in row)}]"
+           for x, row in zip(m3_a, m3_rows)]
+m3_caps[-1] += "; answer best[0] = 18"
+V.animate(m3_frame, len(m3_a), captions=m3_caps, interval=1100)
+```
+
+Greatest sum divisible by three on `[3,6,5,1,8]`, one element per frame. The whole state is three numbers: the best sum seen so far with remainder 0, 1, 2 (green = changed by this element). Remainders 1 and 2 start at $-\infty$, not 0. The answer $18 = 3 + 6 + 1 + 8$ is checked against all 32 subsets.
+
+:::
+
+{{< include ../problems/lc-1262-greatest-sum-divisible-by-three/problem.qmd >}}
+
+[**From the best sum to distinct strings.** The remainder summary looks only at values. Counting distinct subsequences must not count the same string twice when it can be picked at different positions, so the summary becomes the last letter: each new letter doubles the count and subtracts what its previous occurrence already produced.]{.flow-bridge}
+
+{{< include ../problems/lc-0940-distinct-subsequences-ii/problem.qmd >}}
+
+**Looking back.** Every problem in this chapter answered one question: which earlier element may come before this one? A smaller value gave the LIS and its tails; a sort turned a set into an array; a direction or a difference joined the state; a window of values called for a tree; and when the rule depended only on a summary of what was taken, take-or-skip with that summary replaced the search for a predecessor. The next chapter keeps these ideas and gives the state a second sequence.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Longest increasing subsequence, one example, or the $O(n \log n)$ length | Ends at $i$, then tails | @sec-lis-p1-lis |
+| How many longest increasing subsequences, as index sets | Pairs $(length, count)$ | @sec-lis-p1-count |
+| A set of objects; nesting needs every key to grow | Sort, then LIS, with the strict tie-break | @sec-lis-p2-doll |
+| Boxes you may rotate, and the height is a sum | Normalise, sort, weighted chain under $\le$ | @sec-lis-p2-cube |
+| Remove as few as possible to leave a mountain | $n$ minus the longest two-sided peak | @sec-lis-p3-mount |
+| A common difference that the pair chooses | State $(index, difference)$ | @sec-lis-p3-arith |
+| Increasing, and consecutive values differ by at most $k$ | Segment tree on the value window | @sec-lis-p4-lis2 |
+| $a[i] \le a[i + k]$ after as few changes as possible | $k$ non-decreasing chains | @sec-lis-p4-kinc |
+| Best sum in a residue class | Three totals, copy the row | @sec-lis-p5-mod3 |
+| Distinct strings, not distinct index sets | Last letter, replace, subtract the old count | @sec-lis-p5-dist |
+| Delete the fewest so the rest is increasing | $n - \mathrm{LIS}$ | @sec-lis-chain |
+| Cover with the fewest increasing subsequences | Length of the longest decreasing subsequence | @sec-lis-chain |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **The answer is `dp[n - 1]`.** An LIS, a doll chain, and a stack of cuboids can end before the last object. Take the maximum over endings (@sec-lis-p1-lis).
+- **Printing the tails array.** It stores the smallest end of each length, and later values overwrite it. Reconstruct from parents (@sec-lis-p1-lis).
+- **The wrong binary search.** Strict increasing uses the first tail $\ge x$. Non-decreasing, including each $k$-increasing chain, uses the first tail $> x$ (@sec-lis-p4-kinc).
+- **Both keys sorted ascending.** Equal widths then look nestable. Heights go descending inside a tie (@sec-lis-p2-doll).
+- **A strict box comparison.** Cuboids may meet on a side. Six equal boxes stack (@sec-lis-p2-cube).
+- **A peak with an empty arm, or the peak counted twice.** Both slopes have length at least 2, and the length is $left + right - 1$ (@sec-lis-p3-mount).
+- **One length per index for an arithmetic subsequence.** The difference is part of the state. A shorter chain with a different step is still needed later (@sec-lis-p3-arith).
+- **Tails, or a prefix tree, for a value window.** "At most $k$ larger" has two endpoints. Query, then update (@sec-lis-p4-lis2).
+- **The mod-3 row updated in place, or unreachable remainders set to 0.** Copy the row. Only remainder 0 starts at 0 (@sec-lis-p5-mod3).
+- **Position sets counted as strings.** `"aaa"` is 3, not 7. Replace the letter's count (@sec-lis-p5-dist).
+:::
+
+## Exercises
+
+**1. [M]** LIS with one repair. You may overwrite at most one element with any integer. What is the longest strictly increasing subsequence you can then form? ($[1, 2, 3, 2, 5, 6] \to 6$, $[1, 2, 3, 0, 4, 5] \to 5$, $[5, 4, 3, 2, 1] \to 2$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $f[j]$ be the LIS ending at $j$ and $g[k]$ the LIS starting at $k$. Either the repair is unused, or it extends a chain ending at $j$, or it opens a chain starting at $k$, or it sits strictly between $a[j]$ and $a[k]$ with a free index in between, which needs $k \ge j + 2$ and $a[k] - a[j] \ge 2$.
+
+```{python}
+def lis_one_change(a):
+    n = len(a)
+    if n <= 1:
+        return n
+    f, g = [1] * n, [1] * n
+    for i in range(n):
+        for j in range(i):
+            if a[j] < a[i]:
+                f[i] = max(f[i], f[j] + 1)
+    for i in range(n - 1, -1, -1):
+        for k in range(i + 1, n):
+            if a[i] < a[k]:
+                g[i] = max(g[i], g[k] + 1)
+    best = max(f)
+    for j in range(n - 1):
+        best = max(best, f[j] + 1)
+    for k in range(1, n):
+        best = max(best, g[k] + 1)
+    for k in range(n):
+        for j in range(k - 1):
+            if a[k] - a[j] >= 2:
+                best = max(best, f[j] + g[k] + 1)
+    return min(best, n)
+
+assert lis_one_change([1, 2, 3, 2, 5, 6]) == 6
+assert lis_one_change([1, 2, 3, 0, 4, 5]) == 5
+assert lis_one_change([5, 4, 3, 2, 1]) == 2
+```
+:::
+
+**2. [M]** [LC 1964 · Find the Longest Valid Obstacle Course at Each Position](https://leetcode.com/problems/find-the-longest-valid-obstacle-course-at-each-position/){difficulty="Hard"}. For every index, the longest non-decreasing subsequence of the prefix that ends at that index. ($[1, 2, 3, 2] \to [1, 2, 3, 3]$, $[2, 2, 1] \to [1, 2, 1]$, $[3, 1, 5, 6, 4, 2] \to [1, 1, 2, 3, 2, 2]$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+This is the length ending at $i$, and equals may follow. The tails slot is the first tail strictly greater than the new height.
+
+```{python}
+def obstacle(a):
+    tails, ans = [], []
+    for x in a:
+        lo, hi = 0, len(tails)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if tails[mid] > x:
+                hi = mid
+            else:
+                lo = mid + 1
+        if lo == len(tails):
+            tails.append(x)
+        else:
+            tails[lo] = x
+        ans.append(lo + 1)
+    return ans
+
+assert obstacle([1, 2, 3, 2]) == [1, 2, 3, 3]
+assert obstacle([2, 2, 1]) == [1, 2, 1]
+assert obstacle([3, 1, 5, 6, 4, 2]) == [1, 1, 2, 3, 2, 2]
+```
+:::
+
+**3. [M]** [CF 1682C · LIS or Reverse LIS?](https://codeforces.com/problemset/problem/1682/C){rating="1400"}. Rearrange the array. Maximise the minimum of its LIS and the LIS of its reversal. ($[1, 1, 1] \to 1$, $[1, 3, 2, 1, 2] \to 3$, $[1, 2, 3, 4] \to 2$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+A strictly increasing subsequence uses each value at most once, and it shares at most one index with a strictly decreasing subsequence. If $d$ values occur at least twice and $s$ values occur once, the bound $d + \lceil s / 2 \rceil$ is tight.
+
+```{python}
+def lis_or_reverse(a):
+    from collections import Counter
+    freq = Counter(a)
+    once = sum(v == 1 for v in freq.values())
+    twice = sum(v >= 2 for v in freq.values())
+    return twice + (once + 1) // 2
+
+assert lis_or_reverse([1, 1, 1]) == 1
+assert lis_or_reverse([1, 3, 2, 1, 2]) == 3
+assert lis_or_reverse([1, 2, 3, 4]) == 2
+```
+:::
+
+**4. [E]** [LC 646 · Maximum Length of Pair Chain](https://leetcode.com/problems/maximum-length-of-pair-chain/){difficulty="Medium"}. Pair $(c, d)$ follows $(a, b)$ when $b < c$. ($[[1, 2], [2, 3], [3, 4]] \to 2$, $[[1, 2], [7, 8], [4, 5]] \to 3$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort by the right end and take a pair when its left end is strictly beyond the last taken right end. The earliest end leaves the most room.
+
+```{python}
+def pair_chain(pairs):
+    end, ans = -10**18, 0
+    for left, right in sorted(pairs, key=lambda p: p[1]):
+        if left > end:
+            ans += 1
+            end = right
+    return ans
+
+assert pair_chain([[1, 2], [2, 3], [3, 4]]) == 2
+assert pair_chain([[1, 2], [7, 8], [4, 5]]) == 3
+assert pair_chain([[1, 10], [2, 3], [4, 5]]) == 2
+```
+:::
+
+**5. [M]** [LC 1626 · Best Team With No Conflicts](https://leetcode.com/problems/best-team-with-no-conflicts/){difficulty="Medium"}. A younger player must not have a strictly higher score than an older one. ($[1, 3, 5, 10, 15]$ with ages $[1, 2, 3, 4, 5] \to 34$; $[4, 5, 6, 5]$ with $[2, 1, 2, 1] \to 16$; $[1, 2, 3, 5]$ with $[8, 9, 10, 1] \to 6$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort by age, then by score. The scores along a legal team are non-decreasing, and the score is the weight.
+
+```{python}
+def best_team(scores, ages):
+    people = sorted(zip(ages, scores))
+    dp = [s for _, s in people]
+    for i in range(len(people)):
+        for j in range(i):
+            if people[j][1] <= people[i][1]:
+                dp[i] = max(dp[i], dp[j] + people[i][1])
+    return max(dp)
+
+assert best_team([1, 3, 5, 10, 15], [1, 2, 3, 4, 5]) == 34
+assert best_team([4, 5, 6, 5], [2, 1, 2, 1]) == 16
+assert best_team([1, 2, 3, 5], [8, 9, 10, 1]) == 6
+```
+:::
+
+**6. [M]** [LC 1048 · Longest String Chain](https://leetcode.com/problems/longest-string-chain/){difficulty="Medium"}. A predecessor is the word with one letter deleted. ($["a", "b", "ba", "bca", "bda", "bdca"] \to 4$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort by length is optional if every one-letter deletion is looked up in a set. The chain ending at a word is one plus the best predecessor.
+
+```{python}
+def string_chain(words):
+    words = set(words)
+    memo = {}
+
+    def f(w):
+        if w not in memo:
+            best = 1
+            for i in range(len(w)):
+                pred = w[:i] + w[i + 1:]
+                if pred in words:
+                    best = max(best, 1 + f(pred))
+            memo[w] = best
+        return memo[w]
+
+    return max(f(w) for w in words)
+
+assert string_chain(["a", "b", "ba", "bca", "bda", "bdca"]) == 4
+assert string_chain(["x"]) == 1
+```
+:::
+
+**7. [E]** [LC 376 · Wiggle Subsequence](https://leetcode.com/problems/wiggle-subsequence/){difficulty="Medium"}. Differences of consecutive chosen elements alternate sign. ($[1, 7, 4, 9, 2, 5] \to 6$; $[1, 17, 5, 10, 13, 15, 10, 5, 16, 8] \to 7$; $[1, 2, 3, 4, 5, 6, 7, 8, 9] \to 2$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+`up` is the longest wiggle in the prefix whose last step goes up, and `down` is the same for a last step down. A rise sets `up = down + 1`. A fall sets `down = up + 1`. Equals change nothing.
+
+```{python}
+def wiggle(a):
+    up = down = 1
+    for i in range(1, len(a)):
+        if a[i] > a[i - 1]:
+            up = down + 1
+        elif a[i] < a[i - 1]:
+            down = up + 1
+    return max(up, down)
+
+assert wiggle([1, 7, 4, 9, 2, 5]) == 6
+assert wiggle([1, 17, 5, 10, 13, 15, 10, 5, 16, 8]) == 7
+assert wiggle([1, 2, 3, 4, 5, 6, 7, 8, 9]) == 2
+```
+:::
+
+**8. [M]** [LC 873 · Length of Longest Fibonacci Subsequence](https://leetcode.com/problems/length-of-longest-fibonacci-subsequence/){difficulty="Medium"}. The array is strictly increasing. ($[1, 2, 3, 4, 5, 6, 7, 8] \to 5$; $[1, 3, 7, 11, 12, 14, 18] \to 3$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Every pair is a start of length 2. The next value is the sum, and a set answers whether it exists. Keep going while it does. Lengths below 3 do not count.
+
+```{python}
+def fib_subseq(a):
+    got = set(a)
+    ans = 0
+    for i in range(len(a)):
+        for j in range(i + 1, len(a)):
+            x, y, length = a[i], a[j], 2
+            while x + y in got:
+                x, y = y, x + y
+                length += 1
+            if length >= 3:
+                ans = max(ans, length)
+    return ans
+
+assert fib_subseq([1, 2, 3, 4, 5, 6, 7, 8]) == 5
+assert fib_subseq([1, 3, 7, 11, 12, 14, 18]) == 3
+```
+:::
+
+**9. [H]** [LC 446 · Arithmetic Slices II - Subsequence](https://leetcode.com/problems/arithmetic-slices-ii-subsequence/){difficulty="Hard"}. Count arithmetic subsequences of length at least 3. ($[2, 4, 6, 8, 10] \to 7$; $[7, 7, 7, 7, 7] \to 16$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+`dp[i][d]` counts arithmetic subsequences of length at least 2 ending at `i` with difference `d`. Extending one adds a subsequence of length at least 3, and that is what the answer counts. The pair itself is stored and not yet added.
+
+```{python}
+def arith_slices(a):
+    dp = [{} for _ in a]
+    ans = 0
+    for i in range(len(a)):
+        for j in range(i):
+            d = a[i] - a[j]
+            extra = dp[j].get(d, 0)
+            ans += extra
+            dp[i][d] = dp[i].get(d, 0) + extra + 1
+    return ans
+
+assert arith_slices([2, 4, 6, 8, 10]) == 7
+assert arith_slices([7, 7, 7, 7, 7]) == 16
+```
+:::
+
+**10. [M]** [AC dp_q · Flowers](https://atcoder.jp/contests/dp/tasks/dp_q). Heights are a permutation. Keep a strictly increasing sequence of heights with maximum total beauty. ($h = [3, 1, 4, 2]$, $a = [10, 20, 30, 40] \to 60$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Weighted LIS. $dp[i] = a[i] + \max\{dp[j] : j < i,\ h[j] < h[i]\}$. The sample is small; the $10^5$ version is a Fenwick prefix maximum on the height.
+
+```{python}
+def flowers(h, beauty):
+    dp = beauty[:]
+    for i in range(len(h)):
+        for j in range(i):
+            if h[j] < h[i]:
+                dp[i] = max(dp[i], dp[j] + beauty[i])
+    return max(dp)
+
+assert flowers([3, 1, 4, 2], [10, 20, 30, 40]) == 60
+```
+:::
+
+**11. [M]** [CSES 1748 · Increasing Subsequence II](https://cses.fi/problemset/task/1748). Count strictly increasing subsequences of length at least 1, modulo $10^9 + 7$. ($[2, 1, 3] \to 5$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$cnt[i] = 1 + \sum\{cnt[j] : j < i,\ a[j] < a[i]\}$. The answer adds every $cnt[i]$. Equal values do not extend each other. The fast form is a Fenwick tree of sums; the sample is the quadratic recurrence.
+
+```{python}
+def count_increasing(a):
+    cnt = [0] * len(a)
+    ans = 0
+    for i in range(len(a)):
+        cnt[i] = 1
+        for j in range(i):
+            if a[j] < a[i]:
+                cnt[i] = (cnt[i] + cnt[j]) % MOD
+        ans = (ans + cnt[i]) % MOD
+    return ans
+
+assert count_increasing([2, 1, 3]) == 5
+assert count_increasing([1, 1, 1]) == 3
+```
+:::
+
+**12. [M]** [LC 2370 · Longest Ideal Subsequence](https://leetcode.com/problems/longest-ideal-subsequence/){difficulty="Medium"}. Adjacent chosen letters differ by at most $k$ in the alphabet. (`"acfgbd"`, $k = 2 \to 4$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Twenty-six best lengths, one per last letter. A letter extends every letter in its window, including itself.
+
+```{python}
+def ideal(s, k):
+    best = [0] * 26
+    ans = 0
+    for ch in s:
+        c = ord(ch) - 97
+        cur = 1 + max(best[d] for d in range(max(0, c - k), min(26, c + k + 1)))
+        best[c] = max(best[c], cur)
+        ans = max(ans, cur)
+    return ans
+
+assert ideal("acfgbd", 2) == 4
+assert ideal("a", 0) == 1
+```
+:::
+
+**13. [H]** [LC 1987 · Number of Unique Good Subsequences](https://leetcode.com/problems/number-of-unique-good-subsequences/){difficulty="Hard"}. Distinct binary subsequences with no leading zero, and the string `"0"` counts. (`"101" \to 5$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Strings that start with 1 are the distinct-subsequence scan, split by the last bit. The single string `"0"` is added once when the input contains a zero. It is not produced by appending, because those strings already contain a 1.
+
+```{python}
+def unique_good(s):
+    end0 = end1 = 0
+    for ch in s:
+        if ch == "1":
+            end1 = (end0 + end1 + 1) % MOD
+        else:
+            end0 = (end0 + end1) % MOD
+    extra = 1 if "0" in s else 0
+    return (end0 + end1 + extra) % MOD
+
+assert unique_good("101") == 5
+assert unique_good("0") == 1
+assert unique_good("1") == 1
+assert unique_good("00") == 1
+```
+:::
+
+**14. [E]** [LC 334 · Increasing Triplet Subsequence](https://leetcode.com/problems/increasing-triplet-subsequence/){difficulty="Medium"}. Does a strictly increasing subsequence of length 3 exist? ($[1, 2, 3, 4, 5] \to \mathrm{true}$, $[5, 4, 3, 2, 1] \to \mathrm{false}$, $[2, 1, 5, 0, 4, 6] \to \mathrm{true}$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Two slots of the tails array. `first` is the smallest value seen. `second` is the smallest value that ends an increasing pair. A later value above `second` is a triplet.
+
+```{python}
+def increasing_triplet(a):
+    first = second = 10**18
+    for x in a:
+        if x <= first:
+            first = x
+        elif x <= second:
+            second = x
+        else:
+            return True
+    return False
+
+assert increasing_triplet([1, 2, 3, 4, 5]) is True
+assert increasing_triplet([5, 4, 3, 2, 1]) is False
+assert increasing_triplet([2, 1, 5, 0, 4, 6]) is True
+```
+:::
+
+**15. [M]** [LC 368 · Largest Divisible Subset](https://leetcode.com/problems/largest-divisible-subset/){difficulty="Medium"}. After sorting, each chosen number divides the next. Return one largest subset. ($[1, 2, 3] \to [1, 2]$ or $[1, 3]$; $[1, 2, 4, 8] \to [1, 2, 4, 8]$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort, then run the LIS recurrence with "divides" instead of $<$, and walk the parent pointers.
+
+```{python}
+def divisible_subset(nums):
+    nums = sorted(nums)
+    end, parent = [1] * len(nums), [-1] * len(nums)
+    for i in range(len(nums)):
+        for j in range(i):
+            if nums[i] % nums[j] == 0 and end[j] + 1 > end[i]:
+                end[i] = end[j] + 1
+                parent[i] = j
+    best = max(range(len(nums)), key=lambda i: end[i])
+    seq = []
+    while best != -1:
+        seq.append(nums[best])
+        best = parent[best]
+    seq.reverse()
+    return seq
+
+assert divisible_subset([1, 2, 4, 8]) == [1, 2, 4, 8]
+assert len(divisible_subset([1, 2, 3])) == 2
+```
+:::
+
+**16. [M]** [LC 845 · Longest Mountain in Array](https://leetcode.com/problems/longest-mountain-in-array/){difficulty="Medium"}. A mountain subarray climbs strictly and then falls strictly. Return its length, or 0. ($[2, 1, 4, 7, 3, 2, 5] \to 5$; $[2, 2, 2] \to 0$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+This mountain cannot skip. `up[i]` is the number of strict rises ending at `i`, and `down[i]` is the number of strict falls starting at `i`. A peak needs both, and the length is `up + down + 1`.
+
+```{python}
+def longest_mountain(a):
+    n = len(a)
+    up, down = [0] * n, [0] * n
+    for i in range(1, n):
+        if a[i] > a[i - 1]:
+            up[i] = up[i - 1] + 1
+    for i in range(n - 2, -1, -1):
+        if a[i] > a[i + 1]:
+            down[i] = down[i + 1] + 1
+    ans = 0
+    for i in range(n):
+        if up[i] and down[i]:
+            ans = max(ans, up[i] + down[i] + 1)
+    return ans
+
+assert longest_mountain([2, 1, 4, 7, 3, 2, 5]) == 5
+assert longest_mountain([2, 2, 2]) == 0
+```
+:::
+
+## Interview questions
+
+**1.** What is the difference between a subarray and a subsequence?
+
+::: {.callout-note collapse="true" title="Answer"}
+A subarray is a contiguous block, so the previous chosen index is the neighbour. A subsequence keeps the array order and may skip, so the previous chosen index is any earlier compatible index. There are $O(n^2)$ subarrays and $2^n$ subsequences. The DP stores one answer per ending, not the list.
+:::
+
+**2.** Why is the LIS answer $\max_i end[i]$ and not $end[n - 1]$?
+
+::: {.callout-note collapse="true" title="Answer"}
+The definition of $end[i]$ forces the subsequence to include $i$ as its last element. The longest one in the whole array may end earlier. On a decreasing array every $end[i]$ is 1. On the envelope sample the last sorted envelope does not extend the chain of three.
+:::
+
+**3.** Why is the tails array not a subsequence you can print?
+
+::: {.callout-note collapse="true" title="Answer"}
+$tails[k]$ is the smallest value that currently ends some increasing subsequence of length $k + 1$. A later, smaller value overwrites that slot and throws away the previous end. The length of the array is the LIS. One actual subsequence is the parent walk stored at insertion time.
+:::
+
+**4.** When do you use the first tail $\ge x$, and when the first tail $> x$?
+
+::: {.callout-note collapse="true" title="Answer"}
+Strictly increasing uses $\ge$, so an equal value replaces a slot and does not extend. Non-decreasing uses $>$, so an equal value extends. Seven equal values have strict LIS 1 and non-decreasing LIS 7. A $k$-increasing chain is non-decreasing.
+:::
+
+**5.** Why do Russian-doll heights go descending when the widths tie?
+
+::: {.callout-note collapse="true" title="Answer"}
+Equal widths do not nest. If the heights also increase, a strict LIS on the heights reports a chain. Descending heights inside the tie make the later height smaller, and the strict test refuses it. $[[1, 1], [1, 2]]$ answers 1 only with that tie-break.
+:::
+
+**6.** Why does sorting a cuboid's three sides not lose the optimum?
+
+::: {.callout-note collapse="true" title="Answer"}
+You may rotate. If one box fits under another in some orientation, it fits after both triples are sorted, smallest side against smallest. The height you add is the largest side. The comparison is $\le$, so equal boxes stack.
+:::
+
+**7.** A mountain subsequence uses two LIS tables. What do you subtract, and what do you reject?
+
+::: {.callout-note collapse="true" title="Answer"}
+The peak is in both the rising length and the falling length, so the mountain length is $left + right - 1$. An arm of length 1 means that side is empty, and that index is not a peak. The removals are $n$ minus the longest accepted mountain.
+:::
+
+**8.** Why is the state of an arithmetic subsequence not just the index?
+
+::: {.callout-note collapse="true" title="Answer"}
+Several differences can end at the same index. Keeping only the longest throws away a shorter difference that a later element extends. The state is $(index, difference)$. A difference that is given in the input collapses back to one map from value to length.
+:::
+
+**9.** Why is LIS II a segment tree rather than the tails array?
+
+::: {.callout-note collapse="true" title="Answer"}
+Tails answers "any smaller value". LIS II allows only values in $[x - k,\ x - 1]$. That window has a left end, which a prefix structure cannot express. Query the window, then write the new length at $x$.
+:::
+
+**10.** Why does $k$-increasing split into $k$ independent chains?
+
+::: {.callout-note collapse="true" title="Answer"}
+The only comparisons are $a[i] \le a[i + k]$. Index $i$ never constrains $i + 1$ unless $k = 1$. Each residue class is its own non-decreasing problem, and the changes add. The kept length is an LNDS, not a strict LIS.
+:::
+
+**11.** What goes wrong if the three mod-3 totals are updated in place?
+
+::: {.callout-note collapse="true" title="Answer"}
+Taking $x$ writes a new remainder, and a later iteration of the same element reads that new remainder and takes $x$ again. Copy the row first. Also leave remainders 1 and 2 at $-\infty$ until a real sum reaches them. Remainder 0 starts at 0 because the empty sum is legal.
+:::
+
+**12.** `"aaa"` has seven non-empty subsets. Why is the answer 3?
+
+::: {.callout-note collapse="true" title="Answer"}
+The problem counts distinct strings, not index sets. The subsets spell `a`, `aa`, and `aaa`. The update replaces the count of subsequences ending at this letter, or equivalently doubles the total and subtracts what the previous copy of the letter already produced. The empty string is not counted.
+:::
+
+**13.** How do you delete the fewest elements to leave a strictly increasing array? How do you cover the array with the fewest increasing subsequences?
+
+::: {.callout-note collapse="true" title="Answer"}
+Deletions: keep an LIS, so the answer is $n - \mathrm{LIS}$. A cover by increasing subsequences has size equal to the longest decreasing subsequence. Both are the complement view: the object you delete or the objects that cannot share a chain are what the LIS machinery measures.
+:::
+
+## Summary
+
+- A subsequence may skip. "Ends at $i$" has one state per index. "Take or skip" needs a summary of what was taken, and that summary has to stay small.
+- $end[i] = 1 + \max\{end[j] : j < i,\ a[j] < a[i]\}$ is $O(n^2)$. The answer is the maximum, not the last cell.
+- The tails array is $O(n \log n)$ for the length. It is not the subsequence. Parents reconstruct one. $\ge$ is strict, $>$ is non-decreasing.
+- Counts of index sets are pairs: a longer predecessor resets the count, an equal length adds it. Sum every ending that holds the maximum length.
+- A set becomes a sequence by sorting. Strict nesting sorts the tie key descending. Cuboids are normalised by sorting their sides, then stacked with $\le$ and a summed height.
+- A mountain is two LIS tables and a peak with both arms non-empty. Removals are $n$ minus that length.
+- An arithmetic subsequence remembers the difference. A value window of width $k$ is a segment tree: query, then update.
+- $k$-increasing is $k$ non-decreasing chains. Changes are $\sum (length - \mathrm{LNDS})$.
+- A residue class is three totals and a copied row. Distinct strings replace the last letter's count and drop the empty string.
+- $n - \mathrm{LIS}$ is the fewest deletions that leave an increasing subsequence. The longest decreasing subsequence is the fewest increasing subsequences that cover the array.
+
+## Practice ladder
+
+These are for later. They are not solved in this chapter. A rating is the Codeforces rating of that problem.
+
+**LIS, reconstruction, and small variants**
+
+- [LC 334 · Increasing Triplet Subsequence](https://leetcode.com/problems/increasing-triplet-subsequence/){difficulty="Medium"}
+- [LC 368 · Largest Divisible Subset](https://leetcode.com/problems/largest-divisible-subset/){difficulty="Medium"}
+- [LC 2501 · Longest Square Streak in an Array](https://leetcode.com/problems/longest-square-streak-in-an-array/){difficulty="Medium"}
+- [LC 2901 · Longest Unequal Adjacent Groups Subsequence II](https://leetcode.com/problems/longest-unequal-adjacent-groups-subsequence-ii/){difficulty="Medium"}
+- [LC 1673 · Find the Most Competitive Subsequence](https://leetcode.com/problems/find-the-most-competitive-subsequence/){difficulty="Medium"}
+- [LC 1930 · Unique Length-3 Palindromic Subsequences](https://leetcode.com/problems/unique-length-3-palindromic-subsequences/){difficulty="Medium"}
+- [LC 3202 · Find the Maximum Length of Valid Subsequence II](https://leetcode.com/problems/find-the-maximum-length-of-valid-subsequence-ii/){difficulty="Medium"}
+- [LC 1713 · Minimum Operations to Make a Subsequence](https://leetcode.com/problems/minimum-operations-to-make-a-subsequence/){difficulty="Hard"}
+- [LC 3041 · Maximize Consecutive Elements in an Array After Modification](https://leetcode.com/problems/maximize-consecutive-elements-in-an-array-after-modification/){difficulty="Hard"}
+
+**Counting**
+
+- [LC 1395 · Count Number of Teams](https://leetcode.com/problems/count-number-of-teams/){difficulty="Medium"}
+- [LC 1955 · Count Number of Special Subsequences](https://leetcode.com/problems/count-number-of-special-subsequences/){difficulty="Hard"}
+- [LC 2484 · Count Palindromic Subsequences](https://leetcode.com/problems/count-palindromic-subsequences/){difficulty="Hard"}
+- [LC 2552 · Count Increasing Quadruplets](https://leetcode.com/problems/count-increasing-quadruplets/){difficulty="Hard"}
+- [CF 1183H · Subsequences (hard version)](https://codeforces.com/problemset/problem/1183/H){rating="1900"}
+- [CF 1613D · MEX Sequences](https://codeforces.com/problemset/problem/1613/D){rating="1900"}
+- [CF 1621G · Weighted Increasing Subsequences](https://codeforces.com/problemset/problem/1621/G){rating="3200"}
+
+**Sort, then a chain**
+
+- [CF 340D · Bubble Sort Graph](https://codeforces.com/problemset/problem/340/D){rating="1500"}
+- [AC abc134_e · Sequence Decomposing](https://atcoder.jp/contests/abc134/tasks/abc134_e)
+- [CF 1475G · Strange Beauty](https://codeforces.com/problemset/problem/1475/G){rating="1900"}
+- [LC 960 · Delete Columns to Make Sorted III](https://leetcode.com/problems/delete-columns-to-make-sorted-iii/){difficulty="Hard"}
+- [CF 2128D · Sum of LDS](https://codeforces.com/problemset/problem/2128/D){rating="1600"}
+- [CSES 3314 · Mountain Range](https://cses.fi/problemset/task/3314)
+
+**Value axis, partitions, and longer LIS**
+
+- [LC 2926 · Maximum Balanced Subsequence Sum](https://leetcode.com/problems/maximum-balanced-subsequence-sum/){difficulty="Hard"}
+- [LC 3177 · Find the Maximum Length of a Good Subsequence II](https://leetcode.com/problems/find-the-maximum-length-of-a-good-subsequence-ii/){difficulty="Hard"}
+- [CF 1257E · The Contest](https://codeforces.com/problemset/problem/1257/E){rating="2000"}
+- [AC dp_t · Permutation](https://atcoder.jp/contests/dp/tasks/dp_t)
+- [CF 1582E · Pchelyonok and Segments](https://codeforces.com/problemset/problem/1582/E){rating="2000"}
+- [CF 1667B · Optimal Partition](https://codeforces.com/problemset/problem/1667/B){rating="2100"}
+- [AC abc165_f · LIS on Tree](https://atcoder.jp/contests/abc165/tasks/abc165_f)
+- [CF 486E · LIS of Sequence](https://codeforces.com/problemset/problem/486/E){rating="2200"}
+- [CF 13C · Sequence](https://codeforces.com/problemset/problem/13/C){rating="2200"}
+- [CF 650D · Zip-line](https://codeforces.com/problemset/problem/650/D){rating="2600"}
+- [CF 568E · Longest Increasing Subsequence](https://codeforces.com/problemset/problem/568/E){rating="3000"}
+
+## Further reading
+
+The next chapter, @sec-st, is string DP: the state is a pair of positions, one in each of two strings.
+
+- [CP-Algorithms: Longest increasing subsequence](https://cp-algorithms.com/sequences/longest_increasing_subsequence.html): the $O(n^2)$ table, the tails array, reconstruction, and the tree-based version.
+- [Wikipedia: Patience sorting](https://en.wikipedia.org/wiki/Patience_sorting): the card game whose piles are the tails array.
+- [Wikipedia: Dilworth's theorem](https://en.wikipedia.org/wiki/Dilworth%27s_theorem): chains and antichains, the reason "fewest decreasing sequences" equals the LIS length.
+- [Wikipedia: Erdős–Szekeres theorem](https://en.wikipedia.org/wiki/Erd%C5%91s%E2%80%93Szekeres_theorem): the $rs + 1$ bound on increasing or decreasing subsequences.
+- [CP-Algorithms: Fenwick tree](https://cp-algorithms.com/data_structures/fenwick.html) and [Segment tree](https://cp-algorithms.com/data_structures/segment_tree.html): the value-indexed structures of Pattern 4.
+- [Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf), ch. 7: dynamic programming for contests, including LIS, grid paths and edit distance.

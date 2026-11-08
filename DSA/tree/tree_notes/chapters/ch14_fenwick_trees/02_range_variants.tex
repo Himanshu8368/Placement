@@ -1,0 +1,653 @@
+% =====================================================================
+%  18.2  Range Variants: Differences, Pairs, Compression   sec:c14-range
+%  Exports: def:c14-diff  thm:c14-twobit  prop:c14-compress
+%           prop:c14-prefixmin  lst:c14-diff-build  lst:c14-diff-range
+%           lst:c14-twobit  lst:c14-compress  lst:c14-min  lst:c14-1651-soln
+%           prob:c14-rangeupd
+%  Shared numbers (all hand-reverified, ASCII only):
+%    D = (3,-1,2,1,-4,0,4,-2); diff-BIT Td = BIT over D = (3,2,2,5,-4,-4,4,3);
+%    add +1 to [2,5]: Td -> (3,3,2,6,-4,-5,4,3); reads: p4=6, p2=3, p7=5, p8=3.
+%    Two-BIT (T1 over D, T2 over j*D_j), prefix(x)=(x+1)Q1(x)-Q2(x):
+%    original T1=(3,2,2,5,-4,-4,4,3), T2=(3,1,6,11,-20,-20,28,3);
+%    prefix(4)=5*5-11=14, prefix(6)=7*1+9=16, prefix(3)=4*4-7=9;
+%    after +1 on [2,5]: T1=(3,3,2,6,-4,-5,4,3), T2=(3,3,6,13,-20,-26,28,-1);
+%    sum[1,4]=5*6-13=17, sum[1,6]=7*1+13=20, sum[4,6]=20-11=9.
+%  CSES 1651 sample (live-verified): 8 3 / 3 2 4 5 1 1 5 3 /
+%    2 4 / 1 2 5 1 / 2 4  ->  outputs 5 then 6 (x[4]=5; after +1 on [2,5], 6).
+%  Two-BIT convention used EVERYWHERE here: T1 over D, T2 over j*D_j, and
+%    prefix(x) = (x+1)Q1(x) - Q2(x)   (thm:c14-twobit, lst:c14-twobit).
+%    Verified on a=(3,2,4,5,1,1,5,3): prefix(4)=5*5-11=14=sum a[1..4];
+%    after +1 on [2,5]: T1=(3,3,2,6,-4,-5,4,3), T2=(3,3,6,13,-20,-26,28,-1),
+%    sum[1,4]=5*6-13=17; sum[4,6]=20-11=9 (see the side-by-side tracebox).
+% =====================================================================
+\section{Range Variants: Adding to Intervals, Summing Intervals}\label{sec:c14-range}
+
+\begin{previouslybox}[18.1 stores sums of \emph{data}; now store sums of \emph{changes}]
+The plain BIT answers a prefix of \(A\) and mutates one entry of \(A\).
+This section swaps which side gets the expensive operation: encode the
+\emph{difference array} \(D_i=A_i-A_{i-1}\) in the BIT, and a whole-interval
+addition collapses to two point updates -- at the price that a read becomes
+a prefix walk.  Push the algebra one step further (a \emph{paired} BIT) and
+even ``range add \emph{and} range sum'' become logarithmic.  Two supporting
+tools travel with them: coordinate compression (when indices are not small
+integers) and the prefix-min variant (when the accumulator is \(\min\), not
+\(\sum\)).
+\end{previouslybox}
+
+\begin{topicintro}
+\textbf{Prerequisites.} \secref{c14-core} in full -- walks, blocks,
+\(\coderef{c14-build}\).  The telescoping identity
+\(A_i=\sum_{j\le i}(A_j-A_{j-1})\) (Ch.~5 used it for edge-span counts).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item build the difference BIT and answer range-add/point-read inputs
+        (CSES~1651); \hfill\lv{3}--\lv{4}
+  \item derive and implement the two-BIT range-add/range-sum identity from
+        the contribution count, not from memory; \hfill\lv{4}--\lv{5}
+  \item coordinate-compress arbitrary values into BIT indices without
+        breaking equal-range semantics; \hfill\lv{4}
+  \item state exactly when a prefix-min BIT is legal (append-only decreases)
+        and when it silently lies. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``intervals move, positions/segments are asked'']
+\reckey{``increase each value in \([a,b]\) by \(u\)'' + ``value at position
+\(k\)'' (CSES~1651's exact words); ``add to a range, then ask a range sum''
+(two BITs); values up to \(10^9\) but only \(\le2\cdot10^5\) of them appear
+(compression); ``\(\mathit{dp}[i]=\min_{j<i,\;\text{cond}}\mathop(\ldots)\)
+with \(j\) queried by a prefix of \(\min\) values'' (prefix-min BIT).}
+\recuse{
+  \item range add, point read -- difference BIT, this section (row~3 of the
+        opener's cost chart);
+  \item range add \emph{and} range sum -- two paired BITs
+        (\thmref{c14-twobit}); the segment tree with lazy (\chref{c15}) also
+        does it, at 4x the code;
+  \item index domain huge, order the only thing that matters -- compress
+        first (\propref{c14-compress});
+  \item accumulator \(\min\) with monotone (decreasing-only) writes --
+        prefix-min BIT (\propref{c14-prefixmin}).
+}
+\recnotuse{
+  \item point \emph{sets} and range sums -- the plain BIT of
+        \secref{c14-core} (differences would force you to re-point two
+        slots per set and buy nothing);
+  \item arbitrary overwrites of a \(\min\) table -- the monotonicity
+        hypothesis of \propref{c14-prefixmin} fails; go to \chref{c13};
+  \item range \emph{assign} (set all of \([a,b]\) to \(v\)) -- neither
+        difference nor pair survives non-invertible assignment; lazy Ch.~20.
+}
+One-line test: \emph{if every mutation touches a whole interval, something
+telescoping is being stored -- put \emph{that} in the BIT.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The Difference BIT: Range Add, Point Read}
+% ---------------------------------------------------------------
+
+Let \(D_1=A_1\), \(D_i=A_i-A_{i-1}\).  Then \(A_i=\sum_{j\le i}D_j\): a
+\emph{point read of \(A\) is a prefix query of \(D\)} -- exactly the
+operation a BIT is born for.  The magic is the other direction:
+
+\begin{definition}{Difference encoding of interval adds}{c14-diff}
+Adding \(\delta\) to every \(A_p\) with \(p\in[a,b]\) changes only two
+differences: \(D_a\mathrel{+}=\delta\) (the step up into the interval) and
+\(D_{b+1}\mathrel{-}=\delta\) (the step back out).  All other \(D_j\) are
+untouched because inside the interval both neighbours moved by \(\delta\).
+\end{definition}
+
+So the whole workload ``range add / point read'' becomes: BIT over \(D\);
+\(\texttt{add}(a,\delta),\ \texttt{add}(b{+}1,-\delta)\); read
+\(\code{query}(k)\).  \(\bigO{\log n}\) per op, three lines of code.
+
+\begin{lstlisting}[caption={the difference BIT: build from A by differencing (O(n)), range add as two point updates}, label={lst:c14-diff-build}]
+// t[] is a BIT over D; every "A[i]" below is 1-based
+void build_diff(){                       // O(n): t[i] = D[i] first...
+    for (int i = 1; i <= n; i++)
+        t[i] = A[i] - (i > 1 ? A[i-1] : 0);
+    for (int i = 1; i <= n; i++){        // ...then the same push as
+        int j = i + lowbit(i);           // coderef:c14-build
+        if (j <= n) t[j] += t[i];
+    }
+}
+void range_add(int a, int b, long long d){
+    update(a, d);                        // t is the point-update walk of
+    if (b + 1 <= n) update(b+1, -d);     // coderef:c14-update on D
+}
+long long point_read(int k){ return query(k); }   // prefix of D = A[k]
+\end{lstlisting}
+
+\begin{tracebox}[Difference cascade on the CSES 1651 sample array]
+\(a=(3,2,4,5,1,1,5,3)\) gives the raw difference array
+\(D=(3,-1,2,1,-4,0,4,-2)\).  The BIT is built on top of \(D\) by
+\(\coderef{c14-diff-build}\): start \(t=D\) and push \(t[i]\to t[i{+}\text{lowbit}(i)\)
+(\(\coderef{c14-build}\)), giving the \emph{block sums}
+\[
+  Td=(\,3,2,2,5,-4,-4,4,3\,),
+\]
+cell by cell: \(Td[1]=3\), \(Td[2]=D_1{+}D_2=2\), \(Td[3]=D_3=2\),
+\(Td[4]=\sum_{1..4}D=5\), \(Td[5]=D_5=-4\), \(Td[6]=D_5{+}D_6=-4\),
+\(Td[7]=D_7=4\), \(Td[8]=\sum_{1..8}D=3\).  This is \(Td\), \emph{not} the
+raw \(D\) above -- conflating them is Pitfall~1 below.
+
+Now \(\texttt{range\_add}(2,5,+1)\) fires \(\mathit{update}(2,+1)\) (walk
+\(2{\to}4{\to}8\): \(Td[2]\!{\to}\!3,\ Td[4]\!{\to}\!6,\ Td[8]\!{\to}\!4\)) and
+\(\mathit{update}(6,-1)\) (walk \(6{\to}8\): \(Td[6]\!{\to}\!-5,\ Td[8]\!{\to}\!3\)),
+so the live tree is \(Td=(3,3,2,6,-4,-5,4,3)\).  Point reads are prefix walks:
+\(\text{read}(4)=Td[4]=6=a_4{+}1\) \checkmark,\quad
+\(\text{read}(2)=Td[2]=3=a_2{+}1\) \checkmark,\quad
+\(\text{read}(7)=Td[7]{+}Td[6]{+}Td[4]=4-5+6=5=a_7\) \checkmark\ (position~7
+lies outside \([2,5]\)); \(\text{read}(8)=Td[8]=3=a_8\) is unchanged because
+the two difference writes contributed \(+1-1=0\) to \(Td[8]\) -- the encoding
+cancels exactly as \defref{c14-diff} promises.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Two BITs: Range Add \emph{and} Range Sum}
+% ---------------------------------------------------------------
+
+Difference reads a point; but a \emph{sum} of \(A\)'s prefix in terms of
+\(D\) weights each difference by how many entries it still affects:
+\[
+  \sum_{i=1}^{x} A_i
+  = \sum_{i=1}^{x}\sum_{j\le i} D_j
+  = \sum_{j\le x} D_j\,(x-j+1)
+  = (x+1)\underbrace{\sum_{j\le x} D_j}_{S_1(x)}
+    \;-\; \underbrace{\sum_{j\le x} j\,D_j}_{S_2(x)} .
+\]
+Two plain BITs -- one over \(D_j\), one over \(j\,D_j\) -- answer range
+add/range sum in \(4\) updates and \(4\) walks per op.
+
+\begin{theorem}{The two-BIT identity}{c14-twobit}
+Maintain BITs \(T_1\) over \(D\) and \(T_2\) over \(j\cdot D_j\).  Then
+\(\displaystyle\mathit{prefix}(x)=(x+1)\,\code{query}_1(x)-\code{query}_2(x)\)
+and a range add \(\delta\) on \([a,b]\) is
+\[
+\text{at }a:\ \mathit{add_1}(a,\delta),\ \mathit{add_2}(a,a\delta);
+\qquad
+\text{at }b{+}1:\ \mathit{add_1}(b{+}1,-\delta),\ \mathit{add_2}(b{+}1,-(b{+}1)\delta).
+\]
+Every operation is \(\bigO{\log n}\).
+\end{theorem}
+\begin{proofbox}
+The prefix formula is the telescoping rearrangement above -- each \(D_j\)
+lifts \(A_j,\dots,A_x\), i.e.\ \(x-j+1\) entries, so its contribution to
+\(\sum_{i\le x}A_i\) is \((x+1)D_j-jD_j\).  A range add changes exactly
+\(D_a{+}=\delta\), \(D_{b+1}{-}=\delta\) (\defref{c14-diff}); each change
+must be entered in \emph{both} trees with the respective weight
+(\(\delta\) vs.\ \(j\delta\)), giving the four updates.  \code{query}
+correctness is \thmref{c14-query} applied to each tree.
+\end{proofbox}
+
+\begin{lstlisting}[caption={range add + range sum with two BITs (worked example, not a linked problem: CSES has no such task)}, label={lst:c14-twobit}]
+// T1 over D, T2 over j*D[j]; both use coderef:c14-update/coderef:c14-query
+void ra(int i, long long d){                 // one difference point change
+    for (int k = i; k <= n; k += lowbit(k)){
+        t1[k] += d;                          // d contribution
+        t2[k] += d * i;                      // (j * d) contribution, j = i
+    }
+}
+void range_add(int a, int b, long long d){
+    ra(a, d);  ra(b + 1, -d);
+}
+long long bitq(long long* t, int i){
+    long long s = 0;
+    for (; i > 0; i -= lowbit(i)) s += t[i];
+    return s;
+}
+long long prefix(int x){ return (x + 1) * bitq(t1, x) - bitq(t2, x); }
+long long range_sum(int a, int b){ return prefix(b) - prefix(a - 1); }
+\end{lstlisting}
+
+\begin{tracebox}[Both BITs side by side: start a=(3,2,4,5,1,1,5,3), add +1 to [2,5], then sum [1,4] and [4,6]]
+Before any update, \(D=(3,-1,2,1,-4,0,4,-2)\).  \(T_1\) is the BIT of block
+sums over \(D\) -- exactly the \(Td\) row of the box above,
+\(T_1=(3,2,2,5,-4,-4,4,3)\).  \(T_2\) is the BIT over \(jD_j=(3,-2,6,4,-20,0,28,-16)\),
+which \(\coderef{c14-build}\) turns into \(T_2=(3,1,6,11,-20,-20,28,3)\).
+Sanity check on the untouched array: \(\mathit{sum}[1,4]=\mathit{prefix}(4)=5{\cdot}Q_1(4)-Q_2(4)=5{\cdot}5-11=14=3{+}2{+}4{+}5\) \checkmark.
+
+Apply \(\texttt{range\_add}(2,5,+1)\): four point writes -- at \(j=2\) put
+\((\delta,\,j\delta)=(+1,+2)\) into \((T_1,T_2)\), at \(j=6\) put \((-\delta,\,-j\delta)=(-1,-6)\).
+Their update walks give \(T_1=(3,3,2,6,-4,-5,4,3)\) and \(T_2=(3,3,6,13,-20,-26,28,-1)\).
+Now the range sums read off the live pair:
+\[
+\mathit{sum}[1,4]=\mathit{prefix}(4)=5{\cdot}T_1[4]-T_2[4]=5{\cdot}6-13=17=(3{+}3{+}5{+}6)\ \checkmark ,
+\]
+\[
+\mathit{sum}[4,6]=\mathit{prefix}(6)-\mathit{prefix}(3)=(7{\cdot}1+13)-(4{\cdot}5-9)=20-11=9=(6{+}2{+}1)\ \checkmark .
+\]
+Both trees moved by the \emph{same} two difference events; the second simply
+weights each by its index \(j\), which is what turns a point read into a range
+sum.  This is \(\thmref{c14-twobit}\) running, no memorised constant required.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Coordinate Compression}
+% ---------------------------------------------------------------
+
+A BIT is an array indexed by \(1..n\), so it silently assumes the things you
+store live at small \emph{integer} positions.  When the real indices are huge
+(values up to \(10^9\)) or non-integral, only their \emph{relative order} can
+matter to a prefix count -- and order is exactly what survives being replaced
+by rank.  Compression is the one-time relabelling that makes that legal.
+
+\begin{proposition}{Compression preserves the game}{c14-compress}
+Let \(\mathit{vals}\) be the sorted, deduplicated set of all values that will
+\emph{ever} be indexed (read, updated, or compared against).  Replacing each
+value by its index in \(\mathit{vals}\) turns the value domain into
+\([1..m]\), \(m\le\) (number of events), and preserves every comparison
+\(v_1\le v_2\), hence every prefix count/sum the BIT answers.  Cost:
+\(\bigO{M\log M}\) once.
+\end{proposition}
+
+\begin{lstlisting}[caption={standard compression: collect, sort, unique, lower\_bound}, label={lst:c14-compress}]
+// Compress BEFORE any update/query: every value that will ever be an index
+// must already sit in vals when the sort happens.  See thm:c14-twobit for a
+// value-weighted tree when magnitudes (not just order) are needed.
+vector<int> vals;                          // 1. COLLECT every value that
+for (...) vals.push_back(x);               //    will ever be an index
+sort(vals.begin(), vals.end());            // 2. SORT + 3. UNIQUE
+vals.erase(unique(vals.begin(), vals.end()), vals.end());
+int rank_(int x){                          // 4. RANK by lower_bound
+    return (int)(lower_bound(vals.begin(), vals.end(), x) - vals.begin()) + 1;
+}
+// rank_ returns a 1-based index into vals -- the BIT's [1..m] domain.
+// from here on, the BIT is sized m = vals.size(), never 1e9
+\end{lstlisting}
+
+% ---------------------------------------------------------------
+\subsection{Prefix Min, and the Only Way It Is Legal}
+% ---------------------------------------------------------------
+
+\begin{proposition}{The append-only prefix-min BIT}{c14-prefixmin}
+If the accumulator is \(\min\) and slot values only ever \emph{decrease} (the
+standard DP pattern \(\mathit{dp}[i]=\min_{j\le i}\) over processed prefixes,
+each \(j\) written once), then storing block minima and updating
+\(t[k]=\min(t[k],v)\) along the \emph{update} walk answers
+\(\min_{j\le x}\) along a \emph{superset-cover} walk: query visits the same
+\(i\to i{-}\operatorname{lowbit}(i)\) blocks, which cover \([1..x]\) but now
+may also be joined by over-covering ancestors -- for \(\min\) (idempotent)
+extra coverage is harmless.  Arbitrary point increases are \textbf{not}
+supported: the stale minimum remains buried in some slot with no rule for
+which one to fix.
+\end{proposition}
+
+\begin{lstlisting}[caption={prefix-min BIT under monotone writes (query min over [1..x])}, label={lst:c14-min}]
+void push(int i, long long v){             // position i may only decrease
+    for (; i <= n; i += lowbit(i)) t[i] = min(t[i], v);
+}
+long long qmin(int x){                     // min over [1..x] (over-covers)
+    long long m = INF;
+    for (; x > 0; x -= lowbit(x)) m = min(m, t[x]);
+    return m;
+}
+\end{lstlisting}
+
+\begin{warningbox}[The prefix-min BIT answers min only while writes stay monotone]
+``Cover a superset, harmless for \(\min\)'' is exactly as true for \(\max\);
+what is \emph{not} true is mixing directions -- a \(\min\)-BIT whose writes
+sometimes raise a value has no local repair rule (the raised entry may hide
+in any ancestor).  When monotonicity breaks, you need recomputation over
+blocks: that is a segment tree, \chref{c13}, and the honest cost is stating
+so here instead of debugging a silent WA for a night.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{BIT vs Segment Tree: the Boundary in One Table}
+% ---------------------------------------------------------------
+
+\begin{comparisonbox}[Where each range engine lives (and why this book teaches both)]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{BIT}: sums/counts (invertible) or monotone \(\min/\max\)
+        writes; point or difference updates; \(\sim\)8 lines per flavour;
+        trivially 2D-able (\(\secref{c14-offline}\), practice CF~1093G);
+        cache-friendly half the memory of a segtree.
+  \item \textbf{Segment tree} (Ch.~19, \chref{c13}): \emph{any} associative
+        aggregate (max/min/gcd under arbitrary writes), non-invertible
+        queries, custom combine functions; \(\sim\)40 lines; lazy variant
+        (Ch.~20, \chref{c15}) for range assign/add with range asks.
+  \item \textbf{Rule of thumb for contests}: if you can phrase every query
+        as ``prefix of an invertible accumulator'' or a monotone DP write,
+        the BIT is the lower-effort AC; the moment the statement asks a
+        \emph{suffix min under increases}, \emph{range mode}, or
+        \emph{first position where a non-additive predicate flips}, reach
+        for \chref{c13}.
+\end{itemize}
+This is prose, per the chapter contract -- segtree code appears only there.
+\end{comparisonbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CSES 1651 Range Update Queries}
+% ---------------------------------------------------------------
+
+\solvedproblem{c14-rangeupd}{Range Update Queries}{CSES 1651}
+  {https://cses.fi/problemset/task/1651}{CSES L4}
+  {difference BIT, range add as two point updates, point read as prefix}
+
+\begin{problemstatement}[CSES 1651 Range Update Queries]
+An array of \(n\) values; process \(q\) queries of two types:
+\texttt{1 a b u} --- increase each value in \([a,b]\) by \(u\);
+\texttt{2 k} --- print the value at position \(k\).
+
+\textbf{Input.} \(n,q\le 2\cdot10^5\); \(|x_i|\le10^9\); \(|u|\le10^9\)
+(negative updates allowed); \(1\le a\le b\le n\), \(1\le k\le n\).
+
+\textbf{Output.} Each type-2 query on its own line.
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+8 3
+3 2 4 5 1 1 5 3
+2 4
+1 2 5 1
+2 4
+
+Output:
+5
+6
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 25 minutes]
+The type-1 brute force loops \(a..b\): a single \([1,n]\) update is
+\(\bigO{n}\), and \(q\) of them is \(\tle\).  The hint is in what type-1
+\emph{does not} change: differences between adjacent values.
+\peek{after adding \(+1\) to \([2,5]\), which adjacent pairs actually see a
+change in \(A_i-A_{i-1}\)?}
+\nudge{exactly two boundaries: at \(2\) (enters) and \(6\) (leaves) -- store
+the difference array in the BIT of \secref{c14-core} and you already know
+every remaining line of code.}
+\fullhint{BIT over \(D\).  \texttt{1 a b u}: \code{update(a,u)},
+\code{update(b+1,}-u\code{)} (guard \(b+1\le n\)).  \texttt{2 k}:
+\code{query(k)} \(=\sum_{j\le k}D_j=A_k\).  Build: \(t[i]\!\leftarrow\!D_i\)
+then the push loop of \(\coderef{c14-diff-build}\).  \code{long long}
+everywhere: \(|u|\le10^9\), \(2\cdot10^5\) overlapping adds reach
+\(2\cdot10^{14}\).}
+\end{attemptgate}
+
+\solstep{Understanding}
+The problem never asks a range sum -- it asks \emph{single positions} after
+\emph{whole-interval} moves.  That is the difference encoding's exact
+signature (\defref{c14-diff}): the mutation is local in \(D\) (two slots),
+and the read is global-in-prefix in \(D\) (one walk).  A plain BIT over
+\(A\) would have it backwards: reads \(O(\log)\), writes \(O(n)\).
+
+\solstep{Key Observations}
+\begin{observation}
+An interval add is a \emph{rank-one} change in the difference view: \(+u\) at
+the left edge, \(-u\) at one past the right edge.  Everything inside shifts
+together, so no difference between consecutive inside-positions changes.
+\end{observation}
+\begin{observation}
+The initial build must difference \emph{first}, then BIT-build (\(\coderef{c14-diff-build}\));
+feeding \(A\) into \(\coderef{c14-build}\) and then calling updates
+``range-style'' answers \(A_k\) with a sum of raw values, not the value --
+the Pitfall~1 trace above shows how plausible this looks.
+\end{observation}
+\begin{observation}
+\(b=n\) is safe: \(\mathit{update}(n{+}1,\cdot)\) is out of the array's
+domain \([1,n]\) and no read walk ever passes \(n\); guard with
+\(b{+}1\le n\) (or size \(t\) to \(n{+}1\) and skip the guard).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Lazy segment tree (Ch.~20's tool)}
+{Correct and \(\bigO{\log n}\) per op, but ~45 lines, \(4n\) memory, and a
+propagation discipline to debug -- for ``range add, point read'' the lazy
+machinery answers a question nobody asked (range aggregates).  Reserve it
+for \chref{c15} proper.}
+\deadend{Difference \emph{array} (no BIT)}
+{The static array version supports each update in \(O(1)\) but each read in
+\(\bigO{n}\) (re-prefix the whole array).  Interleaving is what kills it --
+\(q\) reads after \(q\) updates is the same \(\bigO{nq}\).  The BIT is what
+makes the prefix-of-differences incremental.}
+\aha{Store in the tree what makes the \emph{update} cheap, if the \emph{query}
+is an operation the tree already answers fast -- here differences turn
+intervals into points, and prefix sums are the BIT's native tongue.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ loop the interval & \(A_p+=u\) for \(p\in[a,b]\) & \(\bigO{nq}\) & \tle \\
+2 & \lv{3}\ diff array only & two \(O(1)\) writes, re-prefix per read & \(\bigO{nq}\) & \tle \\
+3 & \lv{4}\ \textbf{difference BIT} & two \(\bigO{\log}\) writes, \(\bigO{\log}\) read & \(\bigO{(n+q)\log n}\) & \ac \\
+4 & \lv{4}\ lazy segtree & full power, mostly unused here & \(\bigO{(n+q)\log n}\) & overkill \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Solution}
+Build \(D\) from the input, then the \(\bigO{n}\) BIT build
+(\(\coderef{c14-diff-build}\)).  Type~1: two point updates at \(a\) and
+\(b{+}1\).  Type~2: \code{query(k)}.  \code{long long} for the tree and the
+answers.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Invariant.} After any sequence of processed queries, \(t\) is a BIT
+over the current difference array \(D\) of the logical array \(A\).
+\emph{Init:} \(\coderef{c14-diff-build}\) establishes it (\propref{c14-linear}
+applied to \(D\)).  \emph{Type-1 step:} by \defref{c14-diff} the interval add
+changes exactly \(D_a,D_{b+1}\) by \(+u,-u\); the two \code{update} walks
+maintain the BIT for those point changes (\thmref{c14-query}).
+\emph{Type-2 step:} \(A_k=\sum_{j\le k}D_j\) telescopes; \code{query(k)}
+returns that prefix by \thmref{c14-query}'s disjoint-cover property.
+\textbf{Bounds:} values \(|A_k|\le 10^9+2\cdot10^5\cdot10^9<3\cdot10^{14}\)
+-- \code{long int long}; walks \(\le18\). \textbf{Termination:} each walk
+strictly increases/decreases its index past the guards.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CSES 1651 full solution (difference BIT)}, label={lst:c14-1651-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+int n, q;
+long long t[MX];
+
+int lowbit(int i){ return i & -i; }
+void update(int i, long long d){
+    for (; i <= n; i += lowbit(i)) t[i] += d;
+}
+long long query(int i){
+    long long s = 0;
+    for (; i > 0; i -= lowbit(i)) s += t[i];
+    return s;
+}
+int main(){
+    scanf("%d%d", &n, &q);
+    long long prev = 0, cur;
+    for (int i = 1; i <= n; i++){          // build D in place
+        scanf("%lld", &cur);
+        t[i] = cur - prev; prev = cur;     // t = raw D so far
+    }
+    for (int i = 1; i <= n; i++){          // O(n) BIT push (build_diff)
+        int j = i + lowbit(i);
+        if (j <= n) t[j] += t[i];
+    }
+    while (q--){
+        int ty, a, b; long long u;
+        scanf("%d", &ty);
+        if (ty == 1){
+            scanf("%d%d%lld", &a, &b, &u);
+            update(a, u);
+            if (b + 1 <= n) update(b + 1, -u);
+        } else { scanf("%d", &a); printf("%lld\n", query(a)); }
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CSES 1651: read x[4], add +1 to [2,5], read x[4] again]
+\(D=(3,-1,2,1,-4,0,4,-2)\); after the push phase the live tree is
+\(Td=(3,2,2,5,-4,-4,4,3)\) (the row verified in the first trace box of this
+section).
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|l|l|l}
+\text{\#} & \text{query} & \text{walk} & \text{result}\\ \hline
+1 & \texttt{2 4} & \text{query}(4)=Td[4]=5 & 5\\
+2 & \texttt{1 2 5 1} & \text{update}(2,+1):\ Td[2]{\to}3,\ Td[4]{\to}6,\ Td[8]{\to}4 & \text{(add)}\\
+  & \text{(cont.)} & \text{update}(6,-1):\ Td[6]{\to}-5,\ Td[8]{\to}3 & \\
+3 & \texttt{2 4} & \text{query}(4)=Td[4]=6 & 6
+\end{array}
+\]
+Printed: \texttt{5, 6} -- matches the live statement (each type-2 answer on
+its own line).  Cross-check on \(\text{query}(8)=Td[8]=3=a_8\) after the
+update: \(a_8=3\) was outside \([2,5]\), and \(Td[8]\) received \(+1-1=0\)
+net -- the difference encoding cancelling itself exactly as
+\defref{c14-diff} promises.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(\bigO{n}\) build, \(\bigO{\log n}\) per update/read; total
+\(\lesssim 2\cdot10^5 + 3\cdot10^5\cdot18\approx5.6\cdot10^6\) ops.
+Memory one \code{long long} array.  \textbf{AC}.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.30\linewidth} p{0.38\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+\(b=n\) & \(D_{n+1}\) has no slot & guard \code{b+1<=n}; no read ever reaches \(n{+}1\) \\
+negative \(u\) & tree entries go negative & \code{long long}, no logic change \\
+overlapping adds & value drifts to \(2\cdot10^{14}\) & magnitudes bounded above; fits \\
+first element & \(D_1=A_1\) (no \(A_0\)) & \code{prev=0} initialisation handles it \\
+read after many adds & needs \emph{current} value & prefix walk reads live tree \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Do not mix flavours:} a tree built over \(D\) answers point
+        reads; feeding it ``set \(A_k=u\)'' queries (as in CSES~1648) is
+        \emph{wrong} -- a set at \(k\) is two delta-updates in the difference
+        view (\(+\delta\) at \(k\), \(-\delta\) at \(k{+}1\)) \emph{and}
+        still needs the shadow array.  Mixing problem types is this
+        section's signature WA.
+  \item \textbf{Guard or size-up:} pick one convention for \(b=n\) and keep
+        it in the template (\code{if (b+1<=n)} above; or \(MX=n+2\) and no
+        guard).
+  \item \textbf{\(\pm u\) stress:} generate random \([a,b]\) adds and compare
+        \code{query(k)} against a brute-force array for \(n\le50\), \(q\le100\)
+        -- five lines of Python; catches an inverted sign at \(b{+}1\)
+        instantly.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: storing the raw difference array \emph{as if} it were the BIT]
+\(D\) and the BIT over \(D\) are different objects: the second stores
+\emph{block sums} of the first.  Skipping the push phase of
+\(\coderef{c14-diff-build}\) (leaving \(t=D\)) makes \code{query} walk
+individual \(D\) entries and return \(A_k\) only for the indices the walk
+happens to touch -- e.g.\ on the sample, \(\text{query}(4)\) would answer
+\(1\) (the raw \(D_4\)) instead of \(5\).  Wrong answers that ``look like
+off-by-one'' are usually this.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: forgetting \(-u\) at \(b+1\)]
+A one-sided difference update turns every later read into an accumulated
+flood of \(+u\).  Visible only when a query position exceeds \(b\) -- many
+hand samples never query there.  Say the two words out loud when writing:
+\emph{enter, leave}.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: memorising the two-BIT formula with the wrong weight]
+The pair is \(\big(D_j,\;(j{-}1)D_j\big)\) with
+\(\mathit{prefix}(x)=x\,Q_1(x)-Q_2(x)\), \emph{or} \(\big(D_j,\;jD_j\big)\)
+with \((x{+}1)Q_1-Q_2\) -- one convention, consistently.  The bug appears
+when code and derivation come from different memories.  Re-derive in one
+line on the page before submitting (the derivation is in
+\thmref{c14-twobit}'s proof); do not recall.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: compression on a \emph{sum} that needs real values]
+Compression preserves \emph{order} (counts, k-th, \(\le k\) predicates).  It
+destroys \emph{magnitudes}: ``sum of values \(\le k\)'' cannot be answered
+by counting compressed ranks.  Keep sums on a value-carrying structure or
+store \(v\)-weighted trees -- \(\coderef{c14-twobit}\)'s second tree is the
+template for weighting.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Which side is cheap in your encoding -- update or read?  Choose the
+        stored object so the \emph{frequent} op is the cheap one.
+  \item Did you build the difference tree with the push phase, not raw \(D\)?
+  \item Compression: are you using only \emph{order} properties?
+  \item Two-BIT: which weight convention is your code actually using?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Little Girl and Maximum Sum}{CF 276C}
+    {https://codeforces.com/problemset/problem/276/C}
+    {CF 1500 L3}
+    {\(q\) fixed ranges, reorder the array so that the \emph{sum over the
+     ranges} is maximal.  Count how many ranges cover each position --
+     that is the difference-array idea of \defref{c14-diff} run once
+     offline (two \(O(1)\) writes per range, one prefix sweep) -- then sort
+     and match greedily.  No BIT survives the queries here (the array never
+     changes), which makes the difference \emph{technique} visible without
+     the tree.}
+  \practice{Iahub and Xors}{CF 341D}
+    {https://codeforces.com/problemset/problem/341/D}
+    {CF 1900 L5}
+    {A \(n\times n\) matrix, two ops: xor \(x\) into every cell of a
+     subrectangle, and xor of a subrectangle.  \(\oplus\) is its own inverse
+     (invertible accumulator -- the BIT licence holds), so the rectangle is
+     a 2D difference encoding with four corner events per update, and a
+     range-xor needs the same paired-tree trick as \thmref{c14-twobit} in
+     two axes.  Budget a page of index algebra before coding; verify on a
+     \(2\times2\) hand case first.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\secref{c14-core} owns the walks this section reuses without restating.
+Chapter~5 (\propref{c24-prefix}) owns telescoping in its static form.
+Forward: the frequency reading of compressed indices is
+\secref{c14-order}; difference-on-Euler arrays is \secref{c14-trees}
+(CF~383C); 2D sweep encodings return in \secref{c14-offline}.  Arbitrary
+aggregates under arbitrary writes are the segment tree's -- \chref{c13},
+\chref{c15}; the boundary table is above, the code is there.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 18.2 in 10 seconds]
+Store \(D=A_{\mathit{diff}}\): interval add \(=\) two point updates
+(\defref{c14-diff}); point read \(=\) prefix walk (CSES~1651,
+\(\coderef{c14-1651-soln}\)).  Need range sums too?  Pair a second tree of
+\((j{-}1)D_j\): \(\mathit{prefix}(x)=xQ_1-Q_2\) (\thmref{c14-twobit}) --
+pick ONE weight convention.  Huge index domains: collect--sort--unique--
+lower\_bound (\propref{c14-compress}); order survives, magnitudes don't.
+\(\min\)-BIT legal only while writes are monotone (\propref{c14-prefixmin});
+otherwise \chref{c13}.  Never confuse raw \(D\) with the BIT over \(D\).
+\selftest{
+  \item Which two slots does ``\(+5\) on \([3,7]\)'' touch in the difference
+        tree, and what are the increments?
+  \item Re-derive \(\mathit{prefix}(x)=xQ_1-Q_2\) in two lines from
+        \(\sum_{j\le x}D_j(x-j+1)\).
+  \item Give the workload where a lazy segment tree is the \emph{smaller}
+        program than the two-BIT pair.
+  \item Why does compression answer ``how many \(\le k\)'' but not ``sum of
+        values \(\le k\)''?
+  \item State the monotonicity hypothesis of the prefix-min BIT and the
+        failure mode when it breaks.
+}
+\end{recallbox}

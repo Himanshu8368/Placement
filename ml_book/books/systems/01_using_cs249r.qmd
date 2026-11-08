@@ -1,0 +1,224 @@
+# ML Systems with CS249r {#sec-sys-cs249r}
+
+::: {.callout-note title="Sources"}
+**CS249r** *Machine Learning Systems* (Harvard, V. J. Reddi et al.). **Vol 1** *Introduction to Machine Learning Systems* (release v0.8.0) and **Vol 2** *Scaling Machine Learning Systems* (preview v0.3.0) are bundled with this book. **Vol 3** *Agentic ML Systems* and **Vol 4** *Physical AI Systems* are still being written by their authors and will be plugged in when they are released.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Find the CS249r chapter that covers any ML-systems question, and jump straight to its page.
+- Use CS249r's two organising equations, the **iron law** for one machine and the **Fleet Law** for a cluster, to reason about where time goes.
+- Choose a reading path: an interview sprint (about 10 chapters), the core path (Vol 1 cover to cover), or the full path (Vol 1 + Vol 2).
+- Connect each systems chapter to the algorithm chapters of this book that it builds on.
+:::
+
+## Why this part is "plugged in" rather than written
+
+This guide covers ML *algorithms* in depth: the math, the models, and the training methods. ML *systems* covers how those models are fed with data, trained on hardware, compressed, served, operated, scaled across fleets, secured, and governed. That subject is just as large, and CS249r already treats it at reference depth (about 3,200 pages across Vol 1 and Vol 2), with the quantitative style this book uses. Writing a weaker copy would waste effort. So the CS249r volumes **are** the systems volumes of this guide, and this part is the bridge into them:
+
+| Chapter | What it gives you |
+|---|---|
+| This chapter | How CS249r is organised, its core equations, reading paths, and how it maps onto this book |
+| @sec-sys-cs249r-vol1 | A chapter-by-chapter guide to **Vol 1** (16 chapters): page links, what to master, the matching chapters here, and interview self-checks |
+| @sec-sys-cs249r-vol2 | The same for **Vol 2** (17 chapters) |
+| *Vol 3 guide (coming later)* | Plugged in when CS249r Vol 3 is released. Until then, Part XIII (Agentic Systems) of this book covers the topic |
+| *Vol 4 guide (coming later)* | Plugged in when CS249r Vol 4 is released (robotics and physical AI, optional) |
+
+## Opening the volumes
+
+| Volume | PDF | EPUB | Online (latest) |
+|---|---|---|---|
+| Vol 1, Introduction to ML Systems (1,493 pp.) | [Vol 1 PDF](../cs249r/Machine-Learning-Systems-Vol1.pdf) | [Vol 1 EPUB](../cs249r/Machine-Learning-Systems-Vol1.epub) | [mlsysbook.ai/vol1](https://mlsysbook.ai/vol1/) |
+| Vol 2, Scaling ML Systems (1,686 pp.) | [Vol 2 PDF](../cs249r/Machine-Learning-Systems-Vol2.pdf) | [Vol 2 EPUB](../cs249r/Machine-Learning-Systems-Vol2.epub) | [mlsysbook.ai/vol2](https://mlsysbook.ai/vol2/) |
+
+The page links in the two guide chapters use `#page=N` and open the PDF at the first page of the chapter. Chrome, Edge and Firefox all support this. The PDF and EPUB files live in `books/cs249r/`. If they are missing, re-download them with `scripts/fetch_cs249r.sh`.
+
+## How CS249r is organised
+
+**Vol 1** is about **one machine**. It follows a model through its life on a single node: why ML systems differ from ordinary software, where models run (cloud to TinyML), the lifecycle, data engineering, how neural networks compute, frameworks, training, data selection, compression, hardware acceleration, benchmarking, serving, and MLOps. It closes with responsible engineering.
+
+**Vol 2** is about **the fleet**. When the model or the traffic outgrows one node, the binding constraint moves from local memory to the network, power, and routine failure. Vol 2 covers compute infrastructure, network fabrics, storage, collective communication, distributed training, fault tolerance, orchestration, fleet efficiency, serving at scale, edge learning, and operations at scale. It ends with security and privacy, robustness, sustainability, and responsible AI.
+
+Both volumes use the same three lenses:
+
+- **D·A·M.** Every system decision is a decision about **D**ata, **A**lgorithm, or **M**achine, and a bottleneck in one moves pressure onto the others.
+- **Fallacies and pitfalls.** Every chapter ends with common wrong beliefs. These are excellent interview material.
+- **Lighthouse models.** A few recurring reference workloads (a large language model, a vision model, a recommender, a TinyML model) make the trade-offs concrete.
+
+## The two equations to carry with you
+
+### The iron law of ML systems (Vol 1)
+
+Total time on one machine splits into data movement, computation, and fixed overhead:
+
+$$
+T = \underbrace{\frac{D_\text{vol}}{BW}}_{\text{memory time}} + \underbrace{\frac{O}{R_\text{peak}\cdot\eta}}_{\text{compute time}} + \underbrace{L_\text{lat}}_{\text{overhead}}
+$$
+
+Here $D_\text{vol}$ is the bytes moved, $BW$ the memory bandwidth, $O$ the operations performed, $R_\text{peak}$ the peak FLOP/s, $\eta$ the achieved utilisation, and $L_\text{lat}$ fixed latency (dispatch, launch, network round-trips). CS249r also gives a dimensional form, *time = (samples/task) × (FLOPs/sample) × (seconds/FLOP)*, which splits the same time into Data × Algorithm × Machine.
+
+Useful consequences that come up again and again:
+
+- **Training a dense transformer costs about $6N$ FLOPs per token**, so $O \approx 6ND$ for $N$ parameters and $D$ tokens. Inference costs about $2N$ FLOPs per generated token.
+- **Training** batches many samples per weight read, so it tends to be **compute-bound**. **Autoregressive decoding** reads every weight for very few FLOPs, so it tends to be **memory-bandwidth-bound**. This is why batching, the KV cache, and quantization matter so much for serving.
+- A speed-up applied to one term is limited by the others (Amdahl's law). Find the dominant term before you optimise.
+
+```{python}
+#| label: iron-law-demo
+# Rough step-time estimate with the iron law for a 7B model on one accelerator.
+# The numbers are illustrative assumptions, not vendor specifications.
+N = 7e9                      # parameters
+bytes_per_param = 2          # bf16 weights
+peak = 400e12                # FLOP/s (assumed peak)
+eta = 0.4                    # achieved utilisation
+bw = 2.0e12                  # bytes/s memory bandwidth (assumed)
+
+def decode_token_time(batch):
+    flops = 2 * N * batch                 # forward pass, one token per sequence
+    data = N * bytes_per_param            # every weight is read once per step
+    t_mem, t_cmp = data / bw, flops / (peak * eta)
+    return t_mem, t_cmp
+
+for b in [1, 8, 64, 256]:
+    t_mem, t_cmp = decode_token_time(b)
+    bound = "memory" if t_mem > t_cmp else "compute"
+    print(f"batch {b:4d}: memory {t_mem*1e3:6.2f} ms, compute {t_cmp*1e3:6.2f} ms -> {bound}-bound")
+
+# The crossover batch size, where the two terms are equal: 2*N*b/(peak*eta) = N*bytes/bw
+b_star = bytes_per_param * peak * eta / (2 * bw)
+print(f"crossover batch ~ {b_star:.0f}")
+assert decode_token_time(1)[0] > decode_token_time(1)[1]  # batch-1 decoding is memory-bound
+```
+
+### The Fleet Law (Vol 2)
+
+Across $n$ devices, a distributed training step costs the divided compute plus communication and synchronisation, minus whatever overlaps:
+
+$$
+T_\text{step}(n) = \frac{T_\text{compute}}{n} + T_\text{comm}(n) + T_\text{sync}(n) - T_\text{overlap},
+\qquad
+\text{useful fraction} = \frac{T_\text{compute}/n}{T_\text{step}(n)}.
+$$
+
+Vol 2 groups these terms into its **C³ taxonomy**: **C**ompute, **C**ommunication, and **C**oordination. Adding devices shrinks only the first term. The others usually grow with $n$, which is why scaling efficiency falls and why parallelism strategies, collective algorithms, topology-aware placement, and overlap matter so much.
+
+```{python}
+#| label: fleet-law-demo
+# Data-parallel scaling: ring all-reduce moves about 2(n-1)/n of the gradient bytes per device.
+T_compute = 10.0          # seconds of single-device compute per step (assumed)
+grad_bytes = 14e9         # 7B params in bf16
+link_bw = 50e9            # bytes/s per device (assumed effective bandwidth)
+sync = 0.02               # seconds of barrier/straggler cost per step (assumed)
+overlap_frac = 0.5        # fraction of communication hidden behind backward
+
+for n in [1, 8, 64, 512]:
+    comm = 0 if n == 1 else 2 * (n - 1) / n * grad_bytes / link_bw
+    step = T_compute / n + comm + (sync if n > 1 else 0) - overlap_frac * comm
+    print(f"n={n:4d}: step {step:6.3f} s, useful fraction {T_compute/n/step:5.1%}")
+```
+
+At large $n$ the communication term stops shrinking while compute keeps shrinking, so efficiency collapses. Vol 2 ch. 5–6 cover the ways out: bigger per-device batches, gradient bucketing and overlap, hierarchical collectives, sharding (ZeRO/FSDP), and switching to tensor or pipeline parallelism.
+
+## Reading paths
+
+| Path | Chapters | Time |
+|---|---|---|
+| **Interview sprint** | Vol 1: 1 (Introduction), 8 (Training), 10 (Compression), 11 (Hardware), 13 (Serving), 14 (MLOps) · Vol 2: 5 (Collectives), 6 (Distributed training), 10 (Serving at scale), 12 (Ops at scale) | about 2–3 weeks |
+| **Core** | All of Vol 1, in order | about 6–8 weeks |
+| **Full** | Vol 1, then Vol 2 in order | about 4–5 months |
+| **LLM-engineer focus** | Vol 1: 5, 6, 8, 10, 11, 13 · Vol 2: 2, 5, 6, 7, 9, 10 | about 5–6 weeks |
+| **MLOps / platform focus** | Vol 1: 3, 4, 12, 13, 14 · Vol 2: 4, 7, 8, 12, 14 | about 5–6 weeks |
+
+For every chapter: read the *Purpose* and *Learning Objectives*, then the body, then the *Fallacies and Pitfalls*. Then answer the self-check questions in this guide without looking.
+
+## How the systems volumes connect to this book
+
+| When you study… (this book) | …read alongside (CS249r) |
+|---|---|
+| Linear algebra, matrix calculus, autodiff (Part II) | Vol 1 ch. 5 Neural Computation, ch. 7 Frameworks |
+| End-to-end projects, features, validation (Part IV) | Vol 1 ch. 3 ML Lifecycle, ch. 4 Data Engineering |
+| Metrics, A/B testing, calibration (Part IV) | Vol 1 ch. 12 Benchmarking · Vol 2 ch. 12 Ops at Scale, ch. 14 Robust AI |
+| Deep learning foundations, optimizers, mixed precision (Part VII) | Vol 1 ch. 6 Architectures, ch. 8 Training |
+| CNNs, Transformers (Parts VIII–IX) | Vol 1 ch. 6, ch. 11 Hardware Acceleration (arithmetic intensity) |
+| Scaling laws, pretraining data (Part XII) | Vol 1 ch. 9 Data Selection · Vol 2 ch. 1 Introduction |
+| LLM inference: KV cache, quantization (Part XII) | Vol 1 ch. 10 Compression, ch. 13 Serving · Vol 2 ch. 10 Serving at Scale |
+| MoE, long context (Part XII) | Vol 2 ch. 5 Collectives (AllToAll), ch. 6 Distributed Training |
+| RLHF and alignment (Part XII) | Vol 2 ch. 6 (multi-model training for RLHF) |
+| Agentic systems (Part XIII) | CS249r Vol 3 (when released) |
+| Distribution shift, continual and federated learning (Part XIV) | Vol 2 ch. 11 Edge Intelligence, ch. 14 Robust AI |
+| Fairness, privacy, interpretability (Parts IV, XIV) | Vol 1 ch. 15 · Vol 2 ch. 13, 16 |
+| ML system design interviews (Part XVI) | All of Vol 1 ch. 13–14, Vol 2 ch. 10, 12 |
+
+## Exercises
+
+**1. [E]** With the iron law, explain why serving a 70B model at batch size 1 is limited by memory bandwidth rather than FLOPs.
+
+::: {.callout-note collapse="true" title="Solution"}
+Each decode step reads all weights once ($70\text{B}\times2$ bytes ≈ 140 GB in bf16) but does only about $2N = 140$ GFLOPs of work. At about 2–3 TB/s, the memory term is around 50–70 ms. At hundreds of TFLOP/s, the compute term is well under 1 ms. Memory time dominates by about two orders of magnitude, so only moving fewer bytes helps: batching (more FLOPs per byte read), quantization (fewer bytes), or sharding weights across devices (more aggregate bandwidth).
+:::
+
+**2. [E]** Using $O\approx6ND$, how many FLOPs does it take to train a 7B-parameter model on 2T tokens? How long does that take on 1,024 accelerators at 400 TFLOP/s peak and 40% utilisation?
+
+::: {.callout-note collapse="true" title="Solution"}
+$O = 6\times7\times10^9\times2\times10^{12} = 8.4\times10^{22}$ FLOPs. Effective throughput is $1024\times400\times10^{12}\times0.4\approx1.64\times10^{17}$ FLOP/s. So $T\approx5.1\times10^5$ s, about 5.9 days, ignoring communication and failures (the Fleet Law terms).
+:::
+
+**3. [M]** In the Fleet Law demo above, what limits the useful fraction as $n\to\infty$? Name three ways to raise it.
+
+::: {.callout-note collapse="true" title="Solution"}
+$T_\text{compute}/n\to0$, but ring all-reduce communication approaches $2\cdot\text{grad\_bytes}/BW$, which is constant in $n$, and synchronisation cost does not shrink either. So the useful fraction goes to 0. Ways to raise it: (1) increase per-device work, for example with a larger global batch or gradient accumulation; (2) hide more communication behind compute, with bucketing and overlap; (3) reduce the bytes communicated, with lower-precision gradients, compression, or sharded optimizers that reduce-scatter instead; (4) use faster or hierarchical interconnects (NVLink inside a node, hierarchical all-reduce across nodes); (5) switch strategy (tensor or pipeline parallelism) once data parallelism saturates.
+:::
+
+**4. [M]** Find the crossover batch size where decoding switches from memory-bound to compute-bound, as a formula in peak FLOP/s, utilisation, bandwidth, and bytes per parameter. How does INT4 weight quantization move it?
+
+::: {.callout-note collapse="true" title="Solution"}
+Set $2Nb/(R\eta) = N\beta/BW$, where $\beta$ is bytes per parameter. This gives $b^\ast=\beta R\eta/(2BW)$. INT4 cuts $\beta$ from 2 to 0.5, which divides $b^\ast$ by 4. Decoding becomes compute-bound at a smaller batch, and at small batches each step is about 4× faster, because the memory term shrinks by 4×.
+:::
+
+**5. [H]** Choose one *Fallacies and Pitfalls* section in Vol 1. For each fallacy, write a short counter-example drawn from an algorithm chapter of this book.
+
+::: {.callout-note collapse="true" title="Solution"}
+This is an open-ended exercise. A good answer ties each fallacy to a mechanism. Example: *"FLOPs predict latency"* is false because decode is bandwidth-bound (Exercise 1). Depthwise-separable convolutions cut FLOPs but have low arithmetic intensity, so on GPUs they often run slower than their FLOP count suggests (CNN architectures chapter).
+:::
+
+## Interview questions
+
+**Q1. A model's offline accuracy is great, but production quality is dropping while every service dashboard is green. What is happening, and how would you catch it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+This is a *silent failure*: data-defined behaviour degrades under distribution shift or training–serving skew while the infrastructure stays healthy. Catch it with layered monitoring: input feature distributions (PSI/KS against the training data), prediction distributions, delayed ground-truth metrics, per-slice metrics, and training–serving parity tests. Connect alerts to retraining triggers and a rollback path. See Vol 1 ch. 14 and Vol 2 ch. 14.
+:::
+
+**Q2. Why is LLM decoding memory-bound, and what are the main levers?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Each generated token reads every weight (and the KV cache) but performs only about $2N$ FLOPs, so arithmetic intensity is about 1 FLOP/byte, far below the accelerator's ridge point. The levers are: batching (continuous batching), quantization of weights and KV cache, the KV cache itself (so past tokens are not recomputed), paged attention (less fragmentation, so larger batches fit), speculative decoding (several tokens per weight read), and tensor parallelism (aggregate bandwidth). See Vol 1 ch. 13 and Vol 2 ch. 10.
+:::
+
+**Q3. You add 8× more GPUs, but training gets only 3× faster. Diagnose it.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Apply the Fleet Law: compute shrank 8×, but communication, synchronisation and stragglers did not. Profile step time: look at all-reduce time, how much of it overlaps backward, data-loader stalls, and straggler variance. Fixes: gradient bucketing and overlap, larger per-device batch, hierarchical or topology-aware collectives, ZeRO/FSDP, better data prefetching, and checking for a slow node. See Vol 2 ch. 5, 6, 9.
+:::
+
+**Q4. Where does CS249r draw the line between Vol 1 and Vol 2, and why does it matter in a design interview?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Vol 1 ends at the boundary of one node: memory, compute, and local I/O bind, and the iron law governs. Vol 2 starts when the workload crosses that boundary: the network, coordination, power, and failure become first-class concerns, and the Fleet Law governs. In an interview, say which side of the line your design is on (does the model fit on one node? does the QPS need a fleet?) before you choose techniques.
+:::
+
+## Summary
+
+::: {.callout-important title="Key equations"}
+| | |
+|---|---|
+| Iron law (one machine) | $T = D_\text{vol}/BW + O/(R_\text{peak}\eta) + L_\text{lat}$ |
+| Dense-transformer training cost | $O\approx 6ND$ FLOPs; inference about $2N$ per token |
+| Fleet Law | $T_\text{step}(n)=T_\text{compute}/n+T_\text{comm}(n)+T_\text{sync}(n)-T_\text{overlap}$ |
+| Decode crossover batch | $b^\ast=\beta R_\text{peak}\eta/(2BW)$ |
+:::
+
+- CS249r Vol 1 and Vol 2 *are* the ML-systems volumes of this guide. This part is the map into them.
+- Vol 1 is one node (iron law, D·A·M). Vol 2 is the fleet (Fleet Law, C³).
+- Training tends to be compute-bound and decoding memory-bound. Most serving techniques exist because of that asymmetry.
+- Scaling out shrinks only the compute term. Communication and coordination decide how efficient a fleet is.
+- Use the guide chapters that follow for page links, what to master, and self-checks.

@@ -1,0 +1,1999 @@
+# Testing and Debugging {#sec-testing}
+
+::: {.callout-note title="Sources"}
+**Kernighan and Pike** *The Practice of Programming* ch. 5 (debugging) and ch. 6 (testing) · **Zeller** *Why Programs Fail* (simplifying failing inputs, delta debugging) · **Claessen and Hughes**, "QuickCheck" (ICFP 2000): property-based testing and shrinking · **CP-Algorithms**: Prüfer code · **GCC manual**: `-fsanitize`, `-Wshadow`; libstdc++ debug mode (`_GLIBCXX_DEBUG`) · **Codeforces**: interactive problems guide.
+
+**Coverage:** stress testing (brute force + optimised + generator + compare loop) in Python and in C++ with a shell or Python driver · choosing sizes and value ranges that force ties and collisions · random generators for arrays, distinct arrays, permutations, sorted arrays, strings, intervals, trees (random parent, Prüfer), connected graphs, DAGs and weighted graphs · reproducible seeds · shrinking a failing test (delta debugging) · the edge-case checklist · exhaustive enumeration of small inputs · checkers for problems with many valid answers · reading verdicts (WA, TLE, MLE, RE, ILE, PE) · multi-test state that is not reset · integer overflow · recursion depth · asserts and invariant checks, stderr debugging, binary searching the failing step, compiler flags and sanitizers · interactive problems: flushing, local judges, query-count checks, adaptive judges.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Write a stress test (brute force, optimised solution, random generator, compare loop) in a few minutes, in Python or as a C++ and shell setup.
+- Write generators for arrays, permutations, strings, intervals, trees, connected graphs and DAGs, and choose sizes and value ranges that make bugs likely to show.
+- Shrink a failing random test to a minimal one that explains the bug.
+- Sweep the standard edge cases (empty, one element, all equal, extremes, overflow, multi-test state) systematically instead of from memory.
+- Read a verdict (WA, TLE, MLE, RE, Idleness limit) and name its likely causes and the first thing to check.
+- Test an interactive solution against a local judge that checks the protocol and the query limit.
+:::
+
+```{python}
+#| include: false
+import copy
+import math
+import random
+import sys
+from bisect import bisect_left
+from collections import Counter, defaultdict, deque
+from functools import cmp_to_key, lru_cache
+from itertools import combinations, permutations, product
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+from contextlib import contextmanager
+
+
+@contextmanager
+def keep_random():
+    """Figures may use random numbers without changing the sequence seen by later cells."""
+    state = random.getstate()
+    yield
+    random.setstate(state)
+
+
+random.seed(0)
+```
+
+## Why this matters
+
+Most wrong submissions are not wrong ideas. They are right ideas with a small bug: a `<` that should be `<=`, a counter not reset between test cases, an `int` that overflows, a recursion that is too deep. The samples rarely catch these, because the samples are small and friendly. The judge's tests are not.
+
+This chapter is about finding those bugs **before** the judge does. The main tool is the **stress test**: run your fast solution and a slow, obviously correct one on thousands of small random inputs and compare. The proofs chapter already used it to break wrong greedy ideas (@sec-pf-greedy, @sec-pf-p3); here it becomes a general method, with generators for every common input type, a shrinker that turns a messy failing input into a two-line one, a checklist of edge cases, and a local judge for interactive problems.
+
+In an interview the same habits show up as "How would you test this?". A good answer names the edge cases, says how you would compare against a brute force, and catches your own off-by-one before the interviewer does.
+
+::: {.callout-note title="In plain words"}
+You write a solution, it passes the samples, you submit — and it fails on some hidden test you never saw. This chapter is about not being surprised. The core trick is almost embarrassingly simple: write a second, dumb-but-clearly-correct version of your program, feed both thousands of tiny random inputs, and watch for the first answer where they disagree. Everything else here — generators, shrinking, checklists, a local judge — exists to support that one idea.
+:::
+
+| Tool | Finds | Section |
+|---|---|---|
+| Stress test against brute force | Wrong ideas and wrong code on small inputs | @sec-test-stress |
+| Structured generators | Bugs that need a tree, a DAG, a small alphabet, a tie | @sec-test-generators |
+| Shrinking | The smallest input that still fails, which explains the bug | @sec-test-shrinking |
+| Edge-case sweep | Boundaries, overflow, multi-test state | @sec-test-edge-cases |
+| Reading verdicts | What kind of bug a TLE, MLE or RE points to | @sec-test-verdicts |
+| Debugging techniques | Where in the code the bug is | @sec-test-debugging |
+| Local judge | Protocol and query-limit bugs in interactive problems | @sec-test-interactive |
+
+## Stress testing {#sec-test-stress}
+
+A stress test has four parts:
+
+1. **The solution** you want to submit (fast, possibly wrong).
+2. **A brute force** that is slow but obviously correct: try all subsets, all permutations, all pairs. It only has to work for tiny inputs. Write it in the simplest way, *not* as a variant of your solution, or it will share your bug.
+3. **A generator** that makes small random inputs.
+4. **A compare loop** that runs both on each input and stops at the first difference, printing the input.
+
+::: {.callout-important title="The stress-test loop"}
+```
+repeat many times:
+    case  = generate()          # small n, small values
+    want  = brute(case)
+    got   = solution(case)      # a crash counts as a difference
+    if got != want: print case, got, want; stop
+```
+Keep the inputs **small** (n from 1 to about 8) and the **values small** (0 to 5, say). Small inputs are fast to brute-force, and small values force the ties, duplicates and collisions where bugs live.
+:::
+
+Here is the harness used for the rest of the chapter. It takes a generator that returns a tuple of arguments, and returns the first failing case or `None`.
+
+```{python}
+#| label: test-harness
+def stress(gen, fast, slow, trials=2000):
+    """Return (case, got, want) for the first input where fast and slow differ, else None."""
+    for _ in range(trials):
+        case = gen()
+        want = slow(*copy.deepcopy(case))
+        try:
+            got = fast(*copy.deepcopy(case))
+        except Exception as e:                       # a crash is a failure too
+            got = f"{type(e).__name__}: {e}"
+        if got != want:
+            return case, got, want
+    return None
+```
+
+::: {#fig-test-loop}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    nodes = {
+        "gen": (0, 0, "case = generate(seed)", "indigo"),
+        "brute": (-2.6, -2.9, "want = brute(case)", "green"),
+        "sol": (2.6, -2.9, "got = solution(case)", "amber"),
+        "cmp": (0, -5.8, "got == want ?", "violet"),
+        "next": (6.8, -5.8, "next seed", "muted"),
+        "fail": (0, -8.0, "print case, shrink it", "red"),
+    }
+    edges = [("gen", "brute", ""), ("gen", "sol", ""), ("brute", "cmp", ""), ("sol", "cmp", ""),
+             ("cmp", "next", "yes"), ("cmp", "fail", "no")]
+    V.flow(ax, p, nodes, edges, w=4.4)
+    ax.plot([6.8, 6.8], [-5.35, 0], color=p["muted"], lw=1.4)
+    V.arrow(ax, p, 6.8, 0, 2.2, 0)
+V.show(draw)
+```
+
+The stress-test loop. Every test is generated from its own seed, so a failure can be regenerated, shrunk and debugged.
+
+:::
+
+### Why small values matter
+
+Count pairs $i < j$ with $a_i + a_j = k$. A common first attempt sorts and uses two pointers, moving both pointers on a match. That is right when all values are distinct, and wrong with duplicates: on $[2, 2, 2]$, $k = 4$ it finds one pair instead of three.
+
+```{python}
+#| label: test-small-values
+def pairs_buggy(a, k):
+    a = sorted(a)
+    i, j, count = 0, len(a) - 1, 0
+    while i < j:
+        s = a[i] + a[j]
+        if s == k:
+            count += 1
+            i += 1
+            j -= 1
+        elif s < k:
+            i += 1
+        else:
+            j -= 1
+    return count
+
+def pairs_two_pointer(a, k):
+    a = sorted(a)
+    i, j, count = 0, len(a) - 1, 0
+    while i < j:
+        s = a[i] + a[j]
+        if s < k:
+            i += 1
+        elif s > k:
+            j -= 1
+        elif a[i] == a[j]:                    # everything in a[i..j] is equal
+            m = j - i + 1
+            count += m * (m - 1) // 2
+            break
+        else:                                 # count both runs of equal values
+            li = ri = 1
+            while a[i + li] == a[i]:
+                li += 1
+            while a[j - ri] == a[j]:
+                ri += 1
+            count += li * ri
+            i, j = i + li, j - ri
+    return count
+
+def pairs_brute(a, k):
+    return sum(a[i] + a[j] == k for i in range(len(a)) for j in range(i + 1, len(a)))
+
+def failure_rate(fast, max_value, trials=2000):
+    bad = 0
+    for _ in range(trials):
+        a = [random.randint(1, max_value) for _ in range(random.randint(1, 8))]
+        k = random.randint(2, 2 * max_value)
+        bad += fast(a, k) != pairs_brute(a, k)
+    return bad / trials
+
+small, large = failure_rate(pairs_buggy, 5), failure_rate(pairs_buggy, 10**9)
+print(f"buggy two pointers fail on {small:.1%} of tests with values 1..5, {large:.1%} with values 1..1e9")
+assert small > 0.05 and large == 0
+
+gen_pairs = lambda: ([random.randint(1, 5) for _ in range(random.randint(1, 8))], random.randint(2, 10))
+print("first counterexample:", stress(gen_pairs, pairs_buggy, pairs_brute))
+assert stress(gen_pairs, pairs_buggy, pairs_brute) is not None
+assert stress(gen_pairs, pairs_two_pointer, pairs_brute) is None
+```
+
+::: {#fig-test-small-values}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ranges = [2, 3, 5, 10, 30, 100, 1000, 10**6, 10**9]
+with keep_random():
+    rates = [100 * failure_rate(pairs_buggy, m, trials=600) for m in ranges]
+
+def draw(ax, p):
+    ax.semilogx(ranges, rates, marker="o", color=p["indigo"])
+    ax.set_xlabel("largest value in the generated arrays")
+    ax.set_ylabel("tests exposing the bug (%)")
+    ax.grid(alpha=0.25, color=p["line"])
+V.plot(draw, size=(6.4, 2.9))
+```
+
+How often a random test exposes the duplicate bug in the two-pointer pair counter, as the value range grows. Small ranges find it; realistic ranges almost never do.
+
+:::
+
+With values up to $10^9$ the bug never shows: random values almost never repeat. With values 1 to 5 it shows in one test out of a few. **The generator decides which bugs you can find.**
+
+### The C++ setup
+
+In a contest you usually have three programs: `sol.cpp`, `brute.cpp` and `gen.cpp`. The generator takes a seed on the command line, so every test can be reproduced.
+
+```cpp
+// gen.cpp: ./gen <seed> prints one random test
+#include <bits/stdc++.h>
+using namespace std;
+
+int main(int argc, char* argv[]) {
+    mt19937 rng(atoi(argv[1]));
+    auto rnd = [&](int lo, int hi) { return uniform_int_distribution<int>(lo, hi)(rng); };
+    int n = rnd(1, 8), k = rnd(2, 10);
+    cout << n << ' ' << k << '\n';
+    for (int i = 0; i < n; i++) cout << rnd(1, 5) << " \n"[i == n - 1];
+}
+```
+
+A shell loop drives them (Linux, macOS, WSL or Git Bash on Windows):
+
+```bash
+g++ -std=c++17 -O2 -o sol sol.cpp
+g++ -std=c++17 -O2 -o brute brute.cpp
+g++ -std=c++17 -O2 -o gen gen.cpp
+for ((i = 1; i <= 10000; i++)); do
+    ./gen $i > in.txt
+    ./sol < in.txt > out1.txt
+    ./brute < in.txt > out2.txt
+    if ! cmp -s out1.txt out2.txt; then
+        echo "Mismatch on seed $i"; cat in.txt
+        echo "sol:";   cat out1.txt
+        echo "brute:"; cat out2.txt
+        exit 1
+    fi
+done
+echo "All tests passed"
+```
+
+`cmp` compares bytes, so a trailing space or a missing newline counts as a difference. A Python driver can compare tokens instead, as most judges do:
+
+```python
+import subprocess, sys
+
+def run(cmd, stdin=""):
+    return subprocess.run(cmd, input=stdin, capture_output=True, text=True).stdout
+
+for seed in range(1, 10001):
+    test = run(["./gen", str(seed)])
+    got, want = run(["./sol"], test), run(["./brute"], test)
+    if got.split() != want.split():
+        print(f"seed {seed}\n{test}sol:   {got}brute: {want}")
+        sys.exit(1)
+print("All tests passed")
+```
+
+Use `mt19937`, not `rand()`: with MinGW on Windows, `RAND_MAX` is only 32767, so `rand() % n` never produces large values and is biased.
+
+## Random generators {#sec-test-generators}
+
+Most bugs need a particular **shape** of input to show: a duplicate, a tie, a deep tree, a vertex reachable along two paths. A generator for each common input type, written once, makes these shapes common.
+
+::: {.callout-important title="Generator checklist"}
+- **Arrays:** small length, small value range, include negatives and 0 when allowed.
+- **Distinct arrays and permutations:** `random.sample`, `random.shuffle`. Never "generate and hope they are distinct".
+- **Sorted arrays:** sort a random array (with duplicates) or a sample (without).
+- **Strings:** a **small alphabet** (`"ab"`, `"abc"`) so that characters repeat.
+- **Intervals:** pick two points and sort them; allow length-0 intervals and shared endpoints.
+- **Trees:** random parent ($p_i$ uniform in $1..i-1$) then shuffle labels; uniform trees from a random Prüfer sequence; **also** paths, stars and caterpillars, because random trees are shallow.
+- **Connected graphs:** a random tree plus extra random edges (no self-loops or multi-edges unless allowed).
+- **DAGs:** a random permutation as the topological order, edges only go forward in it.
+- **Weights:** a small range (1..3) to force equal-weight ties.
+- **Reproducibility:** derive each test from a seed and print the seed on failure.
+:::
+
+```{python}
+#| label: test-generators
+def rand_array(n, lo, hi):
+    return [random.randint(lo, hi) for _ in range(n)]
+
+def rand_distinct(n, lo, hi):
+    return random.sample(range(lo, hi + 1), n)
+
+def rand_perm(n):
+    p = list(range(1, n + 1))
+    random.shuffle(p)
+    return p
+
+def rand_string(n, alphabet="ab"):
+    return "".join(random.choice(alphabet) for _ in range(n))
+
+def rand_intervals(n, max_coord):
+    return [tuple(sorted((random.randint(0, max_coord), random.randint(0, max_coord)))) for _ in range(n)]
+
+def rand_tree_parent(n):
+    """Edges of a random tree on 1..n: the i-th vertex attaches to a random earlier one; labels shuffled."""
+    perm = rand_perm(n)
+    return [(perm[random.randint(0, i - 1)], perm[i]) for i in range(1, n)]
+
+def prufer_to_tree(seq, n):
+    """Decode a Prüfer sequence of length n - 2 into the edges of a tree on 1..n (O(n^2), fine for tests)."""
+    degree = [1] * (n + 1)
+    for x in seq:
+        degree[x] += 1
+    edges = []
+    for x in seq:
+        leaf = min(v for v in range(1, n + 1) if degree[v] == 1)
+        edges.append((leaf, x))
+        degree[leaf] -= 1
+        degree[x] -= 1
+    u, v = [w for w in range(1, n + 1) if degree[w] == 1]
+    return edges + [(u, v)]
+
+def rand_tree_uniform(n):
+    if n <= 2:
+        return [(1, 2)] if n == 2 else []
+    return prufer_to_tree([random.randint(1, n) for _ in range(n - 2)], n)
+
+def rand_path(n):
+    p = rand_perm(n)
+    return [(p[i], p[i + 1]) for i in range(n - 1)]
+
+def rand_star(n, centre=None):
+    centre = centre or random.randint(1, n)
+    return [(centre, v) for v in range(1, n + 1) if v != centre]
+
+def rand_connected_graph(n, m):
+    """Simple connected graph on 1..n with m edges, n - 1 <= m <= n(n-1)/2."""
+    edges = {tuple(sorted(e)) for e in rand_tree_parent(n)}
+    while len(edges) < m:
+        u, v = random.sample(range(1, n + 1), 2)
+        edges.add((min(u, v), max(u, v)))
+    return [(u, v) if random.random() < 0.5 else (v, u) for u, v in edges]
+
+def rand_dag(n, m):
+    """m distinct directed edges on 1..n, all going forward in a random topological order."""
+    order = rand_perm(n)
+    edges = set()
+    while len(edges) < m:
+        i, j = sorted(random.sample(range(n), 2))
+        edges.add((order[i], order[j]))
+    return list(edges)
+
+def rand_weighted(edges, lo=1, hi=3):
+    return [(u, v, random.randint(lo, hi)) for u, v in edges]
+```
+
+Every generator should be tested too: a "tree" generator that sometimes makes a cycle will make you chase bugs that are not there.
+
+```{python}
+#| label: test-generators-check
+def is_tree(n, edges):
+    parent = list(range(n + 1))
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for u, v in edges:
+        ru, rv = find(u), find(v)
+        if ru == rv:
+            return False
+        parent[ru] = rv
+    return len(edges) == n - 1
+
+def height(n, edges, root):
+    adj = defaultdict(list)
+    for u, v in edges:
+        adj[u].append(v)
+        adj[v].append(u)
+    depth, q = {root: 0}, deque([root])
+    while q:
+        v = q.popleft()
+        for w in adj[v]:
+            if w not in depth:
+                depth[w] = depth[v] + 1
+                q.append(w)
+    return max(depth.values())
+
+for _ in range(200):
+    n = random.randint(1, 30)
+    for gen in (rand_tree_parent, rand_tree_uniform, rand_path, rand_star):
+        assert is_tree(n, gen(n))
+    m = random.randint(n - 1, n * (n - 1) // 2)
+    g = rand_connected_graph(n, m)
+    assert len({frozenset(e) for e in g}) == m and all(u != v for u, v in g)
+
+# Prüfer sequences give every labelled tree the same probability: 4^2 = 16 trees on 4 vertices.
+counts = Counter(frozenset(frozenset(e) for e in rand_tree_uniform(4)) for _ in range(3200))
+assert len(counts) == 16 and min(counts.values()) > 140
+# Random-parent trees are shallow: height about e * ln n, far from n - 1.
+n = 2000
+h_parent = height(n, rand_tree_parent(n), 1)
+h_path = height(n, rand_path(n), 1)
+print(f"n = {n}: height of a random-parent tree from vertex 1 = {h_parent}, of a path from vertex 1 = {h_path}")
+assert h_parent < 60
+```
+
+::: {#fig-test-trees}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def tree_node(edges, root, color="indigo"):
+    adj = defaultdict(list)
+    for u, v in edges:
+        adj[u].append(v)
+        adj[v].append(u)
+    def build(v, parent):
+        return V.Node(v, [build(w, v) for w in sorted(adj[v]) if w != parent], color=color)
+    return build(root, None)
+
+with keep_random():
+    random.seed(11)
+    families = [("random parent", rand_tree_parent(7), "indigo"), ("path", rand_path(7), "cyan"),
+                ("star", rand_star(7), "amber")]
+
+def draw(ax, p):
+    x = 0.0
+    for name, edges, c in families:
+        nodes = V.tree(ax, p, tree_node(edges, 1, c), x=x, dx=1.0, dy=1.1, node_h=0.62)
+        left, right = min(v.px for v in nodes), max(v.px for v in nodes)
+        V.text(ax, p, (left + right) / 2, 1.0, name, color=c, weight="bold")
+        x = right + 1.8
+V.show(draw)
+```
+
+Three generator families on 7 vertices, rooted at vertex 1: a random-parent tree, a path and a star. The path is the deep case, the star the high-degree case.
+
+:::
+
+::: {#fig-test-dag}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+with keep_random():
+    random.seed(5)
+    dag_edges = rand_dag(6, 8)
+indeg = Counter(v for _, v in dag_edges)
+# recover a topological order with Kahn's algorithm (the generator's order is hidden)
+adj = defaultdict(list)
+for u, v in dag_edges:
+    adj[u].append(v)
+deg = dict(indeg)
+q = deque(sorted(v for v in range(1, 7) if deg.get(v, 0) == 0))
+order = []
+while q:
+    v = q.popleft()
+    order.append(v)
+    for w in sorted(adj[v]):
+        deg[w] -= 1
+        if deg[w] == 0:
+            q.append(w)
+assert len(order) == 6
+pos = {v: i for i, v in enumerate(order)}
+
+def draw(ax, p):
+    for v in order:
+        V.box(ax, p, 2 * pos[v] - 0.35, -0.35, 0.7, 0.7, str(v), color="violet" if indeg[v] >= 2 else "indigo")
+    for u, v in dag_edges:
+        a, b = 2 * pos[u], 2 * pos[v]
+        if b - a == 2:
+            V.arrow(ax, p, a + 0.35, 0, b - 0.35, 0)
+        else:
+            V.arrow(ax, p, a, 0.35, b, 0.35, rad=-0.35 if (b - a) % 4 else -0.5)
+    V.text(ax, p, 5, -1.0, "violet: two or more incoming edges", color="violet", size=10)
+    V.text(ax, p, 5, 2.4, "")                         # room for the arcs
+V.show(draw)
+```
+
+A generated DAG on 6 vertices drawn in its hidden topological order: every edge goes forward, and vertices with two incoming paths are common.
+
+:::
+
+The last line is the important one. A random-parent tree on 2000 vertices has height around 20. If your recursive DFS only ever sees such trees, the recursion-depth crash on a path of $10^5$ vertices (@sec-test-p5-kefa) never shows. Mix the families: random, uniform, path, star, and a "caterpillar" (a path with leaves hanging off it).
+
+**Reproducible tests.** Give each test its own seed, so the failing one can be regenerated exactly:
+
+```{python}
+#| label: test-seeds
+def gen_case(seed):
+    rng = random.Random(seed)                    # a private generator: independent of other code
+    return [rng.randint(1, 5) for _ in range(rng.randint(1, 8))]
+
+assert gen_case(42) == gen_case(42) and gen_case(42) != gen_case(43)
+```
+
+## Shrinking a failing test {#sec-test-shrinking}
+
+A random failing input is often 20 numbers long, and the bug is hidden among them. **Shrinking** repeatedly replaces the input by a smaller one that still fails, until nothing smaller fails. The result is usually two or three elements, and the bug is obvious from it.
+
+::: {.callout-important title="Greedy shrinking (a simple form of delta debugging)"}
+```
+shrink(case):
+    repeat:
+        for each candidate in smaller(case):     # delete chunks, delete one item, make values smaller
+            if fails(candidate): case = candidate; restart
+        if no candidate fails: return case       # every smaller candidate passes
+```
+`smaller` first tries deleting big chunks (half, a quarter, …), then single elements, then making single values closer to 0. `fails` must check the **same** failure (wrong answer vs brute, or the same crash), and must reject inputs that break the problem's constraints.
+:::
+
+Zeller's **delta debugging** (ddmin) is the systematic version: it splits the input into $k$ chunks, tries removing each, and doubles $k$ when nothing can be removed. The greedy version below is simpler and good enough for inputs of a few dozen elements. Property-based testing libraries such as QuickCheck and Hypothesis shrink automatically in the same way.
+
+```{python}
+#| label: test-shrink
+def shrink(case, fails, smaller):
+    """Greedy shrinking: move to the first smaller candidate that still fails, until none does."""
+    assert fails(case), "shrink needs a failing case"
+    while True:
+        for cand in smaller(case):
+            if fails(cand):
+                case = cand
+                break
+        else:
+            return case
+
+def smaller_list(xs, smaller_item=None):
+    n = len(xs)
+    k = n // 2
+    while k >= 1:                                   # delete chunks of size n/2, n/4, ..., 1
+        for i in range(n - k + 1):
+            yield xs[:i] + xs[i + k:]
+        k //= 2
+    if smaller_item:                                # then shrink single items
+        for i, x in enumerate(xs):
+            for y in smaller_item(x):
+                yield xs[:i] + [y] + xs[i + 1:]
+
+def smaller_int(x):
+    """Candidates strictly closer to 0 (or the positive twin of a negative)."""
+    out = [0] if x != 0 else []
+    if abs(x) > 1:
+        out.append(int(x / 2))
+    if x > 0:
+        out.append(x - 1)
+    if x < 0:
+        out += [x + 1, -x]
+    return list(dict.fromkeys(out))
+
+def smaller_pairs_case(case):
+    a, k = case
+    for b in smaller_list(a, smaller_int):
+        yield (b, k)
+    for k2 in smaller_int(k):
+        yield (a, k2)
+
+random.seed(4)
+big = ([random.randint(1, 5) for _ in range(20)], 6)
+fails = lambda c: pairs_buggy(*c) != pairs_brute(*c)
+assert fails(big)
+small_case = shrink(big, fails, smaller_pairs_case)
+print("failing input:", big, "\nshrunk to:    ", small_case,
+      " buggy =", pairs_buggy(*small_case), " brute =", pairs_brute(*small_case))
+assert len(small_case[0]) == 3
+```
+
+::: {#fig-test-shrink}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def shrink_history(case, fails, smaller):
+    """Like shrink, but returns every intermediate failing case."""
+    history = [case]
+    while True:
+        for cand in smaller(case):
+            if fails(cand):
+                case = cand
+                history.append(case)
+                break
+        else:
+            return history
+
+pair_history = shrink_history(big, fails, smaller_pairs_case)
+assert pair_history[-1] == small_case
+picked = sorted({0, 1, 2, len(pair_history) // 2, len(pair_history) - 1})
+
+def draw(ax, p):
+    for row, k in enumerate(picked):
+        a, kk = pair_history[k]
+        V.array(ax, p, a, 0, -2.0 * row, index=False, label=f"step {k}",
+                note=f"buggy {pairs_buggy(a, kk)}, brute {pairs_brute(a, kk)}",
+                colors={i: "red" for i in range(len(a))} if k == picked[-1] else None)
+V.show(draw)
+```
+
+Shrinking the failing pair-count test (k = 6), step by step, as computed by the shrinker above. Each row still fails; the last one has three elements and no smaller candidate fails.
+
+:::
+
+Three equal-sum values, and the bug is plain: after a match, moving both pointers skips the other partners of the same value.
+
+## The edge-case checklist {#sec-test-edge-cases}
+
+Random tests are good at the middle of the input space and bad at its corners. The corners need a deliberate sweep.
+
+::: {.callout-important title="Edge cases to try before submitting"}
+| Category | Cases |
+|---|---|
+| Size | empty (if allowed), $n = 1$, $n = 2$, the maximum $n$ |
+| Values | all equal, all distinct, 0, negatives, the minimum and maximum allowed value |
+| Order | sorted, reverse sorted, alternating, one element out of place |
+| Duplicates | many copies of one value; the answer achieved several ways (ties) |
+| Overflow | max $n$ × max value; products, squares, sums of pairs; $a \cdot b \bmod m$ |
+| Boundaries | first and last index, $l = r$, half-open vs closed ranges, `<` vs `<=` |
+| Graphs | one vertex, disconnected, self-loops and multi-edges (if allowed), a path (deep), a star (high degree), a complete graph |
+| Strings | one character, all the same character, the whole alphabet, palindromes |
+| Multi-test | many tiny tests (state not reset, per-test cost of clearing big arrays), a big test after a small one |
+| Output | "no solution" case, `-1`, `YES`/`NO` capitalisation, precision of floats |
+:::
+
+When the input space for small sizes is small enough, do not sample it: **enumerate all of it**. All arrays of length up to 5 over $\{-1, 0, 1, 2\}$ are $4 + 16 + 64 + 256 + 1024 = 1364$ inputs, which a brute force checks in a fraction of a second. Exhaustive tests are deterministic and cannot miss a small case.
+
+```{python}
+#| label: test-exhaustive
+def all_arrays(max_len, values, min_len=0):
+    for n in range(min_len, max_len + 1):
+        yield from (list(t) for t in product(values, repeat=n))
+
+def max_element_buggy(a):
+    best = 0                                   # bug: assumes some value is >= 0
+    for x in a:
+        best = max(best, x)
+    return best
+
+first_bad = next(a for a in all_arrays(5, [-1, 0, 1, 2], min_len=1) if max_element_buggy(a) != max(a))
+print("smallest failing array:", first_bad)
+assert first_bad == [-1]
+```
+
+Enumerating in order of length finds the **smallest** failing input directly, without shrinking.
+
+## Reading verdicts {#sec-test-verdicts}
+
+The verdict tells you what kind of bug to look for. On Codeforces it also tells you on which test; "test 1" is the samples.
+
+| Verdict | Usual causes | First thing to check |
+|---|---|---|
+| **WA** Wrong answer | wrong idea; off-by-one; overflow; state not reset between tests; wrong output format; uninitialised variable | stress test; edge-case sweep; `long long` everywhere a product or sum can exceed $2^{31}$ |
+| **WA on test 2** with many tests per input | a global counter, map, array or flag carries over between test cases | reset **every** piece of state at the start of each test |
+| **TLE** Time limit exceeded | wrong complexity; a hidden quadratic (`list.pop(0)`, `x in list`, string `+=` in a loop, `memset` of a big array per test); slow I/O; an infinite loop | count operations on the worst case (sorted, all equal, a path); fast I/O |
+| **MLE** Memory limit exceeded | $n \times n$ table; adjacency matrix for large $n$; storing all states of a DP that only needs two rows; deep recursion | compute the memory: cells × bytes per cell |
+| **RE** Runtime error | index out of range; recursion too deep (stack overflow); division or modulo by 0; null pointer; uncaught exception; `assert` failed | run the max test locally with sanitizers; Python: the recursion limit |
+| **ILE** Idleness limit exceeded | interactive problem: output not flushed; reading when the judge expects you to write; waiting for input that never comes | flush after every line; follow the protocol exactly |
+| **PE** Presentation error (rare today) | missing or extra spaces or newlines on judges with strict comparison | match the sample output byte for byte |
+
+::: {#fig-test-verdicts}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+rows = [("WA", "stress test, edge sweep, overflow", "red"),
+        ("WA on test 2", "reset all per-test state", "red"),
+        ("TLE", "worst-case inputs, count steps", "amber"),
+        ("MLE", "cells × bytes per cell", "amber"),
+        ("RE", "bounds, recursion depth, ÷ 0", "pink"),
+        ("ILE", "flush after every query", "violet")]
+
+def draw(ax, p):
+    nodes, edges = {}, []
+    for i, (verdict, check, c) in enumerate(rows):
+        nodes[f"v{i}"] = (0, -1.25 * i, verdict, c)
+        nodes[f"c{i}"] = (7.6, -1.25 * i, check, "green")
+        edges.append((f"v{i}", f"c{i}", ""))
+    V.flow(ax, p, nodes, edges, w=6.2, h=0.8, size=10)
+V.show(draw)
+```
+
+From the verdict to the first thing to check.
+
+:::
+
+A few verdicts are easy to misread:
+
+- **WA on a big test can be overflow**, not a wrong idea. If the solution passes every small stress test and fails a large test, suspect `int` first.
+- **TLE on test 1** in a problem with $t$ up to $10^4$ is often a per-test cost: clearing an array of size $10^6$ for each test is $10^{10}$ operations. Clear only the part you used.
+- **RE in C++ can show up as WA.** Writing past the end of an array may silently corrupt a neighbouring variable. `-fsanitize=address` turns this into a clear error with a line number.
+- **TLE in an interactive problem** is often ILE in disguise: the program is waiting for an answer the judge will never send because your query is still in the output buffer.
+
+## Debugging techniques {#sec-test-debugging}
+
+When the stress test has found a failing input, these techniques locate the bug in the code.
+
+**Asserts and invariant checks.** Write the loop invariant (@sec-pf-invariants) as an `assert` inside the loop, and run it on the failing input. The first assert that fires tells you which iteration broke which property. Asserts also catch violated assumptions early: `assert 0 <= idx < n`, `assert total == sum(parts)`. Remove the expensive ones before submitting, or guard them with a debug flag.
+
+**Print to stderr, not stdout.** Judges read only stdout, so debug output on stderr does not cause WA — but it still costs time, so remove it for TLE-sensitive code. In C++ use a macro that disappears unless you compile with `-DLOCAL`:
+
+```cpp
+#ifdef LOCAL
+#define dbg(x) cerr << #x << " = " << (x) << endl
+#else
+#define dbg(x)
+#endif
+```
+
+In Python, `print(..., file=sys.stderr)`.
+
+**Binary search the failing step.** When the input is a sequence of operations (queries, updates), run the solution and the brute force side by side and find the **first** operation where their states or outputs differ. If "the outputs of the first $k$ operations agree" is monotone in $k$, binary search finds that operation in $O(\log q)$ runs. The same idea applies to code history (`git bisect`) and to the stages of a pipeline (print the intermediate result after each stage, and compare with a hand computation).
+
+```{python}
+#| label: test-first-bad-step
+class MinStackBuggy:
+    def __init__(self):
+        self.st, self.mins = [], []
+    def push(self, x):
+        self.st.append(x)
+        if not self.mins or x < self.mins[-1]:        # bug: must be <=, duplicates of the min matter
+            self.mins.append(x)
+    def pop(self):
+        if self.st.pop() == self.mins[-1]:
+            self.mins.pop()
+    def get_min(self):
+        return self.mins[-1]
+
+class MinStackBrute:
+    def __init__(self):
+        self.st = []
+    def push(self, x):
+        self.st.append(x)
+    def pop(self):
+        self.st.pop()
+    def get_min(self):
+        return min(self.st)
+
+def run_ops(cls, ops):
+    s, out = cls(), []
+    for op in ops:
+        try:
+            if op[0] == "push":
+                s.push(op[1])
+            elif op[0] == "pop":
+                s.pop()
+            else:
+                out.append(s.get_min())
+        except (IndexError, ValueError):            # pop or min on an empty stack
+            out.append("crash")
+            break
+    return out
+
+def rand_ops(q):
+    ops, size = [], 0
+    for _ in range(q):
+        r = random.random()
+        if size == 0 or r < 0.4:
+            ops.append(("push", random.randint(0, 3)))
+            size += 1
+        elif r < 0.7:
+            ops.append(("pop",))
+            size -= 1
+        else:
+            ops.append(("min",))
+    return ops
+
+random.seed(1)
+ops = next(o for o in (rand_ops(60) for _ in range(1000)) if run_ops(MinStackBuggy, o) != run_ops(MinStackBrute, o))
+lo, hi = 0, len(ops)                     # invariant: prefix of length lo agrees, prefix of length hi does not
+while hi - lo > 1:
+    mid = (lo + hi) // 2
+    if run_ops(MinStackBuggy, ops[:mid]) == run_ops(MinStackBrute, ops[:mid]):
+        lo = mid
+    else:
+        hi = mid
+print(f"{len(ops)} operations; first wrong output at operation {hi}: {ops[hi - 1]}")
+minimal = shrink(ops[:hi], lambda o: run_ops(MinStackBuggy, o) != run_ops(MinStackBrute, o),
+                 lambda o: smaller_list(o))
+print("shrunk to:", minimal)
+assert len(minimal) == 4 and minimal[-1] == ("min",)
+```
+
+::: {#fig-test-min-stack}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def replay(ops):
+    s = MinStackBuggy()
+    for op in ops:
+        if op[0] == "push":
+            s.push(op[1])
+        elif op[0] == "pop":
+            s.pop()
+    return list(s.st), list(s.mins)
+
+after_pushes, after_pop = replay(minimal[:2]), replay(minimal[:3])
+assert after_pop[1] == []                            # the next min() query crashes
+
+def draw(ax, p):
+    stacks = [(after_pushes[0], "st", "indigo"), (after_pushes[1], "mins", "amber"),
+              (after_pop[0], "st", "indigo"), (after_pop[1], "mins", "red")]
+    for k, (items, name, c) in enumerate(stacks):
+        V.stack(ax, p, items, x=3.2 * k + (1.4 if k >= 2 else 0), title=name, color=c, w=1.2, top_label="")
+    V.text(ax, p, 2.2, 3.0, "after push 0, push 0", color="muted", size=10)
+    V.text(ax, p, 9.0, 3.0, "after pop: min() crashes", color="red", size=10)
+V.show(draw)
+```
+
+The shrunk failing sequence, replayed on the buggy min-stack. After two pushes of 0, the stack holds two 0s but the min-stack only one; one pop empties the min-stack.
+
+:::
+
+The shrunk sequence (two pushes of the same value, a pop, a min query) points straight at the duplicate-minimum bug.
+
+**Read the constraints again.** A surprising share of WAs come from misreading the statement: 1-indexed vs 0-indexed, "at most" vs "exactly", inclusive bounds, values that can be negative, multiple test cases. Read the statement once more, line by line, against your code — out loud if possible ("rubber-duck debugging"). Explaining the code forces you to say the assumption you made.
+
+**Compiler flags.** For C++, compile locally with warnings and, when hunting a bug, with sanitizers:
+
+```bash
+# everyday: warnings catch shadowed variables, signed/unsigned comparisons, missing returns
+g++ -std=c++17 -O2 -Wall -Wextra -Wshadow -DLOCAL sol.cpp -o sol
+# bug hunting: out-of-bounds, use-after-free, signed overflow, bad iterators
+g++ -std=c++17 -g -fsanitize=address,undefined -D_GLIBCXX_DEBUG sol.cpp -o sol_dbg
+```
+
+- `-Wshadow` warns when an inner variable hides an outer one (a local `n` hiding the global `n`).
+- `-fsanitize=address` reports out-of-bounds accesses on arrays and the heap, and use-after-free.
+- `-fsanitize=undefined` reports signed integer overflow, shifts by too many bits and division by zero.
+- `-D_GLIBCXX_DEBUG` makes `vector::operator[]` check bounds and makes `std::sort` check that the comparator is a strict weak ordering.
+
+The sanitizers are not available with MinGW on Windows; use WSL or Linux for them. The debug flags make the program several times slower, so use them on the failing input, not on the max test.
+
+## Interactive problems {#sec-test-interactive}
+
+In an interactive problem, your program talks to a judge program: it prints a query, reads the answer, and eventually prints the final answer. Two rules matter more than anything else:
+
+1. **Flush after every query.** Output is buffered; until you flush, the judge sees nothing and both programs wait forever (Idleness limit exceeded). In C++ `cout << x << endl` flushes (`'\n'` does not); also `fflush(stdout)` or `cout.flush()`. In Python `print(x, flush=True)`.
+2. **Respect the query limit and the format.** One query too many is WA. Read the judge's `-1` (error) answer if the problem has one, and exit immediately.
+
+You cannot stress-test an interactive solution with a plain compare loop: there is no fixed input. Instead write a **local judge** (an interactor): a program that holds the hidden data, answers queries, counts them, validates them, and checks the final answer. In Python the simplest form is a class with an `ask` method; the solution is a function that takes `ask` as a parameter. Then the stress loop runs the solution against the judge for many (or all) hidden values. Both problems in @sec-test-p6 use this form.
+
+::: {#fig-test-interactive}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.box(ax, p, 0, 0, 3.2, 1.0, "solution", color="indigo")
+    V.box(ax, p, 7.0, 0, 4.4, 1.0, "judge (hidden data)", color="amber")
+    V.arrow(ax, p, 3.2, 0.75, 7.0, 0.75)
+    V.text(ax, p, 5.1, 1.1, "query + flush", color="indigo", size=10)
+    V.arrow(ax, p, 7.0, 0.25, 3.2, 0.25)
+    V.text(ax, p, 5.1, -0.1, "answer", color="amber", size=10)
+    V.arrow(ax, p, 1.6, 0, 1.6, -1.2)
+    V.box(ax, p, 0, -2.2, 3.2, 1.0, "final answer", color="indigo")
+    V.arrow(ax, p, 3.2, -1.7, 7.0, -1.7)
+    V.box(ax, p, 7.0, -2.2, 4.4, 1.0, "OK / WA", color="green")
+    V.text(ax, p, 9.2, -0.6, "validate, count ≤ limit", color="muted", size=9)
+V.show(draw)
+```
+
+The interactive loop. The solution's query reaches the judge only after a flush; the judge validates and counts every query and checks the final answer.
+
+:::
+
+To test the real stdin/stdout program, write the interactor as a separate program and connect the two with a named pipe:
+
+```python
+# interactor.py <hidden>: answers "is x a divisor?" queries; verdict on stderr
+import sys
+
+hidden, queries = int(sys.argv[1]), 0
+for line in sys.stdin:
+    tok = line.strip()
+    if tok in ("prime", "composite"):
+        ok = (tok == "prime") == all(hidden % d for d in range(2, hidden))
+        sys.stderr.write(f"{'OK' if ok else 'WA'} after {queries} queries\n")
+        sys.exit(0 if ok else 1)
+    queries += 1
+    x = int(tok)
+    if queries > 20 or not 2 <= x <= 100:
+        sys.stderr.write("WA: too many queries or query out of range\n")
+        sys.exit(1)
+    print("yes" if hidden % x == 0 else "no", flush=True)
+sys.stderr.write("WA: no final answer\n")
+sys.exit(1)
+```
+
+```bash
+mkfifo pipe
+for h in $(seq 2 100); do
+    ./sol < pipe | python3 interactor.py $h > pipe || { echo "failed for hidden = $h"; break; }
+done
+rm pipe
+```
+
+The solution reads from the pipe, its output goes into the interactor, and the interactor's answers go back into the pipe. The exit status of the pipeline is the interactor's.
+
+Some judges are **adaptive**: they do not fix the hidden value in advance, but answer each query so as to stay consistent with as many possibilities as possible (an adversary, as in @sec-pf-lower-bounds). A local adaptive judge is the best test of a query-limit argument (exercise 14).
+
+## Pattern 1: stress test against a brute force {#sec-test-p1}
+
+**Where we are.** The lessons built a testing kit: a stress loop, generators, a shrinker, an edge-case checklist and a guide to verdicts. The patterns use it in the order a bug is hunted: compare with a brute force (this pattern), make the random inputs look like real ones (Pattern 2), shrink a failure until the bug is visible (Pattern 3), add the corners random inputs never reach (Pattern 4), measure cost instead of answers (Pattern 5), and test a program that talks to a judge (Pattern 6).
+
+**Recognise it.** You have an idea that is not obviously correct: a greedy order, a comparator, a one-pass update rule, a formula found from examples. Or the samples pass but you have no proof. Or $n$ is small enough in a subtask that a brute force exists.
+
+::: {.callout-important title="Template"}
+1. Write the brute force first, in the most direct way (all permutations, all subarrays, all subsets). It must not share code or ideas with the solution.
+2. Write a generator with tiny sizes and a small, **hand-biased** value pool (0, 1, duplicates, values that are prefixes of each other, negatives).
+3. Run `stress(gen, solution, brute)`. On failure, shrink and read the minimal case.
+4. After fixing, keep the stress test and run it again: also check that it **does** catch the old bug (the generator is strong enough).
+:::
+
+**Complexity.** Trials × brute-force cost. With $n \le 8$, an $O(n! \cdot n)$ brute force is still about $3\cdot10^5$ operations per test: a few thousand tests run in seconds.
+
+::: {#fig-test-p1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+with keep_random():
+    random.seed(3)
+    run = []
+    while True:
+        a, k = gen_pairs()
+        run.append((a, k))
+        if pairs_buggy(a, k) != pairs_brute(a, k):
+            break
+run = run[-5:]
+
+def draw(ax, p):
+    cells = [[" ".join(map(str, a)), str(k), str(pairs_brute(a, k)), str(pairs_buggy(a, k)),
+              "ok" if pairs_brute(a, k) == pairs_buggy(a, k) else "MISMATCH"] for a, k in run]
+    colors = {(r, c): ("green" if row[4] == "ok" else "red") for r, row in enumerate(cells) for c in (4,)}
+    colors.update({(len(cells) - 1, c): "red" for c in range(5)})
+    V.grid(ax, p, cells, col_labels=["a", "k", "brute", "solution", "verdict"], colors=colors, cell_w=2.6, size=10)
+V.show(draw)
+```
+
+A stress run on the pair counter: brute force and solution agree until the first mismatch, which the loop prints.
+
+:::
+
+{{< include ../problems/lc-0680-valid-palindrome-ii/problem.qmd >}}
+
+[**From a string rule to a copied algorithm.** Valid Palindrome II has two branches that are easy to get half right, and the stress test checks both. Maximum Product Subarray copies Kadane's algorithm with one change, and the brute force shows at once that the change breaks on negative numbers.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0152-maximum-product-subarray/problem.qmd >}}
+
+## Pattern 2: generate structured random inputs {#sec-test-p2}
+
+**From random numbers to random structures.** A stress test only finds a bug if the generator can produce an input that shows it. For arrays of numbers that is easy. For strings with repeats, directed graphs with cycles, and trees, the generator itself needs care.
+
+**Recognise it.** The input is not "an array of numbers" but a string, a graph, a tree, a set of intervals or a permutation, and the bug needs a specific structure to show: a repeated character after another repeat, a vertex reachable along two paths, a deep path, a non-root parent.
+
+::: {.callout-important title="Template"}
+1. Pick the generator family from @sec-test-generators that produces valid inputs of the right type.
+2. Bias it towards the structures that matter: small alphabets, DAGs (no cycles, many shared descendants), paths and random trees, small weights.
+3. Use **several** families. Each one misses some bugs; together they rarely do.
+4. Check that each family actually catches the classic bug for the problem (keep the buggy version around as a test of the test).
+:::
+
+**Complexity.** Generating a tree, DAG or graph is $O(n + m)$ (Prüfer decoding as written is $O(n^2)$, fine for test sizes; a heap makes it $O(n\log n)$).
+
+::: {#fig-test-p2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+with keep_random():
+    random.seed(2)
+    heights = {name: height(500, gen(500), 1) for name, gen in
+               [("random parent", rand_tree_parent), ("Prüfer (uniform)", rand_tree_uniform),
+                ("path", rand_path), ("star", rand_star)]}
+
+def draw(ax, p):
+    names = list(heights)
+    ax.barh(names, [heights[n] for n in names], color=[p["indigo"], p["violet"], p["cyan"], p["amber"]])
+    ax.set_xscale("log")
+    ax.set_xlabel("height (edges from vertex 1)")
+    for i, n in enumerate(names):
+        ax.text(heights[n] * 1.1, i, str(heights[n]), va="center", color=p["text"], fontsize=9)
+    ax.invert_yaxis()
+V.plot(draw, size=(6.4, 2.6))
+```
+
+Height of a 500-vertex tree from each family, measured from vertex 1 (log scale). Only paths reach the depths where recursion breaks.
+
+:::
+
+::: {#fig-test-anim-window}
+
+```{python}
+#| echo: false
+ls_s = "tmmzuxt"
+ls_last, ls_left, ls_best, ls_frames, ls_caps = {}, 0, 0, [], []
+for i, ch in enumerate(ls_s):
+    p_ = ls_last.get(ch, -1)
+    if p_ >= ls_left:
+        ls_left = p_ + 1
+        how = f"'{ch}' last seen at {p_}, inside the window: left jumps to {ls_left}"
+    elif p_ >= 0:
+        how = f"'{ch}' last seen at {p_}, left of the window: left stays at {ls_left}"
+    else:
+        how = f"'{ch}' is new"
+    ls_last[ch] = i
+    ls_best = max(ls_best, i - ls_left + 1)
+    ls_frames.append((ls_left, i))
+    ls_caps.append(f"{how}; window length {i - ls_left + 1}, best {ls_best}")
+assert ls_best == 5 == len(set("mzuxt"))
+
+def ls_frame(ax, p, k):
+    left, i = ls_frames[k]
+    V.array(ax, p, list(ls_s), regions=[(left, i + 1, "cyan", "window")],
+            pointers=[(left, "left", "green"), (i, "i", "indigo", "top")] if left != i else [(i, "left = i", "indigo", "top")],
+            dim=list(range(i + 1, len(ls_s))))
+
+V.animate(ls_frame, len(ls_s), captions=ls_caps, interval=1100)
+del i, ch, p_, how                # keep the chapter's namespace clean
+```
+
+The window of Longest Substring on `"tmmzuxt"`. Watch the last frame: `t` was seen at index 0, which is already left of the window, so `left` must **not** move. A version that moves `left` back to 1 passes most random strings; a generator that repeats characters far apart, as in this example, catches it.
+
+:::
+
+{{< include ../problems/lc-0003-longest-substring-without-repeating-characters/problem.qmd >}}
+
+[**From a string to a graph.** Longest Substring needs strings whose repeats sit both inside and outside the window. Course Schedule needs directed graphs with and without cycles, and the generator must make both kinds likely.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0207-course-schedule/problem.qmd >}}
+
+[**From any graph to a tree.** A random graph is easy to make. A random tree needs a generator that keeps it connected and acyclic, and Tree with Maximum Cost also needs deep trees, where rerooting mistakes show.]{.flow-bridge}
+
+
+{{< include ../problems/cf-1092f-tree-with-maximum-cost/problem.qmd >}}
+
+## Pattern 3: shrink the failing case {#sec-test-p3}
+
+**From finding a failure to understanding it.** Patterns 1 and 2 produce a failing input, often a long one. Shrinking it, by deleting and lowering parts while it still fails, leaves an input small enough to trace by hand.
+
+**Recognise it.** The stress test found a counterexample, but it is long, and you cannot see the bug in it. Or a large hand-made test fails and you do not know which part of it matters.
+
+::: {.callout-important title="Template"}
+1. Define `fails(case)`: the solution differs from the brute force (or crashes in the same way). Return `False` for inputs that break the problem's constraints.
+2. Define `smaller(case)`: chunk deletions, single deletions, smaller values, and **global** moves that keep the structure (shift all coordinates, relabel values by rank).
+3. Run `shrink(case, fails, smaller)` and read the result. Then fix the bug, and add the shrunk case to the sample asserts.
+:::
+
+**Complexity.** Each shrink step costs at most (number of candidates) × (cost of `fails`), and the input gets smaller every step. For inputs of 20–50 elements this is a fraction of a second.
+
+::: {#fig-test-p3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+stack_fails = lambda o: run_ops(MinStackBuggy, o) != run_ops(MinStackBrute, o)
+ops_history = shrink_history(ops[:hi], stack_fails, lambda o: smaller_list(o))
+sizes = {"pair count (array length)": [len(c[0]) for c in pair_history],
+         "min-stack (number of operations)": [len(o) for o in ops_history]}
+
+def draw(ax, p):
+    for (name, ys), c in zip(sizes.items(), ("indigo", "amber")):
+        ax.plot(range(len(ys)), ys, marker="o", ms=3, color=p[c], label=name)
+    ax.set_xlabel("shrink step")
+    ax.set_ylabel("input size")
+    ax.legend()
+V.plot(draw, size=(6.4, 2.8))
+```
+
+Size of the failing input after each shrink step, for the pair-count case and the min-stack operation sequence. Big chunk deletions first, then single steps.
+
+:::
+
+{#sec-test-p3-merge}
+
+```{python}
+def merge_buggy(ivs):
+    """Sort by start, grow blocks — but extend with the new end instead of the max."""
+    out = []
+    for s, e in sorted(ivs):
+        if out and s <= out[-1][1]:
+            out[-1][1] = e                              # bug: forgets max()
+        else:
+            out.append([s, e])
+    return out
+
+def merge_brute(ivs):
+    """The definition: merge any overlapping pair, repeat until a pass changes nothing."""
+    cur = [list(iv) for iv in sorted(ivs)]
+    while True:
+        nxt, merged = [], False
+        for s, e in cur:
+            if nxt and s <= nxt[-1][1]:
+                nxt[-1] = [nxt[-1][0], max(nxt[-1][1], e)]
+                merged = True
+            else:
+                nxt.append([s, e])
+        if not merged:
+            return nxt
+        cur = nxt
+
+mi_case = [[1, 10], [2, 3], [12, 13]]
+mi_fails = lambda c: merge_buggy(c) != merge_brute(c)
+assert mi_fails([[1, 10], [2, 3]])
+
+def mi_smaller(case):
+    for i in range(len(case)):                          # delete one interval, biggest span first
+        yield case[:i] + case[i + 1:]
+
+hist, case = [mi_case], mi_case
+while True:
+    for cand in sorted(mi_smaller(case), key=lambda c: -sum(e - s for s, e in c)):
+        if mi_fails(cand):
+            case = cand
+            hist.append(cand)
+            break
+    else:
+        break
+print("failing input:", mi_case, "\nshrunk to:    ", case,
+      " buggy =", merge_buggy(case), " brute =", merge_brute(case))
+assert case == [[1, 10], [2, 3]] and len(hist) == 2
+del hist, case, cand
+```
+
+**Reading it line by line.** The stress test hands over `[[1,10],[2,3],[12,13]]`, where the buggy merge answers $[[1,3],[12,13]]$ instead of $[[1,10],[12,13]]$. Every candidate is a deletion, tried biggest-span first. Round one: dropping $[1,10]$ or $[2,3]$ makes the two agree, but dropping $[12,13]$ still fails — the nest is what matters, not the bystander. Round two, on $[[1,10],[2,3]]$: deleting either interval ends the failure, so the shrinker stops at exactly the pair that names the bug — the extension must be `max(end, e)`, because a *nested* interval ends before the block it falls inside (@sec-int-p1-a's running example covers the algorithm itself).
+
+[**From deleting items to shrinking numbers.** Merge Intervals shrinks by deleting intervals. Search in Rotated Sorted Array shrinks the array, the rotation and the target together, and the minimal case points at one boundary comparison.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0033-search-in-rotated-sorted-array/problem.qmd >}}
+
+## Pattern 4: sweep the edge cases {#sec-test-p4}
+
+**From random tests to the corners.** A random generator with small sizes rarely produces the largest $n$, values next to $2^{31}$, or several test cases in one input. This pattern lists those corners and tries every one.
+
+**Recognise it.** The solution is right on random small tests but you have not tried the corners: many test cases in one input, the maximum $n$ with the maximum values, $x = 0$ or $x = 1$, values next to $2^{31}$. These are the cases random generators with small sizes **never** produce.
+
+::: {.callout-important title="Template"}
+1. Go through the checklist of @sec-test-edge-cases and write each relevant case as an input.
+2. For small sizes, enumerate **all** inputs (all strings over a 3-letter alphabet up to length 6, all $x \le 1000$).
+3. For overflow, run the **maximum** test and compare intermediate values with the type's range. In Python, simulate a C++ `int` with a checker that raises when a value leaves $[-2^{31}, 2^{31})$.
+4. For multi-test inputs, generate inputs with **several** test cases, including identical ones in a row.
+:::
+
+**Complexity.** A sweep is a fixed list plus an exhaustive enumeration; keep the enumeration under about $10^5$ brute-force calls.
+
+::: {#fig-test-p4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+values = {"n(n+1)/2, n = 1e5": 10**5 * (10**5 + 1) // 2,
+          "46341²": 46341**2,
+          "sum of 2e5 values ≤ 1e9": 2 * 10**14,
+          "tree cost, n = a = 2e5": 3999980000000000,
+          "a·b, a, b < 1e9 + 7": (10**9 + 6) ** 2,
+          "a·b, a, b < 1e18": 10**36}
+
+def draw(ax, p):
+    names = list(values)
+    ax.barh(names, [math.log10(v) for v in values.values()], color=p["muted"])
+    for lim, name, c in ((2**31 - 1, "int", "amber"), (2**63 - 1, "long long", "red")):
+        ax.axvline(math.log10(lim), color=p[c], lw=1.6, label=f"{name} limit")
+    ax.legend(loc="upper right")
+    ax.set_xlabel("log10 of the value")
+    ax.invert_yaxis()
+V.plot(draw, size=(6.4, 2.9))
+```
+
+Typical worst-case values against the integer limits (log scale). Anything right of the first line needs 64 bits; right of the second, 128 bits or modular care.
+
+:::
+
+```{python}
+#| label: test-i32
+INT_MIN, INT_MAX = -2**31, 2**31 - 1
+
+def i32(v):
+    """Use around every arithmetic result that C++ would store in an int."""
+    if not INT_MIN <= v <= INT_MAX:
+        raise OverflowError(f"int overflow: {v}")
+    return v
+```
+
+### Good subarrays: two bugs only the corners show {#sec-test-p4-good-subarrays}
+
+{{< include ../problems/cf-1398c-good-subarrays/card.qmd >}}
+
+The prefix-sums chapter solves this problem in full. Here it is a test subject, because the natural solution has two bugs that random small single-test inputs never reveal.
+
+- **State not reset.** Declare the counter once, outside the test-case loop, and every single-test input passes. The **second** test of a multi-test input then counts subarrays that cross from one test into the next. Only a generator that emits several tests per input finds it (template step 4).
+- **Overflow.** A string of $10^5$ ones makes every subarray good: $n(n+1)/2 = 5\,000\,050\,000 > 2^{31} - 1$. An `int` answer wraps, and only the maximum test shows it (template step 3).
+
+The cell runs both bugs past the stress loop, sweeps every string over $\{0, 1, 2\}$ up to length 6, and runs the max test through the `i32` checker above.
+
+```{python}
+#| label: test-good-subarrays
+def good_main(data, shared_counter=False, int_answer=False):
+    it = iter(data.split())
+    t = int(next(it))
+    out, cnt = [], Counter({0: 1})
+    for _ in range(t):
+        n, s = int(next(it)), next(it)
+        if not shared_counter:
+            cnt = Counter({0: 1})                    # fresh state for every test case
+        pref = ans = 0
+        for ch in s:
+            pref += int(ch) - 1                      # sum == length  <=>  sum of (d - 1) == 0
+            ans += cnt[pref]
+            if int_answer:
+                ans = i32(ans)                       # what a C++ int would hold
+            cnt[pref] += 1
+        out.append(ans)
+    return "\n".join(map(str, out))
+
+def good_brute(data):
+    it = iter(data.split())
+    out = []
+    for _ in range(int(next(it))):
+        n, s = int(next(it)), next(it)
+        d = list(map(int, s))
+        out.append(sum(sum(d[l:r + 1]) == r - l + 1 for l in range(n) for r in range(l, n)))
+    return "\n".join(map(str, out))
+
+def make_input(strings):
+    return f"{len(strings)}\n" + "".join(f"{len(s)}\n{s}\n" for s in strings)
+
+def gen_good(max_tests):
+    return lambda: (make_input([rand_string(random.randint(1, 8), "0123") for _ in range(random.randint(1, max_tests))]),)
+
+not_reset = lambda d: good_main(d, shared_counter=True)
+assert stress(gen_good(1), not_reset, good_brute) is None          # single-test inputs: passes
+assert stress(gen_good(4), not_reset, good_brute) is not None      # several tests: fails
+assert stress(gen_good(4), good_main, good_brute) is None
+
+sweep = ["".join(p) for n in range(1, 7) for p in product("012", repeat=n)]   # every string over {0,1,2}, length <= 6
+assert good_main(make_input(sweep)) == good_brute(make_input(sweep))
+
+big = make_input(["1" * 10**5])                                    # the max test: all ones
+assert good_main(big) == str(10**5 * (10**5 + 1) // 2)
+try:
+    good_main(big, int_answer=True)
+    overflowed = False
+except OverflowError:
+    overflowed = True
+assert overflowed
+
+sample = "3\n3\n120\n5\n11011\n6\n600005\n"
+assert good_main(sample) == "3\n6\n1" and not_reset(sample) != "3\n6\n1"
+```
+
+::: {#fig-test-p4-good-subarrays}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def trace_counts(tests, shared):
+    rows, cnt = [], Counter({0: 1})
+    for k, s in enumerate(tests, 1):
+        if not shared:
+            cnt = Counter({0: 1})
+        pref = 0
+        for ch in s:
+            pref += int(ch) - 1
+            rows.append((k, ch, pref, cnt[pref]))
+            cnt[pref] += 1
+    return rows
+
+fresh, shared = trace_counts(["0", "0"], False), trace_counts(["0", "0"], True)
+assert [r[3] for r in fresh] == [0, 0] and [r[3] for r in shared] == [0, 1]
+
+def draw(ax, p):
+    cells = [[str(f[0]), f[1], str(f[2]), str(f[3]), str(s[3])] for f, s in zip(fresh, shared)]
+    V.grid(ax, p, cells, col_labels=["test", "digit", "P", "cnt[P] fresh", "cnt[P] shared"],
+           colors={(1, 3): "green", (1, 4): "red"}, cell_w=2.4)
+V.show(draw)
+```
+
+The minimal failing input from exercise 12's shrinker: two tests "0". The shared counter still remembers $P = -1$ from test 1, so test 2 counts a subarray that crosses tests.
+
+:::
+
+[**From a multi-test corner to a numeric one.** Good Subarrays broke on the second test of an input and on the largest answer. Integer Square Root breaks at single values: $x = 0$, $x = 1$, and the point where `mid * mid` overflows.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0069-sqrt-x/problem.qmd >}}
+
+## Pattern 5: diagnose TLE, MLE and RE {#sec-test-p5}
+
+**From wrong answers to wrong costs.** Every pattern so far compared answers. TLE, MLE and RE come from inputs that are answered correctly but expensively, and random inputs are rarely the expensive ones, so we build worst cases and measure steps instead.
+
+**Recognise it.** The stress test passes, but the judge says TLE, MLE or RE on a large test. The bug is not in the answer but in the **cost**: a hidden quadratic, recursion depth, memory. Random tests do not show it, because random inputs are rarely worst cases.
+
+::: {.callout-important title="Template"}
+1. Write the **worst-case generators**: sorted, all equal, one long run, a path graph, a star, many duplicates, the max $n$ with the max values.
+2. Measure **operations** (a step counter) or time on sizes $n$ and $2n$. A ratio of about 2 means linear, about 4 means quadratic.
+3. For RE, run the max test locally: Python's recursion limit (default 1000) and C++ stack overflow show up on paths; index errors and division by zero show up on the edge sweep.
+4. For MLE, multiply out the memory: cells × bytes. A $10^4 \times 10^4$ table of 8-byte values is 800 MB.
+:::
+
+**Complexity.** One run per worst-case shape and size; a step counter costs $O(1)$ per step.
+
+::: {#fig-test-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    nodes = {
+        "t1": (0, 0, "TLE", "amber"), "t2": (4.4, 0, "sorted / equal / one run", "indigo"),
+        "t3": (8.8, 0, "steps at n and 2n", "violet"), "t4": (13.2, 0, "×2 linear, ×4 quadratic", "green"),
+        "r1": (0, -1.6, "RE / MLE", "pink"), "r2": (4.4, -1.6, "path, star, max n", "indigo"),
+        "r3": (8.8, -1.6, "sanitizers, memory", "violet"), "r4": (13.2, -1.6, "depth, index, bytes", "green"),
+    }
+    edges = [("t1", "t2", ""), ("t2", "t3", ""), ("t3", "t4", ""), ("r1", "r2", ""), ("r2", "r3", ""), ("r3", "r4", "")]
+    V.flow(ax, p, nodes, edges, w=3.6, h=0.8, size=9)
+V.show(draw)
+```
+
+Diagnosing a cost verdict: build the worst-case input, then measure instead of guessing.
+
+:::
+
+{{< include ../problems/cf-580c-kefa-and-park/problem.qmd >}}
+
+[**From deep recursion to a hidden quadratic.** Kefa and Park is answered correctly but can crash on a path-shaped tree. Longest Consecutive Sequence never crashes; two correct versions hide a quadratic that only one long run or many duplicates expose.]{.flow-bridge}
+
+
+### Longest consecutive sequence: a TLE random tests cannot see {#sec-test-p5-consecutive}
+
+{{< include ../problems/lc-0128-longest-consecutive-sequence/card.qmd >}}
+
+The hashing chapter solves this problem in full. Here we write two slow versions on purpose and ask which tests catch them. Both give correct answers, so a stress test passes them:
+
+- **No start check.** Walk up from **every** value. On $0, 1, \dots, n-1$ that is $n(n-1)/2$ steps.
+- **Loop over the list, not the set.** The start check is there, but each duplicate of a run's start walks the run again: on $h$ copies of $0$ followed by $0, 1, \dots, h-1$, that is $(h+1)(h-1)$ steps.
+
+Random arrays with values up to $10^9$ have almost no consecutive values, so all three versions take about $n$ steps on them. Only the **worst-case generators** of the template, one long run and many duplicates of a run's start, expose the quadratic. The cell counts walking steps on each shape, and the doubling test (template step 2) confirms it.
+
+```{python}
+#| label: test-consecutive
+def lcs_set(nums, stats=None, iterate=None, start_check=True):
+    s, best, steps = set(nums), 0, 0
+    for x in (s if iterate is None else iterate):
+        if start_check and x - 1 in s:
+            continue                                 # not the start of a run
+        y = x
+        while y + 1 in s:
+            y += 1
+            steps += 1
+        best = max(best, y - x + 1)
+    if stats is not None:
+        stats["steps"] = steps
+    return best
+
+longest_consecutive = lambda nums, stats=None: lcs_set(nums, stats)
+lcs_no_start_check = lambda nums, stats=None: lcs_set(nums, stats, start_check=False)
+lcs_over_list = lambda nums, stats=None: lcs_set(nums, stats, iterate=nums)
+
+def lcs_brute(nums):
+    vals, best, run = sorted(set(nums)), 0, 0
+    for i, v in enumerate(vals):
+        run = run + 1 if i and vals[i - 1] == v - 1 else 1
+        best = max(best, run)
+    return best
+
+gen_lcs = lambda: ([random.randint(-6, 6) for _ in range(random.randint(0, 12))],)
+for f in (longest_consecutive, lcs_no_start_check, lcs_over_list):
+    assert stress(gen_lcs, f, lcs_brute) is None     # all three are correct
+
+def steps(f, nums):
+    st = {}
+    f(nums, st)
+    return st["steps"]
+
+n = 2000
+random_case = [random.randint(-10**9, 10**9) for _ in range(n)]
+run_case = random.sample(range(n), n)                # 0..n-1 shuffled: one long run
+dup_case = [0] * (n // 2) + list(range(n // 2))      # many copies of the run's start
+table = {name: [steps(f, c) for c in (random_case, run_case, dup_case)]
+         for name, f in [("set + start check", longest_consecutive),
+                         ("no start check", lcs_no_start_check),
+                         ("loop over list", lcs_over_list)]}
+for name, row in table.items():
+    print(f"{name:18s} steps on random / one run / duplicates: {row}")
+assert table["set + start check"] == [0, n - 1, n // 2 - 1]
+assert table["no start check"][1] == n * (n - 1) // 2
+assert table["loop over list"][2] == (n // 2 + 1) * (n // 2 - 1)
+# Doubling n quadruples the steps: the signature of a quadratic.
+assert steps(lcs_no_start_check, list(range(2 * n))) / steps(lcs_no_start_check, list(range(n))) > 3.9
+```
+
+::: {#fig-test-p5-consecutive}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ns = [250, 500, 1000, 2000]
+curves = {
+    "set + start check (one run)": [steps(longest_consecutive, list(range(n))) for n in ns],
+    "no start check (one run)": [steps(lcs_no_start_check, list(range(n))) for n in ns],
+    "loop over list (duplicates)": [steps(lcs_over_list, [0] * (n // 2) + list(range(n // 2))) for n in ns],
+}
+
+def draw(ax, p):
+    for (name, ys), c in zip(curves.items(), ("green", "red", "amber")):
+        ax.loglog(ns, ys, marker="o", color=p[c], label=name)
+    ax.set_xlabel("n")
+    ax.set_ylabel("walking steps")
+    ax.legend(fontsize=8)
+V.plot(draw, size=(6.4, 3.0))
+```
+
+Steps of the three versions on their worst inputs. Doubling $n$ doubles the correct version's steps and quadruples the other two.
+
+:::
+
+## Pattern 6: test interactive solutions with a local judge {#sec-test-p6}
+
+**From a fixed input to a conversation.** Every test so far fed a fixed input and read the output. In an interactive problem the judge answers your queries, so a local test needs a judge too: a small program that holds the hidden value and plays the other side.
+
+**Recognise it.** The statement says "This is an interactive problem", describes a query format and a query limit, and asks you to flush the output.
+
+::: {.callout-important title="Template"}
+1. Write the solution as a function that receives `ask` (and returns the final answer), so it can run against both the real stdin/stdout and a local judge.
+2. Write a judge class: it holds the hidden data, **validates** every query (range, format, distinct indices, non-empty), counts queries and fails when the limit is exceeded, and checks the final answer.
+3. Run the solution against the judge for **every** hidden value when there are few, or for many random ones (including the extremes) when there are many.
+4. For the real submission: flush after each query, read the answer before sending the next, exit on `-1`.
+:::
+
+**Complexity.** One judge run per hidden value; the judge's own work is usually linear in the size of the queries.
+
+::: {#fig-test-p6}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    nodes = {
+        "sol": (0, 0, "solution: ask(q)", "indigo"),
+        "val": (4.4, 0, "valid query?", "violet"),
+        "cnt": (8.8, 0, "count ≤ limit?", "violet"),
+        "ans": (8.8, -2.2, "return answer", "green"),
+        "wa1": (4.4, 2.2, "WA", "red"),
+        "wa2": (8.8, 2.2, "WA", "red"),
+    }
+    edges = [("sol", "val", ""), ("val", "cnt", "yes"), ("cnt", "ans", "yes"), ("ans", "sol", ""),
+             ("val", "wa1", "no"), ("cnt", "wa2", "no")]
+    V.flow(ax, p, nodes, edges, w=3.4, h=0.8, size=10)
+V.show(draw)
+```
+
+What a local judge does with each query. Invalid queries and one query too many are wrong answers, just as on the real judge.
+
+:::
+
+{{< include ../problems/cf-679a-bear-and-prime-100/problem.qmd >}}
+
+[**From a fixed list of questions to adaptive ones.** Bear and Prime can ask the same fixed list of questions for every hidden number. Interview chooses each query from the previous answers (a binary search), so the local judge must also count the queries.]{.flow-bridge}
+
+
+{{< include ../problems/cf-1807e-interview/problem.qmd >}}
+
+**Looking back.** Each pattern closed one way a wrong program slips past a test: no reference to compare with, inputs without the right structure, failures too big to read, corners random inputs never reach, costs that answers do not show, and a judge that talks back. Together they make the stress loop of @sec-test-stress trustworthy.
+
+## Pattern map
+
+| Signal | Technique | Section |
+|---|---|---|
+| An unproved greedy, comparator or update rule | Stress test against brute force with a biased value pool | @sec-test-p1 |
+| Bug needs duplicates or ties to show | Small value ranges, small alphabets | @sec-test-stress |
+| Input is a tree, graph, DAG or set of intervals | Structured generators, several families | @sec-test-p2 |
+| Counterexample found but too long to read | Shrink with chunk deletion, value shrinking, global moves | @sec-test-p3 |
+| Failure in a sequence of operations | Binary search the first wrong operation | @sec-test-debugging |
+| Small input space | Enumerate all small inputs | @sec-test-edge-cases |
+| Many test cases per input | Multi-test generator; reset all state | @sec-test-p4-good-subarrays |
+| Products, squares, sums of $10^5$ values | Max test plus an int-range checker | @sec-test-p4 |
+| TLE although random tests are fast | Worst-case generators and step counting | @sec-test-p5-consecutive |
+| RE on a large tree | Path generator; iterative DFS | @sec-test-p5-kefa |
+| "This is an interactive problem" | Local judge with validation and a query counter | @sec-test-p6 |
+| Several correct outputs | A checker, not an output comparison | exercise 8 |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **A brute force that shares the bug.** If the brute force reuses the solution's helper functions, its sort order or its boundary conventions, both agree on the wrong answer. Write it from the statement, as directly as possible.
+- **A generator that cannot produce the bug.** Large value ranges, large alphabets and random-parent trees all hide whole classes of bugs. Check that the stress test catches a deliberately buggy version.
+- **Invalid generated inputs.** A "tree" with a cycle, "distinct" values that repeat, $n = 0$ when $n \ge 1$. The stress test then reports bugs that the judge would never trigger.
+- **Comparing outputs when many answers are correct.** Write a checker that validates the output instead.
+- **Debug output on stdout.** It turns a correct answer into WA. Use stderr, and remove it before submitting TLE-sensitive code.
+- **Not resetting state between test cases**: global maps, arrays, counters, flags, adjacency lists.
+- **`int` for products and sums.** Check the max test; in C++ use `long long` by default for sums.
+- **Recursion depth.** Python's default limit is 1000; a path of $10^5$ vertices crashes a recursive DFS.
+- **Forgetting to flush** in interactive problems: Idleness limit exceeded.
+- **Floating-point equality.** Compare floats with a tolerance (absolute or relative $10^{-6}$ to $10^{-9}$), both in the checker and in the code.
+- **Trusting "no counterexample found".** It is evidence, not proof: a generator can only find what it can produce.
+:::
+
+## Exercises
+
+**1. [E]** A stress test with arrays of length 1 to 8 and values in $[1, 10^9]$ passes 10 000 tests, but the solution gets WA. Give two likely reasons.
+
+::: {.callout-note collapse="true" title="Solution"}
+(1) The bug needs equal values (duplicates, ties), and with values up to $10^9$ random arrays almost never repeat a value: shrink the range to 1..5. (2) The bug only appears at larger sizes or extreme values: overflow, recursion depth, a per-test reset, or a case the generator never produces (empty input, $n$ exactly 1 when the generator starts at 2). Also check that the brute force is not wrong in the same way.
+:::
+
+**2. [E] (coding)** Write a generator for a random **permutation** of $1..n$ and one for a random array of $n$ **distinct** values from $[lo, hi]$. Check that their outputs are valid.
+
+::: {.callout-note collapse="true" title="Solution"}
+`random.shuffle` on `list(range(1, n + 1))` and `random.sample(range(lo, hi + 1), n)`. `random.sample` does not build the range list, so it is fast even for a huge range.
+
+```{python}
+for _ in range(300):
+    n = random.randint(0, 20)
+    p = rand_perm(n)
+    assert sorted(p) == list(range(1, n + 1))
+    d = rand_distinct(n, -5, 30)
+    assert len(set(d)) == n and all(-5 <= x <= 30 for x in d)
+```
+:::
+
+**3. [E] (coding)** This function returns the second largest **distinct** value, or `None`. Find its bug by an exhaustive sweep and fix it.
+
+```python
+def second_largest(a):
+    first = second = 0
+    for x in a:
+        if x > first: first, second = x, first
+        elif x > second and x != first: second = x
+    return second if second != first else None
+```
+
+::: {.callout-note collapse="true" title="Solution"}
+Initialising with 0 invents a value that may not be in the array. The exhaustive sweep, in order of length, finds the smallest failure at once: on `[1]` it returns 0 instead of `None`; on `[-1, -2]` it returns 0 instead of $-2$. Start from `None` (or $-\infty$) and treat "no value yet" explicitly.
+
+```{python}
+def second_largest_buggy(a):
+    first = second = 0
+    for x in a:
+        if x > first:
+            first, second = x, first
+        elif x > second and x != first:
+            second = x
+    return second if second != first else None
+
+def second_largest(a):
+    first = second = None
+    for x in a:
+        if first is None or x > first:
+            first, second = x, first
+        elif x != first and (second is None or x > second):
+            second = x
+    return second
+
+def second_brute(a):
+    d = sorted(set(a))
+    return d[-2] if len(d) >= 2 else None
+
+bad = next(a for a in all_arrays(4, [-2, -1, 0, 1, 2]) if second_largest_buggy(a) != second_brute(a))
+print("smallest failing input:", bad)
+assert bad == [1]
+assert all(second_largest(a) == second_brute(a) for a in all_arrays(5, [-2, -1, 0, 1, 2]))
+```
+:::
+
+**4. [M] (coding)** Check that Prüfer decoding gives each of the $5^3 = 125$ labelled trees on 5 vertices exactly once when it is run on all $125$ sequences (Cayley's formula).
+
+::: {.callout-note collapse="true" title="Solution"}
+Decoding is a bijection between sequences in $\{1..n\}^{n-2}$ and labelled trees, so running it on every sequence must give 125 distinct trees, each a valid tree. This is also why a uniformly random sequence gives a uniformly random tree.
+
+```{python}
+trees = [frozenset(frozenset(e) for e in prufer_to_tree(list(seq), 5)) for seq in product(range(1, 6), repeat=3)]
+assert len(trees) == 125 and len(set(trees)) == 125
+assert all(is_tree(5, [tuple(e) for e in t]) for t in trees)
+```
+:::
+
+**5. [M] (coding)** Write a generator for a random **connected** graph with $n$ vertices and $m$ edges that may contain self-loops and multi-edges (some problems allow them). Check connectivity with BFS.
+
+::: {.callout-note collapse="true" title="Solution"}
+Start from a random spanning tree (guarantees connectivity) and add $m - n + 1$ edges with endpoints chosen independently, allowing $u = v$ and repeats.
+
+```{python}
+def rand_multigraph(n, m):
+    edges = rand_tree_parent(n)
+    edges += [(random.randint(1, n), random.randint(1, n)) for _ in range(m - (n - 1))]
+    random.shuffle(edges)
+    return edges
+
+def connected(n, edges):
+    adj = defaultdict(list)
+    for u, v in edges:
+        adj[u].append(v)
+        adj[v].append(u)
+    seen, q = {1}, deque([1])
+    while q:
+        v = q.popleft()
+        for w in adj[v]:
+            if w not in seen:
+                seen.add(w)
+                q.append(w)
+    return len(seen) == n
+
+for _ in range(300):
+    n = random.randint(1, 12)
+    m = random.randint(n - 1, 3 * n)
+    g = rand_multigraph(n, m)
+    assert len(g) == m and connected(n, g)
+```
+:::
+
+**6. [E]** Your C++ solution passes locally and gets "Runtime error on test 5". The input has $n \le 10^6$ and you declared `int a[100000];` globally. What happened, and which flag would have caught it locally?
+
+::: {.callout-note collapse="true" title="Solution"}
+The array is ten times too small: writing `a[i]` for $i \ge 10^5$ is out of bounds. Sometimes this crashes (RE), sometimes it silently overwrites other globals (WA). `-fsanitize=address` reports the out-of-bounds write with a line number; `vector` with `-D_GLIBCXX_DEBUG` also checks `operator[]`. Read the constraints again and size arrays from them (plus a small margin).
+:::
+
+**7. [M]** Explain why a solution to a problem with $t \le 10^4$ test cases and $\sum n \le 2\cdot10^5$ that calls `memset(cnt, 0, sizeof cnt)` on a global `int cnt[1000001]` at the start of each test gets TLE, and give two fixes.
+
+::: {.callout-note collapse="true" title="Solution"}
+Each `memset` writes 4 MB; $10^4$ tests write 40 GB, about $10^{10}$ bytes, far over the time limit, although the "real" work is only $2\cdot10^5$. Fixes: (1) after each test, reset only the entries you touched (loop over the test's values and set `cnt[v] = 0`); (2) use a timestamp array: store `when[v] = test_id` and treat `cnt[v]` as 0 when `when[v] != test_id`. A per-test `map` or `unordered_map` also works.
+:::
+
+**8. [M] (coding)** For a problem with many correct outputs (any topological order of a DAG), write a **checker** and stress-test Kahn's algorithm with it.
+
+::: {.callout-note collapse="true" title="Solution"}
+The checker validates the output against the input: it must be a permutation of the vertices, and every edge must go forward. It never compares with another solution's output.
+
+```{python}
+def kahn(n, edges):
+    indeg, adj = [0] * (n + 1), defaultdict(list)
+    for u, v in edges:
+        adj[u].append(v)
+        indeg[v] += 1
+    q = deque(v for v in range(1, n + 1) if indeg[v] == 0)
+    order = []
+    while q:
+        v = q.popleft()
+        order.append(v)
+        for w in adj[v]:
+            indeg[w] -= 1
+            if indeg[w] == 0:
+                q.append(w)
+    return order
+
+def check_topo(n, edges, order):
+    if sorted(order) != list(range(1, n + 1)):
+        return False
+    pos = {v: i for i, v in enumerate(order)}
+    return all(pos[u] < pos[v] for u, v in edges)
+
+for _ in range(500):
+    n = random.randint(1, 8)
+    edges = rand_dag(n, random.randint(0, n * (n - 1) // 2))
+    assert check_topo(n, edges, kahn(n, edges))
+assert not check_topo(3, [(1, 2), (2, 3)], [2, 1, 3])
+```
+:::
+
+**9. [M]** In C++, why can `sort` with the comparator `[](int a, int b) { return a <= b; }` crash, and how do you detect it?
+
+::: {.callout-note collapse="true" title="Solution"}
+`std::sort` requires a **strict** weak ordering: `comp(a, a)` must be false. With `<=`, `comp(a, a)` is true, and the unguarded inner loops of introsort can run past the end of the range when many elements are equal: undefined behaviour, often a crash or corrupted data. `-D_GLIBCXX_DEBUG` checks the comparator and aborts with a message; `-fsanitize=address` catches the out-of-bounds read. Use `<`.
+:::
+
+**10. [M] (coding)** Check by brute force that the concatenation comparator "$x$ before $y$ iff $x + y > y + x$" (which arranges numbers into the largest number) is a strict weak ordering on all digit strings of length 1 to 3 over the digits 0–2, and that the comparator "$x$ before $y$ iff $x + y \ge y + x$" is not.
+
+::: {.callout-note collapse="true" title="Solution"}
+Test irreflexivity (`not before(x, x)`) and transitivity (`before(x, y) and before(y, z)` implies `before(x, z)`) over all triples. The non-strict version fails irreflexivity at once.
+
+```{python}
+strs = ["".join(p) for k in (1, 2, 3) for p in product("012", repeat=k)]
+before = lambda x, y: x + y > y + x
+before_ge = lambda x, y: x + y >= y + x
+assert all(not before(x, x) for x in strs)
+assert all(before(x, z) for x in strs for y in strs for z in strs if before(x, y) and before(y, z))
+assert any(before_ge(x, x) for x in strs)
+```
+:::
+
+**11. [M]** What is the risk of `x * y % MOD` in C++ when `x` and `y` are `int` values below $10^9 + 7$? And when they are `long long` values below $10^{18}$?
+
+::: {.callout-note collapse="true" title="Solution"}
+With `int` operands the product is computed in `int` and overflows (it can reach $10^{18}$); cast first: `1LL * x * y % MOD`. With `long long` operands up to $10^{18}$, the product can reach $10^{36}$, beyond 64 bits; use `__int128` (`(__int128)x * y % m`) or a multiplication-by-doubling routine. The edge sweep should include $x = y = m - 1$.
+:::
+
+**12. [M] (coding)** Shrink a failing **multi-test** input for the reset bug of @sec-test-p4-good-subarrays to the smallest one.
+
+::: {.callout-note collapse="true" title="Solution"}
+The case is a list of test strings. Shrink by deleting tests, then shortening and lowering each test's digits. The result has two one-digit tests: the second sees the first one's counter.
+
+```{python}
+def smaller_tests(case):
+    (tests,) = case
+    def smaller_test(s):
+        if len(s) > 1:
+            yield s[1:]
+            yield s[:-1]
+        for i, ch in enumerate(s):
+            if ch != "0":
+                yield s[:i] + str(int(ch) - 1) + s[i + 1:]
+    for c in smaller_list(tests, lambda s: list(smaller_test(s))):
+        if c:
+            yield (c,)
+
+fails_reset = lambda c: not_reset(make_input(c[0])) != good_brute(make_input(c[0]))
+random.seed(4)                                    # derive each test from a seed: the shrunk answer must be reproducible
+start = ([rand_string(8, "0123") for _ in range(6)],)
+assert fails_reset(start)
+minimal = shrink(start, fails_reset, smaller_tests)[0]
+print("minimal failing tests:", minimal)
+assert len(minimal) == 2 and all(len(s) == 1 for s in minimal)
+```
+:::
+
+**13. [H]** In a contest you have a WA on test 47 of a problem with a single test per input, you cannot see the test, and your stress test passes. List what you would try, in order.
+
+::: {.callout-note collapse="true" title="Solution"}
+(1) Reread the statement and constraints against the code (indexing, inclusive bounds, special output such as $-1$). (2) Edge sweep: $n = 1$, extremes, all equal, max values — especially **overflow**, since stress tests use small values. (3) Strengthen the generator: larger $n$ (with a faster brute force, e.g. $O(n^2)$ instead of $O(n!)$), larger value ranges, other structures (paths, stars, duplicate-heavy arrays). (4) Write a second, independent fast solution and stress the two against each other on large inputs. (5) Compile with sanitizers and `-D_GLIBCXX_DEBUG` and run the large random tests: undefined behaviour can pass small tests by luck. (6) Check output format for big answers (scientific notation for floats, precision).
+:::
+
+**14. [H] (coding)** Write an **adaptive** judge for "guess $h \in [1, n]$; each query $q$ is answered `lower`, `higher` or `equal`": it keeps the set of values consistent with all answers so far and always answers so as to keep the larger part. Show that binary search needs exactly $\lfloor \log_2 n \rfloor + 1$ queries against it, and that querying $lo + 1$ (a "lazy" search) needs $n$ queries in the worst case.
+
+::: {.callout-note collapse="true" title="Solution"}
+The adversary keeps an interval $[lo, hi]$ of candidates. For a query $q$ in it, the parts below and above $q$ have sizes $q - lo$ and $hi - q$; it answers so that the larger part survives, and says `equal` only when both are empty. Against binary search on an interval of size $s \ge 2$, the surviving part has size $\lfloor s/2 \rfloor$, so the number of queries is $f(s) = 1 + f(\lfloor s/2 \rfloor)$ with $f(1) = 1$, which is $\lfloor \log_2 n \rfloor + 1$. This matches the decision-tree lower bound of @sec-pf-lower-bounds. The lazy search always queries the bottom of the interval, so the adversary removes one value per query.
+
+```{python}
+class AdaptiveGuessJudge:
+    def __init__(self, n):
+        self.lo, self.hi, self.queries = 1, n, 0
+    def ask(self, q):
+        self.queries += 1
+        below, above = q - self.lo, self.hi - q
+        if below <= 0 and above <= 0:
+            return "equal"
+        if above >= below:
+            self.lo = q + 1
+            return "higher"
+        self.hi = q - 1
+        return "lower"
+
+def binary_guess(n, ask):
+    lo, hi = 1, n
+    while True:
+        mid = (lo + hi) // 2
+        r = ask(mid)
+        if r == "equal":
+            return mid
+        lo, hi = (mid + 1, hi) if r == "higher" else (lo, mid - 1)
+
+def lazy_guess(n, ask):
+    lo = 1
+    while True:
+        r = ask(lo)
+        if r == "equal":
+            return lo
+        lo += 1
+
+for n in range(1, 300):
+    j = AdaptiveGuessJudge(n)
+    binary_guess(n, j.ask)
+    assert j.queries == n.bit_length()               # floor(log2 n) + 1
+    j = AdaptiveGuessJudge(n)
+    lazy_guess(n, j.ask)
+    assert j.queries == n
+```
+:::
+
+**15. [H] (coding)** Two programs compute the mean of a list of floats in different orders and print it with 9 decimals. Show that comparing outputs exactly gives false alarms, and write a checker with absolute or relative error $10^{-6}$.
+
+::: {.callout-note collapse="true" title="Solution"}
+Floating-point addition is not associative, so the last digits can differ. Judges accept an answer when $|x - y| \le \varepsilon \max(1, |y|)$; the checker must do the same.
+
+```{python}
+def mean_forward(a):
+    return sum(a) / len(a)
+
+def mean_backward(a):
+    s = 0.0
+    for x in reversed(a):
+        s += x
+    return s / len(a)
+
+def close(x, y, eps=1e-6):
+    return abs(x - y) <= eps * max(1.0, abs(y))
+
+exact_mismatch = 0
+for _ in range(500):
+    a = [random.uniform(-1e6, 1e6) for _ in range(random.randint(1, 50))]
+    x, y = mean_forward(a), mean_backward(a)
+    exact_mismatch += f"{x:.9f}" != f"{y:.9f}"
+    assert close(x, y)
+print("exact comparison would report", exact_mismatch, "false failures out of 500")
+assert exact_mismatch > 0
+```
+:::
+
+**16. [H]** Codeforces "hacks" can make `unordered_map<long long, int>` take $\Theta(n^2)$ time. Why, and how do you defend against it?
+
+::: {.callout-note collapse="true" title="Solution"}
+For integers, libstdc++ uses the identity hash, and the bucket count follows a known sequence of primes. A hacker can choose keys that are all multiples of the bucket count, so they all land in one bucket and each operation scans a chain of length up to $n$. Defence: a hash with a random, per-run seed, for example splitmix64 applied to `x + FIXED_RANDOM`, where `FIXED_RANDOM` comes from `chrono::steady_clock::now()`. Alternatives: `map` ($O(\log n)$ guaranteed), or sorting and coordinate compression. Locally, test with keys $k \cdot P$ for the bucket-count prime $P$ to see the slowdown.
+
+```cpp
+struct SplitMix {
+    static uint64_t f(uint64_t x) {
+        x += 0x9e3779b97f4a7c15; x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111eb; return x ^ (x >> 31);
+    }
+    size_t operator()(uint64_t x) const {
+        static const uint64_t R = chrono::steady_clock::now().time_since_epoch().count();
+        return f(x + R);
+    }
+};
+unordered_map<long long, int, SplitMix> cnt;
+```
+:::
+
+**17. [E]** Your program prints the right answers locally but gets "Wrong answer on test 1". The sample input has two test cases. Name three causes that have nothing to do with the algorithm.
+
+::: {.callout-note collapse="true" title="Solution"}
+(1) Debug output left on stdout. (2) Output format: missing newline between answers, `Yes` instead of `YES`, extra spaces where the checker is strict, too few decimals. (3) State not reset: the second test case of the sample sees the first one's data — locally you may have tested each case separately. Also: reading input in the wrong order, or a local file redirection (`freopen`) left in the code.
+:::
+
+## Interview questions
+
+**1. How would you test the function you just wrote?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Walk through the edge cases out loud (empty, one element, two elements, all equal, negatives, the maximum size and overflow, boundaries), trace one small normal case by hand, and say that in practice you would compare it against a brute force on many small random inputs. Mention the specific risky line ("the `<=` in the loop condition") and test it.
+:::
+
+**2. What is a stress test, and why are its inputs small?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Run the optimised solution and a slow, obviously correct brute force on thousands of random inputs, and stop at the first difference. Inputs are small so that the brute force is fast, so that a failing case is easy to read, and so that small value ranges produce the duplicates and ties where bugs hide. Almost all bugs that exist for large inputs also exist for some small one.
+:::
+
+**3. Your solution passes the samples but you are not sure it is correct. You have 10 minutes left. What do you do?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Write a brute force (five lines: all subsets or permutations), a generator with $n \le 8$ and values in 0..5, and a compare loop. Run it for a minute. If it finds a counterexample, shrink it by hand or by deleting elements, and fix. If not, check the edge cases and overflow on the max test, then submit.
+:::
+
+**4. Your solution gets TLE. How do you find out why?**
+
+::: {.callout-note collapse="true" title="Answer"}
+First compare the intended complexity with the budget from the constraints. Then generate worst-case inputs (max $n$; sorted; all equal; a path graph; many duplicates; many tiny test cases) and time them locally, doubling $n$ to see the growth rate. Look for hidden costs: `x in list`, `list.pop(0)`, string concatenation in a loop, copying vectors by value, clearing a big array per test, slow I/O (`cin` without `sync_with_stdio(false)`, Python `input()` instead of `sys.stdin`), and hash tables under adversarial keys.
+:::
+
+**5. A recursive DFS crashes on large inputs in Python. What are your options?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The default recursion limit is 1000 and the interpreter's C stack is limited too. Options: convert to an explicit stack (iterative DFS, or process vertices in BFS order and then in reverse order for bottom-up computations); or raise the limit with `sys.setrecursionlimit` and run the code in a `threading.Thread` after `threading.stack_size(...)` to get a bigger stack. The iterative version is the robust choice.
+:::
+
+**6. How do you test a function whose output is not unique, for example "return any valid topological order"?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Write a checker that validates the output against the input (a permutation of the vertices; every edge goes forward), instead of comparing with a reference output. For optimisation problems with many optimal solutions, the checker verifies the solution is valid and that its value equals the brute force's optimal value.
+:::
+
+**7. What is shrinking, and why does it help?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Repeatedly replacing a failing input with a smaller one that still fails (delete parts, make values smaller) until no smaller variant fails. The minimal input typically has two or three elements and isolates the cause: "two equal values", "one interval inside another", "two elements when $lo = mid$". It is what property-based testing tools (QuickCheck, Hypothesis) do automatically; the systematic version is Zeller's delta debugging.
+:::
+
+**8. How do you generate a random tree? Is it uniform?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Simplest: for $i = 2..n$ connect $i$ to a random earlier vertex, then shuffle the labels. That is not uniform over labelled trees, and its height is only $O(\log n)$ on average. For uniform trees, decode a random Prüfer sequence of length $n - 2$ (there are $n^{n-2}$ sequences and as many labelled trees). For testing, add paths, stars and caterpillars explicitly, since they are the extreme cases for depth and degree.
+:::
+
+**9. On Codeforces your solution passes test 1 but fails on test 2, which has many test cases. What is the most likely bug?**
+
+::: {.callout-note collapse="true" title="Answer"}
+State carried between test cases: a global counter, map, visited array, adjacency list or answer variable that is not reset. Or an early `return`/`break` that leaves part of a test's input unread, so the next test reads garbage. Fix by putting per-test state inside the test loop and reading the whole input of each test even when the answer is known early.
+:::
+
+**10. What is "Idleness limit exceeded" and how do you avoid it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+In an interactive problem, both programs are waiting: usually your query is still in the output buffer, so the judge never receives it. Flush after every query (`endl`, `fflush(stdout)`, `print(..., flush=True)`). It also happens when you read input the judge never sends (wrong protocol), or when you forget to print the final answer.
+:::
+
+**11. How do you test an interactive solution locally?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Write a local judge: it holds the hidden data, validates each query, answers it, counts queries against the limit, and checks the final answer. Structure the solution so that it takes an `ask` function, and run it against the judge for all hidden values (or many random ones and the extremes). To test the real binary, run the judge as a separate process connected through a pipe. An adaptive judge (adversary) checks the worst case of the query count.
+:::
+
+**12. How do you detect and prevent integer overflow?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Estimate the largest intermediate value from the constraints (max $n$ × max value, products, squares, $n(n+1)/2$ counts). Use 64-bit types for anything that can exceed about $2\cdot10^9$, cast before multiplying (`1LL * a * b`), compare as `a > LIMIT / b` instead of `a * b > LIMIT`, and use `__int128` for products of 64-bit values. Detect it with `-fsanitize=undefined` (signed overflow) and with a max-value test. In Python, wrap results in a range check to simulate C++ types.
+:::
+
+**13. Should asserts stay in submitted code?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Cheap asserts that check assumptions (an index range, "this case cannot happen") can stay: a failing assert gives RE instead of a silent WA, which tells you something. Expensive checks (re-verifying an invariant over the whole array each iteration) must go, or be guarded by a debug flag, because they change the complexity. In Python, `python -O` removes asserts, so never put side effects inside them.
+:::
+
+**14. What do `-fsanitize=address,undefined` and `-D_GLIBCXX_DEBUG` catch?**
+
+::: {.callout-note collapse="true" title="Answer"}
+AddressSanitizer: out-of-bounds reads and writes on heap, stack and global arrays, use-after-free, double free. UndefinedBehaviorSanitizer: signed integer overflow, invalid shifts, division by zero, misaligned or null pointer use. `_GLIBCXX_DEBUG`: bounds checks on `vector::operator[]`, invalid iterator use, and comparators that are not strict weak orderings in `std::sort`. All slow the program down, so use them on the failing test, not to measure speed.
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Stress test:** brute force (from the statement) + solution + generator (tiny $n$, tiny values) + compare loop; a crash is a failure.
+- **Generators:** `sample` for distinct, `shuffle` for permutations, small alphabets for strings, random parent / Prüfer / path / star for trees, tree + extra edges for connected graphs, forward edges in a random order for DAGs; one seed per test.
+- **Shrink:** delete chunks, delete items, shrink values, global moves; stop when no smaller candidate fails.
+- **Edge sweep:** empty, 1, 2, all equal, sorted, extremes, overflow at max size, multi-test with several cases, enumerate all small inputs.
+- **Verdicts:** WA → stress + edges + overflow; WA on test 2 → reset; TLE → worst-case generators and step counts; RE → bounds, recursion depth, division by zero; ILE → flush.
+- **Interactive:** solution takes `ask`; local judge validates, counts, checks; test every hidden value.
+:::
+
+- The generator decides which bugs you can find: bias it towards duplicates, ties, prefixes, zeros and extreme shapes.
+- Check that your stress test catches a deliberately buggy version; otherwise you do not know it tests anything.
+- A brute force must be written independently of the solution, directly from the statement.
+- Shrunk counterexamples explain bugs; long random ones only prove they exist.
+- Random inputs are average cases; TLE and RE need deliberate worst cases.
+- Many "wrong ideas" are right ideas with overflow, a missing reset or an off-by-one at a boundary.
+- In C++, compile with warnings always and with sanitizers when hunting.
+- For interactive problems, the local judge is the stress test, and flushing is not optional.
+
+## Practice ladder
+
+Ordered by idea: first problems where a stress test kills a plausible wrong idea, then structured inputs, boundaries and edge cases, cost-related verdicts, and finally interactive problems.
+
+::: {.practice}
+- [CF 632C · The Smallest String Concatenation](https://codeforces.com/problemset/problem/632/C){rating="1700"}
+- [LC 125 · Valid Palindrome](https://leetcode.com/problems/valid-palindrome/){difficulty="Easy"}
+- [LC 918 · Maximum Sum Circular Subarray](https://leetcode.com/problems/maximum-sum-circular-subarray/){difficulty="Medium"}
+- [CF 1354B · Ternary String](https://codeforces.com/problemset/problem/1354/B){rating="1200"}
+- [LC 424 · Longest Repeating Character Replacement](https://leetcode.com/problems/longest-repeating-character-replacement/){difficulty="Medium"}
+- [CF 510C · Fox And Names](https://codeforces.com/problemset/problem/510/C){rating="1600"}
+- [LC 210 · Course Schedule II](https://leetcode.com/problems/course-schedule-ii/){difficulty="Medium"}
+- [CF 1037D · Valid BFS?](https://codeforces.com/problemset/problem/1037/D){rating="1700"}
+- [CF 1187E · Tree Painting](https://codeforces.com/problemset/problem/1187/E){rating="2100"}
+- [LC 57 · Insert Interval](https://leetcode.com/problems/insert-interval/){difficulty="Medium"}
+- [CF 1029C · Maximal Intersection](https://codeforces.com/problemset/problem/1029/C){rating="1600"}
+- [LC 81 · Search in Rotated Sorted Array II](https://leetcode.com/problems/search-in-rotated-sorted-array-ii/){difficulty="Medium"}
+- [LC 153 · Find Minimum in Rotated Sorted Array](https://leetcode.com/problems/find-minimum-in-rotated-sorted-array/){difficulty="Medium"}
+- [CF 492B · Vanya and Lanterns](https://codeforces.com/problemset/problem/492/B){rating="1200"}
+- [CF 1520D · Same Differences](https://codeforces.com/problemset/problem/1520/D){rating="1200"}
+- [LC 7 · Reverse Integer](https://leetcode.com/problems/reverse-integer/){difficulty="Medium"}
+- [LC 29 · Divide Two Integers](https://leetcode.com/problems/divide-two-integers/){difficulty="Medium"}
+- [CF 1324F · Maximum White Subtree](https://codeforces.com/problemset/problem/1324/F){rating="1800"}
+- [CF 1676F · Longest Strike](https://codeforces.com/problemset/problem/1676/F){rating="1300"}
+- [LC 374 · Guess Number Higher or Lower](https://leetcode.com/problems/guess-number-higher-or-lower/){difficulty="Easy"}
+- [CF 1167B · Lost Numbers](https://codeforces.com/problemset/problem/1167/B){rating="1400"}
+- [CF 1520F1 · Guess the K-th Zero (Easy version)](https://codeforces.com/problemset/problem/1520/F1){rating="1600"}
+:::
+
+| Problem | What it practises |
+|---|---|
+| 632C | Concatenation comparator; stress against all permutations, with a value pool full of prefixes (@sec-test-p1) |
+| LC 125 | Two pointers from both ends; edge cases with no letters at all (@sec-test-p1-palindrome) |
+| LC 918 | Kadane variant with an all-negative trap; brute force over all circular subarrays (@sec-test-p1-product) |
+| 1354B | Sliding window over a 3-letter alphabet; small-alphabet generator (@sec-test-p2-substring) |
+| LC 424 | Window with a "most frequent letter" count that is allowed to be stale; stress it (@sec-test-p2-substring) |
+| 510C | Build a graph from adjacent names, detect a cycle; the prefix case "abc" before "ab" (@sec-test-p2-courses) |
+| LC 210 | Many valid outputs: test with a checker (exercise 8) |
+| 1037D | Validate a given BFS order; random trees and shuffled orders as tests (@sec-test-generators) |
+| 1187E | Rerooting; test with mixed tree families against an $O(n^2)$ brute force (@sec-test-p2-tree-cost) |
+| LC 57 | Interval boundaries: touching, nested, before all, after all (@sec-test-p3-merge) |
+| 1029C | Prefix and suffix intersections; brute force by removing each segment (@sec-test-p3-merge) |
+| LC 81 | Duplicates break the sorted-half test; shrink the failing case (@sec-test-p3-rotated) |
+| LC 153 | Two-element and unrotated arrays as edge cases (@sec-test-p3-rotated) |
+| 492B | The two ends of the street are special cases (@sec-test-edge-cases) |
+| 1520D | Multi-test counter reset and 64-bit pair counts (@sec-test-p4-good-subarrays) |
+| LC 7 | 32-bit overflow detection without 64-bit types (@sec-test-p4-sqrt) |
+| LC 29 | $-2^{31} / -1$ and other boundary values (@sec-test-p4-sqrt) |
+| 1324F | Rerooting on deep trees: iterative DFS (@sec-test-p5-kefa) |
+| 1676F | Runs of consecutive values; worst cases for a quadratic scan (@sec-test-p5-consecutive) |
+| LC 374 | Binary search through an API; overflow in `mid` (@sec-test-p6) |
+| 1167B | Interactive with 4 queries; test all 720 hidden permutations locally (@sec-test-p6-prime) |
+| 1520F1 | Interactive binary search with a query limit of 20; local judge (@sec-test-p6-interview) |
+
+## Further reading
+
+- **Kernighan and Pike**, *[The Practice of Programming](https://dl.acm.org/doi/10.5555/295125)*, ch. 5 (debugging) and ch. 6 (testing): boundary testing, test scaffolds, and how to narrow down a bug.
+- **Zeller**, *[Why Programs Fail](https://www.oreilly.com/library/view/why-programs-fail/9780123745156/)*: delta debugging and the systematic simplification of failing inputs.
+- **Claessen and Hughes**, *["QuickCheck: a lightweight tool for random testing of Haskell programs"](https://dl.acm.org/doi/10.1145/351240.351266)* (ICFP 2000): property-based testing with generators and shrinking; the Python library **[Hypothesis](https://hypothesis.readthedocs.io/)** follows the same ideas.
+- **CP-Algorithms**, *[Prüfer code](https://cp-algorithms.com/graph/pruefer_code.html)*: the bijection between sequences and labelled trees, and an $O(n)$ decoder.
+- **GCC documentation**: [sanitiser options](https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html) (`-fsanitize=address`, `-fsanitize=undefined`) and the [libstdc++ debug mode](https://gcc.gnu.org/onlinedocs/libstdc++/manual/debug_mode_using.html) (`_GLIBCXX_DEBUG`).

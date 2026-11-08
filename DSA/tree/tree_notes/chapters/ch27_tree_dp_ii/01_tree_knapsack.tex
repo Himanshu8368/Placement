@@ -1,0 +1,687 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  14.1  Tree knapsack and the amortised child-merge   sec:c27-knapsack
+%  Exports: def:c27-knap-state  thm:c27-amortize  lst:c27-knap
+%           fig:c27-mergetree  ex:c27-knap-run  prob:c27-knap-solved
+%           lst:c27-855c-soln
+%  THE owed proof: Ch.13 (ch10 / c10) previewed the O(nV) budgeted
+%  child-merge twice and never proved it.  That proof is thm:c27-amortize
+%  below, stated exactly as promised.  Anchor problem CF 855C (Helga
+%  Hufflepuff's Cup), a three-class budgeted tree DP over j = #type-k
+%  vaults with j <= x <= 10 -- a textbook V = x knapsack.  All merge
+%  counts hand-computed on the running tree T from the opener.
+% =====================================================================
+\section{Tree Knapsack: an Index on the State, and the Merge Bound}\label{sec:c27-knapsack}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Chapter~13 folded a \emph{constant} tuple $\mathcal S(v)$ through one
+        child at a time (\thmref{c10-subtree-template}). What made that
+        $\bigO{n}$ rather than $\bigO{n^2}$? (each node did $\bigO{\deg(v)}$
+        work; the children's tuples were combined independently, no shared
+        budget)
+  \item Chapter~13's distance-$k$ histogram (\secref{c10-distance}) stored an
+        \emph{array} $H_v[\cdot]$ and merged children by a double loop. Why
+        did it not need a full $\bigO{n^2}$ argument? (the array length was
+        capped by $k$, a small constant -- the seed of today's bound)
+  \item Chapter~12 computed $\size(v)$ for every node in one DFS
+        (\coderef{c09-dfs3}). Read back the running tree's sizes
+        $\size=[10,4,5,1,2,1,3,1,2,1]$. Which single quantity will bound our
+        loop nests today? (the \emph{subtree size}, capped by the budget)
+  \item State Ch.1's convention that made a leaf fall out of the fold with no
+        \code{if}. (\term{$\height(\nil)=-1$}, $\size(\nil)=0$; today it
+        becomes $\mathit{dp}[\ell][0]=0$ for a leaf)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Chapter~13's recipe broke the moment the state stopped being a fixed-size
+bag. Give each node an \emph{array} $\mathit{dp}[v][0\,.\,V]$ -- a value for
+every amount of budget $j$ from $0$ to $V$ -- and children can no longer be
+combined independently, because a unit of budget spent inside child $A$'s
+subtree is a unit \emph{not} available to child $B$. The children must be
+merged \emph{one at a time}, each merge a small knapsack convolution, and the
+naive reading of the loops says the whole thing is quadratic (subtree sizes
+multiply!). It is not. This section writes the merge template and proves, in
+full, the bound Chapter~13 promised and never delivered:
+
+\term{the amortised child-merge} (\thmref{c27-amortize}) -- bounding each
+merge's two loop heads by the \emph{running} size makes the total
+$\bigO{nV}$ across all nodes. CF~855C (\probref{c27-knap-solved}) is the
+worked example: colour a tree with $m$ types, at most $x$ of them the
+distinguished type~$k$, and count the colourings -- a knapsack whose budget
+is ``number of type-$k$ vaults spent so far.''
+
+\textbf{Prerequisites.} Chapter~13's child-fold template
+\thmref{c10-subtree-template} and histogram merge (\secref{c10-distance});
+Chapter~12's subtree sizes $\size(v)$ (\coderef{c09-dfs3}) -- used here as the
+loop bound, not re-derived; \chref{c04} rooting by parent parameter.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item write the budgeted child-merge skeleton and keep every inner loop
+        capped by the running size; \hfill\lv{2}
+  \item state and prove \thmref{c27-amortize} -- Ch.13's outstanding debt; \hfill\lv{4}
+  \item cold-write CF~855C's three-class cup-counting DP and trace it on an
+        official sample; \hfill\lv{4}--\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\subsection{Intuition}
+
+A scalar state composes with $\max$ or $+$ and the children stay independent:
+$\mathcal S(v) = \mathcal F(\{\mathcal S(c)\})$ spends $\bigO{\deg(v)}$, so
+$\sum_v \bigO{\deg(v)} = \bigO{n}$ (Ch.13). Put an index on the state and
+independence dies. If $\mathit{dp}[v][j]$ means ``best value when the subtree
+of $v$ consumes $j$ units of a global budget of $V$,'' then to close
+$\mathit{dp}[v][\cdot]$ we must decide how to \emph{split} $v$'s budget
+across its children, and every split $(j_1, j_2, \dots)$ with
+$\sum_c j_c \le j$ is a candidate. That is a \term{knapsack}: we cannot feed
+all children to $\mathcal F$ at once, so we fold them \emph{sequentially},
+maintaining a running ``budget used so far at $v$'' array and convolving one
+child in at a time.
+
+The loop nest for one merge looks like two nested $[0..\text{size}]$ ranges,
+which screams quadratic -- and if you write it naively (heads at $\text{sz}(v)$
+and $\text{sz}(c)$) a chain input \emph{really is} $\Theta(n^2)$. The saving
+grace is that a budget of $V$ can never be split past $V$: the reachable
+budget at any node is $\min(\text{size so far}, V)$, so both loop heads are
+$\min(\cdot, V)$. \thmref{c27-amortize} shows the total over every node and
+every child of these capped products is only $\bigO{nV}$, because a merge step
+is a pair of budget slots that is charged at most once (their lowest common
+ancestor is the merging node), and the cap puts at most $V$ live slots per
+node. Chapter~13 asserted this without proof; we prove it now.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Budgeted subtree state and child merge}{c27-knap-state}
+Fix a root and let $\children(v)$ be $v$'s children. A \term{budgeted subtree
+state} is an array $\mathit{dp}[v][0\,.\,V]$ where $\mathit{dp}[v][j]$ is the
+optimal value (or, for counting DPs, the number of configurations) of
+$\subtree(v)$ using \emph{at most} $j$ units of budget, subject to any local
+constraint the problem imposes. A leaf has $\mathit{dp}[\ell][0]$ fixed by its
+own pick and higher $j$ weakly better. Children are combined by the
+\term{merge}: folding a child $c$ into $v$ is the convolution
+\[
+  \mathit{dp}_{\text{new}}[v][t] \;=\; \max_{\,i+j\,=\,t}\Big(\mathit{dp}[v][i] + \mathit{dp}[c][j]\Big)
+\]
+(for maximisation; replace $\max\!\sum$ by $\sum\!\prod$ for counting), where
+$i$ ranges over the budget already reachable at $v$ and $j$ over the budget
+child $c$ can supply. The \term{answer} is read at the root, $\max_{j\le V}\mathit{dp}[r][j]$
+(or its counting analogue). We require the merge to be defined on a leaf
+(no children): $\mathit{dp}[v][\cdot]$ starts at $v$'s own contribution.
+\end{definition}
+
+\noindent\textbf{In plain words.} Each node remembers one number \emph{per
+budget level}; a child is merged by trying every way to split the budget
+between ``what $v$ already holds'' and ``what this child adds,'' keeping the
+split at or below $V$. The order of children does not change the result --
+convolution over $\le V$ is associative and commutative -- but merging one at
+a time is what lets us cap the loops.
+
+\subsection{The Merge Bound: Proving Ch.~13's Debt}
+
+\begin{theorem}{The amortised child-merge costs $\bigO{nV}$}{c27-amortize}
+Run the merge of \defref{c27-knap-state} over a rooted tree of $n$ nodes, and
+at each node $v$ merge its children in any fixed order, letting $S_{v,c}$
+denote the number of nodes already absorbed into $v$ just before child $c$
+(so $S_{v,c} = 1 + \sum_{c' \text{ before } c} \size(c')$). If the two inner
+loop heads are capped as
+\[
+  0 \le i \le \min(S_{v,c}, V), \qquad 0 \le j \le \min(\size(c), V), \qquad i + j \le V,
+\]
+then the total number of $(i,j)$ iterations over all nodes and all children is
+$\bigO{nV}$.
+\end{theorem}
+
+\begin{proofbox}[\thmref{c27-amortize}: charge each iteration to a pair, each pair once, $\le V$ pairs per node]
+An iteration is a tuple $(v, c, i, j)$ with $i + j \le V$. Charge it to the
+\emph{ordered pair of nodes} $(x, y)$ defined as follows: $y$ is the $j$-th
+node of $\subtree(c)$ in a fixed DFS order (with $y = \varnothing$ when $j = 0$),
+and $x$ is the $i$-th node of $v$'s already-absorbed region
+$\{v\} \cup \bigcup_{c' \text{ before } c} \subtree(c')$ in the same order
+($x = \varnothing$ when $i = 0$). Because $i \le \min(S_{v,c}, V)$ and
+$j \le \min(\size(c), V)$, both $x$ and $y$ are well-defined and lie inside
+the capped first-$V$ window of their regions, so the map is injective: no two
+tuples with different $(i,j)$ pick the same $(x,y)$.
+
+\emph{Each pair is charged at most once.} Fix distinct $x, y$ and let
+$a = \lca(x, y)$. A merge can charge $(x,y)$ only when $x$ and $y$ sit on
+opposite sides of the merge: $y$ inside the child $c$ being folded and $x$
+either equal to the merging node or inside an already-folded child. The only
+node at which $x$ and $y$ are separated in exactly that way is their lowest
+common ancestor $a$; at every ancestor strictly above $a$ both lie in the same
+child subtree (so they are never split), and at every node below $a$ at least
+one of them is not in the subtree at all. Hence at most one merge -- the one
+at $a$, with the child $c$ being the child of $a$ that contains $y$ -- ever
+charges $(x,y)$.
+
+\emph{The cap bounds each node's charges by $V$.} For a fixed $y$, the tuples
+that charge a pair ending in $y$ have $y$ as the $j$-th DFS node of $c$ for
+$c$ on the path $a \to y$; there is a unique such $c$ per candidate ancestor
+$a$, and $j$ is then determined. Since $i + j \le V$ forces $j \le V$, and the
+$V$-capped window means $y$ is inside the first-$V$ nodes of $\subtree(c)$ only
+while $a$ is within $V$ levels of the top of that child subtree, the number of
+distinct merges at which $y$ is charged is at most $V$. Thus $y$ appears in at
+most $V$ charged pairs; summing over the $n$ choices for $y$ gives at most
+$nV$ charged pairs, i.e.\ $\bigO{nV}$ iterations. \qed
+\end{proofbox}
+
+\begin{insightbox}
+The theorem is why Ch.~13's distance-$k$ DP ($V = k$) and today's cup DP
+($V = x \le 10$) are both called ``linear'': when the budget $V$ is a small
+constant, $\bigO{nV}$ is $\bigO{n}$. The cap \emph{is} the whole game. Write
+the loop head as $\text{sz}(v)$ instead of $\min(\text{sz}(v), V)$ and the
+chain input reverts to $\Theta(n^2)$ -- and it will still pass every hand
+sample, because those samples are trees of four nodes. This is the number one
+source of ``accepted locally, TLE on test 12'' in budgeted tree DP.
+\end{insightbox}
+
+\subsection{The Algorithm: The Budgeted Child-Merge}
+
+\begin{lstlisting}[caption={The generic budgeted child-merge: same DFS as \coderef{c10-fold}, but the state is an array and children fold by capped convolution}, label={lst:c27-knap}]
+// Budgeted subtree DP. dp[v][j] = value of subtree(v) using <= j budget.
+// Merge children ONE AT A TIME. Cap BOTH loop heads by the running sizes so
+// the whole DFS costs O(nV) -- thm:c27-amortize -- not O(n^2).
+int V;                                   // per-node budget cap
+vector<vector<int>> adj;
+vector<int> sz;                          // subtree size (Ch.12 metric)
+vector<vector<long long>> dp;            // dp[v][0 .. min(sz[v],V)]
+
+void knap_dfs(int v, int p) {
+    sz[v] = 1;
+    dp[v].assign(V + 1, NEG_INF);        // NEG_INF = unreachable budget
+    dp[v][0] = 0;                        // spend 0: seed with v's own term
+    for (int c : adj[v]) {
+        if (c == p) continue;            // parent guard = rooting
+        knap_dfs(c, v);                  // child finalised first (post-order)
+        int lim  = min(sz[v], V);        // budget reachable at v so far
+        int clim = min(sz[c], V);        // budget child c can supply
+        vector<long long> ndp(V + 1, NEG_INF);
+        for (int i = 0; i <= lim; i++) if (dp[v][i] > NEG_INF)
+            for (int j = 0; j <= clim && i + j <= V; j++)   // i + j <= V !!
+                ndp[i + j] = max(ndp[i + j], dp[v][i] + dp[c][j]);
+        dp[v].swap(ndp);
+        sz[v] += sz[c];                  // running size grows by child's
+    }
+}
+// after the call: answer is max_{j<=V} dp[root][j]
+// counting version: replace max by + and NEG_INF seed by 0, product by sum.
+\end{lstlisting}
+
+\begin{complexitybox}
+Time $\bigO{nV}$ by \thmref{c27-amortize}: the outer loop over children plus
+the two capped inner loops is exactly the charged iteration count, $\bigO{nV}$,
+and the post-order DFS touches each node once. Memory $\bigO{nV}$ for the state
+arrays (or $\bigO{hV}$ if you free a child's array once merged). The stack
+depth is $h$; at $n \ge 2\cdot10^{5}$ with chains legal, swap in the explicit
+two-phase stack (Ch.12's \coderef{c09-iter}) so a path input does not overflow.
+Verdict: the merge is cheap \emph{only because of the cap} -- forgetting
+$\min(\cdot,V)$ turns a linear DP into a quadratic one.
+\end{complexitybox}
+
+\subsection{Worked Example: a $V=3$ Knapsack on $T$}
+
+\begin{example}{Top-$j$ label-sum knapsack on the running tree $T$}{c27-knap-run}
+Reuse $T$ from \figref{c27-runtree-knap}: node $v$ is an item of cost~$1$ and
+value equal to its label; $\mathit{dp}[v][j]$ is the max value of a subset of
+$\subtree(v)$ of size $\le j$. Since every item costs $1$, the answer for
+$\mathit{dp}[v][j]$ is just the \emph{sum of the $j$ largest labels in
+$\subtree(v)$} -- a closed form we can hand-check -- while the \emph{loop count}
+of the merge is what \thmref{c27-amortize} is really about. Budget $V=3$. The
+table below is computed by hand and reused, unchanged, by the trace box.
+\end{example}
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{l|cccccccccc}
+\toprule
+node $v$ & 1 & 2 & 3 & 4 & 5 & 6 & 7 & 8 & 9 & 10 \\
+\midrule
+$\size(v)$ & 10 & 4 & 5 & 1 & 2 & 1 & 3 & 1 & 2 & 1 \\
+$\mathit{dp}[v][1]$ & 10 & 8 & 10 & 4 & 8 & 6 & 10 & 8 & 10 & 10 \\
+$\mathit{dp}[v][2]$ & 19 & 13 & 19 & -- & 13 & -- & 19 & -- & 19 & -- \\
+$\mathit{dp}[v][3]$ & 27 & 17 & 26 & -- & -- & -- & 26 & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent Sanity: $\mathit{dp}[1][3]=27 = 10{+}9{+}8$, the three largest labels in
+all of $T$; $\mathit{dp}[3][3]=26=10{+}9{+}7$ (subtree of $3$ is
+$\{3,6,7,9,10\}$, top three $=10,9,7$); a leaf has only $\mathit{dp}[\ell][1]$
+(its subtree is one node), and node~$5$ (subtree $\{5,8\}$) only reaches $[\cdot][2]$.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape,
+    tnode/.style={circle, draw=primaryblue, line width=0.9pt, fill=primaryblue!8,
+                  minimum size=7mm, font=\small\bfseries, text=primaryblue!60!black}]
+  \node[tnode] (n1) at (0,0) {$1$};
+  \node[tnode] (n2) at (-3,-1.6) {$2$};
+  \node[tnode] (n3) at ( 3,-1.6) {$3$};
+  \node[tnode] (n4) at (-5.2,-3.2) {$4$};
+  \node[tnode] (n5) at (-1.6,-3.2) {$5$};
+  \node[tnode] (n6) at ( 1.6,-3.2) {$6$};
+  \node[tnode] (n7) at ( 5.2,-3.2) {$7$};
+  \node[tnode] (n8) at (-1.6,-4.8) {$8$};
+  \node[tnode] (n9) at ( 5.2,-4.8) {$9$};
+  \node[tnode] (n10) at ( 5.2,-6.4) {$10$};
+  \draw[tedge] (n1)--(n2) (n1)--(n3) (n2)--(n4) (n2)--(n5)
+               (n3)--(n6) (n3)--(n7) (n5)--(n8) (n7)--(n9) (n9)--(n10);
+  % merge cost labels on each parent->child edge: min(so far,V)*min(sz c,V)
+  \node[annot, font=\scriptsize, text=warningred!75!black] at (-1.8,-0.6) {$1\!\cdot\!3{=}3$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at ( 1.8,-0.6) {$3\!\cdot\!3{=}9$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at (-4.4,-2.2) {$1\!\cdot\!1{=}1$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at (-2.9,-2.2) {$2\!\cdot\!2{=}4$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at ( 0.5,-2.2) {$1\!\cdot\!1{=}1$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at ( 2.9,-2.2) {$2\!\cdot\!3{=}6$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at (-1.2,-3.8) {$1\!\cdot\!1{=}1$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at ( 4.6,-4.0) {$1\!\cdot\!2{=}2$};
+  \node[annot, font=\scriptsize, text=warningred!75!black] at ( 4.6,-5.6) {$1\!\cdot\!1{=}1$};
+  \node[annot, font=\scriptsize, text=difforange!75!black, anchor=west] at (5.9,-0.3)
+    {edge $v\!\to\!c$:};
+  \node[annot, font=\scriptsize, text=difforange!75!black, anchor=west] at (5.9,-1.0)
+    {$\min(\text{so far},V)\cdot\min(\size(c),V)$};
+  \node[annot, font=\scriptsize, text=successgreen!50!black, anchor=west] at (5.9,-2.1)
+    {total $=3{+}9{+}1{+}4{+}1{+}6{+}1{+}2{+}1 = 28$};
+  \node[annot, font=\scriptsize, text=successgreen!50!black, anchor=west] at (5.9,-2.8)
+    {$\le Vn = 3\!\cdot\!10 = 30$};
+\end{tikzpicture}
+\caption{The \emph{merge cost ledger} for $T$ at $V=3$. Each non-root edge
+carries the capped count of folding its child into the parent: the product of
+$\min(S_{v,c},3)$ and $\min(\size(c),3)$. Over the nine edges the total is
+$28 \le 30 = Vn$, exactly \thmref{c27-amortize}'s promise. Drop the cap (loop
+heads at raw sizes) and the merge costs $45$ on $T$ -- and $\Theta(n^2)$ on a
+chain.}
+\label{fig:c27-mergetree}
+\end{figure}
+
+\begin{tracebox}[Merge ledger on $T$, $V=3$, children folded in numeric order]
+post-order: 4,8,5,2,10,9,7,6,3,1. Leaves (4,6,8,10): zero children, cost $0$.\\
+5: one child $8$, so-far$=1$ -> $\min(1,3)\!\cdot\!\min(1,3)=1$.\\
+2: children $4$ then $5$. fold~4: $1\!\cdot\!\min(1,3)=1$; so-far$=2$.
+   fold~5: $\min(2,3)\!\cdot\!\min(2,3)=4$. subtotal $5$.\\
+9: child $10$, $1\!\cdot\!1=1$. 7: child $9$, $1\!\cdot\!\min(2,3)=2$.\\
+3: children $6$ then $7$. fold~6: $1\!\cdot\!1=1$; so-far$=2$.
+   fold~7: $\min(2,3)\!\cdot\!\min(3,3)=6$. subtotal $7$.\\
+1: children $2$ then $3$. fold~2: $1\!\cdot\!\min(4,3)=3$; so-far$=5$.
+   fold~3: $\min(5,3)\!\cdot\!\min(5,3)=9$. subtotal $12$.\\
+Ledger: $1{+}5{+}1{+}2{+}7{+}12 = 28 \le 30$ \checkmark. Note node~1's first fold
+costs only $3$ (so-far $=1$) though $\size(2)=4$ -- the running-size cap, in
+action: the merge bound \thmref{c27-amortize} is $\bigO{nV}$, not $\bigO{n^2}$. \checkmark
+\end{tracebox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Order is free, capping is mandatory.} Merging $2$ before $3$ at
+        the root changes the per-edge numbers but never the $\bigO{nV}$ total.
+        What must never change is the loop head $\min(\text{so far}, V)$.
+  \item \emph{The result here is trivial to check.} Because costs are all $1$,
+        $\mathit{dp}[v][j]$ is a top-$j$ sum -- you can verify the value in your
+        head while the \emph{loop ledger} is the real lesson of 14.1.
+  \item \emph{Real problems index by the count, not the value.} CF~855C below
+        budgets ``how many type-$k$ vaults,'' a quantity $\le x \le 10$, and the
+        state carries that count plus $v$'s own class -- exactly \defref{c27-knap-state}
+        with a class dimension added.
+\end{enumerate}
+\end{insightbox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Budget is ``number of special nodes'' (counting):} CF~855C and
+        Summit CF~735E both spend the budget on \emph{chosen} vertices, so
+        $j\in[0,V]$ is a count and the merge is $\sum\!\prod$ over splits --
+        not $\max\!\sum$. The cap analysis is unchanged. \hfill\lv{3}
+  \item \textbf{Exactly $j$, not at most $j$}: some problems want the budget
+        spent to be exactly $j$; drop the $\le$ and keep unreachable slots at
+        $\mathit{dp}=0$ (counting) or $-\infty$ (optimisation). Reading the
+        answer becomes ``$\mathit{dp}[r][j]$ for the specific $j$,'' not a max. \hfill\lv{3}
+  \item \textbf{Two coupled indices}: the state $\mathit{dp}[v][j][\text{cls}]$
+        of CF~855C adds a constant ($\le 3$) class factor; it multiplies the
+        merge constant, not the asymptotic -- still $\bigO{nV}$ with $V=x$. \hfill\lv{4}
+  \item \textbf{When the budget is not small}: if $V$ ranges with the data
+        (a value cap, a length, a time) the $\bigO{nV}$ may exceed a plain
+        $\bigO{n\cdot\text{const}}$; \secref{c27-growing} designs the profile,
+        and Ch.~24's centroid merge (\chref{c18}) takes over when $V \sim n$. \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- uncapped loop head, quadratic in disguise]
+The single most damaging budgeted-DP bug: writing the inner loop as
+\lstinline{for (j = 0; j <= sz[c]; j++)} instead of
+\lstinline{for (j = 0; j <= min(sz[c], V) && i + j <= V; j++)}. On the tiny
+samples the answer is right; on a $2\cdot10^{5}$ chain the run time is
+$\Theta(n^2)$ and you get a \tle. \thmref{c27-amortize} is not decoration --
+the $\min(\cdot,V)$ cap is the hypothesis of the theorem.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2 -- resetting the running size too late]
+After folding a child, the ``size so far'' at $v$ must grow by that child's
+$\size(c)$ \emph{before} the next child's $\min(S_{v,c},V)$ is evaluated.
+Freeze $S$ at its initial value and every merge looks like $1 \cdot \min(\size(c),V)$;
+you will underestimate the ledger on paper yet, worse, some codes seed
+$\mathit{dp}[v]$ from the wrong ``reachable budget'' and drop valid splits --
+silently wrong answers on wide nodes.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- overwriting \lstinline{dp[v]} in place]
+The merge reads $\mathit{dp}[v][i]$ and writes $\mathit{dp}[v][i+j]$. If you
+write into the same array you are folding a child into a partially-updated
+parent, and a budget slot gets spent twice (the child's value counted with
+itself). Always merge into a fresh $\mathit{dp}_{\text{new}}[v]$ for the child
+and swap after -- as \lstinline{ndp} does in \coderef{c27-knap}.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+\solvedproblem{c27-knap-solved}{Helga Hufflepuff's Cup}{Codeforces 855C}
+  {https://codeforces.com/problemset/problem/855/C}{CF 1900 · L4}
+  {budgeted subtree DP, three-class state, count of a special type as budget,
+   modular counting, amortised O(nx) child-merge}
+
+\begin{problemstatement}[Helga Hufflepuff's Cup (statement and samples verified against the live problem)]
+The vault of Gringotts is a tree of $n$ rooms; room $v$ is assigned a
+\emph{type}, an integer in $[1, m]$. Rooms of type $k$ have the \emph{highest}
+security. A typing is valid if (i)~at most $x$ rooms have type $k$; and
+(ii)~whenever a room has type $k$, every room \emph{adjacent} to it has type
+strictly less than $k$. Count the valid typings of all $n$ rooms, modulo
+$10^9+7$. Constraints: $1 \le n \le 10^5$, $1 \le m \le 10^9$,
+$1 \le k \le m$, $1 \le x \le 10$. \textbf{Example~1}: $n=4, m=2$; edges
+$1\text{--}2, 2\text{--}3, 1\text{--}4$; $k=1, x=2$; output \texttt{1} (type $1$
+is highest, so a type-$1$ room forces neighbours of type $<1$ -- impossible --
+hence no room is type $1$: every room is type $2$, exactly one way).
+\textbf{Example~2}: $n=3, m=3$; edges $1\text{--}2, 1\text{--}3$; $k=2, x=1$;
+output \texttt{13}. \textbf{Example~3}: $n=3, m=1$; edges $1\text{--}2, 1\text{--}3$;
+$k=1, x=1$; output \texttt{0}.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 35 minutes]
+Two facts before you code. (a)~Only the \emph{relation to $k$} of a room's
+type matters for the constraints -- collapse $m$ colours into three classes.
+(b)~The budget $x$ is $\le 10$, so this is a $V=x$ knapsack whose item is
+``this room is type $k$.''
+\peek{What three classes do the $m$ types fall into relative to $k$, and how
+      many actual types pick from in each class?}
+\nudge{Below $k$: $k-1$ choices. Equal to $k$: exactly $1$. Above $k$: $m-k$.
+      Call them L, C, H. Now: if a room is C, what \emph{must} its neighbours be?}
+\fullhint{Class of a room is L (type $<k$, $k{-}1$ ways), C (type $=k$, $1$
+way), H (type $>k$, $m{-}k$ ways). The adjacency rule becomes: a C room forces
+\emph{all} neighbours to L; an H room may not touch a C room (so its neighbours
+are L or H); an L room is free. Root the tree. Then state
+$\mathit{dp}[v][j][\text{cls}]$ = number of valid typings of $\subtree(v)$ with
+exactly $j$ type-$k$ rooms and $v$'s class $=$ cls. Merge children one at a
+time over the split $j = i + j_c$ with $j \le x$ (\thmref{c27-amortize}, $V=x$):
+if $v$ is C, each child must be L; if $v$ is L, a child is any of L,C,H; if $v$
+is H, a child is L or H. Multiply by $\mathit{ch}[\text{cls}]$ at the leaf seed.
+Answer $= \sum_{j\le x}\sum_{\text{cls}} \mathit{dp}[1][j][\text{cls}]$.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Three separate constraints are tangled together, and the trick is that they
+\emph{decouple} once you look at classes instead of colours. The global
+``at most $x$ rooms of type $k$'' is a \emph{budget} -- a count to spend -- so
+it belongs on a DP index, and $x \le 10$ makes that index tiny. The local
+``a type-$k$ room forces its neighbours below $k$'' is a \emph{parent--child
+compatibility} between \emph{classes}, not colours: it only depends on whether
+each end of an edge is L, C, or H. Once each room is reduced to one of three
+classes, the number of original colourings is just the product of the per-class
+option counts ($k{-}1$, $1$, $m{-}k$), and the combinatorics collapses into the
+seed value at each node. What remains is a budgeted tree DP: the budget is the
+count of C rooms.
+
+\solstep{Key Observations}
+\begin{observation}
+A room's class is fully determined by $\operatorname{sign}(\text{type} - k)$,
+and the adjacency rule in class language is: \textbf{C $\Rightarrow$ all
+neighbours L}, \textbf{H $\Rightarrow$ no neighbour is C}, \textbf{L $\Rightarrow$
+free}. These are edge-local and depend only on the two endpoints' classes -- the
+rooted-DP compatibility the merge needs.
+\end{observation}
+\begin{observation}
+In the rooted view the C/H rules only constrain the \emph{child} classes given
+the parent class, so the constraint is a per-merge filter on the child's class
+index: parent C admits only L children; parent H admits L and H; parent L
+admits all. The reverse direction (child C forces parent L) is automatically
+enforced because a C can only be placed under an L parent, and an L parent
+admits C children -- the two readings agree.
+\end{observation}
+\begin{observation}
+The count of C rooms is additive over subtrees and bounded by $x$: this is
+exactly the budget index $j\in[0,x]$ of \defref{c27-knap-state}, so the merge is
+a $\bigO{nx}$ convolution by \thmref{c27-amortize} with $V = x$.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Do a DP over the actual colours $1..m$; $m \le 10^9$ is fine with a
+map or coordinate compression.}
+{The colour value is irrelevant except relative to $k$; only three classes
+matter. A colour-level state is both wrong (the adjacency rule speaks of
+$<k$, $=k$, $>k$, not specific values) and astronomically expensive. Compress
+\emph{first} -- that is the whole insight.}
+\deadend{Fix the at-most-$x$ rooms of type $k$ by choosing which $\le x$ vertices
+are C, then greedily colour the rest; multiply by $2^n$ for the two non-$k$ sides.}
+{``Greedy colour the rest'' ignores that an H vertex touching a C vertex is
+illegal, and the C set itself must be chosen so its neighbourhood is all L --
+a \emph{structural} constraint that couples C-placement to the whole tree.
+Also $2^n$ is fantasy: L has $k{-}1$ choices, H has $m{-}k$, they differ.}
+\aha{Three classes, one budget index $j \le x$ for ``C rooms used,'' state
+$\mathit{dp}[v][j][\text{cls}]$, children merged with the capped convolution
+of \coderef{c27-knap}. Answer is the sum over $j\le x$ and cls at the root.}
+\end{thinkbox}
+
+\solstep{Solution}
+Root at $1$. Precompute $\mathit{ch}[0]=k-1$ (L), $\mathit{ch}[1]=1$ (C),
+$\mathit{ch}[2]=m-k$ (H), modulo $10^9+7$. At node $v$, seed
+$\mathit{dp}[v][0][0]=\mathit{ch}[0]$, $\mathit{dp}[v][0][2]=\mathit{ch}[2]$,
+and (if $x\ge1$) $\mathit{dp}[v][1][1]=\mathit{ch}[1]$. Then fold each child
+$c$ with running budget $\le x$: for parent class C only child class L
+contributes; for L all three; for H only child L and child H. After all children,
+$\mathit{dp}[v][j][\text{cls}]$ counts valid subtree typings with exactly $j$
+C rooms. Return $\sum_{j=0}^{x}\sum_{\text{cls}} \mathit{dp}[1][j][\text{cls}]$.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[\coderef{c27-855c-soln} counts exactly the valid typings]
+By strong induction on the height of $\subtree(v)$ we show $\mathit{dp}[v][j][\text{cls}]$
+equals the number of typings of $\subtree(v)$ that (a)~use exactly $j$ type-$k$
+rooms, (b)~place $v$ in class $\text{cls}$, and (c)~satisfy the adjacency rule on
+every edge \emph{internal} to $\subtree(v)$. \emph{Base (leaf)}: a single room in
+class L has $k-1$ typings ($\mathit{ch}[0]$), $0$ C-rooms; in C it has $1$
+type ($=k$) and $1$ C-room; in H it has $m-k$ types and $0$ C-rooms -- the three
+seeds. No internal edge exists, so (c) is vacuous. \emph{Step}: assume the
+claim for every child of $v$. A subtree typing of $v$ is $v$'s own class plus an
+independent valid typing of each child subtree, and the C-count is additive:
+$j = [\text{$v$ is C}] + \sum_c j_c$. The merge enumerates exactly these
+splits $j = i + \sum_c j_c$ (children folded one at a time, budget $\le x$). The
+only coupling between $v$ and a child $c$ is the adjacency rule on their shared
+edge, which restricts $c$'s class to (L) when $v$=C, to (L or H) when $v$=H, and
+to (L, C, or H) when $v$=L -- the three cases in the code. Hence the product over
+children, summed over allowed class-splits, counts precisely the internal-rule
+valid typings with $j$ C-rooms. The parent edge of $v$ is \emph{not} constrained
+inside $\subtree(v)$; it is enforced higher up when $v$ is folded into its own
+parent, which is why the state must keep $v$'s class. \emph{Answer}: at the root
+there is no parent edge, so every internal edge is constrained, and summing over
+all $j\le x$ and all classes counts exactly the typings obeying (i) ``$\le x$
+type-$k$'' and (ii) the adjacency rule. \qed
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Codeforces 855C -- three-class, C-count budget, one capped child-merge (\coderef{c27-knap} instantiated with a class dimension)}, label={lst:c27-855c-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+const ll MOD = 1000000007LL;
+// class: 0 = L (type < k), 1 = C (type == k), 2 = H (type > k)
+int n, X; ll m, k; ll ch[3];
+vector<vector<int>> adj;
+vector<int> sz;
+vector<vector<array<ll,3>>> dp;   // dp[v][j][cls], j = 0..X (C-rooms used)
+
+void dfs(int v, int p) {
+    sz[v] = 1;
+    for (int j = 0; j <= X; j++) for (int c = 0; c < 3; c++) dp[v][j][c] = 0;
+    dp[v][0][0] = ch[0];                 // v is L, contributes 0 C-rooms
+    dp[v][0][2] = ch[2];                 // v is H, contributes 0 C-rooms
+    if (X >= 1) dp[v][1][1] = ch[1];     // v is C, contributes 1 C-room
+    for (int u : adj[v]) if (u != p) {
+        dfs(u, v);
+        vector<array<ll,3>> ndp(X + 1);
+        for (int j = 0; j <= X; j++) for (int c = 0; c < 3; c++) ndp[j][c] = 0;
+        for (int i = 0; i <= min(sz[v], X); i++)
+            for (int ju = 0; ju <= min(sz[u], X) && i + ju <= X; ju++) {
+                // v is L: child may be L, C, H
+                for (int cu = 0; cu < 3; cu++)
+                    ndp[i+ju][0] = (ndp[i+ju][0] + dp[v][i][0]*dp[u][ju][cu]) % MOD;
+                // v is C: child forced L
+                ndp[i+ju][1] = (ndp[i+ju][1] + dp[v][i][1]*dp[u][ju][0]) % MOD;
+                // v is H: child may be L or H (not C)
+                ndp[i+ju][2] = (ndp[i+ju][2] + dp[v][i][2]*dp[u][ju][0]) % MOD;
+                ndp[i+ju][2] = (ndp[i+ju][2] + dp[v][i][2]*dp[u][ju][2]) % MOD;
+            }
+        dp[v] = ndp;
+        sz[v] += sz[u];
+    }
+}
+int main() {
+    if (scanf("%d %lld", &n, &m) != 2) return 0;
+    adj.assign(n + 1, {});
+    for (int i = 0; i < n - 1; i++) {
+        int u, v; scanf("%d %d", &u, &v);
+        adj[u].push_back(v); adj[v].push_back(u);
+    }
+    scanf("%lld %d", &k, &X);
+    ch[0] = (k - 1) % MOD; ch[1] = 1 % MOD; ch[2] = (m - k) % MOD;
+    dp.assign(n + 1, vector<array<ll,3>>(X + 1));
+    dfs(1, 0);
+    ll ans = 0;
+    for (int j = 0; j <= X; j++) for (int c = 0; c < 3; c++) ans = (ans + dp[1][j][c]) % MOD;
+    printf("%lld\n", ans);
+    return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official Example~2: $n=3, m=3$, edges $1\text{--}2, 1\text{--}3$, $k=2, x=1$ $\Rightarrow$ 13]
+Here $\mathit{ch}[0]=k{-}1=1$, $\mathit{ch}[1]=1$, $\mathit{ch}[2]=m{-}k=1$: each
+class has exactly one colour, so counting class-assignments $=$ counting typings.
+Root $1$, leaves $2,3$. Each leaf $u$: $\mathit{dp}[u][0][0]=1$, $\mathit{dp}[u][0][2]=1$,
+$\mathit{dp}[u][1][1]=1$, all else $0$.\;
+Node $1$ seed: $[0]\!\to\!(\text{L}1,\text{C}0,\text{H}1)$, $[1]\!\to\!(\text{L}0,\text{C}1,\text{H}0)$.\ 
+Budget cap $i+j\le x=1$, so only $(i,ju)\in\{(0,0),(0,1),(1,0)\}$.\\[6pt]
+\textbf{Fold leaf~2.} $(0,0)$: L$\to1\!\cdot\!(1{+}0{+}1)=2$, H$\to1\!\cdot\!1{+}1\!\cdot\!1=2$;
+$(0,1)$: L$\to1\!\cdot\!1=1$ (child C); $(1,0)$: C$\to1\!\cdot\!1=1$ (parent C, child L).
+State after: $[0]\!\to\!(2,0,2)$, $[1]\!\to\!(1,1,0)$.\\[6pt]
+\textbf{Fold leaf~3.} $(0,0)$: L$\to2\!\cdot\!2=4$, H$\to2\!\cdot\!1{+}2\!\cdot\!1=4$;
+$(0,1)$: L$\to2\!\cdot\!1=2$; $(1,0)$: L$\to1\!\cdot\!2=2$, C$\to1\!\cdot\!1=1$.
+Final: $[0]\!\to\!(\text{L}4,\text{C}0,\text{H}4)$, $[1]\!\to\!(\text{L}4,\text{C}1,\text{H}0)$.\\[6pt]
+\textbf{Answer} $=\sum_{j\le1}\sum_{\text{cls}}$: $j{=}0$ gives $4{+}0{+}4=\mathbf{8}$
+(zero C-rooms: every node L or H $=2^3$); $j{=}1$ gives $4{+}1{+}0=\mathbf{5}$
+(exactly one C: root C forces both leaves L $=1$ way, or a leaf C whose parent is
+L and whose sibling is free L/H $=2$ ways $\times2=4$). Total $8+5=\boxed{13}$
+\checkmark\ matches CF Example~2.
+\end{tracebox}
+
+\begin{tracebox}[Examples 1 and 3 fold the same rule]
+Ex.~1 ($m=2, k=1$): $\mathit{ch}[0]=k{-}1=0$, so any L-forced state is $0$. A C
+room forces all neighbours to L ($0$ ways) $\Rightarrow$ no C is usable; every room
+must be H ($\mathit{ch}[2]=m{-}k=1$) $\Rightarrow$ exactly one typing. Output
+\texttt{1}. \checkmark\\
+Ex.~3 ($m=1, k=1$): only type $1=C$ exists, $\mathit{ch}[0]=\mathit{ch}[2]=0$.
+Placing a C forces its neighbours to L ($0$ ways) on every edge with $n\ge2$, so no
+valid typing exists. Output \texttt{0}. \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{nx}$ by \thmref{c27-amortize} with $V = x \le 10$: each node's array
+has length $\le x+1$, children merge with the $i + j \le x$ cap, and the constant
+factor is the (parent class, child class) pairs ($\le 3\!\cdot\!3$). For $n=10^5$
+that is $\le 30\!\cdot\!10^{6}$ operations. Memory $\bigO{nx}$ for the DP arrays
+($\sim\!10^6$ \lstinline{ll}) plus $\bigO{n}$ adjacency. Everything is modulo
+$10^9+7$ -- keep the accumulators in \lstinline{long long} and take $\%$ MOD inside
+the inner loop, since a $k-1$ factor is up to $10^9$. Verdict: \ac; this is the
+archetypal budgeted tree knapsack -- three classes, one count index, one capped
+child-merge.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Four ways to lose CF~855C: (i)~\emph{forget the modulo inside the inner loop} --
+$\mathit{ch}[0]=k-1$ is up to $10^9$ and products overflow \lstinline{int} and even
+double the modulus before you reduce; (ii)~\emph{let an H parent keep a C child}
+-- the rule ``H has no C neighbour'' is exactly the class filter in the merge, drop
+it and Example~2 over-counts; (iii)~\emph{read only $\mathit{dp}[1][x][\cdot]$}
+instead of summing $j\le x$ -- the bound is ``\emph{at most} $x$''; (iv)~loop head
+at $\size(v)$ not $\min(\size(v),x)$ -- correct answer, \tle on the big tests.
+Variant: swap ``exactly $j$ C-rooms'' for a second index counting H-rooms and you
+get the shape of the Summit CF~735E, where the budget is distance-to-nearest-black
+instead of a global count -- same merge discipline.
+\end{warningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did your state carry the \emph{class} of $v$ so the parent-edge rule can
+        be checked when $v$ is folded into its parent? Without it the C-forces-L
+        constraint is invisible across the subtree boundary.
+  \item Are the loop heads $\min(\text{size so far}, x)$ and $\min(\size(c), x)$
+        with $i + j \le x$? That cap is \thmref{c27-amortize}'s hypothesis.
+  \item Did you sum the answer over \emph{all} $j \le x$ and all three classes at
+        the root, and reduce mod $10^9+7$ on every product?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Apple Tree}{Codeforces 461B}
+    {https://codeforces.com/problemset/problem/461/B}{CF 2100 · L5}
+    {Delete a set of edges so every resulting component holds \emph{exactly one}
+    black vertex; count the sets mod $10^9+7$. This is \defref{c27-knap-state}
+    with budget $V=1$: $\mathit{dp}[v][0/1]$ = ``the component still open at $v$
+    already owns a black vertex / does not yet.'' Merging a child is a two-term
+    knapsack (cut the edge $\to$ the child's part must already own its black;
+    keep it $\to$ the black counts add, capped at~$1$). Write the merge with the
+    same $\min(\text{so far},V)$ discipline as \coderef{c27-knap}. Samples
+    (verified): $3$ vertices $\to 2$, $6\to1$, $10\to27$.
+    }
+\end{practiceset}
+
+\paragraph{Back-cites (URLs live elsewhere in the book).}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{CF~161D ``Distance in Tree''} (\chref{c10} owns this URL): the
+        distance-$k$ pair count is the histogram merge Ch.~13 used \emph{without}
+        proving $\bigO{nk}$; \thmref{c27-amortize} is that missing proof, read
+        with $V = k$. Re-derive CF~161D's $\mathit{dp}[v][d]$ array from
+        \coderef{c27-knap} and the amortisation now justifies the $10^5 \cdot 500$
+        budget.
+  \item \textbf{CSES ``Tree Matching'' family / CF~570D} (\chref{c10} owns
+        CF~570D): the depth-capped subtree query DP is the same budgeted state
+        answering per-root; that is \secref{c27-knapsack}'s array read at every
+        vertex, and Chapter~15 (\chref{c20}) is what makes the ``every root''
+        reading cheap -- not this chapter.
+\end{itemize}
+
+\begin{recallbox}[10-second refresher -- 14.1 Tree knapsack and the merge bound]
+The state is an array $\mathit{dp}[v][0..V]$ over a budget; children are merged
+\emph{one at a time} by a convolution capped at $\min(\text{size so far},V)$ and
+$\min(\size(c),V)$ with $i+j\le V$. \thmref{c27-amortize} charges each iteration
+to a node-pair at their LCA -- each pair once, $\le V$ per node -- so the whole
+DP is $\bigO{nV}$. CF~855C (\probref{c27-knap-solved}) is three classes (L/C/H
+around $k$) and one count index $j\le x$; the ledger on $T$ (root $\mathit{dp}[1][3]=27$,
+$28$ merge iterations $\le 3n$) is the sanity check.
+\selftest{
+  \item Why can Ch.~13's constant-tuple fold be $\bigO{n}$ but the array state
+        needs a real amortisation argument?
+  \item In \coderef{c27-knap}, name the \emph{two} places the cap $\min(\cdot,V)$
+        appears and what each prevents.
+  \item CF~855C: give the three class-option counts and the child-class filter
+        for a parent of class H.
+  \item State \thmref{c27-amortize}'s charge in one sentence: to what object is a
+        merge iteration charged, and why is it charged at most once?
+  \item Reading the answer as $\mathit{dp}[1][x][\cdot]$ instead of
+        $\sum_{j\le x}$ is which trap?
+}
+\end{recallbox}

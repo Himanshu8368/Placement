@@ -1,0 +1,302 @@
+% =====================================================================
+%  27.1  The Mo engine -- offline range queries on an ARRAY with a
+%  sqrt-decomposition block order.  Exports: sec:c21-moengine
+%  def:c21-mo  thm:c21-complexity  lst:c21-mo  prob:c21-xor  lst:c21-xor
+%  Solved CF 617E "XOR and Favorite Number" (2200, L4), live-verified against
+%  the CF problem page + problemset API (name, rating 2200, tag data structures;
+%  both official samples).  DISCHARGES the Ch.26 (sec:c30-boundary) forward hand-
+%  off "many overlapping offline node-set queries with a non-invertible statistic
+%  -> Mo (Ch.27)".  This is the array engine; subtrees (27.2) and paths (27.3)
+%  reuse it verbatim on a smarter array.
+% =====================================================================
+\section{Mo's Algorithm: The Block-Order Sweep}\label{sec:c21-moengine}
+
+\begin{previouslybox}[Ch.~26 handed you the case this engine is built for]
+Chapter~26 (\(\secref{c30-boundary}\)) closed by admitting a problem shape it
+could not compress: \emph{one fixed tree, an offline batch of node-set queries, a
+slowly-updated statistic with no inverse}.  Its pick table routed that shape here,
+to Mo.  The reason a virtual tree (or a Fenwick prefix) fails on it is arithmetic:
+a statistic like "how many distinct colours" does not telescope, so you cannot get
+the answer for a range from two precomputed prefix values.  But \emph{adding or
+removing one element} from a range \emph{is} cheap.  Mo's algorithm exploits that
+asymmetry, and it does so on a plain array first -- this section, with subtrees and
+paths layered on in 27.2--27.3.
+\end{previouslybox}
+
+\begin{topicintro}
+You are given an array of length \(n\) and \(q\) offline range queries
+\([L_i,R_i]\).  Maintain a sliding window \([curL,curR]\) with a statistic you can
+update in \(O(1)\) when the window grows or shrinks by one at either end
+(\texttt{add}/\texttt{rm}).  Naively jumping between arbitrary query ranges costs
+\(\bigO{nq}\).  Mo's \term{block order} fixes it: sort queries by
+\((\lfloor L/B\rfloor, R)\) for a block size \(B\), and the two pointers only ever
+creep, never teleport.  With \(B\approx\sqrt n\) the total pointer movement -- hence
+the total \texttt{add}/\texttt{rm} calls -- is \(\bigO{(n+q)\sqrt n}\)
+(\(\thmref{c21-complexity}\)).  That single sweep answers all \(q\) queries.
+
+\textbf{Prerequisites.} Nothing from earlier chapters is required for the engine
+itself; you meet \(\tin/\tout\) (\chref{c24}) and \(\lca\) (\chref{c11}) in 27.2--27.3.
+What you need here is comfort with \(O(1)\) amortised updates and a counting array.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state the Mo block order and prove the \(\bigO{(n+q)\sqrt n}\) bound; \hfill\lv{4}
+  \item write the two-pointer \texttt{add}/\texttt{rm} sweep cold; \hfill\lv{4}
+  \item design an \(O(1)\) update for a non-telescoping statistic; \hfill\lv{4}
+  \item count subarrays with a given xor offline -- solved CF 617E. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{The block order and why it is fast}
+% ---------------------------------------------------------------
+
+\begin{definition}{Mo's algorithm (block order + two pointers)}{c21-mo}
+Let every query be a range \([L_i,R_i]\) over an array of size \(n\), answered
+offline.  Pick a block size \(B\) and \term{sort the queries} by the key
+\((\lfloor L_i/B\rfloor,\ R_i)\) (within an odd block the \(R\) order is often
+reversed -- the Hilbert/odd-even refinement -- but the plain order already gives
+the bound).  Sweep a single window \([curL,curR]\) from query to query in that
+order, moving the ends one step at a time with an \(O(1)\) \texttt{add}/\texttt{rm},
+recording the window's statistic as each query's answer.
+\end{definition}
+
+\begin{theorem}{Mo is \(\bigO{(n+q)\sqrt n}\) with \(B=\sqrt n\)}{c21-complexity}
+With block size \(B\), the right pointer moves \(O(n\cdot n/B)\) steps in total and
+the left pointer moves \(O(q\cdot B)\) steps, so the total work is
+\(\bigO(n^2/B + qB) = \bigO{(n+q)\sqrt n}\) when \(B=\Theta(\sqrt n)\) (more
+precisely \(B=n/\sqrt q\) balances the two terms).
+\end{theorem}
+\begin{proofbox}
+Split the \(q\) queries by the block of their \(L\). \emph{Right pointer.} Inside
+one \(L\)-block the queries are sorted by \(R\), so while you answer that block the
+\(R\) pointer only marches forward, covering at most \(n\) positions per block; with
+\(n/B\) blocks the total \(R\)-movement is \(O(n\cdot n/B)=O(n^2/B)\). \emph{Left
+pointer.} When a query starts, \(curL\) jumps to the new \(L\); within one block all
+\(L\) lie in an interval of length \(B\), so each intra-block left move is \(O(B)\),
+and across \(q\) queries the left pointer moves \(O(qB)\) steps. Summing
+\(O(n^2/B+qB)\) and minimising (AM-GM, or set the terms equal: \(n^2/B=qB
+\Rightarrow B=n/\sqrt q\); for \(q=\Theta(n)\) that is \(B=\sqrt n\)) gives
+\(\bigO{(n+q)\sqrt n}\). Each step is one \(O(1)\) \texttt{add}/\texttt{rm}. \(\Box\)
+\end{proofbox}
+
+\begin{insightbox}[Why the sort key is "block of \(L\), then \(R\)" and not the reverse]
+You pay for the pointer that \emph{jumps}; you almost pay for the one that
+\emph{sweeps}.  Sorting by \(R\) inside a block makes the \(R\) pointer monotone
+(sweeps, total \(O(n)\) per block, no resets).  Grouping by the \emph{block of
+\(L\)} keeps the \(L\) pointer local (its jumps are \(\le B\)).  Swap the two keys
+and neither pointer stays cheap -- you get \(O(nq)\) again.  The magic is entirely
+in "one pointer monotone per group, the other confined to a small group."
+\end{insightbox}
+
+\begin{lstlisting}[caption={Generic Mo skeleton: block-sort the queries, sweep one window with O(1) add/rm, read off the statistic. ASCII only, identifiers without underscores}, label={lst:c21-mo}]
+struct Query { int l, r, idx; };
+int B;
+bool cmp(const Query& a, const Query& b){
+    if (a.l / B != b.l / B) return a.l / B < b.l / B;   // primary: block of L
+    return a.r < b.r;                                   // secondary: R (odd-even: reverse)
+}
+// curL,curR = current window ends; cur = statistic of the window
+for (auto &qu : queries){                    // queries already sorted, cur starts EMPTY
+    while (curL > qu.l) add(--curL);         // grow left
+    while (curR < qu.r) add(++curR);         // grow right
+    while (curL < qu.l) rm(curL++);          // shrink left
+    while (curR > qu.r) rm(curR--);          // shrink right
+    ans[qu.idx] = cur;
+}
+\end{lstlisting}
+
+\begin{tracebox}[The block order on \(n{=}9\), \(B{=}3\), three queries \(\lbrack 7,8\rbrack, \lbrack 1,3\rbrack, \lbrack 2,5\rbrack\)]
+Block of \(L\): \([1,3]\) and \([2,5]\) are in block \(0\) (indices \(1..3\)), \([7,8]\)
+in block \(2\).  Sorted: \([1,3],[2,5]\) (block 0, by \(R\)), then \([7,8]\).  Sweep from
+empty \([1,0]\): to \([1,3]\) add positions \(1,2,3\) (3 moves).  To \([2,5]\): shrink
+left once (\(rm(1)\)), grow right twice (\(add(4),add(5)\)) -- 3 moves, \(R\) never went
+backwards.  To \([7,8]\): grow right to \(8\) (4 adds), then shrink left to \(7\) (3 rm)
+-- 7 moves.  Total \(13 = O((n+q)\sqrt n)\): the \(R\) pointer ran \(3\!\to\!5\!\to\!8\)
+monotonically and \(L\) only jumped within/across small blocks. \(\Box\)
+\end{tracebox}
+
+\begin{complexitybox}[The engine]
+Sorting the \(q\) queries is \(\bigO{q\log q}\); the sweep is \(\bigO{(n+q)\sqrt n}\)
+\texttt{add}/\texttt{rm} calls at \(O(1)\) each (\(\thmref{c21-complexity}\)). With
+\(q=\Theta(n)\) the total is \(\bigO{n\sqrt n}\). \textbf{Space} \(\bigO{n+q}\) for
+the array, the query list, and whatever the statistic needs. The whole method lives
+or dies on \texttt{add}/\texttt{rm} being \(O(1)\) -- if updating costs \(\bigO{\log n}\)
+you have Mo-with-a-BIT, usually slower than a direct structure.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 617E XOR and Favorite Number -- the canonical Mo warm-up}
+% ---------------------------------------------------------------
+
+\solvedproblem{c21-xor}{XOR and Favorite Number}{CF 617E}
+  {https://codeforces.com/problemset/problem/617/E}{CF 2200 L4}
+  {offline range queries with a block order; prefix-xor turns "subarray xor = k" into "count pairs (i,j) in range with px[i] xor px[j] = k"; a freq-of-prefix-xor window with O(1) add/rm}
+
+\begin{problemstatement}[XOR and Favorite Number (statement, constraints and both samples verified against the live CF page)]
+An array \(a_1,\dots,a_n\) (\(1\le n\le 10^5\), \(0\le a_i\le 10^6\)) and an integer
+\(k\) (\(0\le k\le 10^6\)).  There are \(m\) questions (\(1\le m\le 10^5\)); each gives
+\(l,r\) (\(1\le l\le r\le n\)) and asks: \emph{how many pairs \((i,j)\) with
+\(l\le i\le j\le r\) satisfy \(a_i \oplus a_{i+1}\oplus\cdots\oplus a_j = k\)?}
+Answer the questions in order.  (The count of pairs blows past \texttt{int}.)
+
+\textbf{Sample 1.} \(n{=}6,m{=}2,k{=}3\); \(a=[1,2,1,1,0,3]\); queries \((1,6),(3,5)\)
+\(\to\) \texttt{7} \texttt{0}. \textbf{Sample 2.} \(n{=}5,m{=}3,k{=}1\);
+\(a=[1,1,1,1,1]\); queries \((1,5),(2,4),(1,3)\) \(\to\) \texttt{9} \texttt{4} \texttt{4}.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+A subarray xor is a difference of two prefix xors.  Once you see that, what is a
+query range actually counting, and why can a Fenwick prefix not answer it directly?
+\peek{let \(px[t]=a_1\oplus\cdots\oplus a_t\) (and \(px[0]=0\)); then
+\(a_i\oplus\cdots\oplus a_j = px[j]\oplus px[i{-}1]\).  A query \([l,r]\) becomes
+"how many pairs \(p<q\) with \(l{-}1\le p<q\le r\) have \(px[p]\oplus px[q]=k\)?" --
+a range over the \emph{prefix} array \(px[0..n]\).}
+\nudge{This is the "no inverse" tell: counting equal-xor pairs in a range does not
+telescope.  But adding one index to the current window is \(O(1)\): if the window
+already holds \(cnt[x]\) copies of each prefix value, inserting a new \(px=v\) forms
+exactly \(cnt[v\oplus k]\) new good pairs.}
+\fullhint{Run Mo over ranges \([L,R]=[l-1,\ r]\) of \(px[0..n]\).  Keep
+\(\mathit{cnt}[v]\) = multiplicity of value \(v\) in the window and \(cur\) = number
+of pairs in the window with xor \(k\).  \texttt{add(t)}: \(v=px[t];\ cur+\!\!\!=cnt[v\oplus k];\ cnt[v]++\).
+\texttt{rm(t)}: \(v=px[t];\ cnt[v]--;\ cur-=cnt[v\oplus k]\).  \texttt{add}/\texttt{rm}
+are symmetric because pair-counting is order-independent.  \textbf{Start the window
+empty with \(cnt[px[0]]=0\)} and be careful to add index \(0\) (the empty prefix) when
+\(L=0\): it is \(px[0]=0\) that pairs with a prefix equal to \(k\) to count subarrays
+starting at \(l\).  Read answers in \(O(1)\) from \(cur\).  \(cur\) is \texttt{long
+long}; the value domain is \(<2^{20}\), size \(\mathit{cnt}\) accordingly.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Two reductions do the work.  First, prefix-xor moves the problem from
+\(O(\text{length})\) subarray xors to counting pairs in a range -- so a query is now
+just a window \([l-1,r]\) over \(px\) and its answer is a pair count.  Second, that
+pair count does not telescope (there is no per-index contribution you can subtract),
+which is exactly the Mo regime: cheap to insert one prefix value, expensive to answer
+a fresh range from scratch.  The window statistic is a frequency table \(\mathit{cnt}\)
+plus a running pair total \(cur\).
+
+\solstep{Key Observations}
+\begin{observation}
+Inserting a prefix value \(v\) into a window that already contains \(\mathit{cnt}[x]\)
+of each \(x\) creates \(cnt[v\oplus k]\) new pairs summing (under xor) to \(k\); so
+\texttt{add} is \(O(1)\) and its mirror \texttt{rm} is \(O(1)\) (decrement first, then
+subtract -- the pair being removed no longer counts itself).
+\end{observation}
+\begin{observation}
+Because a pair is an unordered \(\{p,q\}\) with \(p<q\), the two Mo pointers may move
+in any order: the window always holds a set of prefix indices and \(cur\) counts
+pairs among them, independent of insertion order.  This is what makes Mo's pointer
+freedom legal here.
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.26\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ per query, double loop & count all subarrays in \([l,r]\) directly & \(\bigO{m n^2}\) & \tle \\
+2 & \lv{3}\ per query, prefix-xor map & one pass, freq map over \([l-1,r]\) & \(\bigO{mn}\) & \tle \\
+3 & \lv{4}\ \textbf{Mo over prefix xors} & block order, \(O(1)\) add/rm & \(\bigO{(n+m)\sqrt n}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is \(O(n)\) \emph{per query} and \(m\) is up to \(n\), so it is \(O(n^2)\);
+rung~3 shares the frequency table across consecutive queries, paying only for the
+pointers that move.
+
+\solstep{Solution}
+Build \(px[0..n]\).  Turn each question \((l,r)\) into a Mo range \([l-1, r]\) tagged
+with its original index.  Sort by block order.  Sweep one window maintaining
+\(\mathit{cnt}[\cdot]\) over prefix values and the running pair count \(cur\);
+\texttt{add}/\texttt{rm} update both in \(O(1)\) as in the hint.  Store \(cur\) into
+\(\mathit{ans}[\text{idx}]\) and print answers in input order.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 617E via Mo over the prefix-xor array. add(t): cur += cnt[px[t] xor k] then cnt[px[t]]++. rm(t): cnt[px[t]]-- then cur -= cnt[px[t] xor k]. Block size about n divided by sqrt m. ASCII only}, label={lst:c21-xor}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+const int MAXN=100005;
+int n,m,k, px[MAXN], B;
+ll cur, ans[MAXN];
+int cnt[1<<20];
+struct Q{ int l,r,id; } qs[MAXN];
+bool cmp(const Q&a,const Q&b){
+  if(a.l/B!=b.l/B) return a.l/B<b.l/B;
+  return a.r<b.r;
+}
+void add(int t){ int v=px[t]; cur+=cnt[v^k]; cnt[v]++; }
+void rm (int t){ int v=px[t]; cnt[v]--; cur-=cnt[v^k]; }
+int main(){
+  scanf("%d%d%d",&n,&m,&k);
+  px[0]=0;
+  for(int i=1;i<=n;i++){ int a; scanf("%d",&a); px[i]=px[i-1]^a; }
+  for(int i=0;i<m;i++){ int l,r; scanf("%d%d",&l,&r); qs[i]={l-1,r,i}; }
+  B = n / max(1,(int)sqrt((double)n));      // block size
+  sort(qs,qs+m,cmp);
+  int curL=0, curR=-1; cur=0; memset(cnt,0,sizeof cnt);
+  for(int qi=0;qi<m;qi++){
+    Q &q=qs[qi];
+    while(curL>q.l) add(--curL);
+    while(curR<q.r) add(++curR);
+    while(curL<q.l) rm(curL++);
+    while(curR>q.r) rm(curR--);
+    ans[q.id]=cur;
+  }
+  for(int i=0;i<m;i++) printf("%lld\n",ans[i]);
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Sample 1: prefix xors, then the pair count for query \((1,6)\)]
+\(px=[0,1,3,2,3,3,0]\) (indices \(0..6\)).  Query \((1,6)\to\) window \([0,6]\), all
+seven prefix values.  Frequencies: \(\mathit{cnt}[0]{=}2,\mathit{cnt}[1]{=}1,
+\mathit{cnt}[2]{=}1,\mathit{cnt}[3]{=}3\).  Pairs with \(x\oplus y=3\): the
+\((0,3)\) family \(=\mathit{cnt}[0]\!\cdot\!\mathit{cnt}[3]=2\!\cdot\!3=6\); the
+\((1,2)\) family \(=\mathit{cnt}[1]\!\cdot\!\mathit{cnt}[2]=1\).  Total
+\(\boxed{7}\) -- the window's \(cur\).  Query \((3,5)\to[2,5]\) holds \(px\) values
+\(\{3,2,3,3\}\): no value pairs to \(3\) (needs \(0\) with \(3\), needs \(1\) with
+\(2\)), \(cur=\boxed{0}\).  Both match the judge. \(\Box\)
+\end{tracebox}
+
+\begin{warningbox}[Three ways Mo goes wrong]
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{Forgetting the empty prefix \(px[0]\).} A subarray starting at \(l\)
+        pairs \(px[l{-}1]\) with a later prefix; if the window's \(L=l-1\) and you never
+        add index \(0\), you under-count every subarray that starts at the left edge.
+  \item \textbf{\texttt{rm} updating in the wrong order.} \texttt{rm} must
+        \emph{decrement} \(\mathit{cnt}[v]\) \emph{before} subtracting
+        \(\mathit{cnt}[v\oplus k]\), or you subtract the pair that is itself leaving.
+  \item \textbf{Answer overflow / value-domain sizing.} \(cur\) is a pair count
+        (\(\le n^2/2\)) -- \texttt{long long}.  Size \(\mathit{cnt}\) to the prefix-xor
+        domain (\(<2^{20}\) here), not to \(n\).
+\end{enumerate}
+\end{warningbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Block size is a tuning knob, not a theorem.} \(B=n/\sqrt q\) balances
+        the two pointer terms; when in doubt \(B\approx\sqrt n\) works, and a fixed
+        \(B\approx 700\) for \(n=10^5\) is a common contest shortcut.
+  \item \textbf{Odd-even \(R\) order cuts constants.} Reversing \(R\) in odd \(L\)-blocks
+        shortens the \(R\)-jump at block boundaries; correctness is untouched.
+  \item \textbf{Mo is offline \emph{and} no-updates.} If updates are interleaved, the
+        block order is invalid -- that is a different chapter (HLD, Ch.~22).
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[27.1 in one breath]
+\emph{Block-sort the offline ranges by \((\lfloor L/B\rfloor,R)\), sweep one window,
+move the ends with an \(O(1)\) \texttt{add}/\texttt{rm}, and read the statistic -- all
+\(q\) answers in \(\bigO{(n+q)\sqrt n}\) (\(\thmref{c21-complexity}\),
+\(\coderef{c21-mo}\)).  CF 617E is the engine on prefix xors: a range is a pair-count
+over \([l-1,r]\) of \(px\), inserting \(v\) forms \(cnt[v\oplus k]\) pairs, and the
+sweep replays the samples to \(7,0\) and \(9,4,4\) (\(\probref{c21-xor}\)).  Subtrees
+and paths reuse this \emph{exact} loop -- only the array changes.}
+\selftest{
+  \item Why sort by (block of \(L\), then \(R\)) and not the other way? \emph{(To keep one pointer monotone per group and the other confined to a width-\(B\) group; the bound \(O(n^2/B+qB)\) needs it. \(\thmref{c21-complexity}\).)}
+  \item What makes CF 617E a Mo problem and not a Fenwick one? \emph{(The equal-xor pair count has no inverse/telescoping form, but a single insert/delete is \(O(1)\).)}
+  \item Give the \texttt{add} step for the prefix-xor window. \emph{(\(cur += cnt[v\oplus k];\ cnt[v]++\). \(\coderef{c21-xor}\).)}
+}
+\end{recallbox}

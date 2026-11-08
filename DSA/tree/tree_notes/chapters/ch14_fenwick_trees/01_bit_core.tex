@@ -1,0 +1,618 @@
+% =====================================================================
+%  18.1  The Binary Indexed Tree                     sec:c14-core
+%  Exports: def:c14-interval  thm:c14-query  prop:c14-linear
+%           lst:c14-query (lowbit + prefix walk)  lst:c14-update  lst:c14-build
+%           lst:c14-1648-soln  fig:c14-hiddentree  prob:c14-rangesum
+%  All numbers agree with 00_opener (fig:c14-array):
+%    A=(3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2), sum 49;
+%    T=(3,2,4,14,1,2,5,24,7,0,2,13,1,7,3,49);
+%    query(6)=2+14=16, query(7)=5+2+14=21, query(13)=1+13+24=38;
+%    update(3,+3): T4 14->17, T8 24->27, T16 49->52, then query(7)=24.
+%  CSES 1648 sample (live-verified): n=8 q=4, a=(3,2,4,5,1,1,5,3),
+%    queries 2 1 4 / 2 5 6 / 1 3 1 / 2 1 4  ->  outputs 14, 2, 11.
+% =====================================================================
+\section{The Binary Indexed Tree}\label{sec:c14-core}
+
+\begin{previouslybox}[Ch.~5 promised this engine; Ch.~1 met its static twin]
+Chapter~1 learned that a \emph{static} array answers every range sum with one
+prefix table in \(O(1)\) (Ch.~5, \propref{c24-prefix}).  Chapter~5 then
+flattened trees into arrays and repeatedly said ``with updates, hand the
+range to a Fenwick tree, \chref{c14}'' -- without ever building one.  The
+promise is kept now: this section derives the structure from the binary
+representation of indices, in three loops totalling about ten lines.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{Fenwick tree} or \term{Binary Indexed Tree} (BIT, BITr, or
+\emph{Fenwick array} after P.\ Fenwick, 1994) is a single array \code{t[1..n]}
+sitting \emph{on top of} the data array \(A\).  Slot \(i\) stores the sum of
+one carefully chosen block of \(A\)'s entries -- the block
+\([i-\operatorname{lowbit}(i)+1,\,i]\), where
+\(\operatorname{lowbit}(i)=i\,\&\,(-i)\) is the lowest set bit of \(i\).
+Those \(n\) blocks are exactly structured so that every prefix
+\([1..i]\) decomposes into \(\le\log_2 n\) disjoint blocks (walk
+\(i\to i-\text{lowbit}(i)\)) and every position \(i\) is covered by
+\(\le\log_2 n\) blocks (walk \(i\to i+\text{lowbit}(i)\)).  Result: prefix
+sums and point updates in \(\bigO{\log n}\), with no pointers, no recursion,
+and no balancing.
+
+\textbf{Prerequisites.} Binary representation of integers and two's-complement
+negation (\(-i\) flips bits and adds one, so \(i\&(-i)\) isolates the lowest
+set bit).  Prefix sums from Ch.~1/Ch.~5 (\propref{c24-prefix}).  The running
+array \(A\) and its table \(T\) from \figref{c14-array}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item read the responsibility interval of every slot off the binary
+        expansion, and verify a built BIT cell by cell; \hfill\lv{2}
+  \item write \code{query}/\code{update} from memory and bound their walk
+        length by \(\log_2 n\); \hfill\lv{2}--\lv{3}
+  \item build a BIT from its data array in \(\bigO{n}\) (not
+        \(\bigO{n\log n}\)); \hfill\lv{4}
+  \item solve point-set + range-sum inputs end to end (CSES~1648). \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``prefix sums with values that change'']
+\reckey{``update position \(k\) to \(u\) / add \(u\) to position \(k\)''
+interleaved with ``sum of \(x_a+\cdots+x_b\)''; ``after these changes, how
+many of X are currently \(\le\) \(\ldots\)''; any input whose brute force is
+a prefix array rebuilt per update -- the phrase ``process \(q\) queries of
+two types'' with one type mutating one position.}
+\recuse{
+  \item point mutations + prefix/range \emph{sums} (or counts): the plain
+        BIT, this section -- about 10 lines;
+  \item the same but the ranges are tree subtrees -- Ch.~5's flattening
+        \(\;+\) this engine, \secref{c14-trees};
+  \item static array, zero updates -- plain prefix array
+        (\propref{c24-prefix}), \(O(1)\) per query; do not pay \(\log n\).
+}
+\recnotuse{
+  \item the aggregate is min/max/gcd under \emph{arbitrary} writes -- a
+        segment tree, Ch.~19 (\chref{c13}); the BIT trick needs an
+        \emph{invertible} accumulator (sums, counts) or a monotone
+        insertion order (see \secref{c14-range}'s prefix-min caveat);
+  \item whole \emph{intervals} get added to -- still a BIT, but the
+        difference flavour, \secref{c14-range};
+  \item you must read an arbitrary \emph{element} after range adds and also
+        sum ranges -- two BITs, \(\secref{c14-range}\).
+}
+One-line test: \emph{single positions move, prefix questions get asked?  The
+smallest structure that does both is ten lines long and lives in one array.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: the Blocks Binary Gives You}
+% ---------------------------------------------------------------
+
+Write the indices in binary.  Each index \(i\) ``owns'' the block whose
+length is its lowest set bit:
+\[
+  \textstyle
+  \operatorname{lowbit}(i)=i\,\&\,(-i),\qquad
+  \text{block of slot }i=[\,i-\operatorname{lowbit}(i)+1,\; i\,].
+\]
+For \(n=16\) the whole schedule is mechanical (opener,
+\figref{c14-array}, bottom row): six slots own length~1 (odd indices), four
+own length~2 (\(\equiv 2 \pmod 4\)), two own length~4 (\(\equiv4\pmod8\)),
+one owns length~8, one owns length~16.  Two facts make the structure work:
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Prefixes shatter into owned blocks.}  \(i\to
+        i-\operatorname{lowbit}(i)\) peels the \emph{last} block off
+        \([1..i]\): \(13\to12\to8\to0\) shatters \([1..13]\) into
+        \([13,13]\uplus[9,12]\uplus[1,8]\).  Each step clears at least the
+        lowest set bit, so at most \(\log_2 n\) blocks survive the walk.
+  \item \textbf{Positions are covered by few blocks.}  \(A_i\) is stored in
+        exactly the slots whose blocks contain \(i\): \(i\to
+        i+\operatorname{lowbit}(i)\) climbs to each of them --
+        \(3\to4\to8\to16\), again \(\le\log_2 n+1\) stops.
+\end{itemize}
+
+\begin{definition}{Responsibility interval}{c14-interval}
+In a BIT over \([1..n]\), slot \(i\) is \emph{responsible} for the contiguous
+range of data positions \([\,i-\operatorname{lowbit}(i)+1,\;i\,]\), and stores
+\(t[i]=\sum_{p}\,A_p\) over exactly that range.  The \term{parent} of slot
+\(i\) is the next slot responsible for a range strictly containing it,
+\(i+\operatorname{lowbit}(i)\) (if it exists).
+\end{definition}
+
+\begin{theorem}{Both walks in \(\bigO{\log n}\)}{c14-query}
+On a BIT of size \(n\), \code{query(i)} (sum of \([1..i]\)) visits at most
+\(\lfloor\log_2 n\rfloor+1\) slots, and \code{update(i,delta)} touches at
+most \(\lfloor\log_2 n\rfloor+1\) slots.  The blocks collected by
+\code{query} are disjoint and cover \([1..i]\) exactly.
+\end{theorem}
+\begin{proofbox}
+\textbf{Query.}  Each step replaces \(i\) by \(i-\operatorname{lowbit}(i)\),
+which clears the lowest set bit and changes no higher bit, after
+\(\operatorname{popcount}(i)\le\lfloor\log_2 n\rfloor+1\) steps
+\(i=0\).\ \textbf{Coverage.}  The step at value \(i\) collects
+\([i{-}\operatorname{lowbit}(i){+}1,\,i]\); the next value
+\(i' = i-\operatorname{lowbit}(i)\) has
+\(\operatorname{lowbit}(i')>\operatorname{lowbit}(i)\) (the bit just cleared
+was \(i\)'s lowest, so \(i'\)'s lowest set bit is higher), hence
+\(i'\)'s block ends at \(i'\ge i-\operatorname{lowbit}(i)\) and abuts the
+previous block without overlap; by induction the collected blocks are
+disjoint with union \([1..i]\).\ \textbf{Update.}  Each step
+\(i\to i+\operatorname{lowbit}(i)\) clears the lowest set bit of \(i\) that
+is \emph{followed by a zero}... formally: adding the lowest set bit to \(i\)
+carries through the consecutive ones above it, strictly increasing
+\(\operatorname{lowbit}\); since \(\operatorname{lowbit}\) is a power of two
+\(\le n\), at most \(\lfloor\log_2 n\rfloor+1\) additions fit before the walk
+passes \(n\).  The touched slots are precisely those whose blocks contain
+position~\(i\) (a block \([a,b]\) contains \(i\le b\) iff starting from
+\(i\)'s own slot the parent chain reaches it, because parents strictly
+extend and the chain enumerates all extending dyadic blocks).
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  Binary keeps a bookkeeping secret: the
+number of set bits and the length of a carry chain are both \(\le\log n\).
+The query walk spends set bits; the update walk spends carry steps.  Nothing
+about the \emph{data} matters -- only indices -- which is why the structure
+survives being just one flat array.
+
+% ---------------------------------------------------------------
+\subsection{The Two Walks, Then the Linear Build}
+% ---------------------------------------------------------------
+
+\begin{lstlisting}[caption={reading lowbit, and the prefix walk: sum of A[1..i]}, label={lst:c14-query}]
+int lowbit(int i){ return i & -i; }        // lowest set bit of i
+long long query(int i){                    // prefix sum A[1]+..+A[i]
+    long long s = 0;
+    for (; i > 0; i -= lowbit(i)) s += t[i];
+    return s;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={the point-update walk: add delta to A[i] everywhere it is buried}, label={lst:c14-update}]
+void update(int i, long long delta){       // A[i] += delta
+    for (; i <= n; i += lowbit(i)) t[i] += delta;
+}
+// range sum [a,b] = query(b) - query(a-1)   (invertible accumulator!)
+\end{lstlisting}
+
+Both loops are the walks of \thmref{c14-query} with no branch, no pointer and
+no cache-hostile indirection.  On \(A\) of \figref{c14-array}:
+\(\text{query}(13)\) collects \(t[13]{=}1\), \(t[12]{=}13\), \(t[8]{=}24\)
+for \(38\); \(\text{update}(3,+3)\) rewrites \(t[4],t[8],t[16]\).
+
+\begin{lstlisting}[caption={O(n) build: hand each partial block to the slot whose block extends it}, label={lst:c14-build}]
+void build(){                       // assumes A[1..n]; fills t[1..n]
+    for (int i = 1; i <= n; i++) t[i] = A[i];
+    for (int i = 1; i <= n; i++){
+        int j = i + lowbit(i);      // j's block ends just past i's
+        if (j <= n) t[j] += t[i];   // pass i's full block up
+    }
+}
+\end{lstlisting}
+
+\begin{proposition}{The linear build}{c14-linear}
+\(\coderef{c14-build}\) initialises \(\code{t}[i]=A[i]\) and pushes each slot
+into its parent \(i{+}\operatorname{lowbit}(i)\) once, in increasing \(i\).
+After processing \(i\), slot \(i\) already holds the full block sum
+\(\defref{c14-interval}\), because the pushes into \(i\) come exactly from
+the child slots \(i_1 < i_2 < \cdots\) whose blocks partition
+\(i\)'s block minus its own single last entry; and every \(i_1,i_2,\dots<i\)
+was processed earlier.  Total work: \(n\) copies \(+\;\le n\) pushes
+\(=\bigO{n}\), versus \(\bigO{n\log n}\) for calling \code{update} per
+position.
+\end{proposition}
+
+Trace on the first eight slots (opener table): start \(t=(3,2,4,5,1,1,5,3)\).
+Pushes: \(i{=}1\!: t[2]{+}{=}3\to5\). \(i{=}2\!: t[4]{+}{=}5\to10\).
+\(i{=}3\!: t[4]{+}{=}4\to14\). \(i{=}4\!: t[8]{+}{=}14\to17\).
+\(i{=}5\!: t[6]{+}{=}1\to2\). \(i{=}6\!: t[8]{+}{=}2\to19\).
+\(i{=}7\!: t[8]{+}{=}5\to24\).  Final row \((3,5,4,14,1,2,5,24)\) -- note
+\(T[2]=A_1{+}A_2=5\), not \(2\): a slot's value after the build is its
+\emph{whole block}, and the push phase is what turns single entries into
+block sums.  Continuing to \(n=16\) gives the shared row
+\[
+  T=(\,3,5,4,14,1,2,5,24,\;7,7,2,13,1,7,3,49\,)
+\]
+(easy cells to recheck: \(T[10]=A_9{+}A_{10}=7{+}0=7\),
+\(T[12]=7{+}0{+}2{+}4{=}13\), \(T[16]=\sum A=49\)).  The walks are unaffected:
+\(\text{query}(6)=T[6]+T[4]=2+14=16\) \checkmark,
+\(\text{query}(13)=T[13]+T[12]+T[8]=1+13+24=38\) \checkmark.
+
+\begin{complexitybox}[Plain BIT]
+\textbf{Build} \(\bigO{n}\) (\(\coderef{c14-build}\)).
+\textbf{Query/update} \(\le\lfloor\log_2 n\rfloor+1\) array touches, e.g.\
+\(18\) at \(n=2\cdot10^5\) -- a fraction of a microsecond per op.
+\textbf{Memory} one \code{long long} array of \(n+1\).
+\textbf{Constant factor}: the smallest of any \(\bigO{\log n}\) range
+structure (segment trees: \(4\) times the memory, a quarter of the cache
+hits per level; comparison is \secref{c14-range}'s closing table).
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Why It Is a Hidden Binary Tree}
+% ---------------------------------------------------------------
+
+The parent rule \(i\to i+\operatorname{lowbit}(i)\) makes slots into a
+forest; for \(n=16\) the top of each tree and the children of slot~8 are:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.72, transform shape,
+    bnode/.style={circle, draw=primaryblue, line width=0.8pt, fill=primaryblue!8,
+                  minimum size=6.5mm, font=\scriptsize\bfseries, text=primaryblue!60!black}]
+  \node[bnode] (s8) at (0,0)   {8};
+  \node[bnode] (s4) at (-2.2,-1.4) {4};
+  \node[bnode] (s12) at ( 2.2,-1.4) {12};
+  \node[bnode] (s2) at (-3.4,-2.8) {2};
+  \node[bnode] (s6) at (-1.2,-2.8) {6};
+  \node[bnode] (s10) at ( 1.2,-2.8) {10};
+  \node[bnode] (s14) at ( 3.4,-2.8) {14};
+  \node[bnode] (s1) at (-4.0,-4.1) {1};
+  \node[bnode] (s3) at (-2.9,-4.1) {3};
+  \node[bnode] (s5) at (-1.8,-4.1) {5};
+  \node[bnode] (s7) at (-0.6,-4.1) {7};
+  \node[bnode] (s9) at ( 0.6,-4.1) {9};
+  \node[bnode] (s11) at ( 1.8,-4.1) {11};
+  \node[bnode] (s13) at ( 2.9,-4.1) {13};
+  \node[bnode] (s15) at ( 4.0,-4.1) {15};
+  \node[bnode] (s16) at (0,2.2) {16};
+  \draw[tedge] (s16)--(s8) (s8)--(s4) (s8)--(s12)
+    (s4)--(s2) (s4)--(s6) (s12)--(s10) (s12)--(s14)
+    (s2)--(s1) (s2)--(s3) (s6)--(s5) (s6)--(s7)
+    (s10)--(s9) (s10)--(s11) (s14)--(s13) (s14)--(s15);
+  \node[annot, font=\scriptsize, text=darkgray, anchor=north west] at (4.9,2.2)
+    {\(\begin{array}{@{}l@{}}
+      \text{parent of }i = i+\text{lowbit}(i)\\
+      \text{children of }8=\{4,12\};\ \text{of }4=\{2,6\}\\
+      \text{query path: child}\to\text{root sums}\le\log n\ \text{siblings}\\
+      \text{update path: root}\to\text{leaf refreshes the path}
+    \end{array}\)};
+\end{tikzpicture}
+\caption{The BIT over \([1..16]\) drawn as the forest its parent rule
+defines.  Slot~16 roots the whole array (block \([1,16]\)); the children of
+any slot \(s\) are \(s-\operatorname{lowbit}(s)/2\) and its recursive
+split, mirroring a segment tree \emph{whose split points are the binary
+carries instead of the midpoints}.  The \code{query} walk is a root path in
+this forest read bottom-up with sibling sums skipped; \code{update} is the
+same path top-down.  This is why textbook proofs of \(\bigO{\log n}\) need no
+amortisation: the forest has height \(\lceil\log_2 n\rceil\).}
+\label{fig:c14-hiddentree}
+\end{figure}
+
+\begin{comparisonbox}[Prefix array vs BIT vs segment tree (sum workload)]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Prefix array}: build \(\bigO{n}\), query \(O(1)\), point
+        update \(\bigO{n}\) -- dead the moment values move.
+  \item \textbf{BIT}: build \(\bigO{n}\), query \(\bigO{\log n}\), update
+        \(\bigO{\log n}\), \(\sim\)10 lines, one array of \(n{+}1\) -- the
+        default for sums/counts under point changes.
+  \item \textbf{Segment tree} (Ch.~19, \chref{c13}): build \(\bigO{n}\),
+        query/update \(\bigO{\log n}\), \(\sim\)40 lines, array of
+        \(4n\) -- required the moment the accumulator stops being
+        invertible (max, min, gcd) or the updates stop being additive.
+\end{itemize}
+The honest gap between BIT and segment tree is \emph{expressiveness}, not
+speed; the BIT wins on code size, constant factor and memory, and this book
+keeps the segment tree's full power for \chref{c13}/\chref{c15}.
+\end{comparisonbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CSES 1648 Dynamic Range Sum Queries}
+% ---------------------------------------------------------------
+
+\solvedproblem{c14-rangesum}{Dynamic Range Sum Queries}{CSES 1648}
+  {https://cses.fi/problemset/task/1648}{CSES L3}
+  {plain BIT, point set via delta, range sum by prefix difference}
+
+\begin{problemstatement}[CSES 1648 Dynamic Range Sum Queries]
+Given an array of \(n\) integers, process \(q\) queries of two types:
+\texttt{1 k u} --- set the value at position \(k\) to \(u\) (not add);
+\texttt{2 a b} --- print the sum of values in range \([a,b]\).
+
+\textbf{Input.} \(n,q\le 2\cdot10^5\); values \(1\le x_i,u\le10^9\);
+\(1\le a\le b\le n\).
+
+\textbf{Output.} The answer to each type-2 query, one per line.
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+8 4
+3 2 4 5 1 1 5 3
+2 1 4
+2 5 6
+1 3 1
+2 1 4
+
+Output:
+14
+2
+11
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+The brute force is exactly the two textbook approaches colliding: a prefix
+array answers \texttt{2} in \(O(1)\) but needs \(\bigO{n}\) per
+\texttt{1}; re-summing the window per \texttt{2} is \(\bigO{n}\) too, and
+\(n\cdot q=4\cdot10^{10}\) says \tle.  The task is to make \emph{both} sides
+pay \(\log n\) and nothing more.
+\peek{which quantity changes when one position moves, and by how much?}
+\nudge{set \(x_3=1\) from \(4\) is really ``add \(-3\) to position 3'' --
+       an \emph{increment} is what a BIT stores, so keep the raw array to
+       compute the delta.}
+\fullhint{Maintain a plain BIT over \(x\).  Type~1: \(\delta = u - x[k]\);
+\(x[k]\!\leftarrow\!u\); \code{update(k,}\(\delta\)\code{)}.  Type~2:
+\code{query(b)-query(a-1)}.  Everything is \(\bigO{\log n}\); sums need
+\code{long long} (\(2\cdot10^5\cdot10^9=2\cdot10^{14}\)).  The full build is
+below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Two operations, one shared object: the multiset of \emph{prefix sums}.  A
+type-2 answer is a difference of two prefixes (the accumulator is invertible
+-- this is the license to use a BIT at all); a type-1 set perturbs every
+prefix \(\ge k\) by the same \(\delta=u-x[k]\), which is exactly what the
+update walk of \thmref{c14-query} propagates through the \(O(\log n)\) blocks
+containing position~\(k\).  Nothing about the problem is tree-shaped yet --
+this is the pure array-index case; \secref{c14-trees} adds the tree later.
+
+\solstep{Key Observations}
+\begin{observation}
+\texttt{set} \(\ne\) \texttt{add}: the BIT supports adding increments to
+slots; to honour a set you must know the \emph{current} value, so a shadow
+array \code{x[]} stays.  Forgetting this is this problem's signature WA.
+\end{observation}
+\begin{observation}
+A range \([a,b]\) is answered as \(\mathit{pref}(b)-\mathit{pref}(a{-}1)\)
+-- the walk never computes a range directly, and \(a=1\) needs
+\(\mathit{pref}(0)\overset{\text{def}}{=}0\), which \coderef{c14-query}'s
+loop condition gives for free.
+\end{observation}
+\begin{observation}
+Bounds: max magnitude \(2\cdot10^{14}\) fits \code{long long} with margin;
+\(4\cdot10^5\) walks of \(\le18\) touches each \(=\lesssim7\cdot10^6\) array
+ops -- the 1.00\,s limit is a non-issue once the \(\bigO{n}\) build (or
+\(n\) updates) is in place.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Rebuild the prefix array after every type-1 query}
+{This is the \(\bigO{n}\)-per-update brute force in disguise: \(2\cdot10^5\)
+updates of \(O(n)\) is \(4\cdot10^{10}\) -- \tle.  The whole point of the
+BIT is that a change at one position touches only \(\log n\) stored blocks.}
+\deadend{\code{update(k, u)} instead of \code{update(k, u - x[k])}}
+{Silently wrong for every set that is not an ``add \(u\)''; passes samples
+whose first update happens to be a large increase.  The BIT is an
+\emph{incremental} structure; absolute writes must be converted to deltas
+against the shadow array.}
+\aha{Set = add of (new $-$ old); range = difference of prefixes; and the lowbit
+walks make both directions logarithmic at once.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ re-sum window & loop \(a..b\) per type-2 & \(\bigO{q\cdot n}\) & \tle \\
+2 & \lv{2}\ rebuild prefixes & fresh \(\mathit{pref}\) after each set & \(\bigO{q\cdot n}\) & \tle \\
+3 & \lv{3}\ \textbf{plain BIT} & delta-update + prefix difference (\(\coderef{c14-query}\)--\(\coderef{c14-update}\)) & \(\bigO{(n+q)\log n}\) & \ac \\
+4 & \lv{4}\ segment tree & works, but 4x memory + full code for an invertible op & \(\bigO{(n+q)\log n}\) & overkill \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~4 is the Ch.~19 tool brought to a knife fight; rung~3 is why this
+chapter exists before it.
+
+\solstep{Solution}
+Store the array \(x[1..n]\) (1-based -- the lowbit machinery \emph{requires}
+index \(0\) to be unused).  Build the BIT once with
+\(\coderef{c14-build}\).  For \texttt{1 k u}: \(\delta = u-x[k]\),
+\code{update(k,}\(\delta\)\code{)}, \(x[k]=u\).  For \texttt{2 a b}: print
+\(\code{query(b)}-\code{query(a-1)}\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Invariant.} For every \(i\), \(t[i]=\sum_{p=i-\operatorname{lowbit}(i)+1}^{i} x[p]\).
+\emph{Init:} \propref{c14-linear} establishes it. \emph{Step:} a type-1 at
+position~\(k\) changes exactly the blocks containing~\(k\); by
+\thmref{c14-query} the update walk visits exactly those slots and adds
+\(\delta\) to each, restoring the invariant elsewhere trivially (other blocks
+omit \(k\)).
+\textbf{Answer:} \thmref{c14-query}'s disjoint-cover property gives
+\(\code{query}(i)=\sum_{p\le i}x[p]\) for all \(i\); subtracting at
+\(a{-}1\) (with \(\code{query}(0)=0\), the empty walk) yields the range sum.
+\textbf{Termination/bounds:} both walks shrink/grow \(i\) strictly past \(n\)
+within \(\lfloor\log_2 n\rfloor+1\) steps; magnitudes \(\le 2\cdot10^{14}\)
+stay inside \code{long long}.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CSES 1648 full solution (plain BIT, set-as-delta)}, label={lst:c14-1648-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+int n, q, x[MX];
+long long t[MX];
+
+int lowbit(int i){ return i & -i; }
+long long query(int i){
+    long long s = 0;
+    for (; i > 0; i -= lowbit(i)) s += t[i];
+    return s;
+}
+void update(int i, long long d){
+    for (; i <= n; i += lowbit(i)) t[i] += d;
+}
+void build(){                          // O(n), prop:c14-linear
+    for (int i = 1; i <= n; i++) t[i] = x[i];
+    for (int i = 1; i <= n; i++){
+        int j = i + lowbit(i);
+        if (j <= n) t[j] += t[i];
+    }
+}
+int main(){
+    scanf("%d%d", &n, &q);
+    for (int i = 1; i <= n; i++) scanf("%d", &x[i]);
+    build();
+    while (q--){
+        int ty, a, b; scanf("%d%d%d", &ty, &a, &b);
+        if (ty == 1){
+            long long d = (long long)b - x[a];   // set k->u as delta
+            x[a] = b; update(a, d);
+        } else printf("%lld\n", query(b) - query(a-1));
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CSES 1648: a=(3,2,4,5,1,1,5,3), then set x[3]=1]
+After the \(\bigO{n}\) build, \(t=(3,5,4,14,1,2,5,24)\) (the first eight
+cells of the corrected opener row).
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|l|l|l}
+\text{\#} & \text{query} & \text{walk} & \text{result}\\ \hline
+1 & \texttt{2 1 4} & \text{query}(4){=}t[4]{=}14;\ \text{query}(0){=}0 & 14\\
+2 & \texttt{2 5 6} & \text{query}(6){=}t[6]{+}t[4]{=}2{+}14{=}16;\ \text{query}(4){=}14 & 16-14=2\\
+3 & \texttt{1 3 1} & \delta=1{-}4{=}-3:\ t[4]{=}11,\ t[8]{=}21 & \text{(update)}\\
+4 & \texttt{2 1 4} & \text{query}(4){=}t[4]{=}11 & 11
+\end{array}
+\]
+Printed: \texttt{14 2 11} -- the official output.  Post-update sanity:
+\(\text{query}(7)=t[7]+t[6]+t[4]=5+2+11=18=(3{+}2{+}1{+}5{+}1{+}1{+}5)\).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(\bigO{n}\) build \(+\;\bigO{\log n}\) per query:
+\(\lesssim 2\cdot10^5 + 4\cdot10^5\cdot18\approx7.6\cdot10^6\) primitive
+ops.  Memory \(8\cdot(2\cdot10^5)\) bytes for \code{t}, plus the shadow
+\code{int} array.  \textbf{AC} with ~0.1\,s typical.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.30\linewidth} p{0.38\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+\(a=1\) range & \(\mathit{pref}(0)\) must be \(0\) & \code{query(0)} loop body never runs \\
+set to same value & \(\delta=0\) & harmless no-op walk (could skip: \(x[a]==b\)) \\
+\(n=1\) & single slot, parent chain empty & \code{build} pushes nothing; walks stop at \(i>n\) \\
+large sums & \(2\cdot10^{14}\) overflows \code{int} & \code{t}, \code{query} are \code{long long} \\
+last index update & \(k=n\): walk visits \(n\) then exits & loop bound \(i\le n\) correct \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{1-index or die:} slot \(0\) has no block (\(\text{lowbit}(0)=0\)
+        makes both walks spin forever).  Reading 0-based input?  Convert at
+        the door: \code{x[i]} for \(i=1..n\), and shift query endpoints.
+  \item \textbf{Two's complement note:} \code{i \& -i} relies on signed
+        integers being two's complement (true on all contest judges; C++20
+        made it mandatory for the builtin types).
+  \item \textbf{Fast IO:} \(q=2\cdot10^5\) lines -- \code{scanf} as above or
+        \code{cin} with \code{sync\_with\_stdio(false)} is enough; the
+        structure is never the bottleneck.
+  \item \textbf{Array sizing:} \code{t[MX]} with \(MX=n_{\max}+5\); an
+        off-by-one makes \code{update} at \(i=n\) write \code{t[n]} legally
+        and nothing else -- but a too-small \(MX\) is silent UB.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: mixing the two walks' directions]
+\code{query} must \emph{subtract} the lowbit (\(6{\to}4{\to}0\));
+\code{update} must \emph{add} it (\(3{\to}4{\to}8{\to}16\)).  Swapping the
+signs produces an infinite loop (update walking down into \(0\)) or a wrong
+prefix (query walking up).  The mnemonic: \emph{questions descend the forest,
+answers climb it} (\figref{c14-hiddentree}).
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: \code{update(i, value)} instead of \code{update(i, delta)}]
+The BIT accumulates increments; a type-1 ``set'' is only an
+\(\text{add}(u - x_i)\).  Keep the shadow array.  (Ch.~6's LC~307 -- the
+mutable range-sum problem you may already know -- has the same trap, and its
+treap/prefix solutions there all convert to deltas first.)
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: \code{int} accumulator]
+\(\sum x_i\) reaches \(2\cdot10^{14}\) on this very problem's constraints;
+the first \(10^9\)-sized test that overflows is also the one that flips a
+range sum negative.  \code{long long} for \code{t[]}, \code{query}'s return,
+and the delta \emph{before} the cast.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: \(n\) updates from zeros as the build]
+Calling \code{update}(i, x[i]) for every position costs \(\bigO{n\log n}\)
+and is \emph{correct} -- but when \(n=2\cdot10^5\) and the time limit is
+1.00\,s with several test files, the \(\bigO{n}\) build of
+\(\coderef{c14-build}\) is free insurance.  Never rebuild by updates inside
+a loop over test cases.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Did you convert every ``set'' into a delta against a shadow array?
+  \item Are you 1-indexed everywhere, with \code{query(0)}\(=0\) as the
+        \(a=1\) guard?
+  \item Is every sum type \code{long long} (array, return, printf)?
+  \item Build by \(\coderef{c14-build}\) or by \(n\) updates -- which did
+        you actually write?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Forest Queries}{CSES 1652}
+    {https://cses.fi/problemset/task/1652}
+    {CSES L3}
+    {Static \(n\cdot n\) grid, rectangle queries ``how many trees in
+     \([x_1..x_2][y_1..y_2]\)'' -- the \(O(1)\) 2D \emph{prefix} cousin of
+     this section: inclusion--exclusion over four corner values of
+     \(\mathit{pref}[i][j]\).  Solve it to feel exactly what the BIT later
+     buys you: this works only because nothing ever changes.}
+  \practice{Multidimensional Queries}{CF 1093G}
+    {https://codeforces.com/problemset/problem/1093/G}
+    {CF 2300 L6}
+    {Points in a \(k\le4\)-dimensional space, ``set a point's coordinates''
+     and ``sum of points in an axis-aligned box''.  The box becomes
+     \(2^k\) signed prefix queries of a \(k\)-dimensional BIT -- nested
+     lowbit loops, \(O(\log^k n)\) per op -- and the \(\bigO{n}\) build of
+     \(\coderef{c14-build}\) generalises axis by axis.  Check your loop
+     nesting against \(\coderef{c14-1648-soln}\) first.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+Chapter~5 (\propref{c24-prefix}) owns the static prefix array this replaces
+under updates.  Forward: \secref{c14-range} changes \emph{what the slots
+store} (differences, pairs); \secref{c14-order} changes \emph{what the
+indices mean} (ranks); \secref{c14-trees} changes \emph{what the ranges are}
+(subtrees); \secref{c14-offline} changes \emph{when the queries run}
+(sorted).  Segment trees, the heavier rival, are \chref{c13}/\chref{c15}.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 18.1 in 10 seconds]
+Slot \(i\) owns block \([i{-}\operatorname{lowbit}(i){+}1,i]\);
+\(\operatorname{lowbit}(i)=i\mathbin{\&}(-i)\).  Query walks \(i\to i{-}\text{lowbit}\)
+(peeling blocks, \(\le\log n\)); update walks \(i\to i{+}\text{lowbit}\)
+(refreshing containers); range \(=\) prefix difference (invertibility
+licence!).  Build in \(\bigO{n}\) by pushing \(t[i]\to t[i{+}\text{lowbit}]\).
+Set-queries need deltas plus a shadow array; sums need \code{long long}.
+Worked: CSES~1648 (\(\probref{c14-rangesum}\), \(\coderef{c14-1648-soln}\)).
+\selftest{
+  \item List the blocks the walk \(13\to\cdots\to0\) collects on \(n=16\).
+  \item Which slots does \code{update(10,}\(\delta\)\code{)} touch?
+  \item Why is \code{lowbit(0)}=0 a segfault magnet, and what invariant of
+        the code prevents visiting \(0\) in \code{update}?
+  \item Give the one-line reason a segment tree is \emph{not} needed here.
+  \item Convert ``\texttt{1 k u}'' to the BIT vocabulary in one sentence.
+}
+\end{recallbox}

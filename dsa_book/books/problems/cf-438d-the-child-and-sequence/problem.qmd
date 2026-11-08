@@ -1,0 +1,267 @@
+### Problem: The Child and Sequence {#sec-sqrt-p3-childseq}
+
+::: {.p-statement}
+Maintain an array $a_1, \ldots, a_n$ of positive integers ($1 \le a_i \le 10^{9}$) under $m$ operations, three kinds:
+
+- `1 l r` — print $\sum_{i=\ell}^{r} a_i$;
+- `2 l r x` — set $a_i \leftarrow a_i \bmod x$ for every $i \in [\ell, r]$;
+- `3 k x` — set $a_k = x$.
+
+Constraints: $1 \le n, m \le 10^{5}$, $1 \le a_i, x \le 10^{9}$, $1 \le \ell \le r \le n$, $1 \le k \le n$; a printed sum may exceed 32 bits.
+
+Source: [CF 438D · The Child and Sequence](https://codeforces.com/problemset/problem/438/D){.solved rating="2300"}
+
+Example — $a = [1, 2, 3, 4, 5]$: `2 3 5 4` turns it into $[1,2,3,0,1]$; `3 3 5` sets $a_3 = 5$ giving $[1,2,5,0,1]$; `1 2 5` prints $2+5+0+1 = 8$; `2 1 3 3` gives $[1,2,2,0,1]$; `1 1 3` prints $1+2+2 = 5$. Output `8`, `5`. (Every step is asserted against a copy-the-array oracle, then stressed with random interleavings.)
+:::
+
+::: {.p-intuition}
+A modulo is a *range update that is not uniform* — different cells change by different amounts — so @sec-sqrt-a2's "one lazy tag per block" cannot express it; you would have to touch every cell. But $a \bmod x$ has a telling property: if $x > a$ the cell does **not change at all**. So if a block remembers its **maximum**, an update `2 l r x` can *skip* a whole block in $O(1)$ whenever `max[b] < x`. A block is only opened (every cell modded, then its summary rebuilt) when it still holds a value $\ge x$ — and every time a cell is actually reduced it at least halves ($a \bmod x < x \le a$ and if $x \le a/2$ the result is $< a/2$; if $x > a/2$ the result is $a - x < a/2$). A cell can therefore be rewritten $O(\log A)$ times over the whole run before it stops mattering, so the expensive rebuilds are rare: this is @sec-sqrt-a5's "cheap when it looks expensive" amortisation carried by a block summary.
+:::
+
+::: {.p-approach}
+1. **Copy the array.** `2` mods each cell in $[\ell,r]$, `1` sums the slice, `3` writes one cell. $O(n)$ per operation — the oracle.
+2. **Blocks carrying sum and max.** Per block keep `s[b]` (sum) and `mx[b]` (max). Sum queries add whole blocks via `s[b]` and walk the two edges. Modulo skips a whole block whose `mx[b] < x`, and otherwise re-mods that block's cells and rebuilds it once. Point set rebuilds one block. $O(\sqrt n)$ per query/update, amortised over the $O(\log A)$-per-cell bound.
+
+**Invariant.** `s[b] = sum(a[lo..hi])` and `mx[b] = max(a[lo..hi])` for block $b$'s current cells. Every operation that changes any `a[i]` in $b$ ends by re-deriving both from scratch (`_redo`), so the two summaries always match the live block — which is exactly what lets a later modulo trust `mx[b] < x` and skip.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Copy the array
+
+::: {.form-next}
+Do the three operations literally on a single list: modulo every cell of the window, sum the window, or overwrite one cell. $O(n)$ a query — oracle only, but it is the unambiguous truth the block version must match after every operation.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+class ChildSeqBrute:
+    def __init__(self, a):
+        self.a = list(a)
+
+    def sum_range(self, l, r):                 # 0-indexed inclusive
+        return sum(self.a[l:r + 1])
+
+    def mod_range(self, l, r, x):
+        for i in range(l, r + 1):
+            self.a[i] %= x
+
+    def set_val(self, k, x):
+        self.a[k] = x
+
+
+cb = ChildSeqBrute([1, 2, 3, 4, 5])
+cb.mod_range(2, 4, 4)
+cb.set_val(2, 5)
+assert cb.sum_range(1, 4) == 8
+cb.mod_range(0, 2, 3)
+assert cb.sum_range(0, 2) == 5
+```
+
+##### C++
+
+```cpp
+// brute force: touch every cell, O(n) per operation
+class ChildSeqBrute {
+    vector<long long> a;
+public:
+    ChildSeqBrute(vector<long long>& v) : a(v) {}
+    long long sum_range(int l, int r) {
+        long long s = 0;
+        for (int i = l; i <= r; ++i) s += a[i];
+        return s;
+    }
+    void mod_range(int l, int r, long long x) {
+        for (int i = l; i <= r; ++i) a[i] %= x;
+    }
+    void set_val(int k, long long x) { a[k] = x; }
+};
+```
+:::
+
+**Reading it line by line.** `mod_range` is a bare loop; at $m \le 10^{5}$ and $n \le 10^{5}$ a window the length of the whole array is $10^{10}$ operations, so this only survives as a reference. What matters for the block version is that this loop computes, for each cell, exactly $a_i \bmod x$ — the block form must reproduce it whether it skips, whole-blocks, or edges.
+
+#### Blocks with a sum and a maximum
+
+::: {.form-next}
+Split into blocks of $B = \sqrt n$ and give each a `s[b]` (sum) and `mx[b]` (max). A sum query reads whole-block `s` plus edge cells. A modulo walks blocks: whole block with `mx[b] < x` is untouched (skip), otherwise mod its cells and `_redo(b)`; edges are modded and `_redo`'d. A point set writes one cell and `_redo`s its block.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+c_a = [1, 2, 5, 0, 1]
+
+
+def draw(ax, p):
+    V.array(ax, p, c_a, x=0.0, y=1.4, index=False,
+            regions=[(0, 2, "green", "block 0: max 2"),
+                     (2, 4, "indigo", "block 1: max 5"),
+                     (4, 5, "pink", "block 2: max 1")])
+    V.array(ax, p, [2, 5, 1], x=0.6, y=0.0, index=False, label="mx",
+            colors={i: "muted" for i in range(3)}, note="skip if mx < x")
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-sqrt-p3-childseq-sol
+class ChildSeq:
+    def __init__(self, a, B=None):
+        self.n = len(a)
+        self.a = list(a)
+        self.B = B or max(1, int(round(self.n ** 0.5)))
+        self.nb = (self.n + self.B - 1) // self.B
+        self.s = [0] * self.nb
+        self.mx = [0] * self.nb
+        for b in range(self.nb):
+            self._redo(b)
+
+    def _bounds(self, b):
+        return b * self.B, min(self.n, (b + 1) * self.B)
+
+    def _redo(self, b):
+        lo, hi = self._bounds(b)
+        self.s[b] = sum(self.a[lo:hi])
+        self.mx[b] = max(self.a[lo:hi]) if hi > lo else 0
+
+    def sum_range(self, l, r):
+        total = 0
+        while l <= r:
+            b = l // self.B
+            lo, hi = self._bounds(b)
+            if lo == l and l + self.B - 1 <= r:
+                total += self.s[b]
+                l = hi
+            else:
+                end = min(r, hi - 1)
+                for i in range(l, end + 1):
+                    total += self.a[i]
+                l = end + 1
+        return total
+
+    def mod_range(self, l, r, x):
+        while l <= r:
+            b = l // self.B
+            lo, hi = self._bounds(b)
+            if lo == l and l + self.B - 1 <= r:
+                if self.mx[b] >= x:            # else every a_i % x == a_i: skip
+                    for i in range(lo, hi):
+                        self.a[i] %= x
+                    self._redo(b)
+                l = hi
+            else:
+                end = min(r, hi - 1)
+                for i in range(l, end + 1):
+                    self.a[i] %= x
+                self._redo(b)
+                l = end + 1
+
+    def set_val(self, k, x):
+        self.a[k] = x
+        self._redo(k // self.B)
+
+
+cs = ChildSeq([1, 2, 3, 4, 5], B=2)
+cs.mod_range(2, 4, 4)
+cs.set_val(2, 5)
+assert cs.sum_range(1, 4) == 8
+cs.mod_range(0, 2, 3)
+assert cs.sum_range(0, 2) == 5
+for _ in range(150):
+    n = random.randint(1, 60)
+    a = [random.randint(1, 10**9) for _ in range(n)]
+    fast = ChildSeq(a, random.randint(1, n))
+    slow = ChildSeqBrute(a)
+    for _ in range(30):
+        t = random.randint(1, 3)
+        if t == 1:
+            l = random.randrange(n); r = random.randrange(n)
+            if l > r: l, r = r, l
+            assert fast.sum_range(l, r) == slow.sum_range(l, r)
+        elif t == 2:
+            l = random.randrange(n); r = random.randrange(n)
+            if l > r: l, r = r, l
+            x = random.randint(1, 50)
+            fast.mod_range(l, r, x); slow.mod_range(l, r, x)
+        else:
+            k = random.randrange(n); x = random.randint(1, 10**9)
+            fast.set_val(k, x); slow.set_val(k, x)
+```
+
+##### C++
+
+```cpp
+class ChildSeq {
+    vector<long long> a, s, mx;
+    int n, B, nb;
+public:
+    ChildSeq(vector<long long>& v) {
+        a = v;
+        n = (int)a.size();
+        B = max(1, (int)round(sqrt((double)max(n, 1))));
+        nb = (n + B - 1) / B;
+        s.assign(nb, 0);
+        mx.assign(nb, 0);
+        for (int b = 0; b < nb; ++b) redo(b);
+    }
+    void redo(int b) {
+        int lo = b * B, hi = min(n, (b + 1) * B);
+        s[b] = 0; mx[b] = 0;
+        for (int i = lo; i < hi; ++i) { s[b] += a[i]; mx[b] = max(mx[b], a[i]); }
+    }
+    long long sum_range(int l, int r) {
+        long long total = 0;
+        while (l <= r) {
+            int b = l / B, lo = b * B, hi = min(n, (b + 1) * B);
+            if (lo == l && l + B - 1 <= r) { total += s[b]; l = hi; }
+            else { int end = min(r, hi - 1);
+                   for (int i = l; i <= end; ++i) total += a[i];
+                   l = end + 1; }
+        }
+        return total;
+    }
+    void mod_range(int l, int r, long long x) {
+        while (l <= r) {
+            int b = l / B, lo = b * B, hi = min(n, (b + 1) * B);
+            if (lo == l && l + B - 1 <= r) {
+                if (mx[b] >= x) { for (int i = lo; i < hi; ++i) a[i] %= x; redo(b); }
+                l = hi;
+            } else {
+                int end = min(r, hi - 1);
+                for (int i = l; i <= end; ++i) a[i] %= x;
+                redo(b);
+                l = end + 1;
+            }
+        }
+    }
+    void set_val(int k, long long x) { a[k] = x; redo(k / B); }
+};
+```
+:::
+
+**Reading it line by line.** `sum_range` is @sec-sqrt-a1's edge–middle–edge verbatim; the only new thing lives in `mod_range`'s whole-block branch `if self.mx[b] >= x`. When it is false the block is *provably* a no-op — every cell is $< x$ so $a_i \bmod x = a_i$ — and we advance `l = hi` without opening it, the amortisation of @sec-sqrt-a5 in one line. When it is true we pay the full $O(B)$ rebuild, and each such rebuild halves at least one contributing value, bounding the total number of *effective* rebuilds. The edge blocks always pay $O(B)$ (they can't be skipped wholesale), so they, like a point set, are a plain @sec-sqrt-a3 single-block rebuild.
+
+:::
+
+::: {.p-complexity}
+**Copy the array:** $O(n)$ per operation. **Sum/max blocks:** $O(\sqrt n)$ for a sum query and a point set; a modulo is $O\!\big(\tfrac{n}{B}\big)$ to sweep the blocks plus $O(B)$ for each block it actually rebuilds. Since a value $> 0$ can be rebuilt $O(\log A)$ times before every later modulo either skips it or zeroes it, the rebuild cost amortises over $O((n + m)\log A)$ effective block rebuilds; with $B = \sqrt n$ each operation is effectively $O(\sqrt n \log A)$. Memory $O(n)$. Sums reach $n \cdot 10^{9} = 10^{14}$, so the accumulator must be 64-bit (@sec-arr-size-trap).
+:::
+
+::: {.p-edge}
+- `x = 1`: every `a_i % 1 == 0`, so the block is rebuilt to all-zeros; `mx` becomes 0 and later modulos skip it.
+- A value already $0$ never changes under modulo, and never blocks a skip ($0 < x$ always).
+- The last block is short: `_bounds` clamps `hi` to `n`, so `_redo` and the skip test see the right size.
+- Point set can *increase* `mx[b]` again, re-enabling future rebuilds — the amortisation counts reductions, and a set is a separate $O(B)$ event charged once per operation.
+:::
+
+::: {.practice}
+- [CF 455D · Serega and Fun](https://codeforces.com/problemset/problem/455/D){rating="2700"} — the sibling block rebuild, here forced by a cyclic shift rather than a modulo (@sec-sqrt-p3-serega)
+- [CF 242E · XOR on Segment](https://codeforces.com/problemset/problem/242/E){rating="2000"} — a range update that *can* be tagged lazily, unlike modulo (@sec-sqrt-p2-xorseg)
+:::

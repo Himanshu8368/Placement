@@ -1,0 +1,1012 @@
+# Square Root Decomposition {#sec-sqrt}
+
+<!--
+Author-facing provenance (not rendered): Chapter 23 of the arrays volume, the fifth chapter of Part IV,
+per outline.yml ("Square Root Decomposition"). Lesson labels follow the outline "covers" order exactly:
+sec-sqrt-a1 (the block grid and the sqrt(n) tradeoff), a2 (lazy block tags and range updates), a3
+(rebuilding — partial vs full, buffer sqrt(n) mutations then flush), a4 (blocks over the value domain),
+a5 (choosing block size and unbalanced / heavy-light costs), a6 (the boundary: sqrt vs Mo's vs segment
+tree). Patterns sec-sqrt-p1..p5 with two solved problems each: p1 LC 307 + LC 308, p2 CF 13E + CF 242E,
+p3 CF 438D + CF 455D, p4 CF 220B + CF 1638E, p5 CF 797E + CF 522D.
+Roster note: the outline plan listed LC 981 (p3) and LC 220 (p4); both are already `.solved` in other
+chapters (ch. 003 and ch. 013) and cannot be reused, so they were swapped, before writing, for the
+collision-free LC 308 (Range Sum Query 2D - Mutable) and CF 220B (Little Elephant and Array). CF 95E
+(Lucky Country), an early candidate for p3, was dropped after confirming it is a DSU/greedy problem
+rather than a sqrt one, and replaced by CF 438D (The Child and Sequence); CF 797E and CF 522D were kept
+after confirming each is a genuine block decomposition rather than Mo's algorithm in disguise. Mo's
+problems (86D, 617E, 1000F) are cited in @sec-sqrt-a6 only — never solved here — because they belong to
+the next
+chapter. Storyboards use inline V.grid/V.array/V.trace/V.flow/V.bars draws (no companion traces module);
+every sample output quoted is produced by a cell in this file or its registry problems and asserted
+against a brute force; where a CF or LC statement is paraphrased, the constraints come from the judge
+page and the algorithm has been stress-tested.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 17 (amortised analysis — the accounting behind "rebuild every $\sqrt{n}$ edits") and ch. 31 (§ modular arithmetic tables) · **CPH** ch. 10 (§ prefix sums, the special case you get when there are no updates) · **CP-Algorithms**: Sqrt Decomposition, Sqrt Decomposition for range queries with updates, Mo's algorithm (the offline sibling reserved for ch. 24) · **Erickson, *Algorithms*:** the "part into buckets, precompute per bucket" habit and amortised bookkeeping · Coverage: partitioning positions (or values) into $\sqrt{n}$-sized blocks; whole-block answers plus two $\le 2B$ partial scans; lazy per-block tags with push-down; periodic rebuild after a buffer of mutations; the $B + n/B$ tradeoff minimised at $B \approx \sqrt{n}$; heavy-versus-light thresholds; and why a plain block structure sometimes beats both Mo's algorithm and a segment tree.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Partition an array into blocks of size $B \approx \sqrt{n}$, keep one summary per block, and answer a range query as (whole blocks) $+$ ($\le 2B$ stragglers) in $O(\sqrt{n})$ (@sec-sqrt-a1).
+- Maintain range sums, range minima, and "how many equal to $v$" under **interleaved point updates** with a two-line rebuild of the touched block (@sec-sqrt-a1, @sec-sqrt-p1-mutable).
+- Attach a lazy tag to each block so a range *add* or *assign* costs $O(\sqrt{n})$, pushing the tag down only when a partial cell forces it (@sec-sqrt-a2, @sec-sqrt-p2-holes).
+- Decide between *partial* rebuild (touch one block) and *full* rebuild (re-sort every block), and amortise a buffer of $\sqrt{n}$ pending mutations against one $O(n)$ flush (@sec-sqrt-a3, @sec-sqrt-p3-serega).
+- Put the blocks on the **value** axis instead of the position axis to count elements inside a value range or recover the $k$-th present value in $O(\sqrt{V})$ (@sec-sqrt-a4, @sec-sqrt-p4-learray).
+- Choose a non-$\sqrt{n}$ block size on purpose — $n^{2/3}$, or a heavy/light frequency threshold — when update and query costs differ, and price the choice (@sec-sqrt-a5, @sec-sqrt-p5-closeq).
+- Tell apart the three range-query tools — plain blocks, Mo's algorithm, and a segment tree — from the shape of the statement alone (@sec-sqrt-a6).
+:::
+
+```{python}
+#| include: false
+import bisect
+import heapq
+import math
+import random
+import sys
+from collections import Counter, defaultdict, deque
+from itertools import combinations
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-sqrt-why}
+
+::: {.callout-note title="In plain words"}
+A prefix-sum table answers "sum of $a[l..r]$" instantly, but dies the moment one cell changes: rebuilding the table is $O(n)$. A segment tree survives the change in $O(\log n)$, at the price of a full recursive structure. **Square root decomposition** takes the middle road you can build in five minutes: slice the array into $\sqrt{n}$ blocks of $\sqrt{n}$ cells, remember one number per block, and answer any question by adding up whole blocks and walking the few leftover cells by hand. Updates only disturb *one* block's summary. Every operation lands at $O(\sqrt{n})$ — worse than the tree's $O(\log n)$, better than the naive $O(n)$, and dramatically easier to get right under contest conditions. The magic number is not a coincidence: it is the point where the two costs you are paying, "walk the stragglers" and "touch every block", are equal.
+:::
+
+Chapters @sec-cnt and @sec-pref built the no-updates world: a prefix table, an $O(1)$ range sum, a $O(1)$ frequency lookup — all of them *static*. Chapter @sec-seg (the trees volume) owns the fully-general dynamic structure, the segment tree with lazy propagation. This chapter is the pragmatic bridge between them. When the statement says **"and then $q$ operations, each either an update or a query,"** the prefix table is dead and you reach for *something dynamic*; when that something is a few lines of loops over blocks rather than a lazily-propagating tree, you are in square root decomposition. The same $\sqrt{n}$ partition reappears three chapters later as Mo's algorithm (@sec-sqrt-a6's boundary, ch. 24), where the blocks move from *positions* to *query reordering* — so learn the block grid here, cheaply, before it earns its keep offline.
+
+Four constraint shapes tell you you are in this chapter's territory:
+
+| Statement hint | What it forbids / enables | Which section uses it |
+|---|---|---|
+| "$q$ operations: point update **and** range query, $n, q \le 10^{5}$" | Prefix table dies (rebuild $O(n)$/update); blocks give $O(\sqrt{n})$ | @sec-sqrt-a1, @sec-sqrt-p1 |
+| "$q$ operations: **range** add/assign **and** range query" | Segment tree fits but is heavy; a lazy *tag per block* is 20 lines | @sec-sqrt-a2, @sec-sqrt-p2 |
+| "Insert / delete in the middle; report order statistics" | Array shift is $O(n)$; rebuild a block when it grows past $2B$ | @sec-sqrt-a3, @sec-sqrt-p3 |
+| "$n, q \le 10^{5}$ but the *values* reach $10^{6}$; count elements inside a value window" | Table over values is fine to *index* but $O(V)$/query to *scan*; bucket the value axis | @sec-sqrt-a4, @sec-sqrt-p4 |
+
+::: {#fig-sqrt-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "arr": (-4.6, 0.0, "array of $n$ cells", "muted"),
+        "blk": (-1.6, 0.0, "$\\sqrt{n}$ blocks", "green"),
+        "sum": (1.5, 0.0, "one summary/block", "indigo"),
+        "ans": (4.6, 0.0, "whole blocks + $\\leq 2B$ edges", "pink"),
+    }, [("arr", "blk", "split at $B$"), ("blk", "sum", "$O(B)$ each"),
+        ("sum", "ans", "walk $O(\\sqrt{n})$")], w=2.9, h=0.9)
+V.show(draw)
+```
+
+The whole chapter in one pipe: cut the array at fixed $B$, store a constant-size answer per block during an $O(n)$ build, then serve any query by trusting the block summaries for the middle and counting the two short edges by hand. Updates rewrite exactly one summary in $O(B)$.
+
+:::
+
+The lessons build the toolkit in six steps:
+
+- **A1 — The block grid and the $\sqrt{n}$ tradeoff.** Partition, summarise, and answer range queries with two edge scans; see *why* $B = \sqrt{n}$ (@sec-sqrt-a1).
+- **A2 — Lazy block tags.** A pending add/assign per block, pushed down only when a partial cell demands it (@sec-sqrt-a2).
+- **A3 — Rebuilding.** Touch-one-block versus rebuild-all, and amortising a buffer of $\sqrt{n}$ mutations (@sec-sqrt-a3).
+- **A4 — Blocks over the value domain.** Put the grid on the *values* to count and select in $O(\sqrt{V})$ (@sec-sqrt-a4).
+- **A5 — Choosing the block size.** $n^{2/3}$, heavy/light thresholds, and pricing unequal costs (@sec-sqrt-a5).
+- **A6 — Sqrt versus Mo versus segment tree.** Reading the statement to pick the right one of three (@sec-sqrt-a6).
+
+Part B turns the toolkit into five patterns, one per outline topic: block summaries with point updates (@sec-sqrt-p1), lazy tags with range updates (@sec-sqrt-p2), periodic rebuilding (@sec-sqrt-p3), blocks over values (@sec-sqrt-p4), and unbalanced heavy-light costs (@sec-sqrt-p5).
+
+## Part A — Lessons
+
+## A1. The block grid and the $\sqrt{n}$ tradeoff {#sec-sqrt-a1}
+
+::: {.callout-note title="In plain words"}
+Pick a block size $B$. Write cell $i$'s block as $i / B$ (integer division) — block $b$ owns cells $[bB,\; bB + B)$. As you build, keep one number per block: its sum, its minimum, its count of a special value, whatever the query needs. To answer $[\ell, r]$: $\ell$ and $r$ might sit *inside* blocks, so walk those two short edges one cell at a time ($\le 2B$ cells total), and add whole-block summaries for the clean run in the middle (at most $n/B$ blocks). One point update touches a single block, so you only recompute that block's summary in $O(B)$. Cost per operation $\approx B + n/B$, which is smallest when the two terms are equal, $B = \sqrt{n}$, giving $O(\sqrt{n})$.
+:::
+
+Here is the whole structure in one class, keeping a sum, a minimum and a maximum per block. Read it as the template every later lesson mutates.
+
+```{python}
+class SqrtBlocks:
+    """Array cut into blocks of size B; each block keeps a sum/min/max summary.
+    Range queries = whole-block summaries + two hand-walked edges; point update rewrites one summary."""
+
+    def __init__(self, a, B=None):
+        self.a = list(a)
+        self.n = len(a)
+        self.B = B or max(1, int(round(self.n ** 0.5)))
+        self.nb = (self.n + self.B - 1) // self.B           # number of blocks (last may be short)
+        self.ssum = [0] * self.nb
+        self.smin = [0] * self.nb
+        self.smax = [0] * self.nb
+        for b in range(self.nb):
+            lo, hi = b * self.B, min(self.n, (b + 1) * self.B)
+            seg = self.a[lo:hi]
+            self.ssum[b] = sum(seg)
+            self.smin[b] = min(seg)
+            self.smax[b] = max(seg)
+
+    def _redo(self, b):                                     # rebuild only the touched block: O(B)
+        lo, hi = b * self.B, min(self.n, (b + 1) * self.B)
+        seg = self.a[lo:hi]
+        self.ssum[b] = sum(seg)
+        self.smin[b] = min(seg)
+        self.smax[b] = max(seg)
+
+    def point_set(self, i, v):
+        self.a[i] = v
+        self._redo(i // self.B)
+
+    def range_sum(self, l, r):                              # inclusive [l, r]
+        total = 0
+        while l <= r and l % self.B:                        # left edge up to a block boundary
+            total += self.a[l]; l += 1
+        while l + self.B - 1 <= r:                           # whole blocks in the middle
+            total += self.ssum[l // self.B]; l += self.B
+        while l <= r:                                        # right edge, cell by cell
+            total += self.a[l]; l += 1
+        return total
+
+    def range_min(self, l, r):
+        best = float("inf")
+        while l <= r and l % self.B:
+            best = min(best, self.a[l]); l += 1
+        while l + self.B - 1 <= r:
+            best = min(best, self.smin[l // self.B]); l += self.B
+        while l <= r:
+            best = min(best, self.a[l]); l += 1
+        return best
+
+
+a = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+sb = SqrtBlocks(a)                    # B = 3, four blocks [3,1,4] [1,5,9] [2,6,5] [3,5]
+assert sb.range_sum(0, 10) == 44      # the whole array
+assert sb.range_sum(2, 5) == 4 + 1 + 5 + 9
+assert sb.range_min(3, 7) == 1        # min of [1, 5, 9, 2, 6]
+sb.point_set(5, 0)                    # kill the 9
+assert sb.range_min(3, 7) == 0 and sb.range_sum(0, 10) == 44 - 9
+```
+
+Stress it against the two $O(n)$ worlds — a fresh Python list for the truth — over random builds, updates and queries, so the edge-walk bookkeeping is proven, not assumed:
+
+```{python}
+for _ in range(400):
+    n = random.randint(1, 120)
+    a = [random.randint(-40, 40) for _ in range(n)]
+    B = random.randint(1, n)
+    st, ref = SqrtBlocks(a, B), list(a)
+    for _ in range(30):
+        if random.random() < 0.4:                    # point update, mirrored into ref
+            i = random.randrange(n)
+            v = random.randint(-40, 40)
+            st.point_set(i, v)
+            ref[i] = v
+        else:                                        # range query both ways
+            l, r = sorted((random.randrange(n), random.randrange(n)))
+            assert st.range_sum(l, r) == sum(ref[l:r + 1])
+            assert st.range_min(l, r) == min(ref[l:r + 1])
+```
+
+Now the $\sqrt{n}$ is not folklore — it is the minimum of one explicit function. Per query you hand-walk at most $2B$ stragglers and add at most $n/B$ block summaries, so the *work* of a query is $2B + n/B$, proportional to $B + n/B$; a point update is $B$. Minimise $B + n/B$:
+
+```{python}
+def work(B, n):
+    return B + n / B        # up to a constant: walk one block-sized edge (<= 2B), add n/B block summaries
+
+
+for n in (10_000, 1_000_000):
+    best = min(range(1, n + 1), key=lambda B: work(B, n))
+    assert abs(best - int(round(n ** 0.5))) <= 1       # the argmin sits on the square root
+assert work(1000, 1_000_000) == 1000 + 1000            # ~2 sqrt(n) cells of work
+```
+
+::: {#fig-sqrt-grid}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+g_a = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]
+g_B = 3
+g_blk = ["0", "0", "0", "1", "1", "1", "2", "2", "2", "3", "3"]
+g_ssum = [sum(g_a[b * g_B:b * g_B + g_B]) for b in range(4)]
+
+
+def draw(ax, p):
+    V.array(ax, p, g_a, x=0.0, y=2.2,
+            colors={i: ("green" if i in (2, 5, 6, 7) else "muted") for i in range(len(g_a))},
+            label="a")
+    V.array(ax, p, g_blk, x=0.0, y=0.6, index=False, label="block",
+            colors={i: ("green" if i in (2, 5, 6, 7) else None) for i in range(len(g_a))})
+    V.array(ax, p, g_ssum, x=1.2, y=-1.2, index=False, label="ssum",
+            colors={b: "indigo" for b in range(4)})
+V.show(draw)
+```
+
+The query $[2, 7]$ shaded green: cells 2 (inside block 0) and 7 (inside block 2) are the two hand-walked edges, while the clean middle block 1 contributes its single summary `ssum[1] = 15`. Index row shows each cell's block $= i / B$; the summary row is all the structure stores.
+
+:::
+
+::: {.callout-important title="When the block grid is the right tool"}
+The build is $O(n)$ and every operation is $O(\sqrt{n})$ with a **constant per block**. It wins when (i) updates *and* queries are interleaved (killing prefix tables), (ii) the per-element work you must do on the two edges is cheap, and (iii) you do *not* need $O(\log n)$ — if you truly need logarithmic, @sec-sqrt-a6 explains the segment tree.
+:::
+
+## A2. Lazy block tags and range updates {#sec-sqrt-a2}
+
+::: {.callout-note title="In plain words"}
+Point updates were easy because one cell changed one block. A *range* update — "add $v$ to every $a_i$ with $\ell \le i \le r$" — touches many whole blocks *and* two edges. Re-summing every touched block is $O(n/B \cdot B) = O(n)$, no better than naive. The fix is a **lazy tag**: a per-block number `tag[b]` meaning "everyone in block $b$ still owes you $+t$; I have not written it into the cells yet." A whole-block add is $O(1)$: bump the tag and the block's stored sum. Only the two *partial* blocks need their cells actually updated — and before you touch those cells you `push` the block's tag down into all its cells and reset it to zero. Cost: two edge pushes at $O(B)$ plus $O(n/B)$ tag bumps, i.e. $O(\sqrt{n})$.
+:::
+
+The invariant that makes this provable: a block's stored sum equals its true sum whether or not a tag is pending, and `a[i]` is the cell value **before** `tag[b]` is applied. Push-down converts pending-tag state into written-cells state without changing any sum.
+
+```{python}
+class LazyBlocks:
+    """Range add + range sum, with one lazy tag per block. Push-down only when a partial cell forces it.
+    Invariant: ssum[b] == sum(true block values) == sum(a[lo:hi]) + tag[b] * (block length)."""
+
+    def __init__(self, a, B=None):
+        self.a = list(a)
+        self.n = len(a)
+        self.B = B or max(1, int(round(self.n ** 0.5)))
+        self.nb = (self.n + self.B - 1) // self.B
+        self.ssum = [sum(self.a[b * self.B:min(self.n, (b + 1) * self.B)]) for b in range(self.nb)]
+        self.tag = [0] * self.nb
+
+    def _len(self, b):
+        return min(self.n, (b + 1) * self.B) - b * self.B
+
+    def _push(self, b):
+        if self.tag[b]:
+            t = self.tag[b]
+            for i in range(b * self.B, b * self.B + self._len(b)):
+                self.a[i] += t                 # write the debt into the cells ...
+            self.tag[b] = 0                     # ... and cancel it; ssum[b] already counts it
+
+    def range_add(self, l, r, v):
+        while l <= r and l % self.B:                         # left partial block: push, edit, re-sum
+            b = l // self.B
+            self._push(b)
+            self.a[l] += v
+            self.ssum[b] += v
+            l += 1
+        while l + self.B - 1 <= r:                           # whole middle blocks: O(1) tag bump each
+            b = l // self.B
+            self.tag[b] += v
+            self.ssum[b] += v * self._len(b)
+            l += self.B
+        while l <= r:                                        # right partial block
+            b = l // self.B
+            self._push(b)
+            self.a[l] += v
+            self.ssum[b] += v
+            l += 1
+
+    def range_sum(self, l, r):
+        total = 0
+        while l <= r and l % self.B:                         # partial cells: materialise, then read
+            b = l // self.B
+            self._push(b)
+            total += self.a[l]; l += 1
+        while l + self.B - 1 <= r:                           # whole blocks: stored sum is already true
+            total += self.ssum[l // self.B]; l += self.B
+        while l <= r:
+            b = l // self.B
+            self._push(b)
+            total += self.a[l]; l += 1
+        return total
+
+
+lb = LazyBlocks([1, 2, 3, 4, 5, 6, 7, 8])       # B = 3: blocks [1,2,3][4,5,6][7,8]
+lb.range_add(0, 7, 10)                          # whole-ish range add
+assert lb.range_sum(0, 7) == (1 + 2 + 3 + 4 + 5 + 6 + 7 + 8) + 10 * 8
+lb.range_add(2, 4, 5)                           # straddles two blocks: forces pushes
+assert lb.range_sum(2, 4) == (3 + 4 + 5) + 10 * 3 + 5 * 3
+assert lb.range_sum(0, 1) == (1 + 2) + 10 * 2
+```
+
+The stress test is the *same* naive array kept side by side; if any push-down is forgotten, the block and cell worlds disagree and an assert fires:
+
+```{python}
+for _ in range(300):
+    n = random.randint(1, 90)
+    a = [random.randint(-30, 30) for _ in range(n)]
+    st, ref = LazyBlocks(a, random.randint(1, n)), list(a)
+    for _ in range(25):
+        if random.random() < 0.5:
+            l, r = sorted((random.randrange(n), random.randrange(n)))
+            v = random.randint(-20, 20)
+            st.range_add(l, r, v)
+            for i in range(l, r + 1):
+                ref[i] += v
+        else:
+            l, r = sorted((random.randrange(n), random.randrange(n)))
+            assert st.range_sum(l, r) == sum(ref[l:r + 1])
+    # after all operations every materialised cell must agree with the truth once each tag is pushed
+    for b in range(st.nb):
+        st._push(b)
+    assert st.a == ref
+```
+
+::: {#fig-sqrt-tag}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+t_a = [1, 2, 3, 4, 5, 6, 7, 8]
+t_cell = [11, 12, 13, 4, 5, 6, 7, 8]        # only block 0 materialised; blocks 1,2 hold +10 as a tag
+t_tag = [0, 10, 10]
+
+
+def draw(ax, p):
+    V.array(ax, p, t_a, x=0.0, y=2.2, label="before", dim=range(8))
+    V.array(ax, p, t_cell, x=0.0, y=0.7, label="cells",
+            colors={i: ("green" if i < 3 else "muted") for i in range(8)})
+    V.array(ax, p, t_tag, x=1.5, y=-0.9, index=False, label="tag",
+            colors={b: ("pink" if t_tag[b] else None) for b in range(3)})
+V.show(draw)
+```
+
+`range_add(0, 7, 10)` over $B = 3$: block 0 is a *partial* edge, so it is pushed and its cells literally grow to 11, 12, 13; blocks 1 and 2 are whole, so their cells stay old and a pending `tag = 10` carries the increase. The stored sums are correct either way — that is the invariant @sec-sqrt-a2's stress test verifies line by line.
+
+:::
+
+::: {.callout-tip title="Assign-tags and mixed tags"}
+A *range assign* ("set every cell in $[\ell,r]$ to $v$") needs a second tag kind with a priority rule: an assign wipes any pending add on that block. Problems that interleave add and assign (CF 1638E, @sec-sqrt-p4-colorops) keep `tag_add[b]` and `tag_set[b]` and define push as "if a set is pending write it, then apply the add." The skeleton above is unchanged; only `push` grows two lines.
+:::
+
+## A3. Rebuilding — partial, full, and amortised {#sec-sqrt-a3}
+
+::: {.callout-note title="In plain words"}
+Some operations *change the block boundaries*, not just cell values: inserting into the middle makes a block one cell too big; deleting shrinks it. You have two rebuild budgets. A **partial rebuild** rewrites only the touched block's summary — that was @sec-sqrt-a1's `point_set`. A **full rebuild** re-slices every block from scratch, $O(n)$, and is the honest price of keeping blocks the right size after structural edits. Doing a full rebuild after *every* insert is $O(n)$ per insert — too slow. The trick is **amortisation**: let inserts pile up in a small buffer of size $B \approx \sqrt{n}$, answer queries by scanning the buffer *plus* the untouched sorted blocks, and only when the buffer fills do you spend one $O(n \log n)$ rebuild. Over $m$ inserts that is $(m/B)$ rebuilds, so each insert costs $O(\sqrt{n})$ *on average*.
+:::
+
+The exemplar is an ordered multiset that supports `insert(x)` and `count_le(x)` — the skeleton under CF 455D (@sec-sqrt-p3-serega) and LC 981's order-statistics cousin. Blocks stay internally sorted; a buffer absorbs recent inserts; a single flush sorts everything and re-cuts at $B$.
+
+```{python}
+class BufferRebuild:
+    """Sorted blocks (each internally sorted) + a pending buffer. Insert O(1) into the buffer;
+    when it reaches B, flush: sort all and re-cut. count_le sums a bisect per block + a scan of the buffer."""
+
+    def __init__(self, a, B=None):
+        self.B = B or max(1, int(round(len(a) ** 0.5)))
+        self.blocks = [sorted(a[i:i + self.B]) for i in range(0, len(a), self.B)]
+        self.buffer = []
+        self.rebuilds = 0
+
+    def _flush(self):
+        flat = sorted([x for blk in self.blocks for x in blk] + self.buffer)
+        self.buffer = []
+        self.blocks = [flat[i:i + self.B] for i in range(0, len(flat), self.B)]
+        self.rebuilds += 1
+
+    def insert(self, x):
+        self.buffer.append(x)
+        if len(self.buffer) >= self.B:
+            self._flush()
+
+    def count_le(self, x):
+        c = sum(bisect.bisect_right(blk, x) for blk in self.blocks)
+        c += sum(1 for v in self.buffer if v <= x)
+        return c
+
+    def size(self):
+        return sum(len(blk) for blk in self.blocks) + len(self.buffer)
+
+
+br = BufferRebuild([1, 4, 7, 2, 8, 5, 3], B=3)
+for x in (6, 0, 9, 3, 3, 3):
+    br.insert(x)
+assert br.size() == 13
+assert br.count_le(0) == 1 and br.count_le(9) == 13
+assert br.count_le(4) == 8     # multiset {0,1,2,3,3,3,3,4} are the eight elements <= 4
+```
+
+The amortisation claim is directly checkable: the rebuild count must track the insert count divided by the buffer size, not the raw insert count.
+
+```{python}
+m = 500
+br = BufferRebuild(list(range(m // 2)), B=20)       # buffer size 20
+for x in range(m // 2, m):
+    br.insert(x)
+assert br.size() == m
+assert br.rebuilds <= m // 20 + 2                   # ~ one rebuild per B inserts, never one per insert
+```
+
+Stress against a plain sorted list, comparing `count_le` after every single operation:
+
+```{python}
+for _ in range(250):
+    n = random.randint(1, 80)
+    arr = [random.randint(-50, 50) for _ in range(n)]
+    st, ref = BufferRebuild(arr, random.randint(2, 12)), sorted(arr)
+    for _ in range(25):
+        if random.random() < 0.6:
+            x = random.randint(-50, 50)
+            st.insert(x)
+            bisect.insort(ref, x)
+        else:
+            x = random.randint(-55, 55)
+            assert st.count_le(x) == bisect.bisect_right(ref, x)
+```
+
+::: {#fig-sqrt-rebuild}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "ins": (-4.2, 0.0, "insert $x$", "green"),
+        "buf": (-1.4, 0.0, "buffer $< B$", "indigo"),
+        "flush": (1.6, 0.0, "buffer $= B$: flush", "pink"),
+        "res": (4.4, 0.0, "re-sort, re-cut $\\sqrt{n}$", "violet"),
+    }, [("ins", "buf", "amortised"), ("buf", "flush", "full"),
+        ("flush", "res", "$O(n\\log n)$"), ("res", "buf", "buffer emptied")], w=2.7, h=0.9)
+V.show(draw)
+```
+
+The rebuild cycle: most inserts are $O(1)$ into the buffer; once every $B$ inserts you pay one $O(n \log n)$ flush that leaves $B$ fresh cheap inserts. Amortised insert cost is $O(\log n) + O(n/B) = O(\sqrt{n})$ once you also account for the buffer scan inside each query.
+
+:::
+
+::: {.callout-warning title="Partial vs full — do not confuse the budgets"}
+A **point update** never changes block sizes: one partial `_redo` (@sec-sqrt-a1) is $O(B)$ and you do it eagerly. A **structural edit** (insert/delete) changes sizes and needs a **full** re-cut — pay it *lazily*, every $B$ operations, or you have thrown away the whole amortisation argument.
+:::
+
+## A4. Blocks over the value domain {#sec-sqrt-a4}
+
+::: {.callout-note title="In plain words"}
+Everything above put blocks on the **position** axis ($a[\ell..r]$). Move the grid onto the **values** instead. Keep `cnt[v]` = how many times $v$ occurs, and bucket it: `bucket[v / B]` = the total count of all values whose name falls in that value-window. Now "how many array elements have value in $[L, R]$" is the same three-line walk — two hand-scanned value edges plus whole value-buckets — at $O(\sqrt{V})$. "Which is the $k$-th smallest value present" walks buckets left to right, subtracting each bucket's total from $k$ until it lands inside one, then scans that bucket's cells. This is the value-table habit of @sec-gcd and @sec-mex, made dynamic.
+:::
+
+```{python}
+class ValueBuckets:
+    """Frequencies bucketed over the value domain [0, V). count_range = whole buckets + two value edges;
+    kth_present walks buckets left to right. Mirrors @sec-sqrt-a1's walk with the roles swapped."""
+
+    def __init__(self, V_, B=None):
+        self.V = V_
+        self.B = B or max(1, int(round(V_ ** 0.5)))
+        self.nb = (self.V + self.B - 1) // self.B
+        self.cnt = [0] * self.V
+        self.bucket = [0] * self.nb
+
+    def add(self, x, delta=1):
+        self.cnt[x] += delta
+        self.bucket[x // self.B] += delta
+
+    def count_range(self, L, R):                         # elements with value in [L, R]
+        c = 0
+        while L <= R and L % self.B:
+            c += self.cnt[L]; L += 1
+        while L + self.B - 1 <= R:
+            c += self.bucket[L // self.B]; L += self.B
+        while L <= R:
+            c += self.cnt[L]; L += 1
+        return c
+
+    def kth_present(self, k):                            # 1-based; smallest value with running count >= k
+        run = 0
+        for b in range(self.nb):
+            if run + self.bucket[b] >= k:
+                for v in range(b * self.B, min(self.V, (b + 1) * self.B)):
+                    run += self.cnt[v]
+                    if run >= k:
+                        return v
+                break
+            run += self.bucket[b]
+        raise ValueError("fewer than k elements present")
+
+
+vb = ValueBuckets(16)
+for x in (3, 3, 7, 10, 10, 10, 15):
+    vb.add(x)
+assert vb.count_range(0, 15) == 7
+assert vb.count_range(3, 3) == 2 and vb.count_range(4, 9) == 1
+assert vb.kth_present(1) == 3 and vb.kth_present(3) == 7 and vb.kth_present(7) == 15
+vb.add(7)                                               # a second 7
+assert vb.count_range(7, 7) == 2 and vb.kth_present(4) == 7
+```
+
+Stress against the raw frequency array (no buckets), the ground truth for both operations:
+
+```{python}
+for _ in range(250):
+    Vd = random.randint(5, 120)
+    st = ValueBuckets(Vd, random.randint(1, Vd))
+    cnt = [0] * Vd
+    for _ in range(40):
+        if random.random() < 0.6:
+            x = random.randrange(Vd)
+            d = random.choice((-1, 1, 1))              # mostly insertions
+            if d < 0 and cnt[x] == 0:
+                d = 1                                   # keep every count non-negative
+            st.add(x, d); cnt[x] += d
+        else:
+            L, R = sorted((random.randrange(Vd), random.randrange(Vd)))
+            assert st.count_range(L, R) == sum(cnt[L:R + 1])
+    tot = sum(cnt)
+    if tot:
+        order = [v for v in range(Vd) for _ in range(cnt[v])]
+        for k in range(1, tot + 1):
+            assert st.kth_present(k) == order[k - 1]
+```
+
+Two earlier-chapter doors open here. Chapter @sec-mex kept a table indexed by value because its domain was *already* small (@sec-mex-a6); @sec-sqrt-a4 is what you do when the domain is *large but not $10^{18}$-large* — you can afford a $10^{6}$-wide `cnt` array but not a $10^{6}$-wide *scan per query*, so you bucket the scan. And Chapter @sec-coord compressed huge values down to dense ranks before indexing (@sec-coord-a1): combine the two — compress to ranks, then bucket the ranks — when values reach $10^{9}$. CF 220B ("count positions where the value $v$ occurs exactly $v$ times", @sec-sqrt-p4-learray) is this lesson with a per-value test bolted onto `cnt[v] == v`.
+
+::: {#fig-sqrt-value}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+v_cnt = [0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 3, 0, 0, 0, 0, 1]     # values 0..15
+v_B = 4
+v_bucket = [sum(v_cnt[b * v_B:(b + 1) * v_B]) for b in range(4)]
+
+
+def draw(ax, p):
+    V.array(ax, p, v_cnt, x=0.0, y=1.6, label="cnt[v]",
+            colors={i: "green" for i in range(16) if v_cnt[i]})
+    V.array(ax, p, v_bucket, x=1.0, y=-0.4, index=False, label="bucket",
+            colors={b: "indigo" for b in range(4)})
+V.show(draw)
+```
+
+`cnt[v]` is the raw frequency at each value; `bucket` groups four values each. `count_range(3, 10)` hand-scans the $[3..3]$ edge, trusts bucket windows fully inside $[4..7]$ and $[8..7]$… — the exact three-line walk of @sec-sqrt-a1 with the array replaced by the value axis. Green cells are the values actually present.
+
+:::
+
+## A5. Choosing the block size; unbalanced costs {#sec-sqrt-a5}
+
+::: {.callout-note title="In plain words"}
+$\sqrt{n}$ is optimal only when the two terms in the cost are *$B$ and $n/B$ with equal weights*. Change the weights and the optimum moves. If an update does $O(B)$ work but a query does $O(n/B)$ work and updates are $c$ times as common, minimise $c \cdot B + n/B$: the argmin is $B = \sqrt{n/c}$, not $\sqrt{n}$. When updates are *rare* you may shrink $B$ to speed queries and accept the update cost, and a second lever appears: **heavy versus light** — treat values that occur at least $T$ times ("heavy", at most $n/T$ of them) eagerly with a precomputed table, and everything else ("light") lazily by scanning its few occurrences. Choosing $T = \sqrt{n}$ balances the two groups and is the whole content of CF 220B and LC 220's counting.
+:::
+
+First, price a weighted tradeoff numerically instead of trusting the formula:
+
+```{python}
+n = 100_000
+# 1 update : 1 query, equal weights -> sqrt(n) ~ 316
+assert min(range(1, n + 1), key=lambda B: B + n / B) == 316
+# updates 4x more expensive (they touch 4 cells of rebuild each) -> smaller blocks
+assert min(range(1, n + 1), key=lambda B: 4 * B + n / B) == 158
+# n^{2/3} for the rebuild-only-every-k structure at m = n operations
+assert abs(round(n ** (2 / 3)) - 2154) <= 5
+```
+
+The $n^{2/3}$ shows up when the two costs are *rebuild frequency* and *rebuild size*: keeping a structure that rebuilds every $B$ mutations at $O(n)$ each and answers a query at $O(n/B + B)$ is minimised at $B = n^{2/3}$ when the per-query edge scan is itself $O(n/B)$. Below, a "measured work" cell counts the *actual* inner-loop iterations for both a $\sqrt{n}$ and an $n^{2/3}$ schedule on a synthetic mixed stream, so the amortised claim is not hand-waved:
+
+```{python}
+def simulate(n, q, updates, B):
+    """Count work for: updates = O(B) partial rebuild each; queries = O(n/B + B) edge scan each."""
+    upd_work = updates * B
+    qry_work = q * (n // B + B)
+    return upd_work, qry_work, upd_work + qry_work
+
+
+n, q = 90_000, 90_000
+updates, queries = 30_000, 60_000
+w_sqrt = simulate(n, queries, updates, int(round(n ** 0.5)))          # B = 300
+w_small = simulate(n, queries, updates, int(round((n * updates / queries) ** 0.5)))  # update-aware B
+# the two operation counts differ, so the equal-weight sqrt(n) is NOT the total-work minimiser
+assert w_small[2] < w_sqrt[2]
+```
+
+::: {#fig-sqrt-blocksize}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+n5 = 100_000
+bs = [100, 200, 316, 500, 800]
+costs = [round(b + n5 / b, 1) for b in bs]
+
+
+def draw(ax, p):
+    V.bars(ax, p, [int(c) for c in costs], x=0.0, y=0.0,
+           colors={i: ("green" if bs[i] == 316 else "muted") for i in range(len(bs))},
+           labels=False)
+V.show(draw)
+```
+
+$B + n/B$ for $n = 10^5$ over $B \in \{100, 200, 316, 500, 800\}$: the U-shape bottoms at $B = 316 = \sqrt{10^5}$ (green). Move the weights and the green bar slides — the entire content of this lesson and the reason a "one-size" $\sqrt{n}$ is sometimes the wrong answer (CF 797E, @sec-sqrt-p5-closeq's neighbour, sizes blocks by the *query parameter*, not by $n$).
+
+:::
+
+## A6. Sqrt versus Mo's versus the segment tree {#sec-sqrt-a6}
+
+::: {.callout-note title="In plain words"}
+Three tools answer "$q$ range questions on an array." Reach for the wrong one and you lose a $\log$ factor or a whole algorithm. **Segment tree** (trees volume, @sec-seg) is the online generalist: $O(\log n)$ per update *and* query, but it needs the query to *decompose* (an associative combine you can split across two children). **Mo's algorithm** (ch. 24) is the offline specialist: $O((n + q)\sqrt{n})$ by reordering queries and sliding a window with two pointers, but it *forbids updates* (or needs the heavier "Mo with modifications") and only works if moving the window one step is $O(1)$. **Square root decomposition** is the middle: it *tolerates interleaved updates* (unlike plain Mo) and needs *no associative combine* (unlike the tree — you may rescan the edges however you like).
+:::
+
+The decision procedure, read straight off the statement:
+
+| The statement offers … | Right tool | Why |
+|---|---|---|
+| Updates interleaved with queries; query = sum/min/count over $[\ell,r]$ | **Sqrt blocks** (@sec-sqrt-p1, @sec-sqrt-p2) | No associative split needed; updates are one block |
+| Queries all known up front, **no updates**, answer = "weird" aggregate Mo can slide ($\sum \text{freq}^2$, mode, #distinct) | **Mo's algorithm** (ch. 24) | $O(1)$ add/remove as the window walks; ordering is free offline |
+| Query has an $O(\log n)$ *decomposable* combine, updates interleaved, $n \le 2\cdot10^{5}$ and time limit tight | **Segment tree / lazy segtree** (@sec-seg) | $O(\log n)$ beats $O(\sqrt{n})$; range-assign/add propagate cleanly |
+| Structure changes size (insert/delete), only $O(\sqrt{n})$ ordering questions | **Sqrt blocks + rebuild** (@sec-sqrt-a3, @sec-sqrt-p3) | Tree rebalancing is painful; a rebuild flush is a few lines |
+
+Read CF 86D "Powerful array" ($\sum_{i} i \cdot \text{freq}^2$ over a range) as the boundary case: adding one element to a window updates the answer in $O(1)$ (increment `freq[x]`, adjust `freq^2`), but there is *no* associative combine for a segment tree and there are *no updates*, so the block-on-positions answer degrades to a $O(\sqrt{n})$ scan that is really Mo's algorithm in disguise. That is exactly the problem ch. 24 owns. This chapter solves only problems where an **update is interleaved** or the **domain (position or value) is bucketed for a genuinely online answer**: LC 307, LC 308, CF 13E, 242E, 438D, 455D, 1638E, 220B, 797E, 522D.
+
+::: {#fig-sqrt-boundary}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "q": (0.0, 2.4, "range questions, $q$ of them", "muted"),
+        "upd": (-3.4, 0.4, "updates\ninterleaved?", "green"),
+        "combo": (0.0, 0.4, "associative\ncombine?", "indigo"),
+        "slide": (3.4, 0.4, "one-step $O(1)$\nadd/remove?", "pink"),
+        "sqrt": (-3.4, -2.0, "sqrt blocks", "green"),
+        "seg": (0.0, -2.0, "segment tree", "indigo"),
+        "mo": (3.4, -2.0, "Mo's (ch. 24)", "violet"),
+    }, [("q", "upd", ""), ("upd", "combo", "no"), ("combo", "slide", "no"),
+        ("upd", "sqrt", "yes"), ("combo", "seg", "yes"), ("slide", "mo", "yes")],
+        w=2.9, h=1.1)
+V.show(draw)
+```
+
+The three-question triage. Updates interleaved → blocks (a tree may still win on time, but blocks are enough and simpler). No updates but the combine splits cleanly → segment tree. No updates, no clean combine, but a one-element slide is $O(1)$ → Mo's algorithm, Chapter 24. The path that loops back to @sec-sqrt-p1..p5 is the first "yes".
+
+:::
+
+That triage is the whole reason Part B's problems all keep an update or an online count: LC 307 (point updates + range sum), LC 308 (2D cell updates + rectangle sum), CF 13E (jump-count query + point update via per-block forward pointers), CF 242E (range xor-update + range sum via per-block bit counts), CF 438D (range sum + range modulo + point set, skipping blocks whose max is already below the modulus), CF 455D (cyclic shift + count-of-value on an unrolled list with periodic split-rebuild), CF 220B (online "value $=$ its own count" by a value/frequency split), CF 1638E (per-colour add + repaint + point query via a colour table plus a block lazy tag), CF 797E (DP-by-$k$ block precompute, small-$k$ versus large-$k$), CF 522D (short-scan versus long-precompute equal-pair queries). Mo's three classics — 86D, 617E, 1000F — appear in no Part B section, by design.
+
+## Part B — Patterns
+
+Each pattern below is one *shape of the block grid* — where the blocks live (positions or values), what a block's summary stores, and how an operation refreshes it. The two solved problems per pattern put that shape on a real judge problem and stress the block answer against a brute force.
+
+**Where we are.** The five patterns climb one idea at a time on top of A1's grid. Pattern 1 fixes the blocks on positions and keeps a plain scalar summary, then adds point updates (@sec-sqrt-p1). Pattern 2 upgrades that summary to a *lazy tag* so a whole range updates in $O(1)$ per block (@sec-sqrt-p2). Pattern 3 lets the blocks *change size* — move, insert, repaint — and pays for it with the partial or amortised rebuild of A3 (@sec-sqrt-p3). Pattern 4 moves the grid onto the **value** axis and asks counting questions there (@sec-sqrt-p4). Pattern 5 breaks the $\sqrt{n}$ symmetry on purpose, sizing blocks by the query's own shape or splitting the work heavy-versus-light (@sec-sqrt-p5). Pattern 1 is the toolkit; 2–5 are what it buys you once the statement gets harder.
+
+## P1. Block summaries and point updates {#sec-sqrt-p1}
+
+**From a prefix table to a live one.** @sec-sqrt-a1 built the grid: slice the array, keep one number per block, answer as whole-blocks-plus-edges, refresh a single block on a point update. The two problems below are exactly that shape — first on one axis (LC 307), then on two (LC 308), where the per-block summary grows from a scalar into a column-prefix array.
+
+::: {.callout-important title="Template"}
+- **One summary per block, refreshed on a point update in $O(B)$.** Whatever the query needs — sum, min, max, a histogram — lives at `s[i // B]`; a write touches one `s` entry (@sec-sqrt-a1).
+- **Query = left edge $+$ whole blocks $+$ right edge.** Walk $\ell$ to a block boundary, add `s` while a full block fits, walk the tail. The middle guard `l + B - 1 <= r` *is* the correctness of the walk (@sec-sqrt-a1's three loops).
+- **The oracle is a raw slice sum.** `sum(ref[l:r+1])` at $O(n)$ per query; stress the $O(\sqrt{n})$ block answer against it with updates interleaved (@sec-sqrt-p1-mutable's stress cell).
+- **A second axis costs an extra prefix, not an extra algorithm.** Block one axis and keep a per-block prefix on the other; the edge–middle–edge walk is unchanged (@sec-sqrt-p1-mutable2d).
+:::
+
+{{< include ../problems/lc-0307-range-sum-query-mutable/problem.qmd >}}
+
+[**From one axis to two.** The previous problem blocked a row vector; the next blocks the *rows of a matrix* and promotes each block's scalar sum into a column-prefix array, so the same edge–middle–edge walk answers a whole rectangle.]{.flow-bridge}
+
+{{< include ../problems/lc-0308-range-sum-query-2d-mutable/problem.qmd >}}
+
+## P2. Lazy block tags and range updates {#sec-sqrt-p2}
+
+**From touching cells to tagging blocks.** P1 refreshed a single block on a *point* write. The moment the operation is a *range* write, re-summing every cell in $[\ell, r]$ is exactly the $O(n)$ we came to avoid. @sec-sqrt-a2's move is to stop touching the cells at all: give each whole block one deferred **tag**, apply the tag lazily on the way in, and push it down only when a query or update has to reach *inside* a block. The two problems below are the two flavours of that idea — one where the block summary is a forward-pointer triple rebuilt on a write (@sec-sqrt-p2-holes), one where it is a per-bit histogram that a XOR-tag flips without any rebuild (@sec-sqrt-p2-xorseg).
+
+::: {.callout-important title="Template"}
+- **A whole block updates in $O(1)$ via a tag; only partial blocks touch cells.** The middle blocks absorb the operation into a per-block lazy value — that is @sec-sqrt-a2's rule made concrete.
+- **The tag must match the operation's algebra.** Addition tags a sum; but XOR is not additive on the *sum*, so CF 242E tags a *per-bit count* instead — the tag is whatever the summary can absorb. Ask "what representation makes this operation $O(1)$ on a whole block?"
+- **Push down before any partial touch.** Read or write inside a block and you first fold `tag` back into the cells, else `a[i]` and `tag[b]` disagree about the true value (@sec-sqrt-p2-xorseg's `_push`).
+- **When a lazy tag is impossible, rebuild the one touched block.** CF 13E's update rewrites a single arrow, so only that block's `nxt/cnt/end` go stale — rebuild just it, right-to-left (@sec-sqrt-a3).
+:::
+
+{{< include ../problems/cf-13e-holes/problem.qmd >}}
+
+[**From rebuild-on-write to tag-on-write.** Holes deferred nothing: a point update rebuilt its block. The next problem updates a whole range and cannot rebuild every cell, so it carries a per-block lazy *XOR mask* and reads its answer out of a bit histogram — the purest example that a tag has to be expressed in the summary's own algebra.]{.flow-bridge}
+
+{{< include ../problems/cf-0242e-xor-on-segment/problem.qmd >}}
+
+## P3. Periodic and partial rebuilding {#sec-sqrt-p3}
+
+**When a tag is impossible, rebuild — but rebuild *less*.** @sec-sqrt-a3's rule is that an update you cannot defer still need only rebuild the *touched* blocks, and that a rebuild you can afford to do *rarely* is nearly free. The two problems below are the two ways a rebuild stays cheap. CF 438D keeps a per-block maximum purely so a range modulo can *skip* whole blocks and rebuild the rest — an operation amortised because values only fall (@sec-sqrt-p3-childseq). CF 455D lets the blocks *change size*: a cyclic shift re-inserts one value and splits any block that overflows, the textbook unrolled linked list (@sec-sqrt-p3-serega).
+
+::: {.callout-important title="Template"}
+- **Rebuild only the blocks the update actually reaches.** The whole-block skip (438D's `mx[b] < x`) and the partial edge rebuild are the same principle: pay $O(B)$ per *changed* block, nothing per untouched one (@sec-sqrt-a3).
+- **Make the summary the thing that bounds the work.** A per-block max turns a "touch every cell" modulo into an amortised $O(\log A)$-rebuilds-per-cell; the summary is not just for queries, it is the stopping condition (@sec-sqrt-a5).
+- **Variable-size blocks = unrolled list.** When ranks move (insert/delete/shift), keep blocks as lists, find a rank by summing lengths in $O(n/B)$, and split a block once it passes $2B$ — that split *is* the rebuild (@sec-sqrt-p3-serega).
+- **A value-frequency map per block** answers "how many $k$ in range" in $O(1)$ per whole block, and survives a shift because you decrement/increment it in step with the cells.
+:::
+
+{{< include ../problems/cf-438d-the-child-and-sequence/problem.qmd >}}
+
+[**From a fixed grid that skips to a growing grid that splits.** The modulo problem kept block *boundaries* fixed and used a max to skip them. The next problem cannot — a cyclic shift moves elements across boundaries — so the blocks themselves grow, shrink and split, and the per-block value histogram carries over from A4's counting idea.]{.flow-bridge}
+
+{{< include ../problems/cf-455d-serega-and-fun/problem.qmd >}}
+
+## P4. Blocks over the value domain {#sec-sqrt-p4}
+
+**Bucket the values, not the positions.** A1–A3 put blocks on the array's indices and asked "what is the answer over positions $[\ell, r]$?" Sometimes the question is really about *values* — "how many $x$ appear exactly $x$ times?", "add to every element of colour $c$" — and @sec-sqrt-a4's move is to make the **value (or colour) domain** the axis you keep a table over. The two problems below do exactly that from opposite ends. CF 220B answers a fixed-point count by splitting values at $\sqrt n$ into many-but-small and few-but-heavy (@sec-sqrt-p4-learray). CF 1638E keeps a live `add[c]` table over the colour domain and layers a position-block lazy tag on top — a value axis and a position axis in one structure (@sec-sqrt-p4-colorops).
+
+::: {.callout-important title="Template"}
+- **Bound the answer to $[1, n]$ on the value axis.** "Count $= $ value" forces value $\le$ range length $\le n$; a per-value table indexed by *magnitude* is then legal (@sec-sqrt-a4).
+- **Split values by size or by frequency.** Small targets: enumerate $x \le T$ and look up each in a position list. Large targets: only *heavy* values (many occurrences) can qualify, and there are few of them — $T + n/T$ is $\sqrt n$ (@sec-sqrt-a5, @sec-sqrt-p4-learray).
+- **A value domain that only ever gets *added to* wants a table, not blocks.** `Add c x` $=$ `add[c] += x` in $O(1)$; store the base per element so the true value is base $+$ `add[colour]` (@sec-sqrt-p4-colorops).
+- **Two axes, two devices.** Table over values *and* blocks over positions (CF 1638E; LC 308) — each op is $O(1)$ on one axis, $O(\sqrt{n})$ on the other.
+:::
+
+{{< include ../problems/cf-220b-little-elephant-and-array/problem.qmd >}}
+
+[**From counting values to updating them.** Little Elephant reads a per-value frequency to answer a fixed-point count. The next problem *writes* the value domain: an `Add` targets a whole colour, so the colour table becomes the primary structure and a position-block lazy tag is added to keep recoloring cheap.]{.flow-bridge}
+
+{{< include ../problems/cf-1638e-colorful-operations/problem.qmd >}}
+
+## P5. Unbalanced costs: heavy precompute, light query {#sec-sqrt-p5}
+
+**Spend the work where the queries are few.** Through A1–A4 the precompute and each query both cost about $O(\sqrt n)$ — a *balanced* budget. @sec-sqrt-a5 asks a sharper question: when one side of the ledger is cheap and the other expensive, why pretend they are the same size? The two problems below buy an enormous $O(n\sqrt n)$ precompute so that each of the $O(n)$ queries collapses, and the trade only pays when queries outnumber build. CF 797E precomputes a whole answer table for every *small* parameter and simulates the *large* ones, because those are already short (@sec-sqrt-p5-arrq). CF 522D stores the best equal-pair gap for every *block pair* so a query reads the interior in $O(1)$ and touches only $O(\sqrt n)$ fringe cells (@sec-sqrt-p5-closeq).
+
+::: {.callout-important title="Template"}
+- **Cost is a function of a parameter — split on the parameter.** When a query's price is $O(n/k)$, precompute the many-cheap-answer-but-expensive-to-build cases ($k \le \sqrt n$) and *simulate* the expensive-but-rare cases ($k > \sqrt n$, already short) (@sec-sqrt-a5, @sec-sqrt-p5-arrq).
+- **Precompute over block pairs, fix only fringes.** Store the interior answer for every whole-block span in $O(n\sqrt n)$; a range query reads the interior in $O(1)$ and pays $O(\sqrt n)$ only on its two partial blocks (@sec-sqrt-p5-closeq).
+- **A huge build is justified only when queries $\gg$ build events.** Check the ratio before reaching for it; here $m \approx n$, so $O(n\sqrt n)$ once beats $O(n)$ per query forever.
+- **Locality of the sub-answer.** The precompute works because the answer for a big span is a $\min$/count over its blocks plus a thin boundary — the same composable-summary idea as P1, paid for up front.
+:::
+
+{{< include ../problems/cf-797e-array-queries/problem.qmd >}}
+
+[**From a table over a parameter to a table over block pairs.** Array Queries precomputes by the query's $k$. The last problem precomputes by *where the query lives*: a best-pair value for every block pair turns each range into an interior look-up plus a short fringe scan.]{.flow-bridge}
+
+{{< include ../problems/cf-522d-closest-equals/problem.qmd >}}
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Point update **and** range query, $n, q \le 10^{5}$ | Block summaries + rebuild one block | @sec-sqrt-a1, @sec-sqrt-p1 |
+| Second axis on the same data (a matrix) | Per-row blocks, or a block grid | @sec-sqrt-p1-mutable2d |
+| **Range** add/assign **and** range query | Lazy block tag; push before a partial touch | @sec-sqrt-a2, @sec-sqrt-p2 |
+| Update is a bitwise XOR / non-summable op | Per-block bit-counts + a mask tag | @sec-sqrt-p2-xorseg |
+| Insert / delete in the middle; rank or count queries | Unrolled list of blocks + periodic split | @sec-sqrt-a3, @sec-sqrt-p3-serega |
+| A summary you cannot tag (modulo, arbitrary set) | Rebuild only the touched block | @sec-sqrt-a3, @sec-sqrt-p3-childseq |
+| "$x$ occurs exactly $x$ times" / "add to colour $c$" | Bucket the **value / colour** axis | @sec-sqrt-a4, @sec-sqrt-p4 |
+| One operation cheap, its twin expensive | Heavy/light split at a $\sqrt n$ threshold | @sec-sqrt-a5, @sec-sqrt-p5 |
+| Cost is $O(n/k)$ in a query parameter | Precompute small $k$, simulate large $k$ | @sec-sqrt-p5-arrq |
+| No updates, a frequency aggregate over a range | Mo's algorithm (ch. 24), **not** blocks | @sec-sqrt-a6 |
+| $O(\log n)$ associative combine, tight time limit | Segment tree / lazy segtree | @sec-sqrt-a6, @sec-seg |
+
+## Pitfalls {#sec-sqrt-pit}
+
+::: {.callout-warning title="Common mistakes"}
+- **Blindly setting $B = \sqrt n$.** The optimum is the minimiser of $c_u B + c_q n/B$, where $c_u, c_q$ are the real costs of touching one cell versus one whole block. When a "rebuild everything" flush is involved, $B = n^{2/3}$ often wins (@sec-sqrt-a5, @sec-sqrt-a3).
+- **Partial touch without pushing the lazy tag.** Read or write one cell inside a tagged block and you use a stale base value; always `push(b)` first, then edit, then `pull(b)` (@sec-sqrt-a2, @sec-sqrt-p2).
+- **Editing cells without rebuilding the block summary.** The block's `sum`/`max`/`freq`/bit-counts are now wrong, and every whole-block operation silently inherits the error (@sec-sqrt-p1, @sec-sqrt-p3-childseq).
+- **Off-by-one block bounds.** The last block is short: use `hi = min(n, (b+1)*B)`. Forgetting the `min` runs a loop off the array end or mis-splits the final block (@sec-sqrt-a1).
+- **A 32-bit accumulator on a block summary.** XOR-on-segment sums reach $n \cdot 2^{20}$ and range sums reach $n \cdot 10^{9}$ — both blow past $2^{31}$; every block total is a 64-bit int (@sec-sqrt-p2-xorseg, @sec-arr-size-trap).
+- **Assuming values fit $[1, n]$ on the value axis.** $a_i$ up to $10^{9}$ (or negative) means the per-value table must be a map/dict, not an array indexed by value (@sec-sqrt-a4, @sec-sqrt-p5-closeq).
+- **Double-counting across a heavy/light split.** The small loop ($x \le T$) and the heavy loop ($x > T$) must be disjoint by construction; overlapping bounds count a value twice (@sec-sqrt-p4-learray, @sec-sqrt-a5).
+- **Letting unrolled blocks grow unbounded.** Without the "split when a block exceeds $2B$" rule, `_locate` degrades from $O(\sqrt n)$ blocks to an $O(n)$ walk (@sec-sqrt-p3-serega, @sec-sqrt-a3).
+- **Choosing blocks for a Mo's problem.** A no-update, order-sensitive frequency aggregate ($\sum \text{freq}^2$, mode, #distinct) has an $O(1)$ window slide but no block-friendly combine — blocks become an $O(\sqrt n)$ scan that is Mo's algorithm in disguise (@sec-sqrt-a6).
+- **Rebuilding the whole structure per update.** The point of the grid is that a local change touches exactly one (or two) blocks; a full rebuild turns $O(\sqrt n)$ into $O(n)$ (@sec-sqrt-p1, @sec-sqrt-p3-childseq).
+:::
+
+## Exercises
+
+**1. [E] For point update + whole-range query you argued work$(B) = B + n/B$. Minimise it: which $B$ and what cost? Why is $B$ a *tradeoff*, not a free choice?**
+
+::: {.callout-note collapse="true" title="Solution"}
+By AM–GM, $B + n/B$ is minimised at $B = \sqrt n$, giving $2\sqrt n$. A small $B$ makes the *update* cheap but leaves many blocks to combine; a large $B$ merges cheaply but forces a long cell loop per update — you are choosing which of the two to pay, and $\sqrt n$ balances them (@sec-sqrt-a1).
+:::
+
+**2. [E] $n = 10^{5}$, $B = 316$. How many blocks, and what is the worst-case cell-touching in one range query?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\lceil n/B \rceil \approx 317$ blocks. A range query rebuilds nothing: it scans the two partial edge blocks ($< 2B \approx 632$ cells) and combines the $\le 317$ whole-block summaries — $O(B + n/B) \approx 2\sqrt n$ (@sec-sqrt-a1, @sec-sqrt-p1).
+:::
+
+**3. [E] LC 307 needs only a sum. Why is a sqrt-block solution "good enough" there even though a Fenwick tree is $O(\log n)$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+At $n, q \le 10^{4}$ the bound $q\sqrt n \approx 10^{6}$ already fits; the block code is a few lines with no bit-twiddling and generalises to aggregates a BIT cannot hold (min under point update, counts). You pay a $\sqrt n$ versus $\log n$ per op but buy simplicity and flexibility (@sec-sqrt-p1-mutable, @sec-sqrt-a6's triage).
+:::
+
+**4. [E] In @sec-sqrt-a2 a range assign stores a `tag` and a `has_tag` flag instead of writing cells. What two things must every reader of a single cell do, and in what order?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Push down *then* read: if `has_tag[b]`, materialise the tag into the block's cells (or, for a value read, compute `base op tag` directly), clear the flag, and only then touch individual cells. Reading the base before applying the tag uses a stale value; writing a cell before clearing the tag loses the pending broadcast (@sec-sqrt-a2, @sec-sqrt-p2).
+:::
+
+**5. [M] CF 242E stores `bit[b][k]` = how many cells in block $b$ have bit $k$ set, and a lazy XOR mask `tag[b]`. The whole-block sum is *not* just $\sum_k \mathit{bit}[b][k] \cdot 2^k$ — why, and what fixes it?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A live cell value is $a_i \oplus \mathit{tag}[b]$, so bit $k$ of the true value is set exactly when $a_i$'s bit differs from `tag`'s bit $k$. The block's set-bit count at $k$ is `bit[b][k]` if `tag`'s bit is $0$, else $\text{size} - \mathit{bit}[b][k]$ — the *complement*. Weight that by $2^k$ and sum (@sec-sqrt-p2-xorseg).
+:::
+
+**6. [M] CF 13E stores, per cell, `nxt[i]` (first position reached outside $i$'s block), `cnt[i]` (jumps to get there) and `end[i]`. Why does a query cost $O(\sqrt n)$ even though a hop chain can be length $O(n)$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The chain is walked *block by block*: one `nxt`/`cnt` read jumps a whole intra-block run in $O(1)$, so a query pays only for the number of blocks it exits, $\le n/B = \sqrt n$. A point update $p[i] \leftarrow v$ only invalidates its own block, repaired right-to-left in $O(B)$ (@sec-sqrt-p2-holes).
+:::
+
+**7. [M] CF 438D's range modulo skips a whole block when `mx[b] < x`. Prove the total rebuild work over all modulo ops is $O(n\log A)$ (amortised), not $O(nm)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+An element is only touched when `mx[b] >= x > a_i` fails to hold, i.e. when its own value $a_i \ge x$; then $a_i$ becomes $a_i \bmod x < x \le a_i$, and if $x \le a_i/2$ the value at least halves, while $x > a_i/2$ gives $a_i \bmod x = a_i - x < a_i/2$ too. So each *effective* mod halves the element; a value $\le A$ halves at most $\log_2 A$ times, bounding rebuilds per cell (@sec-sqrt-p3-childseq).
+:::
+
+**8. [M] CF 455D answers "count $k$ in $[\ell,r]$" with per-block `Counter`s over an unrolled list. Why a *split-on-oversize* rule rather than fixed-size blocks, and what op forces the rebuild?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The cyclic shift *moves* an element (pop at $r$, insert at $\ell$), so block lengths change; fixed indices would need every later block shifted. Instead blocks are lists of size $\le 2B$, `_locate` walks block lengths ($O(\sqrt n)$ blocks), and only the two affected blocks rebuild their `Counter` — $O(B)$ — after each op, with a split when one exceeds $2B$ (@sec-sqrt-p3-serega).
+:::
+
+**9. [M] CF 220B: why is it safe to ignore any value $v > T$ that is *not* globally heavy (total frequency $\le T$)?**
+
+::: {.callout-note collapse="true" title="Solution"}
+For $v$ to qualify, $v$ must occur exactly $v$ times in $[\ell, r] \le$ its total frequency. If total frequency $\le T < v$, it can never reach $v$ occurrences, so it never qualifies. The surviving large candidates are exactly the heavy values, and there are $\le n/T$ of them (@sec-sqrt-p4-learray, @sec-sqrt-a5).
+:::
+
+**10. [M] CF 1638E keeps `add[c]` (per-colour) *and* a per-block colour table. When a `Color l r c` repaints a *partial* block, why flush that block first, and what is the true value of a cell?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A whole block can be repainted in $O(1)$ only if all its cells share a colour; a partial repaint breaks that, so the block's pending per-colour credits are folded into each cell's stored value (`_push`) before recolouring the $\le B$ fringe cells. A cell's true value is always its materialised base plus the colour credit for its current colour, `val[i] + delta[block][colour[i]]` (@sec-sqrt-p4-colorops).
+:::
+
+**11. [M] CF 797E precomputes $f[k][p]$ only for $k \le S$ and simulates $k > S$. State the two bounds and why their sum is minimised near $S = \sqrt n$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Precompute is $O(nS)$; each simulated large-$k$ query is $\le n/(S+1) = O(\sqrt n)$ hops (every hop advances $\ge k+1 > S+1$). Query cost is $O(1)$ for small $k$, $O(n/S)$ for large. Total $O(nS + q \cdot n/S)$; treating it as a function of $S$ the two terms balance at $S \approx \sqrt n$ (@sec-sqrt-p5-arrq, @sec-sqrt-a5).
+:::
+
+**12. [M] CF 522D reads only *adjacent* occurrences of a value inside the fringe. Prove the closest equal-pair in $[\ell,r]$ is always between two consecutive positions of that value.**
+
+::: {.callout-note collapse="true" title="Solution"}
+If $a_x = a_y$ with $x < y$ and a third $a_z = a_x$ lies strictly between ($x < z < y$), then $y - x = (z - x) + (y - z) > \min(z-x,\, y-z)$, so $(x, y)$ was never the minimum. Hence the answer uses consecutive occurrences, and a fringe cell's best partner is its predecessor or successor in `occ[a_i]` — one binary search each side (@sec-sqrt-p5-closeq).
+:::
+
+**13. [H] @sec-sqrt-a3 buffers $O(\sqrt n)$ pending mutations and rebuilds the whole array lazily. If a rebuild is $O(n)$ and happens every $B$ buffered updates, and a query costs $O(B)$ to absorb the buffer, choose $B$ and justify against $\sqrt n$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Per operation the amortised cost is $O(B)$ (scan buffer) $+\ O(n/B)$ (rebuild charged across $B$ updates), so $B = \sqrt n$ is optimal *when rebuild and buffer-scan are unit-cost*. When the rebuild does $\Omega(\log n)$ work per element (a sort) or queries dominate, shift $B$ up (often $n^{2/3}$) to rebuild less — the tuning is on the *real* costs, not the symbol $\sqrt n$ (@sec-sqrt-a3, @sec-sqrt-a5).
+:::
+
+**14. [H] Three problems: CF 86D (powerful array, $\sum i \cdot \text{freq}^2$), CF 220B (Little Elephant), CF 522D (Closest Equals) — all are no-update range queries. Which is Mo's-in-disguise and which have a genuine online block answer? Explain the tell.**
+
+::: {.callout-note collapse="true" title="Solution"}
+86D: adding/removing one element updates the answer in $O(1)$ but there is *no* associative block combine — the block-on-positions answer degenerates to sliding a window, i.e. Mo's (ch. 24). 220B and 522D have no updates *but* a per-value position-list + threshold (220B) or a block-pair precompute (522D) answers each query independently and online, so blocks are genuine. The tell: can you combine whole-block summaries into a range answer without knowing the query order? (@sec-sqrt-a6, @sec-sqrt-p4-learray, @sec-sqrt-p5-closeq).
+:::
+
+**15. [H] CF 455D encodes each query with `lastans` (the previous answer) before reading $\ell, r, k$. Why does this forbid offline/Mo solutions and make the online unrolled list the natural fit?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Each query's parameters depend on the answer to the previous one, so you cannot know query $i{+}1$ before answering query $i$: reordering is illegal and any offline sort is void. You need a structure that answers the *next* query in place after each cyclic shift — an online per-block histogram over an unrolled list delivers exactly that (@sec-sqrt-p3-serega, @sec-sqrt-a6's "adaptive queries" boundary).
+:::
+
+**16. [H] You store per-block bit-counts (242E) *and* a lazy XOR tag. An `Add`-style whole-block XOR just does `tag ^= x`; a partial XOR must edit cells. Give the two-step discipline that keeps `bit` and `tag` consistent, and the failure if you skip it.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Partial XOR: `push(b)` (fold `tag` into every cell, clear `tag`), edit the $\le B$ target cells, then `_redo(b)` (recompute `bit[b][*]` from the cells). Skip the `_redo` and `bit` describes pre-edit values, so every later whole-block sum via `bit` is wrong; skip the `push` and you edit base cells while the mask still re-XORs them, double-applying the tag (@sec-sqrt-p2-xorseg, @sec-sqrt-a2).
+:::
+
+## Interview questions
+
+**1. In your own words: what is square-root decomposition, and what is the core tradeoff it makes?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Split the array into $\approx \sqrt n$ contiguous blocks of $\approx \sqrt n$ cells, keep a cheap summary per block, and answer a range query as (two partial edge blocks scanned cell-by-cell) plus (whole middle blocks read from their summaries). One point update rebuilds a single block in $O(\sqrt n)$; one query is $O(\sqrt n)$. It trades a $O(\log n)$ tree's asymptotics for far simpler code and arbitrary per-block summaries (@sec-sqrt-a1).
+:::
+
+**2. When would you reach for blocks over a segment tree, and when is the tree strictly better?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Blocks win when the combine is not associative or hard to define (count of a value, mode, a modulo, per-value histograms), when insertions change the structure's size, or when you just need code you can trust. The tree wins when the op is a clean $O(\log n)$ monoid (sum/min/gcd) *and* the time limit is tight, or when lazy range-add/assign must propagate over arbitrary $O(\log n)$-many nodes (@sec-sqrt-a6, @sec-seg).
+:::
+
+**3. Explain a lazy block tag and the push/pull discipline it forces.**
+
+::: {.callout-note collapse="true" title="Answer"}
+A tag stores a *pending* whole-block operation (add, assign, XOR) instead of applying it to cells, making range updates $O(\sqrt n)$ (one tag per covered block). Any partial touch must first `push` the tag into the cells (so you act on true values) and later `pull`/`redo` the summary so the block's cached aggregate matches the edits (@sec-sqrt-a2, @sec-sqrt-p2).
+:::
+
+**4. Name three rebuild strategies and when each is right.**
+
+::: {.callout-note collapse="true" title="Answer"}
+(1) Partial: rebuild only the block(s) a change touches — point updates (@sec-sqrt-p1). (2) Buffer-then-flush: log $O(\sqrt n)$ updates, answer queries by combining base + buffer, rebuild the whole array when the buffer is too long — many interleaved updates you cannot fold into a tag (@sec-sqrt-a3). (3) Periodic/split-rebuild: keep a self-adjusting structure (unrolled list) and rebuild/split a block only when it exceeds a size bound — inserts and deletes (@sec-sqrt-p3-serega).
+:::
+
+**5. Some problems put blocks on the *value* axis, not positions. Give two and the tell.**
+
+::: {.callout-note collapse="true" title="Answer"}
+CF 220B ("$x$ occurs exactly $x$ times") and CF 1638E ("add to every element of colour $c$"). The tell: the question or update names a *value/colour*, not an index range, so a table keyed by value ($\mathit{add}[c]$, per-value position lists) is the primary structure; you then split that table by magnitude or frequency at $\sqrt n$ (@sec-sqrt-a4, @sec-sqrt-p4).
+:::
+
+**6. Heavy-light by a threshold is the pattern behind P5. Walk CF 797E through it.**
+
+::: {.callout-note collapse="true" title="Answer"}
+The cost depends on the query parameter $k$: small $k$ is expensive to simulate but there are only $\sqrt n$ distinct small values, so precompute a table $f[k][\cdot]$ for them ($O(n\sqrt n)$); large $k$ is rare-cheap because each hop advances $> \sqrt n$, so just simulate ($O(\sqrt n)$). Precompute exactly the side that is expensive to answer and cheap to batch (@sec-sqrt-p5-arrq, @sec-sqrt-a5).
+:::
+
+**7. Why does an unrolled linked list beat a balanced BST for CF 455D's cyclic shifts?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The operations are pop-one-cell and insert-one-cell at arbitrary ranks, plus "count $k$ in a range" — order-statistics and histograms you want *per block*, and a rebuild flush is a few lines. A BST would need a subtree Counter maintained on every rotation/rebalance; blocks give $O(\sqrt n)$ rank-walk and $O(\sqrt n)$ count via per-block histograms with far less machinery (@sec-sqrt-p3-serega).
+:::
+
+**8. A range-modulo has no lazy tag. Why, and what saves CF 438D?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Modulo is not distributive over the sum/min you would tag, and applying it changes each cell individually, so there is nothing to defer. What saves it: skip a whole block when its `max < x` (no cell changes under $\bmod\, x$), and note every *effective* modulo at least halves the touched value, so each cell rebuilds $\le \log A$ times — amortised $O(\sqrt n)$ (@sec-sqrt-p3-childseq, @sec-sqrt-a3).
+:::
+
+**9. How do you tell a Mo's-algorithm problem from a sqrt-decomposition problem when neither has updates?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Check for an associative, query-independent block summary. If the aggregate needs to *know the current window* and only updates in $O(1)$ as the window slides ($\sum \text{freq}^2$, mode, #distinct), that is Mo's (ch. 24). If you can combine whole-block summaries into an answer for any range without reordering queries — per-value position lists, a block-pair precompute — blocks are genuine (@sec-sqrt-a6).
+:::
+
+**10. Your $O(\sqrt n)$ is too slow. What knobs, other than swapping in a segment tree, can you turn?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Retune $B$ to the real update/query ratio (heavy queries: bigger $B$; heavy updates: smaller), or use $n^{2/3}$ when a rebuild dominates. Split the query into a precomputed interior ($O(1)$) plus a $O(B)$ fringe (P5's block-pair table). Cache per-block data you recompute too eagerly (bit-counts, histograms). Often these turn $\sqrt n$ into $1$ per query at the cost of an $O(n\sqrt n)$ build (@sec-sqrt-a5, @sec-sqrt-p5-closeq).
+:::
+
+**11. Design question: range add and, per query, count elements equal to $v$ in $[\ell,r]$. Sketch blocks.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Per block store a frequency map of *base* values and a lazy `add` tag. Range add: whole blocks `tag += x` ($O(\sqrt n)$), partial blocks push+edit+rebuild the map ($O(B)$). Count-$v$: whole block answer is `freq[v - tag]`; partial blocks scan cells adding `tag`. $O(\sqrt n)$ per op — the tag turns "count $v$" into "count the shifted key" (@sec-sqrt-a2, @sec-sqrt-p4-colorops).
+:::
+
+**12. What is the complexity of CF 220B's value-split answer and where does the $\log n$ come from?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(n)$ to build per-value position lists and find heavy values; each query $O(T)$ small-value checks plus $O(n/T)$ heavy checks, each an $O(\log n)$ count by two binary searches into a position list — so $O(\sqrt n \log n)$ per query. The $\log n$ is purely the binary search; replacing position lists with per-block histograms (as in CF 455D) trades it for a different $\sqrt n$ scan (@sec-sqrt-p4-learray).
+:::
+
+**13. Give a concrete bug that appears only when the lazy tag and the block summary disagree, and how to catch it.**
+
+::: {.callout-note collapse="true" title="Answer"}
+In CF 242E, computing a whole-block sum as $\sum_k \mathit{bit}[b][k]\cdot 2^k$ while `tag[b] != 0` ignores that the live value is $a_i \oplus \mathit{tag}$ — you must complement the bit count where the tag's bit is set. The catch is a stress test: keep a plain-array brute force and, after every random operation, assert the structure's query equals the brute's, so any tag/summary desync fires immediately (@sec-sqrt-p2-xorseg, @sec-sqrt-p1's oracle discipline).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **The block grid.** `B = round(sqrt(n))` blocks of $\le B$ cells; a summary per block; a query = two $O(B)$ edges + $O(n/B)$ whole-block combines; a point update = `redo(b)` in $O(B)$ (@sec-sqrt-a1, @sec-sqrt-p1).
+- **The lazy tag.** Defer a whole-block op in `tag[b]`; `push(b)` before any partial read/write, `pull(b)` after; range updates become $O(\sqrt n)$ (@sec-sqrt-a2, @sec-sqrt-p2).
+- **Rebuild, don't tag.** When no tag exists (modulo, arbitrary set, inserts), fix only the touched block, or buffer $\sqrt n$ mutations and flush, or split oversized blocks — three rebuild cadences for three update shapes (@sec-sqrt-a3, @sec-sqrt-p3).
+- **The value/colour table.** When the statement speaks of values or colours, make *that* the axis: `add[c] += x` in $O(1)$, per-value position lists, split at $\sqrt n$ into small-by-magnitude and large-by-frequency (@sec-sqrt-a4, @sec-sqrt-p4).
+- **Unbalanced costs.** Precompute the side that is expensive-to-answer and cheap-to-batch; live-compute the side that is already short. $O(n\sqrt n)$ build for $O(\sqrt n)$ (or $O(1)$ interior + $O(\sqrt n)$ fringe) queries (@sec-sqrt-a5, @sec-sqrt-p5).
+- **The triage.** Updates interleaved → blocks; $O(\log n)$ monoid + tight TL → segtree; no updates + $O(1)$ window slide + no combine → Mo's, ch. 24 (@sec-sqrt-a6).
+:::
+
+- Square-root decomposition is one idea repeated: *group cells, keep a summary, rebuild locally* — the five patterns are just five different answers to "what goes in the summary and what triggers a rebuild" (@sec-sqrt-a1, @sec-sqrt-p1..p5).
+- The $\sqrt n$ is not sacred; it is the minimiser of $c_u B + c_q n/B$. Read $c_u, c_q$ off the real operations and retune, sometimes to $n^{2/3}$ or a threshold on a query parameter (@sec-sqrt-a5, @sec-sqrt-p5-arrq).
+- The lazy tag is the whole of P2 and the thing you *cannot* have in P3: some operations refuse to defer (modulo, repaint-by-colour, arbitrary sets), and then the answer is a cheaper rebuild, not a cleverer tag (@sec-sqrt-a2, @sec-sqrt-p3-childseq).
+- Putting blocks on the value/colour axis (P4) is the same grid rotated 90°: the "positions" are values, the summary is a frequency or an `add`, and the split is by magnitude or by how often a value appears (@sec-sqrt-a4, @sec-sqrt-p4).
+- A huge precompute is only honest when queries outnumber build events (P5): $m \approx n$ makes $O(n\sqrt n)$ once beat $O(n)$ forever; a handful of queries would make it a loss (@sec-sqrt-p5-closeq, @sec-sqrt-a5).
+- Blocks, Mo's, and segment trees are one decision apart. The tell is whether a range answer can be *combined* from order-independent block summaries — if not, and only a sliding window updates in $O(1)$, hand it to Chapter 24 (@sec-sqrt-a6).
+- Every summary here must agree with its cells: push before touching, rebuild after, and stress each structure against a raw-slice brute force after every random operation — that loop, not the asymptotics, is what makes a block solution trustworthy (@sec-sqrt-p1, @sec-sqrt-pit).
+
+## Practice ladder
+
+Ordered by pattern, following the five-part climb. The ten problems solved in Part B are marked `.solved`; every other entry is "solve it after the lesson named".
+
+::: {.practice}
+- [LC 307 · Range Sum Query - Mutable](https://leetcode.com/problems/range-sum-query-mutable/){.solved difficulty="Medium"} — point update + range sum on one block grid (@sec-sqrt-p1-mutable)
+- [LC 308 · Range Sum Query 2D - Mutable](https://leetcode.com/problems/range-sum-query-2d-mutable/){.solved difficulty="Hard"} — the same summaries on a second axis (@sec-sqrt-p1-mutable2d)
+- [CF 13E · Holes](https://codeforces.com/problemset/problem/13/E){.solved rating="2700"} — per-block forward pointers, point-update rebuild (@sec-sqrt-p2-holes)
+- [CF 242E · XOR on Segment](https://codeforces.com/problemset/problem/242/E){.solved rating="2000"} — lazy XOR tag + per-block bit counts (@sec-sqrt-p2-xorseg)
+- [CF 438D · The Child and Sequence](https://codeforces.com/problemset/problem/438/D){.solved rating="2300"} — per-block sum + max; amortised range modulo (@sec-sqrt-p3-childseq)
+- [CF 455D · Serega and Fun](https://codeforces.com/problemset/problem/455/D){.solved rating="2700"} — unrolled list + per-block Counter, online count (@sec-sqrt-p3-serega)
+- [CF 220B · Little Elephant and Array](https://codeforces.com/problemset/problem/220/B){.solved rating="1800"} — value-axis split, heavy/light candidates (@sec-sqrt-p4-learray)
+- [CF 1638E · Colorful Operations](https://codeforces.com/problemset/problem/1638/E){.solved rating="2400"} — colour table + block lazy tag on two axes (@sec-sqrt-p4-colorops)
+- [CF 797E · Array Queries](https://codeforces.com/problemset/problem/797/E){.solved rating="2000"} — precompute small $k$, simulate large $k$ (@sec-sqrt-p5-arrq)
+- [CF 522D · Closest Equals](https://codeforces.com/problemset/problem/522/D){.solved rating="2000"} — block-pair precompute, $O(\sqrt n)$ fringe (@sec-sqrt-p5-closeq)
+- [LC 304 · Range Sum Query 2D - Immutable](https://leetcode.com/problems/range-sum-query-2d-immutable/){difficulty="Medium"} — the static prefix that mutable blocks must keep updating; a warm-up for @sec-sqrt-p1
+- [CF 981E · Addition on Segments](https://codeforces.com/problemset/problem/981/E){rating="2200"} — per-block lazy arithmetic-progression tags; the pure-P2 shape (@sec-sqrt-p2)
+- [CF 348B · Apple Tree](https://codeforces.com/problemset/problem/348/B){rating="2100"} — lazy-tag the *large* subtrees, direct the small ones; a size-threshold heavy/light split (@sec-sqrt-a5)
+- [CF 1439B · Graph Subset Problem](https://codeforces.com/problemset/problem/1439/B){rating="2600"} — high-degree vertices above a $\sqrt n$ threshold, handled specially (@sec-sqrt-a5)
+- [CF 86D · Powerful array](https://codeforces.com/problemset/problem/86/D){rating="2200"} — the Mo's boundary of @sec-sqrt-a6: $O(1)$ slide, no combine; solve it in Chapter 24
+- [CF 617E · XOR and Favorite Number](https://codeforces.com/problemset/problem/617/E){rating="2200"} — another no-update frequency aggregate; Chapter 24, not blocks (@sec-sqrt-a6)
+- [CF 1000F · One Occurrence](https://codeforces.com/problemset/problem/1000/F){rating="2400"} — the #distinct family that defeats a block combine; Chapter 24 (@sec-sqrt-a6)
+:::
+
+## Further reading
+
+- [CP-Algorithms — Sqrt Decomposition](https://cp-algorithms.com/data_structures/sqrt_decomposition.html) — the block grid, lazy tags, and rebuild discipline of @sec-sqrt-a1..a3 worked through in C++.
+- [Wikipedia — Block (data structure)](https://en.wikipedia.org/wiki/Block_(data_structure)) — the formal framing of "split into blocks, keep a summary" and its cache-friendly siblings.
+- [Wikipedia — Unrolled linked list](https://en.wikipedia.org/wiki/Unrolled_linked_list) — the array-of-lists structure behind @sec-sqrt-p3-serega, and why splitting oversized blocks keeps `_locate` at $O(\sqrt n)$.
+- [CP-Algorithms — Mo's algorithm](https://cp-algorithms.com/misc/mo-algorithm.html) — the window-sliding solver you reach for exactly when @sec-sqrt-a6's combine test fails; Chapter 24's home method.
+- [Codeforces EDU — Data Structures](https://codeforces.com/edu/course/2) — interactive ordered-set and lazy-propagation lessons that stand in when updates make plain blocks too slow (@sec-sqrt-a2).
+- [CPH — Chapter 9 (Advanced Data Structures)](https://cses.fi/book/book.pdf) — the book's own sqrt-decomposition section, with the block-pair precompute style of @sec-sqrt-p5-closeq.

@@ -1,35 +1,226 @@
 % !TEX root = ../../tree_notes.tex
 % =====================================================================
-%  Chapter 16 -- Heavy-Light Decomposition
-%  Status: OUTLINE (not written yet). See structure/chapter.txt.
+%  Chapter 22 -- Heavy-Light Decomposition                     WRITTEN
+%  (folder ch16_heavy_light; label prefix c16; prints as Chapter 22;
+%  folder number 16; build with:  python tools/build.py --only 16)
+%
+%  Owns HEAVY-LIGHT DECOMPOSITION (the chain split and the O(log n)
+%  light-edge bound), the HEAD/POS arrays plus a SEGMENT TREE OVER THE
+%  CHAIN ORDER, PATH QUERIES answered by chain-to-chain jumps that meet at
+%  the LCA, PATH UPDATES composed with Chapter 20's lazy tag, the
+%  EDGE-VALUE-ON-THE-DEEPER-ENDPOINT reduction, and the fact that a SUBTREE
+%  stays a contiguous interval under the heavy-first (HLD) order.  Three
+%  explicit promises are DISCHARGED here: Chapter 20's 20.4/05_when_lazy_-
+%  strains forward-cite ("a path decomposition to HLD, no chain code there")
+%  and Chapter 21's 21.4/21.5/99 rows + closing lastword ("a path that is
+%  UPDATED ... HLD + lazy, Ch.22"), all of which hand path UPDATE / mutable
+%  path queries to this chapter; each is back-cited by label.
+%  Sections:
+%    * 22.1 the decomposition -- why a bare segtree over a DFS order answers
+%      SUBTREES but not arbitrary PATHS; the heavy-child rule (heaviest child
+%      inherits the chain, every other edge is LIGHT); the key lemma that any
+%      root-to-node path crosses <= floor(log2 n) light edges (each light step
+%      at least DOUBLES the subtree); the two DFS passes (dfs1 size+heavy,
+%      dfs2 head+pos); heavy-first preorder keeps subtrees contiguous.  Hand
+%      trace decomposes the shared tree T into the four chains and lists
+%      size/heavy/head/pos.  Solved SPOJ QTREE3 (toggle a node black/white;
+%      first black on the path 1->v).
+%    * 22.2 path queries -- the chain-jump loop (while head[u]!=head[v] take
+%      the deeper head, query pos[head]..pos[node], hop to parent(head); then
+%      one same-chain final range ordered by depth); O(log n) chains x O(log n)
+%      segtree = O(log^2 n).  Back-cites Ch.11 LCA: the loop TERMINATES at the
+%      lca without calling it, but the lca names the last segment.  Traces the
+%      sum and max on paths 4--10 and 8--6 of T, split into B-ranges.  Solved
+%      SPOJ QTREE (CHANGE an edge; QUERY max edge on a path) -- the canonical
+%      edge-max HLD, paired with the edge-to-node reduction.
+%    * 22.3 path updates -- the SAME chain jump but carrying Chapter 20's lazy
+%      range-add/assign on each pos-interval (the tag is REUSED, never re-taught,
+%      back-citing \secref{c15-*}); the edge-value-on-deeper-endpoint reduction
+%      (store an edge at its deeper node so an edge-path query EXCLUDES the
+%      lca's slot).  Re-treats CF 258E / 383C / 877E / 276E (owned by Ch.14) in PROSE
+%      as HLD-vs-BIT twins, never re-linked.  Solved CF 593D Happy Tree Party
+%      (edge values, path product/division query, decrease one edge).
+%    * 22.4 subtree and path in one -- combining subtree-as-range and
+%      path-as-chains in ONE structure; why the heavy-first order (not plain
+%      tin) makes BOTH cheap; subtree lazy-add + subtree-sum traces on T under
+%      a changing root; node- vs edge-centred bookkeeping reconciled.  Back-
+%      cites Ch.5 flattening (\chref{c24}) contrasting plain-Euler vs HLD order.
+%      Solved CF 916E Jamie and Tree (re-root; add x to the LCA-anchored
+%      subtree with a lazy tag; query a subtree sum).
+%    * 22.5 the engine boundary -- when HLD is the WRONG tool: topology that
+%      CHANGES (link/cut) -> Link-Cut / Euler-Tour trees Ch.25 (\chref{c23});
+%      STATIC path k-th / count with no updates -> the persistent four-root
+%      engine Ch.21 (\chref{c19}); non-composable path updates (chmin/mod) ->
+%      beats Ch.23 (\chref{c29}); OFFLINE path queries -> Mo on trees Ch.27
+%      (\chref{c21}); path COUNTING by centroid Ch.24 (\chref{c18}, name-only);
+%      one honest name-only paragraph on TOP TREES.  The capstone ENGINE MAP
+%      (LCA-only vs Euler+BIT vs persistent vs HLD vs link-cut vs beats vs Mo).
+%      WORKED examples only -- NO solvedproblem (in-section count stays 4).
+%
+%  Diagram-first: every structure is hand-computed on the SHARED 10-node tree
+%  T of Ch.12-21 (edges 1-2,1-3,2-4,2-5,3-6,3-7,5-8,7-9,9-10; root 1) with node
+%  VALUES v(1..10) = (3,2,4,5,1,1,5,3,7,0) -- the first 10 of the running array
+%  A, so Ch.21's 21.4 T-value trace stays cross-consistent.  The authoritative
+%  decomposition (fixed once in 00_opener; every section re-uses it exactly):
+%    subtree sizes  size = (10,4,5,1,2,1,3,1,2,1) for nodes 1..10
+%                   (1:10, 2:4, 3:5, 5:2, 7:3, 9:2);
+%    heavy child    heavy(1)=3, heavy(2)=5, heavy(3)=7, heavy(5)=8, heavy(7)=9,
+%                   heavy(9)=10  -> heavy EDGES 1->3->7->9->10 and 2->5->8;
+%    light edges    1->2, 2->4, 3->6;
+%    four chains    C1=[1,3,7,9,10], C2=[2,5,8], C4=[4], C6=[6];
+%    head(node)     head = (1,2,1,4,2,6,1,2,1,1) for nodes 1..10;
+%    pos (heavy-first preorder, nodes 1..10):
+%                   pos = (1,7,2,10,8,6,3,9,4,5);
+%    value array over positions  B[pos]=v(node):
+%                   B = (3,4,5,7,0,1,2,1,3,5), sum 31;
+%    subtree intervals in the HLD order (still contiguous):
+%                   subtree(2)=[7,10]={2,5,8,4}, subtree(3)=[2,6]={3,7,9,10,6},
+%                   subtree(7)=[3,5], subtree(5)=[8,9], subtree(9)=[4,5],
+%                   subtree(1)=[1,10].
+%  Path chain-jump traces (hand-verified twice in 22.2):
+%    path 4--10 (lca 1): segments [10,10](node4), [7,7](node2), [1,5](1,3,7,9,10);
+%      sum 5+2+19=26, max 7.  path 8--6 (lca 1): [6,6](6), [7,9](2,5,8),
+%      [1,2](1,3); sum 1+6+7=14, max 4.
+%
+%  Anti-repetition contract (teach once, cross-reference by label):
+%    * Ch.19 (\chref{c13}) owns the PLAIN segment tree build/update/query and
+%      the interval geometry; 22.2/22.3 REUSE it over the pos order -- no
+%      re-teach of the tree itself.
+%    * Ch.20 (\chref{c15}) owns LAZY RANGE TAGS; 22.3 bolts the SAME tag onto
+%      each chain interval and back-cites \secref{c15-strains} -- the tag is
+%      never re-derived here.
+%    * Ch.11 LCA (\chref{c11}) owns binary lifting / lca(); 22.2/22.4 CALL it
+%      to name the meeting segment; never re-derived.
+%    * Ch.5 (\chref{c24}) owns the plain tin/tout Euler flatten; 22.4 contrasts
+%      the SUBTREE-contiguous plain order against the HLD order and cites it by
+%      label (the tin-vs-pos conflation note lives in 22.4).
+%    * Explicitly OUT (prose + forward-cite only, NO code): dynamic topology --
+%      link-cut / Euler-tour trees Ch.25 (\chref{c23}); segment-tree beats /
+%      Li Chao Ch.23 (\chref{c29}); merge-sort / persistent / k-th-on-path
+%      Ch.21 (\chref{c19}, the STATIC four-root sibling); Mo on trees Ch.27
+%      (\chref{c21}); centroid path-counting Ch.24 (\chref{c18}); top trees
+%      (name-only in 22.5).
+%
+%  Known URL collisions (confirmed by grep of chapters/; prose-cite only,
+%  NEVER re-link -- urlsweep must print an empty DUPLICATES section):
+%    * Ch.19 (c13) owns: CF 914D, 474E, 629D, 920F, 2057D, 689D, 1208E, 515E,
+%      675E, 500E, 414D, 940E, 474F, 438D, 514D, 339D, 380C, 1179C, 501D,
+%      813E, 482B, 359D + CSES 1143.
+%    * Ch.20 (c15) owns: CF 295A, 817F, 915E, 620E, 1146E + mixed 242E, 755D,
+%      981E, 718C, 895E, 444C, 145E, 1114F, 1401F, 1638E + practice 1661D, 446C.
+%    * Ch.21 (c19) owns: SPOJ KQUERY, MKTHNUM, COT; CF 707D, 840D; mixed 1514D,
+%      558E, 1601C, KQUERYO, FREQUENT, DQUERY, LC 1395/1499/2179/2426.
+%    * Ch.11 LCA (c11, PRINTS Ch.16) owns: SPOJ LCA + CSES 1135, 2134.  Ch.14
+%      Fenwick (c14) owns: CF 383C, 877E, 258E, 276E/276C, 1045G, 459D, 522D, 1000F +
+%      CSES 1648/1651.  Ch.6 (c06) owns: CF 343D Water Tree.  Ch.24/Ch.10 own
+%      CSES 2080/2103/2104/1647.  These are the HLD-classic traps: 258E ("Little
+%      Elephant and Tree"), 383C ("Propagating tree"), 877E, 276E, 343D all LOOK
+%      like HLD but are already linked by Ch.14/Ch.6 -- this
+%      chapter re-treats them in PROSE only, never re-links, never re-URLs.
+%    NOTE: tools/urlsweep.py prints only CF and LC families, so it does NOT
+%    catch spoj.com or cses.fi collisions -- those references are grep-checked
+%    by hand against chapters/ at the validation tail (val22).
+%
+%  Roster (every title/rating/sample live-verified against the CF API / problem
+%  page BEFORE a trace was written; Codeforces-forward with SPOJ allowed --
+%  precedent: Ch.11 links spoj.com/problems/LCA/, Ch.21 links COT/KQUERY/
+%  MKTHNUM; all URLs urlsweep+grep-gated at the val22 tail):
+%    solved: SPOJ QTREE3  Query on a tree again!     (22.1 root-path + point toggle)
+%            SPOJ QTREE   Query on a tree            (22.2 edge-max path + change)
+%            CF 593D Happy Tree Party          (2400) (22.3 edge reduction + path product)
+%            CF 916E Jamie and Tree            (2400) (22.4 subtree lazy-add + sum, re-root)
+%    worked: the four-chain decomposition of T + the 4--10 and 8--6 path traces
+%            (22.1/22.2); a path range-add + subtree-sum composite (22.4).
+%    summit: CF 117D... NO -- CF 117E Tree or not Tree (2900; a UNICYCLIC graph,
+%            toggle every edge on the lexicographically-minimal shortest path and
+%            report the number of connected components of the ON edges after each
+%            query -- the chain-flip + lazy-count capstone; BOTH official samples
+%            hand-replayed: sample 1 (n=5, edges (2,1)(4,3)(2,4)(2,5)(4,1), queries
+%            (5,4),(1,5)) -> 3, 3; sample 2 (n=6) -> 4, 3.)
+%    mixed (10, ascending by effective difficulty, every ID live-verified and
+%            absent from the owned lists above; each hint names its reduction and
+%            cites a c16 listing -- see 99_chapter_end for the locked list).
+%    NOTE 1 (roster drift at the verification gate -- the Ch.20/Ch.21 precedent,
+%    recorded here per the never-fabricate rule): the plan DRAFTED CF 13E, 555E,
+%    342E, 76E and CF "208E-adjacent" as solved/mixed candidates.  LIVE CHECK
+%    REJECTED all of them as off-theme: 13E Holes (2700) is sqrt/splay on a
+%    FUNCTIONAL graph, not tree-HLD; 555E Case of Computer Network (2800) is a
+%    bridge-orientation problem; 342E Xenia and Tree (2400) is CENTROID
+%    decomposition (Ch.24); 76E Points (1700) is an interval segtree, not a tree.
+%    CF 1975E "Chain Queries" (2100) was probed and rejected -- "chain" there
+%    means "a simple path of black vertices" (an LCA/set invariant), NOT heavy
+%    chains.  CF 226E Noble Knight's Path (2900) is k-th-alive-on-path via
+%    parallel binary search + persistence (a Ch.21 flavour); CF 1540B/1746D/
+%    1788F are DP/greedy/cycle-space, not HLD.  The genuine tree-HLD classics on
+%    CF (258E, 276E, 383C, 877E, 343D) are ALL owned by Ch.14/Ch.6, so 22.2/22.1 anchor
+%    on the sanctioned SPOJ QTREE family and 22.3/22.4 on the un-owned CF 593D /
+%    916E.  SPOJ QTREE7 was fetched live and REJECTED: it is a same-coloured-
+%    COMPONENT toggle query (a set/LCT invariant), not a path-chain update.  SPOJ
+%    QTREE6 was FIRST rejected on the same reasoning, then RE-EXAMINED live at the
+%    mixed-set lock and REINSTATED: its standard accepted solution lays a
+%    std::set of colour "breakpoints" on EVERY heavy chain and recolors a
+%    monochromatic component by walking chains -- a heavy-light + per-chain-set
+%    technique exactly like 22.1's QTREE3, so it belongs in this chapter's mixed
+%    set (the LCT reading is a possible but not the canonical route).
+%    The Summit CF 117E is rated 2900, ABOVE the ~2800 the plan assumed
+%    -- the badge prints the true 2900.
+%    NOTE 2: QTREE/QTREE3 statements and samples were read live from
+%    spoj.com/problems/...; 593D/916E/117E statements + samples from
+%    codeforces.com (ratings from the problemset API).  Every official sample in
+%    this chapter was replayed by hand before its trace was written.
+%    NOTE 3 (593D sample correction, re-verified live at 22.3 write time): the
+%    first pass recorded 593D sample 1 as "n=6 -> 2 4 20 3" with the 2nd operation
+%    read as changing an edge ON the 4--6 path.  The full official sample 1 is
+%    n=6, m=6, edges (1 2 1)(1 3 7)(1 4 4)(2 5 5)(2 6 2), ops 1 4 6 17 / 2 3 2 /
+%    1 4 6 17 / 1 5 5 20 / 2 4 1 / 1 5 1 3 -> 2 4 20 3, and edge 3 is (1 3) -- NOT
+%    on path 4--6, so the first two answers agree because that change is
+%    irrelevant to the path.  Hand-replayed with that reading; outputs unchanged.
+%    NOTE 4 (916E re-verified live at 22.4 write time): ops are 1 v = re-root,
+%    2 u v x = add x to the subtree of SMALLEST SIZE containing u and v (that is
+%    the subtree of lca(u,v) under the current root -- not a path update), 3 v =
+%    subtree sum.  Sample 1 (n=6,q=7, a=(1,4,2,8,5,7), edges 1-2,3-1,4-3,4-5,3-6)
+%    hand-replayed -> 27, 19, 5.  The third answer requires SPLITTING a re-rooted
+%    subtree into TWO pos-intervals (subtree_r(3) = [1,1] U [2,6] under r=4),
+%    which is why 22.4 carries it: one heavy-first order serves subtree ranges,
+%    path ranges, and their union case.
+%    NOTE 5 (mixed-10 LOCKED at the chapter-end write, each entry re-checked live
+%    for existence + topic, and confirmed absent from EVERY owned roster above --
+%    CF 258E/276E/383C/877E/343D, all Ch.13/15/19/20/11/14/6/24 IDs, and this
+%    chapter's own solved QTREE/QTREE3/593D/916E are all excluded; CSES 1137
+%    "Subtree Queries" is Ch.24/Ch.14-owned and was rejected).  Many CF tree
+%    problems in the 1700--2400 band were probed and found NOT to need chains --
+%    379F (dynamic diameter), 982D (reroot prefix), 1076E (offline depth-BIT),
+%    1987E (greedy), 1797D is heavy-son-specific so it is KEPT -- so the ladder
+%    leans on the sanctioned SPOJ QTREE/COT path family (precedent: this chapter
+%    already solves QTREE/QTREE3; Ch.21's mixed uses SPOJ FREQUENT/DQUERY/KQUERYO)
+%    plus the four genuinely-chain CF entries.  Ascending effective difficulty:
+%    1 CF 1797D (1900); 2 CF 832D (1900); 3 SPOJ QTREE2; 4 SPOJ QTREE5; 5 SPOJ
+%    COT2; 6 SPOJ QTREE6; 7 CF 652E (2300); 8 SPOJ QTREE4; 9 CF 1902F (2400);
+%    10 CF 1111E (2500).  NOTE 5b (late substitution at the 99 write): the draft
+%    slot 10 was SPOJ COT6 "Cut on a tree"; re-read live it is a CONVEX-HULL /
+%    Li Chao-on-paths DP (query lines k*x+b, lazy shift along root paths) wearing
+%    a "straight-chain" costume -- exactly the non-composable-update engine this
+%    chapter EXCLUDES and only forward-cites to Ch.23 (\chref{c29}), so it is a
+%    topical error here and was DROPPED.  It is replaced by CF 1111E "Tree"
+%    (2500, tags data structures / dfs / graphs / trees, live-verified via the
+%    problemset API): the canonical solution decomposes the ancestor chains with
+%    \mathit{dfs1}/\mathit{dfs2} and pushes each query up its heavy path into a
+%    depth-indexed segment tree -- a genuine heavy-light application.  Title corrections applied to the prose re-treats (22.3): CF
+%    383C is "Propagating tree" (NOT "Book of Evil"), CF 258E is "Little Elephant
+%    and Tree", CF 276E is "Little Girl and Problem on Trees", CF 877E is "Danil
+%    and a Part-time Job" -- every one owned by Ch.14, named in prose only, never
+%    re-linked.  SPOJ ratings are numeric-free; L-badges are the book's effective-
+%    difficulty levels, cross-checked against the problem's operation count/constraints.
 % =====================================================================
-\bookchapter{Heavy--Light Decomposition}{c16}
-\chapterinfo{CF 2000--2400}{Outline}
+\bookchapter{Heavy-Light Decomposition}{c16}
+\chapterinfo{CF 2000--2400, SPOJ}{Written}
 
-\plannedtopic{Splitting a Tree into Chains}{9}{%
-  \item Heavy child (largest subtree) and light edges
-  \item A path crosses at most $O(\log n)$ light edges
-  \item Decomposing the tree into disjoint chains
-  \item The head of each chain
-}
-
-\plannedtopic{HLD for Path Queries}{9}{%
-  \item Assign a DFS-order position to every node
-  \item A segment tree over the positions
-  \item Path query and update by jumping chain to chain
-  \item Combining with LCA
-}
-
-\plannedtopic{HLD Applications}{8}{%
-  \item Path max/sum/assign with a lazy segment tree
-  \item Subtree queries as one contiguous range
-  \item Edge values on the deeper endpoint
-}
-
-\plannedtopic{HLD Practice}{7}{%
-  \item Path queries on a tree (CSES / CF)
-  \item Subtree and path updates together
-  \item Debugging the chain decomposition on a small tree
-}
+\input{chapters/ch16_heavy_light/00_opener}
+\input{chapters/ch16_heavy_light/01_decomposition}
+\input{chapters/ch16_heavy_light/02_path_queries}
+\input{chapters/ch16_heavy_light/03_path_updates}
+\input{chapters/ch16_heavy_light/04_subtree_and_path}
+\input{chapters/ch16_heavy_light/05_boundary}
+\input{chapters/ch16_heavy_light/99_chapter_end}
 
 \closechapter

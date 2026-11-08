@@ -1,0 +1,626 @@
+% =====================================================================
+%  19.1  The Segment Tree                          sec:c13-core
+%  Exports: def:c13-node  thm:c13-merge
+%           lst:c13-build  lst:c13-update  lst:c13-query
+%           lst:c13-1649-soln  fig:c13-minbuild  prob:c13-dynmin
+%  All numbers agree with 00_opener (fig:c13-tree + fold table):
+%    A = (3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2), sum 49;
+%    MIN tree (n=16, leaves t16..t31=A): t1=0 t2=1 t3=0 t4=2 t5=1 t6=0
+%      t7=1 t8=2 t9=4 t10=1 t11=3 t12=0 t13=2 t14=1 t15=2.
+%    point-set A10:=9 (removes the lone 0): t12=7, t6=2, t3=1, t1=1.
+%    range query min[3,10] over A = 0, covered by nodes t9=4, t5=1, t12=0.
+%  CSES 1649 sample (live-verified on cses.fi): n=8 q=4,
+%    a=(3,2,4,5,1,1,5,3); 2 1 4 / 2 5 6 / 1 2 3 / 2 1 4  ->  2 / 1 / 3.
+%    n=8 MIN tree (leaves t8..t15): t4=2 t5=4 t6=1 t7=3 t2=2 t3=1 t1=1.
+%    After 1 2 3 (set a2=3): t9=3, t4=3, t2=3 (leaves t8..t15=3,3,4,5,1,1,5,3).
+% =====================================================================
+\section{The Segment Tree}\label{sec:c13-core}
+
+\begin{previouslybox}[Ch.~18 handed us the ranges it could not fold]
+Chapter~18 spent a whole chapter on an array-index structure that answers
+\emph{sums and counts} and, at its close, drew a line it could not cross: the
+moment a range question stops being invertible -- ``the \(\min\) of
+\([a,b]\) after arbitrary point \emph{writes}'' -- the Fenwick tree has no
+subtraction to lean on and points here, to \chref{c13}.  Chapter~1 met the
+\emph{static} twin (a prefix table answers a fixed array in \(O(1)\));
+Chapter~5 flattened trees into arrays and kept promising a range engine.  This
+section is that engine: one binary tree of intervals, four recursions, and a
+\emph{merge} rule general enough to fold a minimum, a maximum, a gcd, or
+(Section~\(\secref{c13-combine}\)) a four-field record.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{segment tree} is a binary tree whose nodes correspond to
+\emph{intervals} (contiguous ranges) of an array \(A[1..n]\).  The root owns
+\([1,n]\); an internal node owning \([nl,nr]\) splits at its
+\term{midpoint} \(mid=\lfloor(nl+nr)/2\rfloor\), giving a left child \([nl,mid]\)
+and a right child \([mid+1,nr]\); the leaves own single positions.  Each node
+stores one \term{aggregate} -- a fold under an associative \term{merge}
+\(\mathcal{M}\) -- of everything in its interval, so a leaf stores \(A_i\) and
+an internal node stores \(\mathcal{M}(\text{left},\text{right})\).  Three
+recursions do all the work: \code{build} folds the tree up once
+(\(\bigO{n}\)); \code{update} re-folds the single root-to-leaf path through a
+changed position (\(\bigO{\log n}\)); \code{query} recombines the
+\(O(\log n)\) nodes that exactly tile a requested range (\(\bigO{\log n}\)).
+No rotations, no rebalancing -- the shape depends only on \(n\).
+
+\textbf{Prerequisites.} The running array \(A\), its fold table and the
+\figref{c13-tree} picture from the opener.  Recursion on intervals (Chapter~1's
+divide-and-conquer).  The identity/neutral-element idea: a fold over an
+\emph{empty} range must not change the answer, so every merge comes paired with
+an \(e\) (\(0\) for sum, \(+\infty\) for min, \(-\infty\) for max).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item lay a segment tree over an array in the \(4n\) heap layout and read
+        the interval each node owns; \hfill\lv{2}
+  \item write \code{build}/\code{update}/\code{query} from memory and explain
+        why the query visits only \(O(\log n)\) nodes; \hfill\lv{2}--\lv{3}
+  \item state the merge-and-identity contract and swap the fold among
+        \(\min/\max/\gcd/\text{sum}\) without touching the skeleton; \hfill\lv{3}
+  \item solve point-set + range-min inputs end to end (CSES~1649), and say
+        precisely why a BIT cannot. \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``fold a range with a non-invertible operation, under point writes'']
+\reckey{``set position \(k\) to \(u\)'' interleaved with ``\(\min\) /
+\(\max\) / gcd of \(x_a..x_b\)''; ``what is the largest value in this
+window?'' with edits; any range fold whose operator has \emph{no inverse}
+(so a prefix-difference trick cannot express it) over an array that
+\emph{changes}; the phrase ``\(q\) queries, two types, one mutates one
+position'' where the read is not a sum.}
+\recuse{
+  \item point writes + a non-invertible range fold (min/max/gcd) -- this
+        section's recursive tree; the \(4n\) layout and three walks below;
+  \item the fold needs a plain sum/count under point writes too -- it works
+        here, but Ch.~18's BIT is smaller; go there first (see the boundary
+        in \(\secref{c13-iter}\));
+  \item the range \emph{itself} changes (add/assign to a whole interval) --
+        that needs lazy tags, Ch.~20 (\chref{c15}); this section stays
+        point-update.
+}
+\recnotuse{
+  \item the array never changes and you only ask \(\min/\max\) range queries
+        -- a sparse table (Ch.~21, \chref{c19}) answers in \(O(1)\) with less
+        code than a tree; build a segment tree only when writes are possible;
+  \item the operation is a prefix sum you also \emph{search} -- either a BIT
+        or the descend of \(\secref{c13-search}\), depending on the fold;
+  \item you must insert/delete in \emph{value} order, not position order --
+        that is a balanced BST / trie, Ch.~6/Ch.~8.
+}
+One-line test: \emph{a mutable array, a range fold, and no inverse for the
+fold -- then the interval tree below is the smallest structure that answers
+it, and it answers it in \(\log n\).}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: a Binary Tree of Intervals}
+% ---------------------------------------------------------------
+
+Slice \([1,n]\) in half, each half in half, until every piece is one element.
+The pieces are the nodes; a node's two children are the halves it was cut
+into.  That is the entire shape.  What we \emph{store} in a node is one number
+(the fold of its interval under \(\mathcal{M}\)), chosen so that a parent can
+be recomputed from its two children alone:
+\[
+  \mathcal{M}:\ \text{node}(v)=\mathcal{M}\big(\text{node}(2v),\ \text{node}(2v{+}1)\big),
+  \qquad \text{leaf } t_v = A_{\text{its position}} .
+\]
+Two facts make every operation logarithmic:
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{The tree has height \(\lceil\log_2 n\rceil\).}  Every split
+        halves an interval, so any root-to-leaf path has at most
+        \(\lceil\log_2 n\rceil+1\) nodes; a point update retraces exactly one
+        such path.
+  \item \textbf{A range is tiled by \(O(\log n)\) nodes.}  Any interval
+        \([l,r]\) is a disjoint union of at most \(2\lceil\log_2 n\rceil\)
+        node-intervals -- the ``canonical cover'' \(\coderef{c13-query}'s\)
+        recursion collects -- so a query folds only that many stored numbers,
+        never the \(r-l+1\) leaves.
+\end{itemize}
+
+\begin{definition}{Segment-tree node and its interval}{c13-node}
+In a segment tree over \([1..n]\), each node \(v\) is tagged with the closed
+interval \([nl_v, nr_v]\) it \emph{owns}.  The root \(v=1\) owns \([1,n]\); if
+\(v\) owns \([nl,nr]\) with \(nl<nr\) and midpoint \(mid=\lfloor(nl+nr)/2\rfloor\),
+then child \(2v\) owns \([nl,mid]\) and child \(2v+1\) owns \([mid+1,nr]\); a
+node with \(nl=nr\) is a \term{leaf} owning one position.  Node \(v\) stores
+\(\mathcal{M}\) applied to all \(A_p\) with \(p\in[nl_v,nr_v]\).  We keep the
+tree in a flat array \code{t[]} using the \term{heap layout} (children of \(v\)
+at \(2v,2v{+}1\)); \(4n\) slots always suffice.
+\end{definition}
+
+\begin{theorem}{Build, update and query under an associative merge}{c13-merge}
+Let \(\mathcal{M}\) be associative with identity \(e\).  On a segment tree of
+\(n\) leaves: \code{build} costs \(\bigO{n}\); \code{update} (set one
+position) costs \(\bigO{\log n}\); \code{query} (fold over any \([l,r]\))
+costs \(\bigO{\log n}\) merges.  The query recombines exactly the canonical
+cover of \([l,r]\) -- a minimal disjoint set of node-intervals whose union is
+\([l,r]\), of size at most \(2\lceil\log_2 n\rceil\).
+\end{theorem}
+\begin{proofbox}
+\textbf{Build.} The tree has \(<2n\) nodes (a full binary tree on \(n\) leaves);
+each is computed from its two children by one \(\mathcal{M}\), so
+\(\bigO{n}\) merges total, bottom-up by depth.
+\textbf{Update.} Position \(p\) lies in exactly one node per level; setting
+\(A_p\) changes only the ancestors of leaf \(p\), one node on each of the
+\(\le\lceil\log_2 n\rceil+1\) levels, each re-folded in \(O(1)\).
+\textbf{Query / cover size.} The recursion \(\coderef{c13-query}\) returns
+\(t_v\) untouched whenever node \(v\)'s interval is exactly the requested
+sub-range and otherwise descends.  On the way down, at most two nodes per level
+are \emph{partial} (one touching \(l\), one touching \(r\)); all other returned
+nodes are full and stop the descent.  Hence \(O(\log n)\) partial nodes are
+expanded and \(O(\log n)\) full nodes are emitted -- their intervals are
+disjoint (a partition of \([l,r]\)) and cover it, and the fold over them
+equals the fold over \([l,r]\) by associativity of \(\mathcal{M}\).
+\textbf{Identity correctness.} Where a recursion yields an empty sub-range it
+returns \(e\), which contributes nothing to the fold, so out-of-range branches
+are harmless.
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  The tree spends \(O(\log n)\) work per
+operation because \emph{depth} is logarithmic and a range is assembled from a
+logarithmic number of pre-folded blocks.  The only thing you choose is
+\(\mathcal{M}\) and its \(e\); the skeleton is fixed.  When \(\mathcal{M}\) is
+\(+\) and the tree only ever sums, you are paying \(4n\) memory for what a
+\(n\)-slot BIT does cheaper -- the tree earns that cost exactly when
+\(\mathcal{M}\) is \(\min/\max/\gcd\) or a tuple (\(\secref{c13-combine}\)).
+
+% ---------------------------------------------------------------
+\subsection{The Layout and the Three Walks}
+% ---------------------------------------------------------------
+
+The heap layout lets a node \(v\) reach its children at \(2v,2v{+}1\) with no
+pointers.  We write the three recursions for a \(\min\)-tree (the CSES~1649
+workload) but keep \(\mathcal{M}\) and \(e\) visible so you can swap them.
+
+\begin{lstlisting}[caption={build: fold leaves up to the root, O(n)}, label={lst:c13-build}]
+void build(int v, int tl, int tr){          // node v owns A[tl..tr]
+    if (tl == tr) t[v] = a[tl];             // leaf: identity of the interval
+    else {
+        int tm = (tl + tr) / 2;
+        build(2*v,   tl,   tm);             // left  child [tl..tm]
+        build(2*v+1, tm+1, tr);             // right child [tm+1..tr]
+        t[v] = min(t[2*v], t[2*v+1]);       // MERGE: replace min to change fold
+    }
+}
+// call: build(1, 1, n);   array t[4*n] is always big enough
+\end{lstlisting}
+
+\begin{lstlisting}[caption={point update: set A[pos]=val, retrace one root path}, label={lst:c13-update}]
+void update(int v, int tl, int tr, int pos, int val){
+    if (tl == tr) t[v] = val;               // leaf reached: write the new value
+    else {
+        int tm = (tl + tr) / 2;
+        if (pos <= tm) update(2*v,   tl,   tm, pos, val);
+        else           update(2*v+1, tm+1, tr, pos, val);
+        t[v] = min(t[2*v], t[2*v+1]);       // re-fold only this ancestor
+    }
+}
+// O(log n): exactly the ancestors of leaf `pos` are visited and re-merged
+\end{lstlisting}
+
+\begin{lstlisting}[caption={range query: fold the canonical cover of [l..r]}, label={lst:c13-query}]
+int query(int v, int tl, int tr, int l, int r){
+    if (l > r) return INF;                  // empty -> IDENTITY (min: +inf)
+    if (l == tl && r == tr) return t[v];    // exact cover: use stored fold
+    int tm = (tl + tr) / 2;
+    return min(query(2*v,   tl,   tm, l,          min(r, tm)),   // left piece
+               query(2*v+1, tm+1, tr, max(l, tm+1), r));         // right piece
+}
+// O(log n) nodes returned; each level expands <= 2 partial nodes
+\end{lstlisting}
+
+Three details carry the whole correctness, and each is a classic WA source if
+missed: the query's empty-case returns the \emph{identity} (\(\coderef{c13-query}\)'s
+\code{INF}) so a clipped branch adds nothing; the two recursive calls pass the
+\emph{intersected} sub-ranges \([l,\min(r,mid)]\) and \([\max(l,mid{+}1),r]\)
+so no leaf is double-counted; and the guard \code{l==tl \&\& r==tr} returns a
+stored node the instant the request aligns with a node, which is what keeps the
+work logarithmic instead of \(\bigO{n}\).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.62, transform shape]
+  % leaves A[1..8] (CSES 1649 sample array)
+  \foreach \i/\vv in {1/3,2/2,3/4,4/5,5/1,6/1,7/5,8/3} {
+    \draw[primaryblue, line width=0.5pt, fill=primaryblue!6] (\i*1.0-0.5,0) rectangle (\i*1.0+0.5,0.8);
+    \node[font=\scriptsize\ttfamily] at (\i*1.0,0.4) {\vv};
+    \node[font=\tiny\ttfamily, text=darkgray] at (\i*1.0,-0.28) {\(t_{\i+7}\)};}
+  % level t4..t7
+  \foreach \n/\x/\val/\iv in {4/1/2/{1\text{--}2}, 5/3/4/{3\text{--}4}, 6/5/1/{5\text{--}6}, 7/7/3/{7\text{--}8}} {
+    \node[boxnode, successgreen, minimum size=6mm, font=\scriptsize] (t\n) at (\x,1.5) {\(t_{\n}{=}\val\)};
+    \node[font=\tiny\ttfamily, text=green!45!black, anchor=north] at (\x,1.12) {\iv};}
+  % level t2,t3
+  \node[boxnode, successgreen, minimum size=6mm, font=\scriptsize] (t2) at (2,3.0) {\(t_{2}{=}2\)};
+  \node[boxnode, successgreen, minimum size=6mm, font=\scriptsize] (t3) at (6,3.0) {\(t_{3}{=}1\)};
+  % root
+  \node[boxnode, successgreen, minimum size=7mm, line width=1pt, fill=successgreen!16, font=\scriptsize] (t1) at (4,4.4) {\(t_{1}{=}1\)};
+  % edges
+  \draw[flow] (t1)--(t2); \draw[flow] (t1)--(t3);
+  \draw[flow] (t2)--(t4); \draw[flow] (t2)--(t5);
+  \draw[flow] (t3)--(t6); \draw[flow] (t3)--(t7);
+  \draw[flow] (t4)--(1,0.8); \draw[flow] (t4)--(2,0.8);
+  \draw[flow] (t5)--(3,0.8); \draw[flow] (t5)--(4,0.8);
+  \draw[flow] (t6)--(5,0.8); \draw[flow] (t6)--(6,0.8);
+  \draw[flow] (t7)--(7,0.8); \draw[flow] (t7)--(8,0.8);
+  \node[font=\scriptsize, text=darkgray, anchor=east] at (-0.6,0.4) {leaves};
+  \node[font=\scriptsize, text=darkgray, anchor=east] at (-0.6,4.4) {root};
+\end{tikzpicture}
+\caption{The \(\min\)-segment tree on CSES~1649's own array \((3,2,4,5,1,1,5,3)\)
+(leaves \(t_{8..15}\), heap layout).  Each internal node is the minimum of its
+green interval: \(t_4{=}\min(3,2){=}2\), \(t_6{=}\min(1,1){=}1\),
+\(t_2{=}\min(t_4,t_5){=}\min(2,4){=}2\) (the answer to query \texttt{2 1 4}),
+\(t_3{=}\min(t_6,t_7){=}1\) (answer to \texttt{2 5 6} after a cover), and the
+root \(t_1{=}\min(t_2,t_3){=}1\).  This eight-leaf tree is the top of the
+opener's sixteen-leaf \(A\)-tree -- same rule, one level shorter.}
+\label{fig:c13-minbuild}
+\end{figure}
+
+\begin{complexitybox}[The recursive segment tree]
+\textbf{Build} \(\bigO{n}\) (\(\coderef{c13-build}\)), one merge per node.
+\textbf{Update} / \textbf{Query} \(\bigO{\log n}\) (\(\le\lceil\log_2 n\rceil{+}1\)
+levels; \(\le 2\lceil\log_2 n\rceil\) nodes recombined per query).
+\textbf{Memory} \(4n\) slots -- a safe bound for \emph{any} \(n\), not just
+powers of two (the extra \(2n\) over the complete-tree \(2n\) absorb the ragged
+last level).  Constant factor is larger than the BIT's (Ch.~18): this is the
+price of a general \(\mathcal{M}\).
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CSES 1649 Dynamic Range Minimum Queries}
+% ---------------------------------------------------------------
+
+\solvedproblem{c13-dynmin}{Dynamic Range Minimum Queries}{CSES 1649}
+  {https://cses.fi/problemset/task/1649}{CSES}
+  {recursive segment tree, point set, range-min fold; the write a BIT cannot serve}
+
+\begin{problemstatement}[CSES 1649 Dynamic Range Minimum Queries]
+Given an array of \(n\) integers, process \(q\) queries of two types:
+\texttt{1 k u} --- set the value at position \(k\) to \(u\) (an assignment,
+not an add); \texttt{2 a b} --- print the \emph{minimum} value in the range
+\([a,b]\).
+
+\textbf{Input.} \(n,q\le 2\cdot10^5\); values \(1\le x_i,u\le10^9\);
+\(1\le a\le b\le n\).
+
+\textbf{Output.} The answer to each type-2 query, one per line.
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+8 4
+3 2 4 5 1 1 5 3
+2 1 4
+2 5 6
+1 2 3
+2 1 4
+
+Output:
+2
+1
+3
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 25 minutes]
+A prefix array is useless: minima are not invertible, so \(\min[1..b]\) and
+\(\min[1..a{-}1]\) do \emph{not} combine into \(\min[a..b]\).  Re-scanning the
+window per type-2 is \(\bigO{n}\) and \(n\cdot q=4\cdot10^{10}\) says \tle.
+The task is to answer a range \(\min\) and honour a point \emph{set}, both in
+\(\log n\).
+\peek{can a Fenwick tree do a \(\min\) under \emph{assignment}?}
+\nudge{only append-only or decrement-only monotone minima survive in a BIT
+(Ch.~18, \(\secref{c14-range}\)'s caveat); an arbitrary \texttt{set} breaks
+both.  Reach for the interval tree.}
+\fullhint{Build a \(\min\)-tree: \(\coderef{c13-build}\) with \(\mathcal{M}=\min\).
+Type~1 is \code{update(1,1,n,k,u)}.  Type~2 is \code{query(1,1,n,a,b)} whose
+empty-case identity is \(+\infty\).  Values \(\le10^9\) fit \code{int}; set the
+\code{INF} to \(>10^9\).  The full program is below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Two operations share one object: the collection of interval-minima stored at
+the tree's nodes.  A type-2 asks for \(\min\) over \([a,b]\), which is the fold
+\(\mathcal{M}=\min\) over \([a,b]\)'s canonical cover -- the \(O(\log n)\) nodes
+\(\coderef{c13-query}\) returns.  A type-1 set rewrites one leaf; every node
+whose interval \emph{contains} that leaf might change, and those nodes are
+exactly the leaf's ancestors, a single root path.  This is the pure
+array-interval case; no tree structure beyond the segment tree itself, no
+Euler tour (that arrives in \(\secref{c13-static}\)).
+
+\solstep{Key Observations}
+\begin{observation}
+\texttt{set} is the whole point.  A BIT's \code{update} \emph{accumulates
+increments} and its \code{query} \emph{inverts a prefix}; \(\min\) has neither.
+The segment tree needs only that \(\min\) is associative with a neutral
+element -- no inverse -- which is exactly the expressiveness gap Ch.~18 flagged.
+\end{observation}
+\begin{observation}
+The empty-range identity is \(+\infty\), \emph{not} \(0\): a query that
+clips a branch must contribute a value that \(\min\) ignores.  Using \(0\)
+here is this problem's signature WA (every answer becomes \(0\)).
+\end{observation}
+\begin{observation}
+\(4n\) array bound, not \(2n\): with the recursive split, node indices can
+reach past \(2n\) for non-power-of-two \(n\).  \(n=2\cdot10^5\Rightarrow
+\code{t}\) of size \(8\cdot10^5\) \code{int}s \(\approx 3.2\) MB -- fine.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Use a Fenwick tree for range-min}
+{A BIT answers \(\min\) only when updates are \emph{monotone} (a position's
+value never increases, or only appends happen).  Here \texttt{1 k u} can raise
+\emph{or} lower any slot, so a stored block-minimum can become stale in a way
+the lowbit walk cannot repair.  The segment tree re-folds both children on
+every write; that redundancy is precisely what buys correctness.}
+\deadend{Return \code{0} for an out-of-range query branch}
+{\(\min(x,0)=0\) for every positive \(x\), so any query whose recursion
+touches an empty branch instantly collapses to \(0\) -- the samples with small
+values may still look plausible, but every large-value test fails.  Return
+\code{INF} for the identity.}
+\aha{Store the minimum of every interval in a binary tree of intervals; a
+point write re-folds \(O(\log n)\) ancestors and a range read folds \(O(\log
+n)\) stored blocks -- no inverse required.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.225\linewidth} p{0.315\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ re-scan window & loop \(a..b\) per type-2 & \(\bigO{q\cdot n}\) & \tle \\
+2 & \lv{2}\ prefix minima & fails: \(\min\) not invertible & -- & wrong \\
+3 & \lv{3}\ multiset per block & sqrt-decomposition, block mins & \(\bigO{q\sqrt n}\) & passes, meh \\
+4 & \lv{3}\ \textbf{segment tree} & \(\min\) fold, point-set (\(\coderef{c13-build}\)--\(\coderef{c13-query}\)) & \(\bigO{(n+q)\log n}\) & \ac \\
+5 & \lv{4}\ sparse table & \(O(1)\) RMQ but \emph{static} -- cannot take a set & -- & wrong here \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~5 is the Ch.~21 tool, dead on arrival because the array mutates; rung~3 is
+a legitimate alternative that trades \(\log n\) for \(\sqrt n\) and far less
+code, but the tree's \(\log n\) is what we want.
+
+\solstep{Solution}
+Store \(a[1..n]\) (1-based).  \code{build(1,1,n)} once.  For \texttt{1 k u}:
+\code{update(1,1,n,k,u)}.  For \texttt{2 a b}: print \code{query(1,1,n,a,b)}.
+The merge is \(\min\), the identity \(\code{INF}=2\cdot10^9\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Invariant.} For every node \(v\) owning \([nl_v,nr_v]\), \(t_v =
+\min_{p\in[nl_v,nr_v]} a_p\).  \emph{Init:} \(\coderef{c13-build}\) establishes
+it bottom-up -- leaves trivially, internal nodes as \(\min\) of two children
+each satisfying it.  \emph{Maintain:} \(\coderef{c13-update}\) changes only
+leaf \(p\) and its ancestors; each ancestor is re-set to \(\min\) of its
+(children), and nodes off the path keep their (still-correct) value, restoring
+the invariant everywhere.
+\textbf{Answer:} \thmref{c13-merge} shows \(\coderef{c13-query}\) folds \(\min\)
+over the canonical cover of \([a,b]\), a disjoint partition of it; associativity
+of \(\min\) makes the fold equal to \(\min_{p\in[a,b]} a_p\), and every empty
+branch returns \(\code{INF}=e\), contributing nothing.
+\textbf{Bounds:} depth \(\le\lceil\log_2 n\rceil{+}1\) bounds update and query;
+values \(\le10^9<\code{INF}\) keep the identity valid; \code{int} suffices.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CSES 1649 full solution (recursive min-segment-tree, point set)}, label={lst:c13-1649-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+const int INF = 2000000000;
+int n, q, a[MX], t[4*MX];
+
+void build(int v, int tl, int tr){
+    if (tl == tr) t[v] = a[tl];
+    else {
+        int tm = (tl + tr) / 2;
+        build(2*v, tl, tm);
+        build(2*v+1, tm+1, tr);
+        t[v] = min(t[2*v], t[2*v+1]);
+    }
+}
+void update(int v, int tl, int tr, int pos, int val){
+    if (tl == tr) t[v] = val;
+    else {
+        int tm = (tl + tr) / 2;
+        if (pos <= tm) update(2*v,   tl,   tm, pos, val);
+        else           update(2*v+1, tm+1, tr, pos, val);
+        t[v] = min(t[2*v], t[2*v+1]);
+    }
+}
+int query(int v, int tl, int tr, int l, int r){
+    if (l > r) return INF;
+    if (l == tl && r == tr) return t[v];
+    int tm = (tl + tr) / 2;
+    return min(query(2*v, tl, tm, l, min(r, tm)),
+               query(2*v+1, tm+1, tr, max(l, tm+1), r));
+}
+int main(){
+    scanf("%d%d", &n, &q);
+    for (int i = 1; i <= n; i++) scanf("%d", &a[i]);
+    build(1, 1, n);
+    while (q--){
+        int ty, x, y; scanf("%d%d%d", &ty, &x, &y);
+        if (ty == 1) update(1, 1, n, x, y);        // set position x to y
+        else printf("%d\n", query(1, 1, n, x, y)); // min on [x,y]
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CSES 1649: a=(3,2,4,5,1,1,5,3), then set position 2 to 3]
+Build the \(\min\)-tree of \figref{c13-minbuild}:
+\([t_1..t_7]=(1,2,1,2,4,1,3)\) with leaves \(t_{8..15}=3,2,4,5,1,1,5,3\).
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|l|l|l}
+\text{\#} & \text{query} & \text{cover folded} & \text{result}\\ \hline
+1 & \texttt{2 1 4} & t_2\ (\text{node owns }[1..4]) & 2\\
+2 & \texttt{2 5 6} & t_6\ (\text{node owns }[5..6]) & 1\\
+3 & \texttt{1 2 3} & \text{leaf }t_9{:}\,2{\to}3;\ t_4{:}2{\to}3,\ t_2{:}2{\to}3,\ t_1{:}1 & \text{(set)}\\
+4 & \texttt{2 1 4} & t_2\ (\text{now }3) & 3
+\end{array}
+\]
+Printed: \texttt{2 1 3} -- the official output.  Note the set at position~2
+changed \(t_4,t_2,t_1\) but \emph{not} the root's value at query~2's answer,
+because \(t_3=1\) still held the global min -- a compact illustration of
+``re-fold only the ancestors.''
+\end{tracebox}
+
+\solstep{Trace a Second Range and a Second Write (on the opener's \(A\))}
+\begin{tracebox}[\(\min\) on the 16-slot \(A\): query over \(3..10\), then set \(A_{10}=9\)]
+Cover of \([3,10]\) under \(\coderef{c13-query}\) at root \([1..16]\):
+\(t_9[3..4]{=}4\), \(t_5[5..8]{=}1\), \(t_{12}[9..10]{=}0\); their
+disjoint union is \([3..10]\), so the answer is \(\min(4,1,0)=0\) -- reached in
+three stored nodes, not eight leaves.
+Now \(\texttt{set }A_{10}=9\) (erase the lone \(0\)).  Only \(A_{10}\)'s
+ancestors change: \(t_{12}{=}\min(7,9){=}7\), \(t_6{=}\min(t_{12},t_{13}){=}
+\min(7,2){=}2\), \(t_3{=}\min(t_6,t_7){=}\min(2,1){=}1\),
+\(t_1{=}\min(t_2,t_3){=}\min(1,1){=}1\).  The root's minimum moves \(0\to1\),
+and re-asking \(\text{query}[3,10]\) now folds \(4,1,7=1\) instead of \(0\).
+Four nodes re-folded out of \(31\) -- the point of the tree.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(\bigO{n}\) build \(+\;\bigO{\log n}\) per query:
+\(\lesssim 2\cdot10^5 + 2\cdot10^5\cdot 18 \approx 3.8\cdot10^6\) merges.
+Memory \(4n\) \code{int}s \(=3.2\) MB.  \textbf{AC} comfortably; the tree is
+never the bottleneck, only the constant (a BIT would use \(n\) slots, but a BIT
+cannot answer this query at all).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.30\linewidth} p{0.38\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+\(l=r\) & leaf query & cover is one node; returns \(t\) of the leaf \(=a_l\) \\
+set to same value & re-fold is a no-op & ancestors recomputed identically \\
+\(n=1\) & single leaf, no internal nodes & \code{build(1,1,1)} writes \(t_1=a_1\) \\
+full range \([1,n]\) & one node & root \(t_1\) returned immediately by the guard \\
+empty branch & clipped recursion side & returns \code{INF}, ignored by \(\min\) \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Size \(\code{t}\) to \(4n\), not \(2n\).}  The recursive heap
+        indices exceed \(2n\) when \(n\) is not a power of two; \(4n\) is the
+        safe universal bound (Section~\(\secref{c13-iter}\) shows the \(2n\)
+        form and the padding it needs).
+  \item \textbf{Identity must be the true neutral.}  \(\min\!\to\!+\infty\),
+        \(\max\!\to\!-\infty\), \(\text{sum/gcd}\!\to\!0\).  A wrong identity is
+        the top WA source and passes weak samples.
+  \item \textbf{Intersect, don't re-split.}  Pass \([\,l,\min(r,mid)\,]\) and
+        \([\max(l,mid{+}1),r\,]\) to the children; passing the raw \([l,r]\)
+        to both re-counts the overlap and can loop.
+  \item \textbf{Build once.}  Rebuilding per test case with \(n\) \emph{updates}
+        costs \(\bigO{n\log n}\); \(\coderef{c13-build}\) is \(\bigO{n}\).
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: assuming \(\min/\max\) is invertible like sum]
+Range-sum uses \(\mathit{pref}(b)-\mathit{pref}(a{-}1)\); there is no
+\(\mathit{prefmin}(b)\,\text{?}\,\mathit{prefmin}(a{-}1)\) that yields
+\(\min[a..b]\) -- the left prefix can hide the window's own minimum.  The
+segment tree sidesteps invertibility entirely by storing \emph{every} interval's
+fold, not just prefixes.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: the wrong identity element]
+Returning \(0\) instead of \(+\infty\) from the empty branch of a
+\(\min\)-tree makes almost every answer \(0\).  The identity is a property of
+\(\mathcal{M}\), not a constant you may pick: it is the value \(e\) with
+\(\mathcal{M}(x,e)=x\) for all \(x\).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: the flat \code{t} array sized to \(2n\) or \(n\)]
+For the recursive layout, \(4n\) is required in general.  A \(2n\)-sized array
+compiles, runs the samples, then corrupts memory on \(n\) with a large odd part
+(silent WA/RE).  The iterative \(2n\) tree of \(\secref{c13-iter}\) fits \(2n\)
+only because it pads \(n\) up to a power of two (or uses the \(n{+}n\) offset
+layout with care).
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: 0-based input, 1-based tree]
+The recursions here assume positions \(1..n\) and root range \([1,n]\).  Feeding
+0-based endpoints shifts every answer by one.  Pick one convention and convert
+at the door -- do not mix \([0,n{-}1]\) leaves with a \([1,n]\) root.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Did your query return the \emph{identity}, not \(0\), on an empty branch?
+  \item Are you passing the \emph{intersected} sub-ranges to the two children?
+  \item Is \code{t[]} sized \(4n\)?
+  \item Did you build once with \(\coderef{c13-build}\) rather than \(n\) updates?
+  \item For a \texttt{set}, did you recompute \(\min\) of \emph{both} children
+        at each ancestor (not just the changed one)?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Range Xor Queries}{CSES 1650}
+    {https://cses.fi/problemset/task/1650}
+    {CSES}
+    {The same sample array, but every query is ``xor of \([a,b]\)'' and there are
+     \emph{no} updates.  Rewiring \(\coderef{c13-1649-soln}\) to
+     \(\mathcal{M}=\text{XOR}\) with identity \(0\) works and is the drill that
+     proves only \(\mathcal{M}\) and \(e\) move, never the skeleton -- but notice
+     xor is its own inverse, so Ch.~18's prefix-difference licence applies and a
+     plain prefix-xor array answers in \(O(1)\).  Write \emph{both}, then say in
+     one sentence which you would submit and why.}
+  \practice{Hotel Queries}{CSES 1143}
+    {https://cses.fi/problemset/task/1143}
+    {CSES}
+    {Rooms with capacities, groups wanting a free room \(\ge\) their size: keep a
+     \(\max\)-tree of the free slots and \emph{descend} to the leftmost room whose
+     capacity still fits, then decrement it.  Ch.~18 solved this same task with a
+     frequency-BIT lifting search (\(\secref{c14-order}\)); do it again here on
+     the segment tree so the two searches sit side by side -- the tree descend is
+     \(\secref{c13-search}\)'s opening example, so peek at it first.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+Chapter~18 (\chref{c14}) owns the invertible-op sibling and the prefix-difference
+licence this section deliberately gives up.  Forward: \secref{c13-combine}
+replaces the scalar \(\mathcal{M}\) with a \emph{tuple} fold (max subarray);
+\secref{c13-search} reads the same tree by \emph{descending} it;
+\secref{c13-iter} rewrites these three recursions as a bottom-up \(2n\) loop and
+settles the BIT-vs-segtree choice; \secref{c13-static} marks the boundary where
+a static array should switch to a sparse table (Ch.~21, \chref{c19}) and a
+subtree range should reuse Ch.~5's flattening.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 19.1 in 10 seconds]
+A segment tree is a binary tree of \emph{intervals}: root \([1,n]\), split at
+\(mid\), leaves are positions, node \(v\) stores \(\mathcal{M}\) over its
+interval (heap layout, \(4n\) slots).  \code{build} folds up in \(\bigO{n}\);
+\code{update} re-folds one root path in \(\bigO{\log n}\); \code{query} folds the
+\(O(\log n)\) canonical cover.  \(\mathcal{M}\) must be \textbf{associative with
+an identity} (\(\min\!\to\!+\infty\)) -- but needs \textbf{no inverse}, which is
+exactly what a BIT lacks.  Worked: CSES~1649 (\(\probref{c13-dynmin}\),
+\(\coderef{c13-1649-soln}\)).
+\selftest{
+  \item Which \(O(\log n)\) nodes tile \([3,10]\) in the 16-leaf \(A\)-tree?
+  \item State the identity for sum, min, max, gcd.
+  \item Why does \(\texttt{set }A_{10}=9\) change only four nodes of \(A\)'s
+        31-node tree?
+  \item Give one range fold a BIT can do and one it structurally cannot.
+  \item Why \(4n\) slots for the recursive tree but \(2n\) for the iterative one?
+}
+\end{recallbox}

@@ -1,0 +1,451 @@
+% =====================================================================
+%  17.1  Disjoint Set Union (Union-Find)              sec:c28-dsu
+%  Exports: def:c28-dsu  def:c28-find  prop:c28-alpha  prop:c28-cycle
+%           ex:c28-merge  fig:c28-forest  lst:c28-find  lst:c28-union
+%           lst:c28-comp   prob:c28-core  lst:c28-core-soln
+% =====================================================================
+\section{Disjoint Set Union: Parent, Rank, Path Compression}\label{sec:c28-dsu}
+
+\begin{topicintro}
+A \term{disjoint set union} (DSU, also \term{union-find}) maintains a
+partition of \(n\) labelled items into \term{components} (sets) and supports
+two operations: \code{find}, ``which set owns item \(v\)?'', and \code{union},
+``glue the sets of \(u\) and \(v\) together.''  It is the data structure
+behind Kruskal's MST, cycle detection, connected components, and every
+``how many groups are left'' question -- and Chapters~6, 13, 14, 16 and 31
+all called it without ever opening it.  This section owns the internals.
+
+\textbf{Prerequisites.} \secref{c28-dsu} needs nothing but a rooted-tree
+mental model; the DSU's own \code{parent} pointers are unrelated to any tree
+\(T\) (they form their \emph{own} forest).  Arrays and recursion from
+Chapter~1.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item implement \code{find} with path compression and \code{union} by size; \hfill\lv{2}
+  \item state and justify the \(\bigO{\alpha(n)}\) amortised guarantee and
+        know exactly when compression is legal; \hfill\lv{3}
+  \item count components and reconnect a forest with the minimum new edges; \hfill\lv{3}
+  \item detect a redundant edge (a cycle) purely by a \code{find} test. \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``glue sets together, then ask who owns what'']
+\reckey{``minimum roads to connect all cities''; ``how many connected
+components after these operations''; ``does adding this edge create a
+cycle''; ``are \(u\) and \(v\) in the same group'' under a stream of
+\emph{merges}; ``merge these two teams and keep track of the groups.''}
+\recuse{
+  \item only \emph{merging} (adding edges / joining sets) and asking about the
+        resulting partition -- \secref{c28-dsu}, CSES~1666;
+  \item cycle / ``is this edge redundant'' tests inside a growing graph --
+        \propref{c28-cycle}, the Ch.~6 ``is it a tree?'' pre-look;
+  \item a relative label per item appears -> upgrade to weighted DSU
+        (\secref{c28-weighted}); undo / time appears -> rollback
+        (\secref{c28-offline}).
+}
+\recnotuse{
+  \item edges are \emph{deleted} online and connectivity is queried live --
+        not monotone; DSU cannot un-merge unless you use the rollback
+        variant offline (\(\secref{c28-offline}\));
+  \item the graph structure per component (not just ``same set'') is needed
+        -- maintain adjacency separately; the DSU only answers membership;
+  \item a minimum spanning \emph{tree} is requested -- Kruskal uses DSU as a
+        black box, but the cut-property reasoning is Ch.~31 (\chref{c17}).
+}
+One-line test: \emph{can the whole task be phrased as ``merge two groups, ask
+which group owns a member,'' with merges never undone?  Then a plain DSU is
+the structure.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: A Forest of Parent Pointers}
+% ---------------------------------------------------------------
+
+Picture the \(n\) items as \(n\) single-node trees.  A \code{union} makes the
+root of one tree a child of the root of another; the item at the very top
+(whose \(\code{parent}[v]=v\)) is the set's \term{representative}.
+\code{find(\(v\))} simply walks parent pointers upward until it reaches that
+root.  Two items are in the same set iff their \code{find} results agree.
+Nothing more exotic is happening -- the entire power comes from two tricks
+that keep the trees shallow.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+    dnode/.style={circle, draw=primaryblue, line width=0.9pt, fill=primaryblue!8,
+                  minimum size=7mm, font=\small\bfseries, text=primaryblue!60!black},
+    rnode/.style={circle, draw=accentorange, line width=1.1pt, fill=accentorange!16,
+                  minimum size=7mm, font=\small\bfseries, text=accentorange!70!black}]
+  % component A, root 1
+  \node[rnode] (a1) at (0,0) {1};
+  \node[dnode] (a2) at (-1.3,-1.3) {2};
+  \node[dnode] (a4) at (-1.3,-2.6) {4};
+  \node[dnode] (a3) at (1.3,-1.3) {3};
+  \node[dnode] (a5) at (1.3,-2.6) {5};
+  \draw[tedge] (a1)--(a2) (a2)--(a4) (a1)--(a3) (a3)--(a5);
+  % component B, root 7
+  \node[rnode] (b7) at (5,0) {7};
+  \node[dnode] (b6) at (3.9,-1.3) {6};
+  \node[dnode] (b8) at (6.1,-1.3) {8};
+  \draw[tedge] (b7)--(b6) (b7)--(b8);
+  \node[annot, font=\scriptsize, anchor=north] at (0,-3.2) {set with representative 1: \(\{1,2,3,4,5\}\)};
+  \node[annot, font=\scriptsize, anchor=north] at (5.0,-2.0) {set with representative 7: \(\{6,7,8\}\)};
+\end{tikzpicture}
+\caption{The DSU's own forest after several unions -- not the tree \(T\), but
+the partition \(\bigl\{\{1,2,3,4,5\},\{6,7,8\},\{9\},\{10\}\bigr\}\).  Orange
+nodes are representatives (\(\code{parent}[v]=v\)); \code{find}(4) climbs
+\(4\to2\to1\).  Shallow trees are the whole game: a deep chain makes
+\code{find} linear, so \code{union} must not create deep chains.}
+\label{fig:c28-forest}
+\end{figure}
+
+\begin{insightbox}[Two tricks, both about depth]
+\textbf{Union by size/rank} attaches the \emph{smaller} tree under the
+\emph{taller} root, bounding depth by \(\bigO{\log n}\) even with no
+compression.  \textbf{Path compression} re-parents every node on a
+\code{find} path straight onto the root, so the path is traversed the ``long
+way'' only once.  Together they give an amortised \(\bigO{\alpha(n)}\); each
+alone is weaker (union-by-size alone: \(\bigO{\log n}\); compression alone,
+without union by rank: \(\bigO{\log n}\) amortised too, but not the near-linear
+bound).
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Definitions}
+% ---------------------------------------------------------------
+
+\begin{definition}{Disjoint set union}{c28-dsu}
+A DSU on \(\{1,\dots,n\}\) is arrays \(\code{parent}[1..n]\) and
+\(\code{sz}[1..n]\) with the invariant: following \(\code{parent}\) from any
+\(v\) reaches a node \(r\) with \(\code{parent}[r]=r\) (the set's
+\term{representative}); \(\code{sz}[r]\) stores the set's size and is
+meaningful only when \(r\) is a root.  Initially \(\code{parent}[v]=v\),
+\(\code{sz}[v]=1\) for all \(v\): \(n\) singleton sets.
+\end{definition}
+
+\begin{definition}{Find, with path compression}{c28-find}
+\(\code{find}(v)\) returns the representative of \(v\)'s set.  With
+\term{path compression}, every node visited on the way is re-parented
+directly to the root before returning.
+\end{definition}
+
+% ---------------------------------------------------------------
+\subsection{The Almost-Linear Guarantee}
+% ---------------------------------------------------------------
+
+\begin{proposition}{The \(\alpha(n)\) bound}{c28-alpha}
+With union by size (or rank) and path compression, a sequence of \(m\)
+operations on \(n\) items runs in \(\bigO{(n+m)\,\alpha(n)}\) total time,
+where \(\alpha\) is the inverse Ackermann function.  For every conceivable
+input, \(\alpha(n)\le 4\), so the cost is linear for all practical purposes.
+\end{proposition}
+\begin{proofbox}
+Union by size keeps each tree's depth \(\le\log n\) (a node's set at least
+doubles whenever it stops being a root).  The full amortised analysis
+(Holm--de Lichtenberg--Thorup; Tarjan) charges a \code{find} against the
+number of times its path's pointers get ``promoted'' by compression; that
+recurrence inverts to \(\alpha\).  We use the black-box consequence: with both
+tricks, each operation is effectively \(O(1)\).
+\end{proofbox}
+
+\begin{warningbox}[Compression is a one-way street]
+Path compression rewrites intermediate \code{parent} pointers to jump to the
+root.  It \emph{destroys} the information a rollback needs (which nodes you
+touched on the path).  Therefore: \textbf{a rollback DSU must not use
+compression} (\(\secref{c28-weighted}\), \(\secref{c28-offline}\)).  Whenever
+the task never asks to undo, use compression freely -- that is the case here.
+\end{warningbox}
+
+\begin{proposition}{Redundant edge / cycle test}{c28-cycle}
+When uniting the endpoints of an edge \((u,v)\): if \(\code{find}(u)=\code{find}(v)\)
+\emph{before} the union, the edge closes a cycle inside one component and is
+redundant; otherwise it merges two components and reduces the component count
+by exactly \(1\).
+\end{proposition}
+\begin{proofbox}
+\(\code{find}(u)=\code{find}(v)\) means a \(u\)--\(v\) path already exists in
+this component, so adding \((u,v)\) creates a cycle.  If the roots differ, the
+two sets become one, so the count drops by one.  A graph on \(n\) vertices is a
+\emph{tree} iff exactly \(n-1\) edges pass the ``roots differ'' test and the
+final count is \(1\) -- the DSU proof of ``connected + no cycle'' that
+Chapter~6 (\chref{c25}) uses on LC~684/685 as an ``is it a tree?'' pre-look.
+\end{proofbox}
+
+% ---------------------------------------------------------------
+\subsection{Algorithms and Implementation}
+% ---------------------------------------------------------------
+
+\begin{lstlisting}[caption={find with path compression (recursive; iterative form avoids deep chains)}, label={lst:c28-find}]
+int find(int v) {
+    if (parent[v] == v) return v;
+    return parent[v] = find(parent[v]);  // compress on the way back up
+}
+// iterative, identical effect, safe when depth could reach n:
+int find_it(int v) {
+    int r = v;
+    while (parent[r] != r) r = parent[r];        // climb to root
+    while (parent[v] != v) { int p = parent[v];   // second pass:
+        parent[v] = r; v = p; }                   // re-parent to root
+    return r;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={union by size (attach the smaller root under the larger)}, label={lst:c28-union}]
+bool unite(int u, int v) {        // returns false if u,v were already together
+    u = find(u); v = find(v);
+    if (u == v) return false;     // same set -> redundant edge (prop:c28-cycle)
+    if (sz[u] < sz[v]) { int t = u; u = v; v = t; }  // keep u the bigger root
+    parent[v] = u;                // hang v's tree under u
+    sz[u] += sz[v];               // u is the only root now; sz[v] stale
+    return true;                  // two components merged -> count -= 1
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={component counting: start at n, decrement on every real merge}, label={lst:c28-comp}]
+int components = n;
+for (int i = 0; i < n; i++) { parent[i] = i; sz[i] = 1; }
+for (auto [a, b] : edges)
+    if (unite(a, b)) components--;   // only a genuine merge lowers the count
+\end{lstlisting}
+
+\begin{complexitybox}[Plain DSU]
+\textbf{Per operation:} \(\bigO{\alpha(n)}\) amortised with both tricks.
+\textbf{Build \(n\) singleton sets:} \(\bigO{n}\).  \textbf{\(m\) merges/finds:}
+\(\bigO{(n+m)\,\alpha(n)}\) -- effectively linear.  \textbf{Memory:} \(\bigO{n}\).
+\textbf{Recursion depth:} worst-case \(O(\log n)\) with union-by-size, so the
+recursive \code{find} is safe here (unlike a DFS on a skewed tree).
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Worked Example: Merging the Edges of \(T\)}
+% ---------------------------------------------------------------
+
+\begin{example}{Union-by-size over the edges of the running tree}{c28-merge}
+Process \(T\)'s nine edges in their input order
+\((1\!-\!2),(1\!-\!3),(2\!-\!4),(2\!-\!5),(3\!-\!6),(3\!-\!7),(5\!-\!8),
+(7\!-\!9),(9\!-\!10)\), starting from ten singletons.  \(\code{parent}[v]\)
+below is written ``\(v\!\to\!p\)''; a root keeps \(\code{parent}[v]=v\).
+\end{example}
+\begin{tracebox}[parent / sz after each union on T]
+\[
+\renewcommand{\arraystretch}{1.2}
+\begin{array}{c|l|l|l}
+\text{step} & \text{unite} & \text{action} & \text{roots' sizes after} \\ \hline
+0 & - & 10\text{ singletons} & \text{all } \code{sz}=1\\
+1 & (1,2) & 2\to1,\ \code{sz}[1]=2 & 1\!:\!2\\
+2 & (1,3) & 3\to1,\ \code{sz}[1]=3 & 1\!:\!3\\
+3 & (2,4) & \code{find}(2)=1;\ 4\to1,\ \code{sz}[1]=4 & 1\!:\!4\\
+4 & (2,5) & 5\to1,\ \code{sz}[1]=5 & 1\!:\!5\\
+5 & (3,6) & \code{find}(3)=1;\ 6\to1,\ \code{sz}[1]=6 & 1\!:\!6\\
+6 & (3,7) & 7\to1,\ \code{sz}[1]=7 & 1\!:\!7\\
+7 & (5,8) & 8\to1,\ \code{sz}[1]=8 & 1\!:\!8\\
+8 & (7,9) & 9\to1,\ \code{sz}[1]=9 & 1\!:\!9\\
+9 & (9,10) & 10\to1,\ \code{sz}[1]=10 & 1\!:\!10
+\end{array}
+\]
+Every \(\code{find}\) resolved to root~\(1\) by step~9, all nine edges merged
+distinct sets (so \(\code{unite}\) returned \texttt{true} each time), the
+component count went \(10\to1\), and \emph{no} edge triggered the cycle test
+-- as required, since \(T\) is a tree with exactly \(n-1=9\) edges.  Had an
+edge \((6,8)\) been added, \(\code{find}(6)=\code{find}(8)=1\) and
+\(\code{unite}\) returns \texttt{false}: a detected cycle.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab}
+% ---------------------------------------------------------------
+
+\solvedproblem{c28-core}{Building Roads}{CSES 1666}
+  {https://cses.fi/problemset/task/1666}{CSES L3}
+  {disjoint set union, component counting}
+
+\begin{problemstatement}[CSES 1666 Building Roads]
+Byteland has \(n\) cities and \(m\) existing roads (a road connects two
+different cities; at most one road per pair).  Build the \emph{minimum} number
+of new roads so that every city is reachable from every other, and print which
+roads to build.
+
+\textbf{Input.} \(n\) and \(m\) (\(1\le n\le 10^5\), \(1\le m\le 2\cdot 10^5\));
+then \(m\) lines, each a road \(a\ b\).
+
+\textbf{Output.} First line: the number \(k\) of new roads.  Then \(k\) lines,
+each naming the two cities to join (any valid set).
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+4 2
+1 2
+3 4
+
+Output:
+1
+2 3
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}
+\peek{``fewest roads to connect everything'' -- that is components minus one.}
+\nudge{Run a DSU over the existing roads; each surviving component
+contributes exactly one representative; chaining the representatives gives
+the answer.}
+\fullhint{Merge all \(m\) roads, collect one root per distinct
+\(\code{find}\), print \(\text{count}-1\) and pair the first representative
+with every other.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The existing roads partition the cities into connected components.  One new
+road can join at most two components, so connecting \(c\) components needs at
+least \(c-1\) roads -- and \(c-1\) suffice by chaining representatives.  The
+task is exactly ``count components and emit a spanning set of them,'' a direct
+\secref{c28-dsu} application.
+
+\solstep{Key Observations}
+\begin{observation}
+A road whose endpoints are already in the same component (cycle test,
+\propref{c28-cycle}) changes nothing -- the DSU simply ignores it.
+\end{observation}
+\begin{observation}
+After all merges, the cities \(v\) with \(\code{find}(v)=v\) are the
+\emph{distinct} component representatives; if there are \(c\) of them, the
+answer is \(c-1\) roads.
+\end{observation}
+\begin{observation}
+Pairing the \emph{first} representative with each other representative
+\((r_1,r_i)\) connects all components in a star -- always valid, since joining
+two different components never closes a cycle.
+\end{observation}
+
+\solstep{Think It Through}
+\begin{thinkbox}
+\deadend{Do a BFS/DFS per unvisited city to count components}
+{Works, but then you must also record one representative per component and
+re-scan; on \(n\le 10^5\) with \(m\le 2\cdot10^5\) it is fine but clunkier than
+a DSU, which counts and picks representatives in the same pass.}
+\aha{One DSU pass merges the roads and drops the count to \(c\); the roots of
+the final forest are the representatives to chain.}
+\end{thinkbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CSES 1666 full solution (DSU + representative chain)}, label={lst:c28-core-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 100005;
+int parent_[MX], sz_[MX];
+int find(int v){ return parent_[v]==v ? v : parent_[v]=find(parent_[v]); }
+bool unite(int a,int b){
+    a=find(a); b=find(b);
+    if(a==b) return false;
+    if(sz_[a]<sz_[b]) swap(a,b);
+    parent_[b]=a; sz_[a]+=sz_[b];
+    return true;
+}
+int main(){
+    int n,m; scanf("%d%d",&n,&m);
+    for(int i=1;i<=n;i++){ parent_[i]=i; sz_[i]=1; }
+    for(int i=0;i<m;i++){ int a,b; scanf("%d%d",&a,&b); unite(a,b); }
+    vector<int> reps;
+    for(int i=1;i<=n;i++) if(find(i)==i) reps.push_back(i);
+    printf("%d\n",(int)reps.size()-1);
+    for(size_t i=1;i<reps.size();i++) printf("%d %d\n",reps[0],reps[i]);
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CSES 1666: n=4, roads (1,2),(3,4)]
+Start \(\code{parent}=(1,2,3,4)\), all \(\code{sz}=1\).
+\(\text{unite}(1,2)\): roots \(1,2\); equal size, keep root \(1\); \(2\to1\),
+\(\code{sz}[1]=2\).
+\(\text{unite}(3,4)\): \(4\to3\), \(\code{sz}[3]=2\).
+Representatives (roots): \(\{1,3\}\) -- \(c=2\).
+Print \(c-1=1\), then the single new road \(1\ 3\) (a valid answer; the
+sample's \texttt{2 3} is the same idea with representative \(2\) standing in
+for the \(\{1,2\}\) component -- \code{find}(2)=1 here, so our output is
+\texttt{1 3}, also accepted).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(n+m\le 3\cdot10^5\) operations, each \(\bigO{\alpha(n)}\) amortised: total
+\(\bigO{(n+m)\alpha(n)}\).  Memory \(\bigO{n}\).  Well inside 1.00\,s.
+\textbf{AC.}
+\end{complexitybox}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1: reusing stale \code{sz}]
+After a union, \(\code{sz}[v]\) is only correct at the \emph{root}.  Reading
+\(\code{sz}[x]\) for a non-root \(x\) gives a meaningless (frozen) number.
+Always \(\code{sz}[\code{find}(x)]\).
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: forgetting the cycle branch]
+If you \code{union} unconditionally without checking \(\code{find}(u)=\code{find}(v)\),
+you double-add \(\code{sz}\) and the component count drifts.  Route everything
+through a \code{unite} that returns whether a real merge happened
+(\coderef{c28-union}).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: 0- vs 1-indexing]
+CSES numbers cities from \(1\).  Initialising the arrays as
+\(\code{for }i=0..n-1\) while reading \(1..n\) leaves \(\code{parent}[n]\)
+uninitialised.  Match the problem's indexing (this file uses \(1..n\)).
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Is every operation a merge (never an undo)?  If not, you need rollback
+        (\(\secref{c28-offline}\)), not this DSU.
+  \item Did you decrement the component count \emph{only} when \code{unite}
+        returned \texttt{true}?
+  \item Are you reading \code{sz} at a root, or at a raw node?
+  \item Does your representative scan use \(\code{find}(i)=i\), not
+        \(\code{parent}[i]=i\) (compression may have re-pointed the latter)?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Building Teams}{CSES 1668}
+    {https://cses.fi/problemset/task/1668}
+    {CSES L3}
+    {friend-enemy partition -- bipartite check per component; pair DSU with a
+     2-colouring DFS, or use a weighted DSU (\(\secref{c28-weighted}\)).}
+  \practice{Number of Islands II}{LC 305}
+    {https://leetcode.com/problems/number-of-islands-ii/}
+    {LC Hard L3}
+    {cells turn to land one at a time; report the island count after each drop.  A
+     new land cell starts its own component (count\,+\(1\)) and \code{unite}s with
+     each land neighbour that merges (count\,\(-\,1\) per genuine merge) -- the
+     monotone-additions pattern of \secref{c28-dsu} with \code{sz} driving the
+     component tally.}
+\end{practiceset}
+
+\paragraph{Back-cites.}
+Chapter~6 (\chref{c25}) -- the ``is it a tree?'' DSU pre-look on LC~547/684/685;
+\propref{c28-cycle} is the internal proof it leans on.
+Chapter~31 (\chref{c17}) -- Kruskal's MST calls \code{find}/\code{unite} as a
+black box; the internals are here.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 17.1 in 10 seconds]
+A DSU is a parent forest + a size stored at each root.  \code{find} climbs and
+compresses; \code{union} glues the smaller root under the larger; both tricks
+together give \(\bigO{\alpha(n)}\) amortised.  Component count starts at \(n\)
+and drops by one per genuine merge; \(\code{find}(u)=\code{find}(v)\) before a
+union means a redundant edge.  Compression is \emph{irreversible} -- never use
+it if you must roll back.
+\selftest{
+  \item Write \code{find} with path compression from memory.
+  \item Why must union-by-size attach small under large, and what depth does
+        it guarantee?
+  \item State the cycle test in one line of code.
+  \item What breaks if you add path compression to a rollback DSU?
+  \item On \(T\)'s edges above, what was \(\code{sz}[1]\) after step~5?  (6.)
+}
+\end{recallbox}

@@ -1,0 +1,1646 @@
+# Prefix Sums & Difference Arrays {#sec-pref}
+
+<!--
+Author-facing provenance (not rendered): mirrors array_book ch.2 "Prefix Sums & Difference Arrays".
+Lessons A1-A6 + patterns P1-P6 per PLAN.md line for chapter 6. The HTML comment above is the only
+place a local path may appear, and it must never reach the rendered page.
+-->
+
+::: {.callout-note title="Sources"}
+**CPH** (Laaksonen, *Competitive Programmer's Handbook*) ch. 9: § 9.1 static array queries (prefix sums, two-dimensional prefix sums, minimum queries with a sparse table), § 9.2–9.3 binary indexed trees and segment trees — what you reach for once the array itself changes · **CSES** problem set: 1646 Static Range Sum Queries, 1652 Forest Queries · **USACO Guide** (Silver): prefix sums and more prefix sums · **CP-Algorithms**: sparse table, Fenwick tree, segment tree (the general answers when an operation has no inverse or the array changes) · LeetCode-style interview patterns: subarray-sum counting with a hash map, product except self, split points. Covered here: range sums and range counts, modular prefix sums, difference arrays (dense, two-dimensional, and sparse event sweeps), prefix sums with a hash map (counts, remainders, first-index maps), prefix and suffix tables for XOR, product, min and max, and split points.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Build a prefix-sum array in one pass and answer *any* range sum in $O(1)$, writing the range as half-open $[\ell, r)$ with no off-by-one at either end.
+- Recognise a **static** range-sum problem from its constraints ($n, q$ both up to $10^5$) and reject the $O(nq)$ nested loop before you write it.
+- Turn "add $v$ to every cell of $[\ell, r)$, $q$ times" into two point updates per query with a **difference array**, then rebuild the whole array in $O(n)$.
+- Count subarrays whose sum equals $k$, is divisible by $k$, or equals the subarray's own length, using a prefix sum indexed by a **hash map** — and find the *longest* such subarray by storing first indices instead of counts.
+- Decide whether a prefix sum helps for an operation *other* than addition — XOR, product, minimum, maximum — by asking the one question that matters: **does it have an inverse?**
+- Write $O(n)$ solutions for split-point problems (pivot index, two equal halves, three equal parts) by comparing a prefix against a suffix.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr006_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters
+
+::: {.callout-note title="In plain words" }
+Adding up a range is the most-repeated question in array problems. Answering it by re-adding the range every time costs $O(n)$ per question; answering it from a table of **prefix sums** costs $O(1)$, because you add the whole array once and then only *subtract two numbers*. The trick has a mirror image: the **difference array**, which makes "add the same thing to a whole range" cost $O(1)$ instead of $O(n)$, so a thousand range updates become two thousand point updates and one final pass.
+:::
+
+Here is the shape of the argument you will make in an interview. You have $n = 2\cdot10^5$ numbers and $q = 2\cdot10^5$ questions of the form "what is the sum from $a$ to $b$?". Re-adding gives up to $n \cdot q = 4\cdot10^{10}$ additions — on the budget of @sec-cx-budget ($10^8$ to $10^9$ simple operations a second in C++) that is somewhere between a minute and several minutes, against a time limit of one or two seconds. But write $P[i] = a_0 + a_1 + \dots + a_{i-1}$ once, and each question becomes $P[b] - P[a]$: two reads and a subtraction. Same answers, about $n + q = 4\cdot10^5$ operations in total — some $10^5$ times less work — and the entire extra cost is one $O(n)$ pass you do up front. That is the whole technique — **pay once in a table, then charge $O(1)$ per query**.
+
+Prefix sums are also the quiet engine behind much harder things. Counting subarrays with a property becomes counting *equal pairs of prefix sums* with a hash map (@sec-pref-hash). "How many flights use this seat range?" becomes a difference array (@sec-pref-diff). A two-dimensional grid question becomes four lookups and an inclusion–exclusion argument (@sec-pref-2d). And when the operation is not addition — XOR, minimum, product — the same table either works beautifully or fails completely, and knowing *which* is a one-sentence test (@sec-pref-other).
+
+**Where this chapter sits.** @sec-arr built the physical model — contiguous memory, half-open ranges ($[\ell, r)$: start included, end excluded), the cost model, one-pass scanning with running state — and this chapter adds the first real *precomputed table* on top of it. The running total of @sec-arr-scan is kept instead of thrown away, and that one change answers every range question in constant time. The next chapter, @sec-hash, takes the hash map that appears here in @sec-pref-hash and makes it the main character; later chapters on two pointers, sliding windows and binary search keep using the prefix table as a building block.
+
+The chapter has two parts. Part A is six lessons, each with its convention written out precisely and its formula checked by code. Part B is six patterns, each with two or three fully solved, stress-tested problems. If a formula feels weightless, run the cell under it and print the array it talks about.
+
+::: {#fig-pref-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a_demo = [3, 1, 4, 1, 5, 9, 2]
+p_demo = [0]
+for x in a_demo:
+    p_demo.append(p_demo[-1] + x)
+
+
+def draw(ax, p):
+    V.array(ax, p, a_demo, y=2.0, label="a")
+    V.array(ax, p, p_demo, y=-0.6, colors={i: "indigo" for i in range(len(p_demo))},
+            label="P", index=False)
+    V.text(ax, p, 7.5, 0.85, "each cell of P = the running sum of a so far",
+           color="muted", size=9)
+V.show(draw)
+```
+
+The central picture of this chapter. The top row is the input; the bottom row is the same input *accumulated*, one cell longer and starting with $0$. Every range sum you will ever need is a difference of two cells of the bottom row. @sec-pref-def.
+
+:::
+
+
+## Part A — Lessons
+
+## A1. Prefix sums: the table and the off-by-one-free convention {#sec-pref-def}
+
+::: {.callout-note title="In plain words"}
+A prefix sum is the running total you would write in the margin while adding a column of numbers: after each row you note the total so far. Then the sum of rows 3 through 7 is "the total after row 7" minus "the total after row 2" — you never re-add anything.
+:::
+
+There are two ways to index the table, and this book uses the one that removes every off-by-one error. Define
+
+$$P[0] = 0, \qquad P[i+1] = P[i] + a[i] \quad (0 \le i < n),$$ {#eq-pref-build}
+
+so $P$ has length $n+1$, and cell $P[i]$ is the sum of everything *strictly before* index $i$. Then the sum of the half-open range $[\ell, r)$ — the exact range @sec-arr-ranges taught us to write — is
+
+$$\sum_{k=\ell}^{r-1} a[k] \;=\; P[r] - P[\ell].$$ {#eq-pref-range}
+
+Both ends obey the same rule: the *exclusive* end of a range is the cell you subtract. Nothing is counted twice and nothing is skipped, because the range $[\ell,r)$ contains exactly the cells that are inside $[0,r)$ and not inside $[0,\ell)$.
+
+```{python}
+def build_prefix(a):
+    p = [0] * (len(a) + 1)
+    for i, x in enumerate(a):
+        p[i + 1] = p[i] + x          # eq-pref-build, literally
+    return p
+
+
+def range_sum(p, l, r):
+    return p[r] - p[l]               # sum of a[l:r]
+
+a = [3, 1, 4, 1, 5, 9, 2]
+p = build_prefix(a)
+print("a =", a)
+print("P =", p)
+for l, r in [(0, 7), (2, 5), (1, 2), (3, 3), (0, 0), (4, 7)]:
+    got, want = range_sum(p, l, r), sum(a[l:r])
+    print(f"P[{r}] - P[{l}] = {p[r]} - {p[l]} = {got:>3}   direct: {want}")
+    assert got == want
+print("all ranges agree, including the empty ones")
+```
+
+Note the two empty cases: $(3,3)$ and $(0,0)$ both give $0$ with no special-casing, because $P[x]-P[x]=0$. A single-element range $[i, i{+}1)$ costs one subtraction too. Compare the alternative convention, $P[i] = a[0]+\dots+a[i]$ (inclusive, length $n$): there the same query is $P[r-1]-P[\ell-1]$, which needs a guard for $\ell = 0$ and an uncomfortable $-1$ on both ends. It is a small thing until you have ten range queries in one problem, and then it is the wrong-answer verdict. **The invariant worth memorising** is the sentence that makes @eq-pref-build and @eq-pref-range the same fact:
+
+> **Invariant.** For every $i$, $P[i] = \sum a[0:i)$.
+
+::: {#fig-pref-build}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [3, 1, 4, 1, 5]
+    pref, rows = [0], []
+    for i, x in enumerate(a):
+        pref.append(pref[-1] + x)
+        rows.append(dict(values=pref + [None] * (len(a) + 1 - len(pref)),
+                         colors={k: "indigo" for k in range(len(pref))},
+                         pointers=[(len(pref) - 1, "new", "green")],
+                         index=True, label=f"i={i}"))
+    V.trace(ax, p, rows, gap=3.4)
+V.show(draw)
+```
+
+Building the table one cell at a time — a film strip of @eq-pref-build. At step $i$ the new cell $P[i{+}1]$ is the old total plus $a[i]$, so the filled (indigo) part is exactly the range $[0, i{+}1)$ covered so far. This is @sec-arr-scan's "one pass with running state", with the twist that we *keep* every intermediate value instead of throwing it away.
+
+:::
+
+What the table buys, in one line of arithmetic: building it costs $O(n)$ time and $O(n)$ space, and each later query costs $O(1)$. So $q$ questions cost $O(n + q)$ instead of $O(nq)$. The trade is *space for time*, and it is one of the cheapest trades in programming — which is why prefix sums are the first thing to try whenever a problem asks about many ranges of an unchanging array.
+
+::: {#fig-pref-range}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [3, 1, 4, 1, 5, 9, 2]
+    pref = build_prefix(a)
+    l, r = 2, 6
+    V.array(ax, p, a, y=1.7, label="a",
+            regions=[(l, r, "green", f"a[{l}:{r}) = {sum(a[l:r])}")],
+            pointers=[(l, "l", "indigo", "top"), (r, "r", "pink", "top")])
+    V.array(ax, p, pref, y=-1.3, label="P", index=False,
+            colors={l: "indigo", r: "pink"},
+            pointers=[(l, "P[l]", "indigo"), (r, "P[r]", "pink")])
+    V.text(ax, p, 3.5, -3.1,
+           f"P[r] - P[l] = {pref[r]} - {pref[l]} = {pref[r] - pref[l]}",
+           color="muted", size=9)
+V.show(draw)
+```
+
+@eq-pref-range drawn. The green bracket is the range you want; the two marked cells of $P$ are the only things you read. Because $P$ has $n+1$ cells, the pointer $r$ may legally sit one past the end of $a$ — that cell is exactly what a query reaching the last element needs.
+
+:::
+
+**Why the formula is right, as a proof.** By the invariant, $P[r] = \sum a[0:r)$ and $P[\ell] = \sum a[0:\ell)$. For $\ell \le r$ the range $[0, r)$ splits into the two disjoint pieces $[0,\ell)$ and $[\ell, r)$, so $P[r] = P[\ell] + \sum a[\ell:r)$. Subtract $P[\ell]$ from both sides and you have @eq-pref-range. The invariant itself holds by induction: $P[0] = 0$ is the empty sum, and if $P[i] = \sum a[0:i)$ then @eq-pref-build adds exactly the next cell. Everything in this chapter is a variation of these three lines.
+
+### Prefix counts: the same table for "how many"
+
+A sum of $0$s and $1$s is a count. So when a question asks "how many cells in $[\ell, r)$ satisfy a property" — are even, are vowels, equal some value $v$, are at least a threshold — turn every cell into an **indicator** ($1$ if it satisfies the property, $0$ if not) and build the prefix table of the indicators. Then the count in any range is @eq-pref-range again. Several properties cost one table each, or one table with a column per property; a small alphabet of 26 letters is 26 prefix-count tables, which is how "how many times does letter $c$ occur in $s[\ell:r)$" becomes $O(1)$ per query after $O(26n)$ preparation.
+
+```{python}
+def prefix_counts(a, pred):
+    """P[i] = number of cells in a[0:i) that satisfy pred."""
+    p = [0]
+    for x in a:
+        p.append(p[-1] + (1 if pred(x) else 0))
+    return p
+
+
+words = ["aba", "bcb", "ece", "aa", "e"]
+is_vowel_word = lambda w: w[0] in "aeiou" and w[-1] in "aeiou"
+pc = prefix_counts(words, is_vowel_word)
+print("indicator prefix:", pc)                       # [0, 1, 1, 2, 3, 4]
+for l, r in [(0, 3), (1, 5), (1, 2)]:
+    assert pc[r] - pc[l] == sum(map(is_vowel_word, words[l:r]))
+print("range counts:", [pc[r] - pc[l] for l, r in [(0, 3), (1, 5), (1, 2)]])
+```
+
+### Overflow and modular prefix sums
+
+The table holds sums, and sums grow: $2\cdot10^5$ values of size $10^9$ add up to $2\cdot10^{14}$, past the $\approx 2.1\cdot10^9$ limit of a 32-bit `int` (@sec-arr-cost). In C++ the table is `long long`. When even 64 bits are not enough — or the problem asks for the answer modulo $M$ (often $10^9+7$) — store every prefix reduced modulo $M$. Subtraction still works, with one repair: $P[r] - P[\ell]$ of two *reduced* values can be negative, so the range sum mod $M$ is
+
+$$\big(P[r] - P[\ell] + M\big) \bmod M .$$ {#eq-pref-mod}
+
+Python's `%` already returns a value in $[0, M)$, so `(p[r] - p[l]) % M` is enough there; in C++ the `+ M` is required, because C++ `%` keeps the sign of a negative left operand.
+
+```{python}
+MOD = 10**9 + 7
+a = [random.randint(0, 10**18) for _ in range(50)]
+pm = [0]
+for x in a:
+    pm.append((pm[-1] + x) % MOD)                     # reduced prefix
+for _ in range(200):
+    l = random.randint(0, 50); r = random.randint(l, 50)
+    assert (pm[r] - pm[l] + MOD) % MOD == sum(a[l:r]) % MOD    # eq-pref-mod
+print("modular range sums agree with exact sums reduced at the end")
+```
+
+
+## A2. Difference arrays: the inverse of prefix sums {#sec-pref-diff}
+
+::: {.callout-note title="In plain words"}
+Prefix sums answer "what is in this range now?" after one long addition. A difference array answers the opposite question — "put $v$ into every cell of this range" — by recording only the *edges*: $+v$ where the range starts, $-v$ where it ends. The values themselves appear when you run a prefix sum over those edges at the very end.
+:::
+
+If prefix sums turn an array into its running totals, the **difference array** turns a list of *range updates* into two point updates each. Given an array $a$ of zeros and an instruction "add $v$ to every cell in $[\ell, r)$", record it in an auxiliary array $d$ of length $n+1$:
+
+$$d[\ell] \mathrel{+}= v, \qquad d[r] \mathrel{-}= v.$$ {#eq-pref-diff}
+
+Do that for every update, all in $O(1)$ each. Then rebuild the real array by one prefix pass: $a[i] = d[0] + d[1] + \dots + d[i]$. Why it works: a cell $i$ accumulates $+v$ from every update whose $\ell \le i$ and $-v$ from every update whose $r \le i$, so it ends with exactly the $v$'s of the updates that actually covered it — $[\ell, r)$ means "$+v$ started, $-v$ has not arrived yet".
+
+The pair to hold in your head is the prefix sum and the difference as *inverses*. The **difference array** of any array $a$ is $d[i] = a[i] - a[i-1]$ (with $a[-1] = 0$): it records only how much the value *changes* from one cell to the next. The prefix sum of $d$ adds those changes back up and returns $a$; the difference of a prefix table returns the original cells. A range add $+v$ on $[\ell, r)$ changes exactly two of those steps — the value jumps up by $v$ entering cell $\ell$ and drops by $v$ entering cell $r$ — which is @eq-pref-diff. So the array does not have to start at zero: take the difference array of the initial $a$, apply the two-write updates on top, and one prefix pass gives the final array. That is also why, when a problem asks for range adds **and** then range sums, you rebuild once with a prefix pass and answer the sums with the table from @sec-pref-def.
+
+```{python}
+def diff_range_add(n, updates):
+    d = [0] * (n + 1)
+    for l, r, v in updates:              # half-open [l, r), like every range here
+        d[l] += v
+        d[r] -= v
+    a, run = [0] * n, 0
+    for i in range(n):
+        run += d[i]
+        a[i] = run
+    return a
+
+a = diff_range_add(7, [(1, 4, 3), (0, 2, 5), (3, 7, 2)])
+print(a)
+assert a == [5, 8, 3, 5, 2, 2, 2]        # hand-checked cell by cell
+assert a == [sum(v for l, r, v in [(1, 4, 3), (0, 2, 5), (3, 7, 2)] if l <= i < r)
+             for i in range(7)]           # agrees with the naive definition
+print("difference array matches the naive loop")
+
+
+def range_add_on(a0, updates):
+    """Range adds on an array that does not start at zero: difference, update, prefix."""
+    n = len(a0)
+    d = [a0[0]] + [a0[i] - a0[i - 1] for i in range(1, n)] + [0]   # d[i] = a[i] - a[i-1]
+    for l, r, v in updates:
+        d[l] += v
+        d[r] -= v
+    out, run = [], 0
+    for i in range(n):
+        run += d[i]
+        out.append(run)
+    return out
+
+
+for _ in range(300):
+    n = random.randint(1, 9)
+    a0 = [random.randint(-5, 5) for _ in range(n)]
+    ups = []
+    for _ in range(random.randint(0, 5)):
+        l = random.randint(0, n); ups.append((l, random.randint(l, n), random.randint(-4, 4)))
+    want = [a0[i] + sum(v for l, r, v in ups if l <= i < r) for i in range(n)]
+    assert range_add_on(a0, ups) == want
+print("difference of a non-zero start, then prefix, matches too")
+```
+
+**Cost.** $q$ range updates: $O(q)$ to record them, $O(n)$ to rebuild — total $O(n + q)$ instead of the naive $O(nq)$. With $n = q = 10^5$ that is $2\cdot10^5$ operations against $10^{10}$: the difference between an accepted program and a timeout. Space is $O(n)$.
+
+::: {#fig-pref-diff}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    n = 7
+    l, r, v = 1, 4, 3
+    d = [0] * (n + 1)
+    d[l] += v
+    d[r] -= v
+    rows = [dict(values=d[:n], colors={l: "green", r: "red"}, index=False,
+                 label="d after one update")]
+    run, out = 0, []
+    for x in d[:n]:
+        run += x
+        out.append(run)
+    rows.append(dict(values=out, colors={i: ("green" if l <= i < r else "muted")
+                                          for i in range(n)}, index=False,
+                     label="prefix of d"))
+    V.trace(ax, p, rows, gap=3.6)
+V.show(draw)
+```
+
+One range update $[\ell,r) \mathrel{+}= 3$ recorded as two numbers (top), and the array those two numbers produce when you take a prefix sum (bottom). Only the cells between the edges change — which is precisely the $+3$ that has started but not yet been cancelled.
+
+:::
+
+### When the coordinates are huge: a sweep over events
+
+A difference array has one cell per position, which is fine for $n = 10^5$ and useless when the ranges live on a line of length $10^9$ (times of day in seconds, positions on a road). The fix keeps the idea and drops the array: the only positions where the running value can change are the range ends, so store the $\pm v$ **events** in a map keyed by position, sort the keys, and sweep. Between two consecutive keys the running value is constant, so a whole stretch of the line is handled in one step. With $u$ updates this costs $O(u \log u)$ for the sort and nothing proportional to the length of the line. The same sweep answers "what is the maximum number of intervals covering one point?" — the classic meeting-rooms question — and it is the seed of the scanline technique developed in a later volume.
+
+```{python}
+def max_coverage(intervals):
+    """Largest number of half-open intervals [s, e) that share a point. Coordinates may be huge."""
+    events = defaultdict(int)
+    for s, e in intervals:
+        events[s] += 1                 # the difference array, stored sparsely
+        events[e] -= 1
+    best = run = 0
+    for x in sorted(events):           # sweep only the positions where something changes
+        run += events[x]
+        best = max(best, run)
+    return best
+
+
+def max_coverage_brute(intervals):
+    points = {s for s, _ in intervals}
+    return max((sum(s <= x < e for s, e in intervals) for x in points), default=0)
+
+
+for _ in range(400):
+    iv = []
+    for _ in range(random.randint(0, 7)):
+        s = random.randint(0, 10**9); iv.append((s, s + random.randint(1, 10**8)))
+    assert max_coverage(iv) == max_coverage_brute(iv)
+assert max_coverage([(0, 30), (5, 10), (15, 20)]) == 2
+assert max_coverage([(1, 5), (5, 9)]) == 1          # half-open: touching is not overlapping
+print("sparse difference array (event sweep) OK")
+```
+
+Two details carry over from the dense version. Processing a key means applying *all* its events at once (the map already merged them), which is what makes touching half-open intervals $[1,5)$ and $[5,9)$ count as non-overlapping. And the brute force only needs to test the left ends, because coverage can only rise at a left end — the same "change happens only at the edges" fact the difference array is built on.
+
+## A3. Two dimensions: inclusion–exclusion {#sec-pref-2d}
+
+::: {.callout-note title="In plain words"}
+On a grid, the running total becomes a running total *of the rectangle from the corner to here*. To get an arbitrary rectangle you take the big corner rectangle and subtract the two strips that stick out — but the strip they both subtracted twice has to be added back. That is the entire trick, and it is why the formula has four terms and alternating signs.
+:::
+
+For a matrix $A$ with $m$ rows and $n$ columns, build
+
+$$P[i+1][j+1] = A[i][j] + P[i][j+1] + P[i+1][j] - P[i][j],$$ {#eq-pref-2d-build}
+
+the sum of the whole rectangle $[0, i{+}1) \times [0, j{+}1)$, with a zero row and a zero column as borders so that no edge case needs special treatment (the same convention as @eq-pref-build, now in two directions). Then the rectangle sum over $[r_1, r_2) \times [c_1, c_2)$ is
+
+$$S = P[r_2][c_2] - P[r_1][c_2] - P[r_2][c_1] + P[r_1][c_1].$$ {#eq-pref-2d-query}
+
+Read @eq-pref-2d-query as a picture rather than a spell. $P[r_2][c_2]$ is everything down to $r_2$ and right to $c_2$. Subtract the band above the rectangle and the band to its left; those two bands overlap in the top-left corner rectangle, which you have now removed **twice**, so add it back once. The signs are $+$, $-$, $-$, $+$ because overlapping regions get counted once per set that contains them — this is inclusion–exclusion on two sets, and it generalises: a $d$-dimensional prefix sum answers a box query with $2^d$ terms, alternating sign by how many coordinates are at their low end.
+
+The build formula @eq-pref-2d-build is the same inclusion–exclusion run the other way: the block ending at $(i{+}1, j{+}1)$ is the cell $A[i][j]$, plus the block above it, plus the block to its left, minus their overlap. The code below uses an equivalent form with one fewer read per cell: keep the running sum of the current row, `rowsum` $= A[i][0] + \dots + A[i][j]$, and add it to the block directly above, $P[i][j{+}1]$. Both forms fill the same table; the stress test checks the result, not the route.
+
+```{python}
+def build_prefix2d(a):
+    m, n = len(a), len(a[0])
+    p = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m):
+        rowsum = 0                      # running sum along the row
+        for j in range(n):
+            rowsum += a[i][j]
+            p[i + 1][j + 1] = p[i][j + 1] + rowsum     # same table as eq-pref-2d-build
+    return p
+
+
+def build_prefix2d_four_term(a):        # eq-pref-2d-build, literally
+    m, n = len(a), len(a[0])
+    p = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m):
+        for j in range(n):
+            p[i + 1][j + 1] = a[i][j] + p[i][j + 1] + p[i + 1][j] - p[i][j]
+    return p
+
+
+def rect_sum(p, r1, c1, r2, c2):        # half-open [r1,r2) x [c1,c2)
+    return p[r2][c2] - p[r1][c2] - p[r2][c1] + p[r1][c1]
+
+grid = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]]
+p = build_prefix2d(grid)
+for row in p:
+    print(row)
+
+def rect_brute(a, r1, c1, r2, c2):
+    return sum(a[i][j] for i in range(r1, r2) for j in range(c1, c2))
+
+for _ in range(400):                    # exhaustive-ish check on a random grid
+    m = random.randint(1, 6); n = random.randint(1, 6)
+    g = [[random.randint(-9, 9) for _ in range(n)] for _ in range(m)]
+    pp = build_prefix2d(g)
+    assert pp == build_prefix2d_four_term(g)
+    for _ in range(30):
+        r1 = random.randint(0, m); c1 = random.randint(0, n)
+        r2 = random.randint(r1, m); c2 = random.randint(c1, n)
+        assert rect_sum(pp, r1, c1, r2, c2) == rect_brute(g, r1, c1, r2, c2)
+print("2D prefix agrees with the naive double loop on every random rectangle")
+```
+
+**Cost.** Building is $O(mn)$ — one pass over the grid, two additions per cell — and each query is $O(1)$. @fig-pref-2d shows the four reads at work. Note the four cells used in @eq-pref-2d-query: the bottom-right corner of the rectangle, and the three corners that share its top and left edges. That geometric pattern is what you implement, so draw it once and refer to the drawing when the signs confuse you.
+
+::: {#fig-pref-2d}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    rows, cols = 5, 6
+    r1, c1, r2, c2 = 2, 2, 4, 5                     # half-open [2,4) x [2,5)
+    terms = [(+1, r2, c2), (-1, r1, c2), (-1, r2, c1), (+1, r1, c1)]   # eq-pref-2d-query
+    cells, colors = [], {}
+    for i in range(rows):
+        row = []
+        for j in range(cols):
+            signs = [s for s, R, C in terms if i < R and j < C]   # blocks that contain (i, j)
+            assert sum(signs) == (1 if r1 <= i < r2 and c1 <= j < c2 else 0)
+            row.append(" ".join("+" if s > 0 else "-" for s in signs) + (f" = {sum(signs)}" if signs else ""))
+            if r1 <= i < r2 and c1 <= j < c2:
+                colors[(i, j)] = "green"
+            elif i < r1 and j < c1:
+                colors[(i, j)] = "amber"
+            elif i < r1 and j < c2:
+                colors[(i, j)] = "pink"
+            elif i < r2 and j < c1:
+                colors[(i, j)] = "violet"
+        cells.append(row)
+    V.grid(ax, p, cells, colors=colors, cell_w=1.9,
+           row_labels=[f"row {i}" for i in range(rows)], col_labels=[f"col {j}" for j in range(cols)])
+    V.text(ax, p, 0.0, -5.4, "S = P[4][5] - P[2][5] - P[4][2] + P[2][2]   (r1 = 2, c1 = 2, r2 = 4, c2 = 5)",
+           color="muted", size=9, ha="left")
+V.show(draw)
+```
+
+Inclusion–exclusion counted cell by cell, for the rectangle rows $[2,4)$, columns $[2,5)$ of a $5\times6$ grid. Each cell lists the signs of the four blocks of @eq-pref-2d-query that contain it, and their total. Green cells (the rectangle) total $1$; the pink band above and the violet band to the left are added once and removed once, total $0$; the amber corner is added twice and removed twice, total $0$; cells outside the big block are never touched. The figure's code asserts these totals for every cell.
+
+:::
+
+**Difference arrays also go two-dimensional.** One rectangle update $[r_1,r_2) \times [c_1,c_2)$ becomes four point updates — $+v$ at $(r_1,c_1)$, $-v$ at $(r_2,c_1)$, $-v$ at $(r_1,c_2)$, $+v$ at $(r_2,c_2)$ — and a *double* prefix pass rebuilds the grid. The signs are the mirror image of @eq-pref-2d-query: the corner you add to is the one the rectangle starts at, and the far corner comes back positive because it was cancelled twice. A later chapter on multidimensional and higher-order prefix sums develops that case in full, together with higher dimensions; here it is enough to see that the two techniques are one technique seen from opposite sides, and to check it once in code.
+
+```{python}
+def rect_add_2d(m, n, updates):
+    """Rectangle adds [r1,r2) x [c1,c2) += v, by four writes each and a 2D prefix rebuild."""
+    d = [[0] * (n + 1) for _ in range(m + 1)]
+    for r1, c1, r2, c2, v in updates:
+        d[r1][c1] += v; d[r1][c2] -= v
+        d[r2][c1] -= v; d[r2][c2] += v
+    out = [[0] * n for _ in range(m)]
+    for i in range(m):
+        for j in range(n):            # 2D prefix of d, the same recurrence as eq-pref-2d-build
+            up = out[i - 1][j] if i else 0
+            left = out[i][j - 1] if j else 0
+            diag = out[i - 1][j - 1] if i and j else 0
+            out[i][j] = d[i][j] + up + left - diag
+    return out
+
+
+for _ in range(300):
+    m, n = random.randint(1, 5), random.randint(1, 5)
+    ups = []
+    for _ in range(random.randint(0, 4)):
+        r1 = random.randint(0, m); c1 = random.randint(0, n)
+        ups.append((r1, c1, random.randint(r1, m), random.randint(c1, n), random.randint(-3, 3)))
+    want = [[sum(v for r1, c1, r2, c2, v in ups if r1 <= i < r2 and c1 <= j < c2)
+             for j in range(n)] for i in range(m)]
+    assert rect_add_2d(m, n, ups) == want
+print("2D difference array: four writes per rectangle, one 2D prefix pass")
+```
+
+
+## A4. Prefix sums with a hash map: counting subarrays by their sum {#sec-pref-hash}
+
+::: {.callout-note title="In plain words"}
+Instead of asking "what is the sum of this range?", you get asked "how many ranges have *this* sum?". Rewrite the question with prefix sums: the range $[i,j)$ sums to $k$ exactly when $P[j] - P[i] = k$, that is, when $P[i] = P[j] - k$. So while you walk $j$ from left to right, all you need is a tally of which prefix values you have already met and how many times — a counter keyed by the prefix *value*, which is a hash map.
+:::
+
+This is the single most valuable upgrade to the prefix-sum idea, and it comes from a one-line rewrite. Fix $k$. Then
+
+$$\sum a[i:j) = k \quad\Longleftrightarrow\quad P[j] - P[i] = k \quad\Longleftrightarrow\quad P[i] = P[j] - k.$$ {#eq-pref-hash}
+
+For each right end $j$, the left ends that work are exactly the indices whose prefix value equals $P[j]-k$. So: keep a map from prefix value to how many times it has occurred, walk $j$ from $0$ to $n$, and at each step add `seen[P[j] - k]` to the answer before recording $P[j]$ itself. One pass, $O(n)$ time, $O(n)$ space.
+
+Why a **hash map** rather than the frequency array of @sec-arr-p5? Because prefix sums wander over a huge range — with negative elements $P$ can be anywhere in $\pm 10^{14}$ — so you cannot index an array by its value. The map is the frequency array with an arbitrary key domain (@sec-arr-cost warned you about the range; @sec-arr-p5's escape hatch was "offset the values or use a hash map", and here it is). Three families of problems collapse to the same walk:
+
+- **Exact sum $k$.** Count pairs with $P[j] - P[i] = k$ — the lookup above (@sec-pref-p2-a).
+- **Sum divisible by $k$.** Two prefixes give a difference divisible by $k$ exactly when they leave the **same remainder**, so key the map by $P \bmod k$ and count equal-remainder pairs (@sec-pref-p2-b). A remainder has only $k$ possible values, so here an array of size $k$ suffices — and that is the frequency-array trick reappearing.
+- **A property rewritten as a sum.** Equal numbers of two kinds means "$+1$ for one kind, $-1$ for the other, total $0$". Length-relative targets mean "subtract $1$ from every element, then look for total $0$" — the move that solves *Good Subarrays* in @sec-pref-p2-c: a subarray whose digit sum equals its **length** becomes a subarray summing to $0$ after every digit is reduced by one.
+
+One trap, and it is a contest-classic: remainders of negative numbers. Python's `%` always returns a value in $[0, k)$; C++'s `%` keeps the sign of the dividend, so `-7 % 3` is `-1`, not $2$. Index a bucket array by a C++ remainder and you write out of bounds. Normalise with `((r % k) + k) % k`.
+
+```{python}
+def subarrays_with_sum(a, k):
+    """Every half-open range [i, j) whose sum is k, listed via the prefix map."""
+    seen = defaultdict(list)            # prefix value -> prefix indices where it occurs
+    seen[0].append(0)                   # P[0] = 0: the empty prefix is a legal left end
+    p, out = 0, []
+    for j, x in enumerate(a):
+        p += x                          # now p == P[j+1]
+        for i in seen[p - k]:           # eq-pref-hash: P[i] == P[j+1] - k
+            out.append((i, j + 1))
+        seen[p].append(j + 1)
+    return out
+
+
+def subarrays_with_sum_brute(a, k):
+    n = len(a)
+    return [(i, j) for i in range(n) for j in range(i + 1, n + 1) if sum(a[i:j]) == k]
+
+
+for _ in range(600):
+    a = [random.randint(-6, 6) for _ in range(random.randint(0, 11))]
+    k = random.randint(-6, 8)
+    assert sorted(subarrays_with_sum(a, k)) == sorted(subarrays_with_sum_brute(a, k))
+
+print(subarrays_with_sum([1, 2, 3], 3))         # [(0, 2), (2, 3)]
+print(subarrays_with_sum([1, -1, 1, 1, 2], 3))  # ranges summing to 3
+print(len(subarrays_with_sum([3, 4, 7, 2, -3, 1, 4, 2], 7)))
+print("prefix-map counting matches the nested loop")
+```
+
+::: {#fig-pref-hash}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [1, 2, 3, -2, 4, 1]
+    k = 3
+    pref = build_prefix(a)
+    pairs = [(i, j) for i in range(len(a) + 1) for j in range(i + 1, len(a) + 1)
+             if pref[j] - pref[i] == k]
+    i, j = max(pairs, key=lambda t: t[1] - t[0])   # the widest such range, for legibility
+    V.array(ax, p, a, y=1.9, index=True, label="a",
+            regions=[(i, j, "green", f"sum = {k}")])
+    V.array(ax, p, pref, y=-0.4, index=False, label="P",
+            colors={i: "indigo", j: "pink"},
+            pointers=[(i, f"P[i]={pref[i]}", "indigo"), (j, f"P[j]={pref[j]}", "pink")])
+    V.text(ax, p, 3.0, -2.2, f"P[j] - P[i] = {pref[j]} - {pref[i]} = {k}", color="muted", size=9)
+    V.text(ax, p, 3.0, 3.9, "counting subarrays = counting pairs i < j with P[i] = P[j] - k",
+           color="muted", size=9)
+V.show(draw)
+```
+
+The rewrite made visible. The green range in $a$ is a subarray summing to $k$; the two marked cells of $P$ are the *only* thing the algorithm touches. Count such ranges over the whole array and you are counting, for each right end, how many earlier prefix values equal $P[j]-k$ — a hash map lookup.
+
+:::
+
+@fig-pref-anim-hash plays the same walk one element at a time. Watch the order inside each step: the lookup happens **before** the current prefix is recorded, so a range is never paired with itself, and the seeded entry `0: 1` is what lets a range starting at index $0$ be found.
+
+::: {#fig-pref-anim-hash}
+
+```{python}
+#| echo: false
+ha_a, ha_k = [1, 2, 3, -2, 4, 1], 3
+ha_seen, ha_p, ha_ans = {0: 1}, 0, 0
+ha_frames = [(None, 0, dict(ha_seen), 0, 0)]
+ha_caps = ["start: seen = {0: 1} for the empty prefix, ans = 0"]
+for ha_j, ha_x in enumerate(ha_a):
+    ha_p += ha_x
+    ha_hit = ha_seen.get(ha_p - ha_k, 0)
+    ha_ans += ha_hit
+    ha_seen[ha_p] = ha_seen.get(ha_p, 0) + 1
+    ha_frames.append((ha_j, ha_p, dict(ha_seen), ha_hit, ha_ans))
+    ha_caps.append(f"j = {ha_j}: P = {ha_p}, look up P - k = {ha_p - ha_k} -> {ha_hit} left end(s), ans = {ha_ans}")
+assert ha_ans == len(subarrays_with_sum(ha_a, ha_k)) == 4
+
+
+def ha_frame(ax, p, f):
+    j, pv, seen, hit, ans = ha_frames[f]
+    cols = {} if j is None else {i: ("green" if i == j else "muted") for i in range(j + 1)}
+    V.array(ax, p, ha_a, y=2.2, label="a", colors=cols,
+            pointers=[] if j is None else [(j, "j", "indigo", "top")])
+    V.text(ax, p, 0.0, 1.0, f"running P = {pv}" + ("" if j is None else f"     lookup seen[{pv - ha_k}] = {hit}"),
+           color="text", size=10, ha="left")
+    V.text(ax, p, 0.0, 0.1, "seen = {" + ", ".join(f"{v}: {c}" for v, c in sorted(seen.items())) + "}",
+           color="muted", size=10, ha="left")
+    V.text(ax, p, 0.0, -0.8, f"ans = {ans}", color="indigo", size=11, ha="left", weight="bold")
+
+
+V.animate(ha_frame, len(ha_frames), captions=ha_caps, interval=1100)
+```
+
+Counting subarrays of $[1,2,3,-2,4,1]$ that sum to $k = 3$. At each step the running prefix moves on, one lookup asks how many earlier prefixes equal $P - k$, and only then is the new prefix added to `seen`. The four hits correspond to the ranges $[0,2)$, $[2,3)$, $[1,4)$ and $[3,6)$, but the algorithm never lists them: it only counts.
+
+:::
+
+### Longest or shortest instead of how many
+
+The map can remember something other than a count. If the question is the **longest** subarray with sum $k$, the best left end for a right end $j$ is the *earliest* index $i$ with $P[i] = P[j] - k$, so store each prefix value's **first** index and never overwrite it. For the **shortest**, store the *latest* index instead and overwrite every time. Same walk, same $O(n)$, different thing stored — which is the whole content of practice problems such as LC 525 and LC 523 in the ladder.
+
+```{python}
+def longest_with_sum(a, k):
+    first = {0: 0}                       # prefix value -> FIRST index where it occurs
+    p = best = 0
+    for j, x in enumerate(a):
+        p += x                           # p == P[j+1]
+        if p - k in first:
+            best = max(best, j + 1 - first[p - k])
+        first.setdefault(p, j + 1)       # never overwrite: earlier is better for "longest"
+    return best
+
+
+def longest_with_sum_brute(a, k):
+    n = len(a)
+    return max((j - i for i in range(n) for j in range(i + 1, n + 1) if sum(a[i:j]) == k), default=0)
+
+
+for _ in range(600):
+    a = [random.randint(-4, 4) for _ in range(random.randint(0, 11))]
+    k = random.randint(-5, 5)
+    assert longest_with_sum(a, k) == longest_with_sum_brute(a, k)
+assert longest_with_sum([1, -1, 5, -2, 3], 3) == 4            # [1, -1, 5, -2]
+print("first-index map gives the longest range")
+```
+
+## A5. Prefix and suffix of other operations: XOR, product, min, max {#sec-pref-other}
+
+::: {.callout-note title="In plain words"}
+Everything in @sec-pref-def secretly relied on being able to *undo* the accumulation: $P[r]-P[\ell]$ works because subtraction reverses addition. So before you build a prefix table for some other operation, ask one question — **is there an inverse?** XOR: yes, it is its own inverse. Product: division, but zeros and modular arithmetic complicate it. Minimum, maximum, GCD: no inverse at all, so a prefix table cannot answer a middle range — only ranges that start at an end.
+:::
+
+Say it precisely. A prefix table answers an arbitrary range query in $O(1)$ when the operation forms a **group**: it is associative, has an identity, and every element has an inverse. Addition qualifies (identity $0$, inverse $-x$), so @eq-pref-range applies. So does XOR (identity $0$, every element is its own inverse since $x \oplus x = 0$):
+
+$$\bigoplus_{k=\ell}^{r-1} a[k] \;=\; P[\ell] \oplus P[r], \qquad P[i+1] = P[i] \oplus a[i].$$ {#eq-pref-xor}
+
+Notice the range formula uses $\oplus$ on *both* ends — no subtraction exists to get wrong, and the same code shape carries over.
+
+Multiplication needs division as its inverse. With non-zero integers the range product $P[r] / P[\ell]$ is an exact division, but two things go wrong in practice. A single $0$ makes every later prefix product $0$ and destroys the information needed to recover a range; and the products themselves overflow almost immediately. The interview-standard fix (@sec-pref-p5-a) sidesteps division entirely by combining a **prefix** product with a **suffix** product. Under a modulus, dividing means multiplying by a modular inverse, which exists only when the divisor is coprime to the modulus — a number-theory topic for later.
+
+Minimum, maximum and GCD are the interesting failures. They are associative and have an identity, but nothing undoes them: from $\max(a[0{:}r])$ you cannot recover $\max(a[\ell{:}r])$, because the value you would need to "un-take" may not even be in the range. Two responses, and they are worth telling apart in an interview:
+
+- **Restrict the ranges.** Prefix minima/maxima and **suffix** minima/maxima are still perfectly good, because a range anchored at an end needs no undoing. Walking from the right, the running maximum is exactly what identifies *leaders* — elements that are at least everything to their right.
+- **Change data structure.** For arbitrary ranges with no inverse you need a **sparse table** (the $\max$-over-sliding-powers-of-two idempotent trick), a **segment tree**, or a **monotonic deque** for sliding windows. All appear later in this book; the point here is knowing *why* you are being pushed off prefix sums.
+
+::: {#fig-pref-ops}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    cells = [
+        ["operation", "identity", "inverse", "any range in O(1)?"],
+        ["sum +", "0", "-x", "yes  (P[r]-P[l])"],
+        ["xor ^", "0", "itself", "yes  (P[r]^P[l])"],
+        ["product *", "1", "/x (zero!)", "only with care"],
+        ["min / max", "+inf/-inf", "none", "no - anchor at an end"],
+        ["gcd", "0", "none", "no - use sparse table"],
+    ]
+    colors = {(1, 3): "green", (2, 3): "green", (3, 3): "amber",
+              (4, 3): "red", (5, 3): "red", (4, 2): "red", (5, 2): "red"}
+    V.grid(ax, p, cells, colors=colors, cell_w=2.35)
+V.show(draw)
+```
+
+The one-question test, tabulated. Green rows are groups: a prefix table answers any range. The amber row needs care (zeros, and modular division). The red rows have no inverse, so a prefix table only serves ranges that touch an end — and everything else is a different data structure. @sec-pref-other.
+
+:::
+
+```{python}
+def prefix_xor(a):
+    p = [0]
+    for x in a:
+        p.append(p[-1] ^ x)
+    return p
+
+
+def xor_range(p, l, r):                # xor of a[l:r], eq-pref-xor
+    return p[l] ^ p[r]
+
+
+def xor_brute(a, l, r):
+    out = 0
+    for x in a[l:r]:
+        out ^= x
+    return out
+
+
+for _ in range(800):
+    a = [random.randint(0, 60) for _ in range(random.randint(0, 12))]
+    p = prefix_xor(a)
+    for _ in range(20):
+        l = random.randint(0, len(a)); r = random.randint(l, len(a))
+        assert xor_range(p, l, r) == xor_brute(a, l, r)
+
+px = prefix_xor([1, 3, 4, 8])
+print("prefix xor of [1,3,4,8]:", px)
+assert xor_range(px, 0, 2) == 2 and xor_range(px, 1, 3) == 7
+print("xor prefix table agrees with the nested loop")
+
+
+def leaders(a):
+    """Indices whose value is >= every value to their right: a suffix maximum."""
+    out, best = [], -math.inf
+    for i in range(len(a) - 1, -1, -1):
+        if a[i] >= best:
+            out.append(i)
+            best = a[i]
+    return out[::-1]
+
+
+assert leaders([16, 17, 4, 3, 5, 2]) == [1, 4, 5]      # the values 17, 5, 2
+assert leaders([1, 2, 3]) == [2]
+assert leaders([5, 5, 5]) == [0, 1, 2]
+print("leaders (suffix maxima) OK")
+```
+
+`max` has no inverse, yet `leaders` is $O(n)$ with $O(1)$ state — because every range it looks at is anchored at the right end. The same "anchor at an end" idea powers the split tests of @sec-pref-split, where a prefix maximum compared against a suffix minimum decides whether every left value is at most every right value.
+
+### Mixing the two: a prefix sum against a prefix minimum
+
+The two kinds of table combine. The **maximum subarray sum** asks for the largest $P[j] - P[i]$ with $i < j$. For a fixed right end $j$ the best left end is the one with the *smallest* earlier prefix, and "smallest earlier prefix" is a prefix **minimum** — anchored at the left end, so it needs no inverse. One pass that carries the running prefix and the running minimum of the prefixes seen so far solves it in $O(n)$ time and $O(1)$ space. This is the same answer Kadane's algorithm gives, read through prefix sums, and it explains why that algorithm works: resetting the running sum when it goes negative is exactly the moment a new prefix minimum appears.
+
+```{python}
+def max_subarray(a):
+    """Largest sum of a non-empty subarray: max over j of P[j] - min(P[0..j-1])."""
+    p, low, best = 0, 0, -math.inf        # low = min of the prefixes before the current one
+    for x in a:
+        p += x
+        best = max(best, p - low)         # best range ending here
+        low = min(low, p)                 # now this prefix may serve as a left end
+    return best
+
+
+for _ in range(600):
+    a = [random.randint(-9, 9) for _ in range(random.randint(1, 12))]
+    assert max_subarray(a) == max(sum(a[i:j]) for i in range(len(a)) for j in range(i + 1, len(a) + 1))
+assert max_subarray([-2, 1, -3, 4, -1, 2, 1, -5, 4]) == 6       # [4, -1, 2, 1]
+assert max_subarray([-3, -1, -2]) == -1                          # all negative: one cell
+print("max subarray = prefix minus prefix-minimum")
+```
+
+The order of the two updates matters for the same reason as in @sec-pref-hash: the answer is computed from prefixes *strictly before* the current one, so `low` is updated after `best`, and the subarray is never empty.
+
+## A6. Split points: cutting the array into parts {#sec-pref-split}
+
+::: {.callout-note title="In plain words"}
+A *cut* is a place to put scissors between two elements. Cutting after position $i-1$ gives parts $[0,i)$ and $[i,n)$. Comparing their sums used to need two tables; it needs one, because the right part is "everything the total has that the left part does not": $\text{right} = \text{total} - \text{left}$.
+:::
+
+With $P$ from @eq-pref-build, the left part of cut $i$ is $P[i]$ and the right part is $P[n] - P[i]$. So a test like "left sum equals right sum" (@sec-pref-p1-b) or "left sum is at least the right sum" (@sec-pref-p6-a) is a comparison you can evaluate *while scanning*, keeping only `left` and `total` — no table at all, $O(1)$ space. That is @sec-arr-inplace's argument in a new costume: the second array was never necessary here, only the running value.
+
+The cases worth naming, all the same walk with a different comparison:
+
+| Question | Test at cut $i$ | Notes |
+|---|---|---|
+| Pivot / middle index | $P[i] = P[n] - P[i{+}1]$ | the element at $i$ itself is excluded from both sides |
+| Left at least right | $2P[i] \ge P[n]$ | count the cuts that pass (@sec-pref-p6-a) |
+| Three non-empty parts, equal sums | two cuts $i < j$ with $P[i] = \tfrac13 P[n]$ and $P[j] = \tfrac23 P[n]$ | scan $j$, counting the earlier good $i$ (code below) |
+| First part $=$ last part, maximised | two cuts with $P[i] = P[n] - P[j]$ | two pointers when values are positive (@sec-pref-p6-b) |
+| Every left value $\le$ every right value | $\max a[0:i) \le \min a[i:n)$ | prefix-max table against suffix-min table (code below) |
+
+Two habits prevent bugs. First, decide whether a cut is *before* index $i$ or *after* it and say so in a comment — "cut $i$ = parts $[0,i)$ and $[i,n)$" makes both endpoints and the $n-1$ possible cuts fall out. Second, when the target is a fraction of the total, check divisibility first: if $P[n]$ is not divisible by $3$, three equal-sum parts cannot exist and the answer is $0$ before any scanning.
+
+**Counting three equal parts.** With two cuts the naive count is a double loop over $(i, j)$. Fix the *second* cut $j$ instead: it needs $P[j] = \tfrac23 P[n]$, and the number of first cuts that pair with it is the number of earlier positions $i < j$ with $P[i] = \tfrac13 P[n]$ — a running counter, exactly the "tally what you have passed" move of @sec-pref-hash. This works with negative values too, because nothing is searched; and it handles the all-zero array, where every cut is good and the answer is $\binom{n-1}{2}$, without a special case.
+
+```{python}
+def three_equal_parts(a):
+    """Number of ways to cut a into three non-empty parts with equal sums."""
+    n, total = len(a), sum(a)
+    if total % 3:
+        return 0
+    third = total // 3
+    p = build_prefix(a)
+    good_first, ans = 0, 0
+    for j in range(2, n):                  # second cut: parts [0,i) [i,j) [j,n), 1 <= i < j < n
+        if p[j - 1] == third:              # cut i = j - 1 becomes available
+            good_first += 1
+        if p[j] == 2 * third:
+            ans += good_first
+    return ans
+
+
+def three_equal_parts_brute(a):
+    n = len(a)
+    return sum(1 for i in range(1, n) for j in range(i + 1, n)
+               if sum(a[:i]) == sum(a[i:j]) == sum(a[j:]))
+
+
+for _ in range(600):
+    a = [random.randint(-3, 3) for _ in range(random.randint(1, 10))]
+    assert three_equal_parts(a) == three_equal_parts_brute(a)
+assert three_equal_parts([1, 2, 3, 0, 3]) == 2       # [1,2] [3] [0,3]  and  [1,2] [3,0] [3]
+assert three_equal_parts([0, 0, 0, 0]) == 3          # C(3, 2)
+print("three equal parts: count the good first cuts as you pass them")
+
+
+def sorted_split_cuts(a):
+    """Cuts i (1 <= i < n) with max(a[:i]) <= min(a[i:]): sorting each part sorts the whole."""
+    n = len(a)
+    pre_max = [-math.inf] * (n + 1)        # pre_max[i] = max of a[0:i)
+    for i in range(n):
+        pre_max[i + 1] = max(pre_max[i], a[i])
+    suf_min = [math.inf] * (n + 1)         # suf_min[i] = min of a[i:n)
+    for i in range(n - 1, -1, -1):
+        suf_min[i] = min(suf_min[i + 1], a[i])
+    return [i for i in range(1, n) if pre_max[i] <= suf_min[i]]
+
+
+for _ in range(400):
+    a = [random.randint(0, 6) for _ in range(random.randint(1, 9))]
+    assert sorted_split_cuts(a) == [i for i in range(1, len(a)) if max(a[:i]) <= min(a[i:])]
+assert sorted_split_cuts([5, 0, 3, 8, 6]) == [3]     # [5,0,3] | [8,6]
+print("prefix max vs suffix min: no inverse needed, both tables are anchored at an end")
+```
+
+The second function is @sec-pref-other's "anchor at an end" put to work: neither max nor min can be undone, but a cut only ever asks about a prefix and a suffix, so two one-directional tables answer every cut in $O(1)$.
+
+::: {#fig-pref-split}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [1, 7, 3, 6, 5, 6]
+    pref = build_prefix(a)
+    total = pref[-1]
+    rows = []
+    for i in range(1, len(a)):
+        left, right = pref[i], total - pref[i]
+        pivot = 3
+        rows.append(dict(values=a, index=False,
+                         regions=[(0, i, "green", f"left {left}"),
+                                  (i, len(a), "pink", f"right {right}")],
+                         colors=({pivot: "amber"} if i == pivot + 1 else {}),
+                         label=f"cut {i}"))
+    V.trace(ax, p, rows, gap=4.0)
+V.show(draw)
+```
+
+Every way to cut $[1,7,3,6,5,6]$ into two non-empty parts. The sums come from the same table the range queries use. Cut $3$ has $11$ on its left and cut $4$ has $11$ on its right, so the one element between them — index $3$, amber in the cut-4 row — has $11$ on each side once it is excluded from both: it is the pivot of @sec-pref-p1-b.
+
+:::
+
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that say "use me", a boxed template with its invariant, and its complexity. Then its problems are solved completely: statement, the one key observation, brute force refined into the pattern, runnable Python stress-tested against brute force, matching C++, complexity, and edge cases.
+
+
+## Pattern 1: Range sum queries {#sec-pref-p1}
+
+**Where we are.** The lessons built one table and its inverse. The patterns use them with one new idea each: answer range sums from the table (this pattern), count ranges by looking up earlier prefixes in a hash map (Pattern 2), run the table backwards to apply range updates (Pattern 3), move to two dimensions (Pattern 4), replace the sum by another operation (Pattern 5), and cut the array where the sums balance (Pattern 6).
+
+**Recognise it.** An array that never changes (**static**, **immutable**, "no updates") and many questions about contiguous pieces of it — a sum, an average, "is this prefix's sum equal to that suffix's". Both $n$ and the number of queries $q$ are $\ge 10^5$, which is the tell: $O(nq)$ cannot fit the budget of @sec-arr-cost, so the intended solution must be $O(n + q)$ — one table, then $O(1)$ per question.
+
+::: {.callout-important title="Template"}
+Build the table with @eq-pref-build, then answer every question with @eq-pref-range. Almost everything else in this pattern is bookkeeping about index conventions.
+
+```text
+P[0] = 0
+for i in range(n):
+    P[i + 1] = P[i] + a[i]          # P[i] == sum of a[0 : i]
+
+def query(l, r):                    # half-open [l, r)
+    return P[r] - P[l]
+```
+
+**Invariant.** For every $i \in [0, n]$, $P[i]$ equals the sum of the cells with index below $i$. A judge that numbers positions from $1$ and includes both ends asks for $[x, y]$; translate once, at the boundary, into $[x-1, y)$, so the answer is $P[y] - P[x-1]$.
+:::
+
+**Complexity.** Time $O(n + q)$: one pass to build, two reads and a subtraction per query. Space $O(n)$. Watch the *magnitude* too: a sum of $2\cdot10^5$ values each up to $10^9$ is $2\cdot10^{14}$, which a 32-bit `int` cannot hold (@sec-arr-cost) — the table itself must be `long long`.
+
+::: {#fig-pref-p1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [1, 2, 3, 4, 5]
+    pref = build_prefix(a)
+    queries = [(1, 2), (2, 4), (3, 5)]        # 1-based inclusive, as CSES gives them
+    cells = [["query x..y", "P[y]", "P[x-1]", "difference"]]
+    for x, y in queries:
+        cells.append([f"{x}..{y}", str(pref[y]), str(pref[x - 1]),
+                      str(pref[y] - pref[x - 1])])
+    V.grid(ax, p, cells, colors={(0, c): "muted" for c in range(4)}, cell_w=2.3)
+    V.text(ax, p, 2.0, -4.5, "a = [1,2,3,4,5] -> P = [0,1,3,6,10,15]", color="muted", size=9)
+V.show(draw)
+```
+
+Three queries of CSES 1646 worked from one table. The middle two columns are the only cells touched, and the last column is the answer — which the brute-force sums confirm is exactly $\sum a[x-1: y]$. @sec-pref-p1-a.
+
+:::
+
+{{< include ../problems/cses-1646-static-range-sum-queries/problem.qmd >}}
+
+[**From many queries to one scan.** Static Range Sum answers many queries from a built table. Find Pivot Index needs only one running sum and the total, because each candidate pivot is one query against the whole array.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0724-find-pivot-index/problem.qmd >}}
+
+## Pattern 2: Prefix sums with a hash map {#sec-pref-p2}
+
+**From answering a range to counting them.** In Pattern 1 the range is given. When the question is how many ranges have some sum, we turn the condition on a range into a condition on two prefixes, and a hash map counts the earlier prefixes that match.
+
+**Recognise it.** The task is to **count** subarrays whose sum has a property — equal to $k$, divisible by $k$, equal to the subarray's own length, "the two kinds are balanced". The array may contain negatives (so a sliding window built on the running sum of @sec-arr-scan cannot work), and $n$ is up to $10^5$, so the $O(n^2)$ enumeration of @sec-arr-counts is out. The signature move is rewriting a condition on a *range* as a condition on *two prefix values*.
+
+::: {.callout-important title="Template"}
+Walk the array keeping the running prefix `p`; the hash map turns "how many earlier prefixes look like this?" into one lookup, per @eq-pref-hash.
+
+```text
+seen[identity] = 1                 # the empty prefix is a legal left end
+p = 0; ans = 0
+for x in a:
+    p = p + x                      # p is now P[j+1]
+    ans = ans + seen[key(p)]       # key(p) = p - k, or p mod k, ...
+    seen[p] = seen[p] + 1
+```
+
+**Invariant.** Before processing index $j$, `seen[v]` counts the prefix indices $i \le j$ with $P[i]=v$. So `seen[key(p)]` is exactly the number of left ends $i$ for which the range $[i, j{+}1)$ passes the test — and the answer never needs the ranges themselves, only their count.
+:::
+
+**Complexity.** Time $O(n)$ expected with a hash map, or $O(n + k)$ with a bucket array when the key is a remainder mod $k$. Space $O(n)$ for the map, $O(k)$ for the buckets. Note what this pattern does **not** do: it counts. If the question asks for the longest or shortest such subarray, you need the map to store *first* indices instead of counts.
+
+::: {#fig-pref-p2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [1, 2, 3, -2, 4, 1]
+    k = 3
+    seen, pref, ans = defaultdict(int), 0, 0
+    seen[0] = 1
+    cells = [["j", "x", "P[j+1]", "seen[P-k]", "ans", "seen"]]
+    for j, x in enumerate(a):
+        pref += x
+        before = seen[pref - k]
+        ans += before
+        seen[pref] += 1
+        cells.append([str(j), str(x), str(pref), str(before), str(ans),
+                      "{" + ", ".join(f"{v}:{c}" for v, c in sorted(seen.items())) + "}"])
+    V.grid(ax, p, cells, colors={(0, c): "muted" for c in range(6)}, cell_w=1.75)
+V.show(draw)
+```
+
+The whole of Subarray Sum Equals K, one row per element, generated by running the algorithm. The fourth column is the lookup `seen[P-k]` — how many left ends are legal *right now* — and the last column is the map that makes it one operation. Four rows find exactly one legal left end each, so the answer is $4$. @sec-pref-p2-a.
+
+:::
+
+{{< include ../problems/lc-0560-subarray-sum-equals-k/problem.qmd >}}
+
+[**From an exact sum to a remainder.** Subarray Sum Equals K looks up the prefix $P - k$. Divisible by K needs prefixes that are equal modulo $k$, so the key becomes $P \bmod k$, and with only $k$ keys the map becomes an array.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0974-subarray-sums-divisible-by-k/problem.qmd >}}
+
+[**From a ready-made sum to a rewritten one.** Both problems so far test the sum directly. In Good Subarrays the condition compares a sum with a length, and subtracting 1 from every digit rewrites it as "sum equals zero".]{.flow-bridge}
+
+
+{{< include ../problems/cf-1398c-good-subarrays/problem.qmd >}}
+
+## Pattern 3: Difference arrays {#sec-pref-p3}
+
+**From reading ranges to writing them.** Patterns 1 and 2 read sums over ranges of a fixed array. Now the ranges are updates, "add $v$ to every cell of $[l, r]$", and the difference array, the inverse of the prefix sum, applies each one in $O(1)$.
+
+**Recognise it.** A long list of *updates* of the form "add $v$ to every cell in $[l,r]$" followed by exactly **one** reading of the result — or a question like "how many of these intervals cover each point?". The giveaway is that no query interleaves with the updates: nothing asks for a value in the middle. If it did you would need a data structure (a Fenwick tree or a segment tree, both later volumes); if it doesn't, @sec-pref-diff turns $O(n)$ per update into $O(1)$.
+
+::: {.callout-important title="Template"}
+Mark the start and the end of every update, then take one prefix sum at the end.
+
+```text
+d = [0] * (n + 1)
+for (l, r, v) in updates:            # half-open [l, r)
+    d[l] += v                        # the value turns on here
+    d[r] -= v                        # and turns off here
+a = []; run = 0
+for i in range(n):
+    run += d[i]
+    a.append(run)                    # run == value of cell i
+```
+
+**Invariant.** After processing $i$ cells of `d`, `run` equals the sum of $v$ over every update whose range contains $i$ — because each such update contributed $+v$ at or before $i$ and its $-v$ only after $i$.
+:::
+
+**Complexity.** Time $O(n + u)$ for $u$ updates: two writes each, one pass to rebuild. Space $O(n)$. Compare the naive loop over each range: $O(\sum(r-l))$, which is $O(nu)$ in the worst case.
+
+::: {#fig-pref-p3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    n = 5
+    bookings = [(1, 2, 10), (2, 3, 20), (2, 5, 25)]
+    d = [0] * (n + 1)
+    rows = [dict(values=list(d), colors={i: "muted" for i in range(n + 1)},
+                 index=False, label="d, empty")]
+    for first, last, seats in bookings:
+        d[first - 1] += seats
+        d[last] -= seats
+        rows.append(dict(values=list(d), colors={first - 1: "green", last: "red"},
+                         index=False, label=f"book [{first}..{last}] +{seats}"))
+    out, run = [], 0
+    for i in range(n):
+        run += d[i]
+        out.append(run)
+    rows.append(dict(values=out, colors={i: "indigo" for i in range(n)},
+                     index=False, label="prefix = answer"))
+    V.trace(ax, p, rows, gap=3.7)
+    V.text(ax, p, 7.2, -18.5, "the -25 sits in cell 5:\nnever read, but it keeps\nd inside the array",
+           color="muted", size=8, ha="left")
+V.show(draw)
+```
+
+Corporate Flight Bookings, five seats and three bookings. Each booking writes exactly two numbers into `d` (green where the value turns on, red where it turns off) and the last row — one prefix pass — is the answer. The sixth cell of `d` holds a $-25$ that no seat ever sees: it exists so that the prefix stops growing (@sec-pref-p3-a).
+
+:::
+
+::: {#fig-pref-anim-diff}
+
+```{python}
+#| echo: false
+da_n, da_ups = 6, [(0, 3, 2), (2, 5, 3), (1, 2, 1)]          # half-open [l, r), add v
+da_d = [0] * (da_n + 1)
+da_frames, da_caps = [(list(da_d), [], None)], ["start: d is all zeros"]
+for l, r, v in da_ups:
+    da_d[l] += v
+    da_d[r] -= v
+    da_frames.append((list(da_d), [], (l, r)))
+    da_caps.append(f"update [{l}, {r}) += {v}: d[{l}] += {v}, d[{r}] -= {v}")
+run, da_out = 0, []
+for i in range(da_n):
+    run += da_d[i]
+    da_out.append(run)
+    da_frames.append((list(da_d), list(da_out), None))
+    da_caps.append(f"sweep: run += d[{i}] = {da_d[i]}, so cell {i} = {run}")
+brute = [sum(v for l, r, v in da_ups if l <= i < r) for i in range(da_n)]
+assert da_out == brute == [2, 3, 5, 3, 3, 0] and len(da_frames) <= 15
+
+def da_frame(ax, p, k):
+    d, out, mark = da_frames[k]
+    row = [str(v) for v in out] + [""] * (da_n + 1 - len(out))
+    colors = {}
+    if mark:
+        colors = {(0, mark[0]): "green", (0, mark[1]): "red"}
+    elif out:
+        colors = {(0, len(out) - 1): "indigo", (1, len(out) - 1): "indigo"}
+    V.grid(ax, p, [[str(v) for v in d], row], row_labels=["d", "a"], colors=colors,
+           col_labels=[str(i) for i in range(da_n + 1)])
+
+V.animate(da_frame, len(da_frames), captions=da_caps, interval=1000)
+del l, r, v, run, i, brute                # keep the chapter's namespace clean
+```
+
+A difference array in two phases. Each update touches only two cells of `d` (green: the value turns on, red: it turns off), whatever the length of its range. One prefix sum at the end (the sweep) spreads every update over its range; the result matches adding each update cell by cell.
+
+:::
+
+{{< include ../problems/lc-1109-corporate-flight-bookings/problem.qmd >}}
+
+[**From one level of updates to two.** Corporate Flight Bookings applies a list of range updates once. In Greg and Array the updates are themselves applied in ranges, so the same trick runs twice: first over the operations, then over the array.]{.flow-bridge}
+
+
+{{< include ../problems/cf-295a-greg-and-array/problem.qmd >}}
+
+## Pattern 4: Two-dimensional prefix sums {#sec-pref-p4}
+
+**From a line to a grid.** Everything so far lived on one axis. On a grid the same table holds the sums of rectangles anchored at the corner, and inclusion–exclusion turns any rectangle into four reads.
+
+**Recognise it.** A grid, static or read-only, and questions about rectangles: "sum of this sub-rectangle", "is this square's average at least $x$", "largest square under a budget". If a brute-force answer loops over the rows *and* columns of the query, build the table once and answer in four reads.
+
+::: {.callout-important title="Template"}
+One extra row and one extra column of zeros, then @eq-pref-2d-build and @eq-pref-2d-query.
+
+```text
+for i in range(m):
+    rowsum = 0
+    for j in range(n):
+        rowsum += a[i][j]
+        P[i+1][j+1] = P[i][j+1] + rowsum
+
+def rect(r1, c1, r2, c2):           # half-open [r1,r2) x [c1,c2)
+    return P[r2][c2] - P[r1][c2] - P[r2][c1] + P[r1][c1]
+```
+
+**Invariant.** $P[i][j]$ is the sum of the $i\times j$ block anchored at the top-left corner, so the four reads of a query subtract two strips and give back the corner they took twice.
+:::
+
+**Complexity.** Build $O(mn)$; query $O(1)$ instead of $O(mn)$ — the whole rectangle becomes four array reads and three signs. Space $O(mn)$, which for a $300\times300$ grid is trivial and for a $10^4\times10^4$ one is not: then stream the rows and keep only the running column sums.
+
+::: {#fig-pref-p4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]]
+    pref = build_prefix2d(a)
+    cells = [[str(v) for v in row] for row in pref]
+    corners = [(4, 3), (1, 3), (4, 1), (1, 1)]        # the four reads of one query
+    colors = {rc: "indigo" for rc in corners}
+    colors[(0, 0)] = "muted"
+    colors[(4, 4)] = "green"
+    V.grid(ax, p, cells, colors=colors, cell_w=1.55)
+    got = pref[4][3] - pref[1][3] - pref[4][1] + pref[1][1]
+    direct = sum(a[i][j] for i in range(1, 4) for j in range(1, 3))
+    assert got == direct
+    V.text(ax, p, 0.0, -5.7,
+           f"query rows 1..3, cols 1..2:  {pref[4][3]} - {pref[1][3]} "
+           f"- {pref[4][1]} + {pref[1][1]} = {got}",
+           color="muted", size=9, ha="left")
+    V.text(ax, p, 0.0, -6.7, f"direct double loop: {direct}          P[4][4] = {pref[4][4]} = total",
+           color="muted", size=9, ha="left")
+V.show(draw)
+```
+
+The table $P$ for the $4\times4$ grid $1\dots16$, built by the row-sum recurrence. The four indigo cells are all that a query over rows $1..3$, columns $1..2$ reads: take the big anchored block, subtract the strip above and the strip to the left, give back the corner that was subtracted twice. The green cell is $P[4][4]$, the sum of everything. @sec-pref-p4-a.
+
+:::
+
+{{< include ../problems/lc-0304-range-sum-query-2d-immutable/problem.qmd >}}
+
+[**From answering rectangles to searching for one.** Range Sum Query 2D answers given rectangles. Maximum Side Length must find the largest square under a budget, and because the cells are non-negative, the side can be binary searched on top of the four-read query.]{.flow-bridge}
+
+
+{{< include ../problems/lc-1292-maximum-side-length-of-a-square-with-sum-less-than-o/problem.qmd >}}
+
+## Pattern 5: Prefix and suffix of other operations {#sec-pref-p5}
+
+**From sums to other operations.** A prefix table works for any operation, but it was subtraction that let one table answer every range. Product with zeros, min and max have no usable inverse and need a prefix table and a suffix table; XOR is its own inverse and keeps the one-table shape.
+
+**Recognise it.** The aggregation is not a sum: a range **XOR**, a **product**, a running **minimum/maximum**, a "for each element, combine everything to its left / everything to its right" request. Ask one question before coding (@sec-pref-other): *does the operation have an inverse?* XOR does (itself), multiplication has division but zeros break it, and $\min$/$\max$ have no inverse at all.
+
+::: {.callout-important title="Template"}
+Two shapes, chosen by the answer to that question.
+
+```text
+# INVERSE EXISTS (xor, +, product with no zeros): one table, O(1) per range
+P[0] = identity
+for i:  P[i+1] = P[i] (op) a[i]
+range(l, r) = inverse( P[l] , P[r] )
+
+# NO INVERSE (min, max, product-with-zeros, gcd-ish, "except self"):
+# two tables, and the answer is a combination of a prefix and a SUFFIX
+L[0] = identity
+for i:  L[i+1] = L[i] (op) a[i]          # everything up to i
+R[n] = identity
+for i from n-1 down to 0:  R[i] = R[i+1] (op) a[i]     # everything from i
+answer for cell i = combine(L[i], R[i])
+```
+
+**Invariant.** $L[i]$ aggregates the cells strictly before $i$ and $R[i]$ the cells at and after $i$ — so combining them never double-counts $a[i]$ itself, which is the whole trick behind "except self" problems.
+:::
+
+**Complexity.** Both shapes are $O(n)$ precompute plus $O(1)$ per question. The inverse version uses one table. The prefix/suffix version needs both directions of information, but not always both *tables*: when each answer is consumed as soon as it is formed, one direction can live in the output array and the other in a single running variable, as the last form of @sec-pref-p5-a shows. What cannot be removed is the second *pass* — a "one-pass" product-with-division solution is a zero-handling bug waiting to happen.
+
+::: {#fig-pref-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [1, 2, 3, 4]
+    n = len(a)
+    L, R = [1] * n, [1] * n
+    for i in range(1, n):
+        L[i] = L[i - 1] * a[i - 1]
+    for i in range(n - 2, -1, -1):
+        R[i] = R[i + 1] * a[i + 1]
+    out = [L[i] * R[i] for i in range(n)]
+    rows = [
+        dict(values=a, index=False, colors={i: "muted" for i in range(n)},
+             label="a"),
+        dict(values=L, index=False, colors={i: "cyan" for i in range(n)},
+             label="L: product left of i"),
+        dict(values=R, index=False, colors={i: "amber" for i in range(n)},
+             label="R: product right of i"),
+        dict(values=out, index=False, colors={i: "indigo" for i in range(n)},
+             label="answer = L * R"),
+    ]
+    V.trace(ax, p, rows, gap=3.7)
+V.show(draw)
+```
+
+Product of Array Except Self on $[1,2,3,4]$, drawn from the algorithm's own arrays. The forward pass builds `L`, the backward pass builds `R`, and the answer is a cell-by-cell multiply — no division, so the zeros in a test case cannot break it. Note that `L` is a prefix table and `R` is the same idea read backwards: @sec-pref-other calls this "two running totals that never meet". @sec-pref-p5-a.
+
+:::
+
+{{< include ../problems/lc-0238-product-of-array-except-self/problem.qmd >}}
+
+[**From two tables back to one.** Product Except Self cannot divide, so it needs a prefix table and a suffix table. XOR undoes itself, so one prefix XOR table answers any range, exactly like a prefix sum.]{.flow-bridge}
+
+
+{{< include ../problems/lc-1310-xor-queries-of-a-subarray/problem.qmd >}}
+
+## Pattern 6: Split points {#sec-pref-p6}
+
+**From given ranges to choosing the cut.** In every pattern so far the ranges were given or counted. Now we choose where to cut the array so that the parts' sums satisfy a relation, and the prefix sum makes each candidate cut $O(1)$.
+
+**Recognise it.** The task is a **cut**: divide the array into two or three contiguous parts whose aggregates satisfy a relation — equal, one at least the other, balanced. A pivot, a fair split, "split the array so that the left sum is at least the right". Once the prefix table exists, every cut position is two reads, so all $n-1$ cuts cost $O(n)$.
+
+::: {.callout-important title="Template"}
+Decide whether the element *at* the cut belongs to the left part, the right part, or neither, and write that down once.
+
+```text
+total = P[n]
+# two parts, left = a[0:k], right = a[k:n],  k in 1..n-1
+for k in range(1, n):
+    left, right = P[k], total - P[k]
+    test(left, right)
+
+# three parts, left = a[0:i], middle = a[i:j], right = a[j:n]
+for i in range(n + 1):
+    for j in range(i, n + 1):
+        test(P[i], P[j] - P[i], total - P[j])      # O(n) when the predicate is monotone
+```
+
+**Invariant.** $P[k]$ is the whole left part and `total - P[k]` the whole right part, so a cut test never re-sums anything; and because the two sum to `total`, "left $=$ right" is the same test as "$P[k] = \text{total}/2$".
+:::
+
+**Complexity.** $O(n)$ for two-part tests, $O(n)$ or $O(n\log n)$ for three-part tests, versus $O(n^2)$ or $O(n^3)$ for re-summing each side. The space is one table, or zero if you keep a running `left` and the total.
+
+::: {#fig-pref-p6}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [10, 4, -8, 7]
+    total = sum(a)
+    cells = [["cut k", "left part", "sum", "right part", "sum", "left >= right"]]
+    colors = {}
+    for k in range(1, len(a)):
+        left, right = a[:k], a[k:]
+        ls, rs = sum(left), sum(right)
+        cells.append([str(k), str(left), str(ls), str(right), str(rs),
+                      "yes" if ls >= rs else "no"])
+        colors[(len(cells) - 1, 5)] = "green" if ls >= rs else "red"
+    colors.update({(0, c): "muted" for c in range(6)})
+    assert sum(row[5] == "yes" for row in cells[1:]) == 2
+    V.grid(ax, p, cells, colors=colors, cell_w=1.9)
+    V.text(ax, p, 0.0, -4.8, f"total = {total}; three cuts, two of them pass",
+           color="muted", size=9, ha="left")
+V.show(draw)
+```
+
+Every cut of $[10,4,-8,7]$ for LC 2270, with the sums read from the same running total. Note that the sums are **not** monotone in the cut position — the $-8$ makes the left sum drop from $14$ to $6$ — which is why the code below scans all cuts instead of binary searching for the crossing point. @sec-pref-p6-a.
+
+:::
+
+{{< include ../problems/lc-2270-number-of-ways-to-split-array/problem.qmd >}}
+
+[**From one cut to two.** Number of Ways to Split compares one running sum with a constant. Three Parts has two cuts, and because every value is positive, the two cuts move towards each other, each in one direction only.]{.flow-bridge}
+
+
+Before the full write-up, watch the two cuts move on the sample. The left cut $i$ only steps right; the right cut $j$ only steps left, and only while the right part is still lighter than the left. @fig-pref-anim-cuts is the whole $O(n)$ argument: neither pointer ever turns back.
+
+::: {#fig-pref-anim-cuts}
+
+```{python}
+#| echo: false
+tc_a = [1, 3, 1, 1, 4]
+tc_n, tc_p = len(tc_a), build_prefix(tc_a)
+tc_frames, tc_caps, tc_j, tc_best = [], [], tc_n, 0
+for tc_i in range(tc_n + 1):
+    tc_moves = 0
+    while tc_j > tc_i and tc_p[tc_n] - tc_p[tc_j] < tc_p[tc_i]:
+        tc_j -= 1
+        tc_moves += 1
+    tc_hit = tc_j >= tc_i and tc_p[tc_n] - tc_p[tc_j] == tc_p[tc_i]
+    if tc_hit:
+        tc_best = max(tc_best, tc_p[tc_i])
+    tc_frames.append((tc_i, tc_j, tc_hit, tc_best))
+    if tc_j < tc_i:
+        tc_caps.append(f"i = {tc_i}: left = {tc_p[tc_i]}; j = {tc_j} is already left of i, so no right part can match")
+    else:
+        tc_caps.append(f"i = {tc_i}: left = {tc_p[tc_i]}; j moved {tc_moves} step(s) to {tc_j}, "
+                       f"right = {tc_p[tc_n] - tc_p[tc_j]}" + (f" -> equal, best = {tc_best}" if tc_hit else ""))
+assert tc_best == 5 == max(tc_p[i] for i in range(tc_n + 1) for j in range(i, tc_n + 1)
+                           if tc_p[i] == tc_p[tc_n] - tc_p[j])          # brute force over all cut pairs
+
+
+def tc_frame(ax, p, k):
+    i, j, hit, best = tc_frames[k]
+    regions = []
+    if i > 0:
+        regions.append((0, i, "green", f"left {tc_p[i]}"))
+    if i <= j < tc_n:                      # once j < i the right part would overlap: nothing to draw
+        regions.append((j, tc_n, "pink", f"right {tc_p[tc_n] - tc_p[j]}"))
+    V.array(ax, p, tc_a, regions=regions,
+            pointers=[(i, "i", "indigo", "top"), (j, "j", "pink", "top")] if i != j else [(i, "i = j", "indigo", "top")])
+    V.text(ax, p, 0.0, -2.0, f"best = {best}" + ("   (match)" if hit else ""), color="indigo", size=10,
+           ha="left", weight="bold")
+
+
+V.animate(tc_frame, len(tc_frames), captions=tc_caps, interval=1100)
+```
+
+Three Parts of the Array on $[1,3,1,1,4]$. Each frame advances the left cut $i$ by one; the right cut $j$ then slides left only as far as it must. Matches occur at $i = 0$ (both parts empty, sum $0$) and at $i = 3$ ($[1,3,1]$ against $[1,4]$, sum $5$), which is the answer.
+
+:::
+
+{{< include ../problems/cf-1006c-three-parts-of-the-array/problem.qmd >}}
+
+**Looking back.** All six patterns rest on one identity: a range is the difference of two prefixes. Range queries read it, the hash map counts pairs of prefixes that satisfy it, the difference array runs it backwards, the grid applies it on each axis, other operations keep it when they have an inverse, and split points slide one end of it. Even the variations from the lessons are the same identity with a different thing stored: an indicator array turns sums into counts, a modulus keeps the prefixes small, a first-index map turns "how many" into "how long", and a running minimum turns it into "how large". When a new problem talks about many contiguous ranges, the first question is always which two prefixes describe the range — and the second is whether the operation lets you subtract them.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Array never changes; many "sum of this range" questions; $n$ and $q$ both $\ge 10^5$ | Range sum queries | @sec-pref-p1 |
+| **Count** subarrays with sum $=k$, divisible by $k$, equal to their length; negatives present | Prefix sums with a hash map | @sec-pref-p2 |
+| Many "add $v$ to $[l,r]$" updates, and the array is read only once at the end | Difference arrays | @sec-pref-p3 |
+| Grid plus rectangle sums, block averages, "largest square under budget" | Two-dimensional prefix sums | @sec-pref-p4 |
+| The aggregation is XOR / product / min / max, or "everything except me" | Prefix and suffix of other operations | @sec-pref-p5 |
+| Cut the array into two or three parts whose sums are equal, ordered, or balanced | Split points | @sec-pref-p6 |
+| One prefix is ever live (a pivot, a running comparison) | Drop the table, keep a scalar | @sec-pref-p1-b, @sec-pref-p6-a |
+| The predicate flips as you scan (duplicates, negatives, zeros) | No binary search: scan all cut points | @sec-pref-p6-a, @sec-pref-p6-b |
+| "How many cells in $[\ell, r)$ have property X", many queries | Prefix counts of an indicator array | @sec-pref-def |
+| Answer "modulo $10^9+7$", or sums too large for 64 bits | Prefix sums stored modulo $M$, subtract with $+M$ | @sec-pref-def |
+| **Longest** / **shortest** subarray with a given sum or balance | Prefix map storing first / last index | @sec-pref-hash |
+| Range adds on coordinates up to $10^9$; "maximum overlap" | Sparse difference array: sorted events, sweep | @sec-pref-diff |
+| Best subarray sum, "max of $P[j] - P[i]$ with $i<j$" | Prefix sum against a running prefix minimum | @sec-pref-other |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Forgetting the seed `seen[0] = 1`** when counting with a hash map: every qualifying subarray that starts at index $0$ is then silently lost (@sec-pref-p2-a).
+- **Mixing index conventions inside one function.** Translate the judge's 1-based inclusive input once, at the boundary, into one half-open $[\ell,r)$; a `+1` in two places is where the wrong answers come from (@sec-pref-def, @sec-pref-p1-a).
+- **Allocating the difference array with $n$ cells.** A range that ends at the last cell writes its $-v$ at index $n$; without the spare cell that is out of bounds (@sec-pref-diff, @sec-pref-p3-a).
+- **`int` overflow in the table.** $2\cdot10^5$ values of $10^9$ sum to $2\cdot10^{14}$. Widen the *table*, not just the answer variable, and widen before multiplying (@sec-arr-cost).
+- **Negative remainders in C++:** `cnt[r]` with $r<0$ is undefined behaviour on your own array. Normalise with `((r % k) + k) % k`; Python's `%` already returns a non-negative result (@sec-pref-p2-b).
+- **Using a set instead of a count map.** Two equal prefixes give one subarray; three equal prefixes give three. Counts, not presence (@eq-pref-hash).
+- **Sliding window where a map is required.** As soon as the array has negatives, growing a window can *decrease* its sum, so the window argument breaks; counting needs the prefix map (@sec-arr-scan, @sec-pref-p2-a).
+- **Assuming prefix sums are monotone.** They are monotone only when every element is non-negative. Binary searching a cut point, or running a two-pointer over cuts, is valid for CF 1006C and invalid for LC 2270 (@sec-pref-p6-a, @sec-pref-p6-b).
+- **Division in "product except self".** One zero makes the total product zero and the division undefined; the two-pass prefix/suffix version needs no case analysis (@sec-pref-other, @sec-pref-p5-a).
+- **Sign errors in the 2D inclusion–exclusion.** Both strips are subtracted and the corner is *added* — check the formula on a rectangle that touches row $0$ and column $0$, where all the padding zeros make the answer obvious (@sec-pref-2d).
+- **Rebuilding the table inside the query loop.** The table is built once; if you rebuild it per query you have written $O(nq)$ with extra steps (@sec-pref-p1-a).
+- **Overwriting the first-index map.** For the *longest* range the map must keep the earliest index of each prefix value; `first[p] = j` on every visit silently turns it into the shortest (@sec-pref-hash).
+- **Subtracting reduced prefixes without `+ M`.** Two prefixes stored modulo $M$ can differ by a negative amount; in C++ the result of `%` then stays negative (@eq-pref-mod).
+- **Recording the current prefix before the lookup.** In the counting walk, `seen[p] += 1` must come *after* `ans += seen[p - k]`; the other order pairs a prefix with itself and counts empty ranges when $k = 0$ (@sec-pref-hash).
+:::
+
+## Exercises
+
+**1. [E] How many cells does the prefix table of an $n$-element array have, and what is $P[n]-P[0]$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$n+1$ cells. $P[n]$ is the sum of everything and $P[0]=0$, so $P[n]-P[0]$ is the total — the "whole array" query costs the same as any other, which is the point of the extra cell (@sec-pref-def).
+:::
+
+**2. [E] A judge numbers positions from $1$ and includes both ends: query $x..y$. Write the answer with the table.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$P[y] - P[x-1]$. The inclusive pair $(x,y)$ is the half-open $[x-1,\,y)$ in 0-based indices, and a half-open range is read as "table at the right end minus table at the left end" (@sec-pref-p1-a).
+:::
+
+**3. [E] What does the table give for the empty range $[i,i)$, and why is that worth having?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$P[i]-P[i]=0$, automatically correct. Ranges then compose: $[a,c) = [a,b)+[b,c)$ with no special case for an empty piece, which is what makes split and window code behave (@sec-pref-def, @sec-arr-ranges).
+:::
+
+**4. [E] Which of these get a range table with $O(1)$ queries: $\min$, $\oplus$, $\gcd$, a product when one element may be $0$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Only $\oplus$. The table needs an inverse to cancel the unwanted prefix: XOR cancels itself ($x\oplus x = 0$). $\min$ and $\gcd$ are idempotent — combining $a$ with itself changes nothing, so nothing cancels — and a product has a division inverse only where no zero is present (@sec-pref-other).
+:::
+
+**5. [E] One range-add update costs how many writes to the difference array, whatever the range length?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Two: $+v$ at the first cell and $-v$ just past the last. An update covering the entire array writes $+v$ to `d[0]` and $-v$ to `d[n]` and nothing else (@sec-pref-diff).
+:::
+
+**6. [E] Given the difference array $d$ of $a$, recover $a$. Given $a$, recover $d$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$a$ is the prefix of $d$ (`run += d[i]`), and $d[i] = a[i] - a[i-1]$ with $a[-1]=0$. The two operations are exact inverses, which is why "prefix of a difference" and "difference of a prefix" both return the original (@sec-pref-diff).
+:::
+
+**7. [E] Count the subarrays of $[1,-1,1,-1]$ whose sum is $0$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Prefix sums: $0,1,0,1,0$. Value $0$ occurs three times ($\binom{3}{2}=3$ pairs) and value $1$ twice ($\binom{2}{2}=1$): **4** subarrays — $[0,2), [2,4), [1,3), [0,4)$. Equal prefixes, not zero-sum prefixes, are the counting rule (@eq-pref-hash).
+:::
+
+**8. [E] For "count subarrays with sum $=k$", what cheaper technique exists if all elements are positive?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A sliding window: with positives the window sum grows as you extend and shrinks as you release, so one $O(n)$ pass with $O(1)$ space suffices. The map version costs $O(n)$ space but survives negatives (@sec-arr-scan, @sec-pref-p2-a).
+:::
+
+**9. [M] Write the 2D query for a judge that gives 1-based inclusive corners $(x_1,y_1),(x_2,y_2)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$P[x_2][y_2]-P[x_1-1][y_2]-P[x_2][y_1-1]+P[x_1-1][y_1-1]$. The table's padding row and column make $x_1=1$ or $y_1=1$ read zeros instead of needing a branch (@sec-pref-2d, @sec-pref-p4-a).
+:::
+
+**10. [M] How many writes does a rectangle-add need in a 2D difference array, and how do you rebuild?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Four: $+v$ at $(r_1,c_1)$, $-v$ at $(r_1,c_2)$, $-v$ at $(r_2,c_1)$, $+v$ at $(r_2,c_2)$ for the half-open rectangle $[r_1,r_2)\times[c_1,c_2)$. Rebuild with one 2D prefix pass. The signs are the *mirror image* of the query formula — the update is the inverse operation of the read (@sec-pref-2d).
+:::
+
+**11. [M] If $m_v$ prefix sums fall in remainder bucket $v \bmod k$, give a closed formula for the number of divisible subarrays, and check it on $[4,5,0,-2,-3,1]$, $k=5$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Every pair of equal remainders is one answer, so $\sum_v \binom{m_v}{2}$. Prefix sums are $0,4,9,9,7,4,5$ with remainders $0,4,4,4,2,4,0$: $m_0=2$, $m_4=4$, $m_2=1$, giving $1+6+0=\mathbf{7}$ — LeetCode's expected answer. The incremental `ans += cnt[r]` computes the same sum without a second pass (@sec-pref-p2-b).
+:::
+
+**12. [M] Build the prefix XOR of $[1,3,4,8]$ and answer the query $[1,2]$ (inclusive) with two reads.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$P = [0,1,2,6,14]$. The answer is $P[1]\oplus P[3] = 1\oplus6 = 7$, and indeed $3\oplus4=7$. The shared prefix $P[1]$ appears twice and cancels (@sec-pref-p5-b).
+:::
+
+**13. [M] An element is a *leader* if it is greater than or equal to everything to its right. Find the leaders of $[16,17,4,3,5,2]$ and state the invariant of your one-pass algorithm.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Scanning right to left, keep `best` $=\max$ of everything already seen: $2$ is a leader, then $5$ ($>2$), then $17$ ($>5$); $4$ and $3$ lose to $5$, and $16$ loses to $17$. Leaders, in original order: $[17,5,2]$ at indices $1,4,5$. This is a suffix table for $\max$ — no inverse is needed because you only ever read the whole suffix (@sec-pref-other).
+:::
+
+**14. [M] `out[i]` = product of all elements except `a[i]`, in $O(1)$ extra space and without division. Give the two passes and their invariants.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Forward: `out[i] = out[i-1]*a[i-1]`, leaving `out[i]` $=\prod_{k<i}a[k]$. Backward: keep `run` $=\prod_{k>i}a[k]$ in one variable and multiply `out[i] *= run`. Both invariants hold by construction, and no cell is ever read after it is finalised (@sec-pref-p5-a).
+:::
+
+**15. [M] For which of these can you binary search the first valid cut instead of scanning all of them: (a) all $a_i \ge 0$, (b) $a_i$ may be negative? Give a concrete counterexample for the other case.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Only (a): non-negative cells make $P[k]$ non-decreasing in $k$, so "left $\ge$ right" becomes a suffix of true answers. (b) fails — for $[10,4,-8,7]$ the three cuts give left sums $10,14,6$ against right sums $3,-1,7$, so the predicate is true, true, **false**: not monotone, and a binary search can miss the answer $2$ (@fig-pref-p6, @sec-pref-p6-a).
+:::
+
+**16. [H] Updates and queries now **interleave**: add $v$ to $[l,r]$, then ask for a point or a range value, $2\cdot10^5$ of each. Why does the difference array fail, and what replaces it?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The difference array amortises its cost by rebuilding *once*, at the end; rebuilding after every update is $O(n)$ per operation, and reading a point from `d` without rebuilding is meaningless because a cell's value is a prefix of `d`, not the value itself. You need a structure that keeps prefixes available under point updates — a Fenwick (binary indexed) tree or a segment tree with lazy propagation, both later volumes (@sec-pref-p3).
+:::
+
+**17. [H] Count subarrays whose sum is **at least** $K$, with negatives allowed. The map trick handles equality; what does the inequality cost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+You need pairs $(i,j)$ with $P[j]-P[i]\ge K$, i.e. for each $j$, the number of earlier prefixes $\le P[j]-K$ — a *rank* query over values seen so far, not a key lookup. That is $O(n\log n)$ with a sorted structure or a Fenwick tree over compressed prefix values (the classic "count of range sum" problem); a merge-sort counting pass does the same without a tree. The hash map cannot answer "$\le$" because it has no order (@sec-pref-hash).
+:::
+
+**18. [H] For the divisible-by-$k$ count, when is the bucket array the wrong choice?**
+
+::: {.callout-note collapse="true" title="Solution"}
+When $k$ is large relative to $n$ or is not an input bound at all: $O(k)$ memory and $O(k)$ initialisation lose to the $O(\min(n,k))$ distinct prefix remainders in a hash map. Also, with $t$ test cases and a fresh $k$ each time, re-zeroing a $k$-sized array costs $t\cdot k$ — use a map, or timestamp the buckets (@sec-pref-p2-b, @sec-arr-p5).
+:::
+
+**19. [H] "Flip every bit in a $k$-long window, minimum number of flips to make all bits $1$" (LC 995-style). Why is this a difference-array problem, and what changes in the template?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Scan left to right; the first $0$ *forces* a flip starting there, so the greedy choice is unique. You must know how many of the active flips cover the current cell — exactly a coverage count — so keep a difference array over flip **parity**: `d[start] += 1`, `d[start+k] -= 1`, and read the running sum modulo $2$. The only change from @sec-pref-diff is that the accumulator is XOR/parity rather than a sum, because a flip is its own inverse (@sec-pref-other).
+:::
+
+**20. [E] Prefix sums are stored modulo $M = 10^9+7$, and $P[2] = 5$, $P[6] = 3$. What is the sum of $a[2:6)$ modulo $M$, and what goes wrong in C++ if you write `p[6] - p[2]`?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$(3 - 5 + M) \bmod M = 10^9+5$. In C++ `p[6] - p[2]` is $-2$: the true sum is congruent to $-2$, but a negative value is not a valid remainder and breaks later comparisons or array indexing. Add $M$ before taking `%` (@eq-pref-mod). Python's `%` returns $10^9+5$ directly.
+:::
+
+**21. [E] An array of words and many queries "how many words in positions $[\ell, r)$ start with a vowel?". What table do you build?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The prefix sums of the indicator array $b[i] = 1$ if word $i$ starts with a vowel, else $0$. Then each query is $P[r]-P[\ell]$: a count is a sum of zeros and ones (@sec-pref-def).
+:::
+
+**22. [M] Find the length of the longest subarray of $[1,-1,5,-2,3]$ with sum $3$, and say which map you used.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Prefixes: $P = 0,1,0,5,3,6$. First occurrences: $0\to0$, $1\to1$, $5\to3$, $3\to4$, $6\to5$. At $j=4$ ($P=3$) the target $P-3=0$ first appeared at index $0$: length $4$, the range $[1,-1,5,-2]$. At $j=5$ ($P=6$) the target $3$ first appeared at $4$: length $1$. Answer $4$, from a **first-index** map that is never overwritten (@sec-pref-hash).
+:::
+
+**23. [M] Intervals $[s,e)$ with $s, e$ up to $10^9$; find the largest number that overlap at one point. Why not a difference array, and what replaces it?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A difference array would need $10^9$ cells. Coverage changes only at interval ends, so store $+1$ at each $s$ and $-1$ at each $e$ in a map, sort the $2u$ keys and sweep, keeping the running coverage and its maximum: $O(u\log u)$ time, $O(u)$ space, independent of the coordinate range (@sec-pref-diff).
+:::
+
+**24. [H] Count the ways to cut an array into three non-empty parts with equal sums, $n \le 5\cdot10^5$, values may be negative. Why is the two-pointer method of @sec-pref-p6-b not the right tool, and what is?**
+
+::: {.callout-note collapse="true" title="Solution"}
+With negatives the prefix sums are not monotone, so a pointer cannot move in one direction only. And the question is a count, not a maximum. Check $3 \mid P[n]$; then scan the second cut $j$ from $2$ to $n-1$, adding $1$ to a counter whenever $P[j-1] = P[n]/3$ (a first cut becomes available) and adding the counter to the answer whenever $P[j] = 2P[n]/3$. $O(n)$, and the all-zero array gives $\binom{n-1}{2}$ with no special case (@sec-pref-split).
+:::
+
+## Interview questions
+
+**1. What is a prefix-sum table, and why is $P[0]=0$ the convention that removes your off-by-one bugs?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$P[i]=\sum_{k<i}a[k]$ for $i\in[0,n]$: $n+1$ cells, each the sum of everything *strictly below* its index. Then any half-open range is $P[r]-P[\ell]$, and an empty range reads $0$ for free. The alternative — $P[i]=\sum_{k\le i}a[k]$ — forces `if (l == 0)` in every query (@sec-pref-def, @sec-arr-ranges).
+:::
+
+**2. Why is the difference array called the inverse of the prefix sum?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`prefix(d)` recovers $a$ and `difference(a)` recovers $d$, so the two passes undo each other. Operationally, a difference array is "a range update written as two point updates": $+v$ where the range starts, $-v$ where it ends. That is why one rebuild pass converts $u$ range adds from $O(nu)$ to $O(n+u)$ (@sec-pref-diff).
+:::
+
+**3. $n,q \le 2\cdot10^5$, the array is immutable, each query is a range sum. Derive the complexity you are allowed to write.**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(nq) = 4\cdot10^{10}$ is hopeless against a $\sim10^8$ budget, so the answer must be $O(n+q)$: build the table in $O(n)$, answer each query in $O(1)$. The constraint pair ($n$ large *and* $q$ large) is the recognition signal; if $q$ were $1$, no table is needed (@sec-pref-p1, @sec-arr-cost, @sec-cx-budget).
+:::
+
+**4. Count subarrays with sum $k$. Why not a sliding window, and what is the invariant of the map solution?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Negatives break the window: extending can lower the sum, so "shrink while too big" has no justification. The map solution walks the prefix sums and uses $\sum a[i:j) = k \iff P[i] = P[j]-k$; the invariant is that before index $j$, `seen[v]` counts the prefix indices with value $v$, so `seen[p-k]` is exactly the number of legal left ends — one lookup per element, $O(n)$ (@sec-pref-hash, @sec-pref-p2-a).
+:::
+
+**5. Why does "divisible by $k$" shrink a hash map to an array of size $k$, and what is the trap in C++?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$k \mid (P[j]-P[i])$ iff $P[j]\equiv P[i]\pmod k$, so the key is the remainder and there are only $k$ of them — time $O(n+k)$, space $O(k)$. The trap: C++'s `%` returns a negative remainder for a negative left operand, so `cnt[r]` indexes out of bounds; normalise with `((r % k) + k) % k`. Python's `%` never returns a negative (@sec-pref-p2-b).
+:::
+
+**6. Which operations get a prefix table, and what do you do when the operation has no inverse?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Anything associative with an inverse — a group: $+$, $\oplus$, and $\times$ away from zeros. Without an inverse ($\min$, $\max$, $\gcd$, product-with-zeros) you cannot cancel a prefix, so you build a **suffix** table instead and combine a prefix with a suffix, which answers "everything to my left/right" but not "the range in the middle" (@sec-pref-other, @sec-pref-p5-a).
+:::
+
+**7. Derive the 2D rectangle formula. Why is the corner added rather than subtracted?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$P[r_2][c_2]$ is the anchored block; removing $P[r_1][c_2]$ deletes the top strip and removing $P[r_2][c_1]$ deletes the left strip — and the top-left rectangle $P[r_1][c_1]$ lies in both strips, so it was deleted twice and must be added back once. Inclusion–exclusion: alternate signs by how many sets you removed (@sec-pref-2d, @sec-pref-p4-a).
+:::
+
+**8. Product of array except self: the interviewer says "no division". Why, and what does it cost you?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Division by zero: one zero makes the total product zero, so `total/a[i]` is either undefined or wrong for every cell. The two-pass version — forward left products into the output, backward with one running right product — is $O(n)$ time, $O(1)$ auxiliary, and has no case analysis at all (@sec-pref-p5-a).
+:::
+
+**9. Find Pivot Index: why do you test *before* accumulating the current element?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The pivot is excluded from both sides. Testing first means `left` is the sum of $a[0{:}i]$ only, and the right side is `total - left - a[i]`; it also returns the *leftmost* pivot, since you return at the first match. Accumulating first would silently include $a[i]$ on the left (@sec-pref-p1-b).
+:::
+
+**10. When may you binary search or two-pointer over cut positions, and when must you scan them all?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Only when the prefix sum is monotone in the cut position, which needs every element non-negative. All-positive problems (CF 1006C, "split into three equal sums") allow $O(n)$ two pointers or $O(n\log n)$ searches. Once negatives are allowed (LC 2270, LC 560) the prefix rises and falls, the predicate is not monotone, and a scan of all $n-1$ cuts is the honest bound (@sec-pref-p6-a, @sec-pref-p6-b).
+:::
+
+**11. Where exactly does 64-bit arithmetic become mandatory in this chapter's problems?**
+
+::: {.callout-note collapse="true" title="Answer"}
+In the *table*, not just the answer: $2\cdot10^5$ values up to $10^9$ sum to $2\cdot10^{14}$. Greg and Array multiplies a run count of $10^5$ by a delta of $10^5$ and then sums $10^5$ such terms — $10^{15}$. And in C++ widen before the operation: `(long long)a * b` is fine, `a * b` assigned to a `long long` has already overflowed (@sec-arr-cost, @sec-pref-p3-b).
+:::
+
+**12. Your table is $O(n)$ space, but the interviewer asks for $O(1)$. What can you always give up?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The table, if you only need one prefix at a time. A single left-to-right scan can carry `left` as a scalar plus the total, which turns pivot/split/count-equal-suffix problems into $O(1)$ space (@sec-pref-p1-b). What you cannot give up: queries that revisit arbitrary ranges, or a hash map that must remember every prefix value — those genuinely need their $O(n)$.
+:::
+
+**13. Two accepted-looking solutions to "count subarrays divisible by $k$" have the same $O(n)$ idea, but one times out on a judge with many test cases. What are the usual culprits?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Constant factors and hidden per-test costs, not the idea. An ordered `map` costs $O(\log n)$ per operation where a bucket array of size $k$ (or an `unordered_map`) costs $O(1)$. Allocating or clearing a $k$-sized array for every test case costs $t \cdot k$ in total even when the inputs are tiny — re-zero only the buckets you touched, or use a map. Flushing output with `endl` after every answer, or unsynchronised C++ streams, can dominate an otherwise linear program. And rebuilding the prefix table inside the query loop turns $O(n+q)$ back into $O(nq)$ (@sec-pref-p2-b, @sec-arr-p5).
+:::
+
+**14. You need the *longest* subarray with sum $k$, not the count. What changes in the hash-map walk, and why?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The map stores each prefix value's **first** index instead of its count, and is never overwritten. For a right end $j$, every left end $i$ with $P[i] = P[j]-k$ works, and the longest range uses the smallest such $i$ — the first occurrence. For the *shortest* range you would store the latest index and overwrite. The seed becomes `first[0] = 0`, the index of the empty prefix (@sec-pref-hash).
+:::
+
+**15. How does the maximum-subarray problem fit into the prefix-sum picture?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The best subarray ending at $j$ is $P[j] - \min_{i<j} P[i]$, so one pass that keeps the running prefix and the running minimum of earlier prefixes solves it in $O(n)$ time and $O(1)$ space. A prefix *minimum* has no inverse but needs none, because it is anchored at the left end. Kadane's algorithm is the same computation: resetting the running sum when it drops below zero is the moment a new prefix minimum appears (@sec-pref-other).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Range sum:** $P[0]=0$, $P[i+1]=P[i]+a[i]$, answer $=P[r]-P[\ell]$. $O(n+q)$.
+- **Range add, read once:** $d[\ell]\mathrel{+}=v$, $d[r]\mathrel{-}=v$ with $n+1$ cells, then one prefix pass. $O(n+u)$.
+- **Count subarrays by property:** key the running prefix by $p-k$ (equality), $p\!\bmod k$ (divisibility), $p$ itself (balance); seed the empty prefix. $O(n)$.
+- **Rectangle sum:** $P[r_2][c_2]-P[r_1][c_2]-P[r_2][c_1]+P[r_1][c_1]$; **rectangle add** uses the mirrored four writes.
+- **No inverse?** Build a suffix table and combine: `out[i] = prefix[i] (op) suffix[i]`.
+- **Cuts:** $\text{left}=P[k]$, $\text{right}=\text{total}-P[k]$; scan all $k$ unless every element is non-negative.
+- **Count in a range:** prefix sums of a 0/1 indicator array. **Modulo $M$:** $(P[r]-P[\ell]+M) \bmod M$.
+- **Longest range with sum $k$:** map from prefix value to its *first* index; **best range sum:** $\max_j (P[j] - \min_{i<j} P[i])$.
+:::
+
+- A prefix table converts an $O(n)$ question into two array reads; a difference table converts an $O(n)$ update into two writes. They are the same idea seen from opposite ends, and every pattern here is one of those two conversions.
+- The convention $P[0]=0$ with half-open ranges is what makes both conversions branch-free — including for the empty range and the whole array.
+- Whether an operation admits the range trick is decided by its algebra (associativity plus an inverse), not by how you write the loop. XOR qualifies; min, max and gcd do not, so they get a suffix table instead.
+- Counting questions ("how many subarrays sum to $k$") move the work into a hash map or a $k$-bucket array; the seed for the empty prefix is part of the template, not a detail.
+- Two dimensions add one more inclusion–exclusion term, and one more chance to get a sign wrong — verify on a rectangle that touches the padded edges.
+- Magnitude is part of correctness: prefix tables hold sums of up to $10^5$–$10^6$ inputs, so read the value range with the array size before choosing `int` (@sec-arr-cost).
+- Positivity is part of correctness too: it is the difference between a monotone predicate you can search and a scan you must run (@sec-pref-p6).
+- What this chapter deliberately does *not* handle: updates and queries interleaved. That is a Fenwick tree or a segment tree, and it is the reason the difference array's "read once at the end" clause exists.
+
+## Practice ladder
+
+Ordered by concept, following the six patterns: each group starts one step beyond a solved problem and adds one idea at a time.
+
+::: {.practice}
+- [LC 303 · Range Sum Query - Immutable](https://leetcode.com/problems/range-sum-query-immutable/){difficulty="Easy"} — the table, with the query already handed to you.
+- [CF 313B · Ilya and Queries](https://codeforces.com/problemset/problem/313/B){rating="1100"} — prefix *counts*: turn "adjacent equal characters" into a 0/1 array first.
+- [LC 2559 · Count Vowel Strings in Ranges](https://leetcode.com/problems/count-vowel-strings-in-ranges/){difficulty="Medium"} — an indicator array and its prefix table, many range counts.
+- [LC 2090 · K Radius Subarray Averages](https://leetcode.com/problems/k-radius-subarray-averages/){difficulty="Medium"} — fixed-length range sums, read from the table.
+- [LC 1588 · Sum of All Odd Length Subarrays](https://leetcode.com/problems/sum-of-all-odd-length-subarrays/){difficulty="Easy"} — enumerate ranges with a table instead of re-summing them.
+- [LC 1732 · Find the Highest Altitude](https://leetcode.com/problems/find-the-highest-altitude/){difficulty="Easy"} — a running prefix where the answer is a max over prefixes.
+- [CF 279B · Books](https://codeforces.com/problemset/problem/279/B){rating="1400"} — prefix sums plus a two-pointer; only valid because every value is positive.
+- [LC 930 · Binary Subarrays With Sum](https://leetcode.com/problems/binary-subarrays-with-sum/){difficulty="Medium"} — count ranges with a given sum in the non-negative regime, where a window also works.
+- [CF 873B · Balanced Substring](https://codeforces.com/problemset/problem/873/B){rating="1500"} — the $\pm1$ transform, then the longest range between equal prefixes.
+- [LC 525 · Contiguous Array](https://leetcode.com/problems/contiguous-array/){difficulty="Medium"} — the same transform with a first-index map.
+- [LC 523 · Continuous Subarray Sum](https://leetcode.com/problems/continuous-subarray-sum/){difficulty="Medium"} — remainder collisions with a *first-seen index* map instead of counts.
+- [CF 1344A · Hilbert's Hotel](https://codeforces.com/problemset/problem/1344/A){rating="1600"} — modular collisions, with the negative-remainder trap as the whole puzzle.
+- [LC 2845 · Count of Interesting Subarrays](https://leetcode.com/problems/count-of-interesting-subarrays/){difficulty="Medium"} — a remainder bucket over prefix *counts*, in one pass.
+- [CF 1320A · Journey Planning](https://codeforces.com/problemset/problem/1320/A){rating="1400"} — subtract the index from every value, then group equal keys: the Good Subarrays rewrite.
+- [CF 1015A · Points in Segments](https://codeforces.com/problemset/problem/1015/A){rating="800"} — mark coverage, read once: the difference array at its smallest.
+- [LC 1893 · Check if All the Integers in a Range Are Covered](https://leetcode.com/problems/check-if-all-the-integers-in-a-range-are-covered/){difficulty="Easy"} — coverage with a count instead of a sum.
+- [LC 3427 · Sum of Variable Length Subarrays](https://leetcode.com/problems/sum-of-variable-length-subarrays/){difficulty="Easy"} — how many ranges cover each cell: a coverage count in disguise.
+- [CF 816B · Karen and Coffee](https://codeforces.com/problemset/problem/816/B){rating="1400"} — a difference array for coverage, then a prefix table over the result: both directions in one problem.
+- [LC 1094 · Car Pooling](https://leetcode.com/problems/car-pooling/){difficulty="Medium"} — passengers on and off at stops: the event sweep of a difference array.
+- [LC 3355 · Zero Array Transformation I](https://leetcode.com/problems/zero-array-transformation-i/){difficulty="Medium"} — decide feasibility from accumulated range adds.
+- [CF 276C · Little Girl and Maximum Sum](https://codeforces.com/problemset/problem/276/C){rating="1500"} — count how often each index is queried, then sort: coverage feeding an optimisation.
+- [LC 3356 · Zero Array Transformation II](https://leetcode.com/problems/zero-array-transformation-ii/){difficulty="Medium"} — the same difference array searched over a monotone predicate.
+- [LC 995 · Minimum Number of K Consecutive Bit Flips](https://leetcode.com/problems/minimum-number-of-k-consecutive-bit-flips/){difficulty="Hard"} — a difference array over parity, with a forced greedy choice.
+- [CSES 1652 · Forest Queries](https://cses.fi/problemset/task/1652) — the 2D table over a binary grid, many submatrix sums.
+- [LC 1314 · Matrix Block Sum](https://leetcode.com/problems/matrix-block-sum/){difficulty="Medium"} — clipped rectangles; the padding saves you four branches.
+- [LC 1074 · Number of Submatrices That Sum to Target](https://leetcode.com/problems/number-of-submatrices-that-sum-to-target/){difficulty="Hard"} — Pattern 2 and Pattern 4 together: fix two rows, then count with a hash map.
+- [LC 1442 · Count Triplets That Can Form Two Arrays of Equal XOR](https://leetcode.com/problems/count-triplets-that-can-form-two-arrays-of-equal-xor/){difficulty="Medium"} — equal prefix XORs, counted like equal prefix sums.
+- [CF 1847C · Vampiric Powers, anyone?](https://codeforces.com/problemset/problem/1847/C){rating="1400"} — every reachable value is a range XOR, i.e. the XOR of two prefixes.
+- [LC 53 · Maximum Subarray](https://leetcode.com/problems/maximum-subarray/){difficulty="Medium"} — prefix sum against a running prefix minimum.
+- [LC 42 · Trapping Rain Water](https://leetcode.com/problems/trapping-rain-water/){difficulty="Hard"} — a prefix-max table against a suffix-max table.
+- [CF 1029C · Maximal Intersection](https://codeforces.com/problemset/problem/1029/C){rating="1600"} — "everything except one segment" with prefix and suffix intersections, the except-self shape for max and min.
+- [LC 1031 · Maximum Sum of Two Non-Overlapping Subarrays](https://leetcode.com/problems/maximum-sum-of-two-non-overlapping-subarrays/){difficulty="Medium"} — a cut, with the best window on each side.
+- [CF 466C · Number of Ways](https://codeforces.com/problemset/problem/466/C){rating="1700"} — three-way split with equal sums, including the all-zero case that breaks naive counting.
+- [LC 862 · Shortest Subarray with Sum at Least K](https://leetcode.com/problems/shortest-subarray-with-sum-at-least-k/){difficulty="Hard"} — negatives return: prefix sums plus a monotone deque, a preview of later chapters.
+:::
+
+## Further reading
+
+- [USACO Guide — Introduction to Prefix Sums](https://usaco.guide/silver/prefix-sums) — the same $P[r]-P[\ell]$ derivation for contest programmers, with graded practice problems.
+- [USACO Guide — More Prefix Sums](https://usaco.guide/silver/more-prefix-sums) — 2D prefix sums and counting-by-remainder, i.e. @sec-pref-2d and @sec-pref-hash with contest problems attached.
+- [Wikipedia — Prefix sum](https://en.wikipedia.org/wiki/Prefix_sum) — the general statement that any associative binary operator gives a prefix structure, which is the algebra behind @sec-pref-other.
+- [Wikipedia — Inclusion–exclusion principle](https://en.wikipedia.org/wiki/Inclusion%E2%80%93exclusion_principle) — why the 2D query adds the corner back, and where the alternating signs come from (@sec-pref-2d).
+- [CP-Algorithms — The Inclusion-Exclusion Principle](https://cp-algorithms.com/combinatorics/inclusion-exclusion.html) — the same sign argument written for a competitive-programming audience, with bitmask enumeration of the general case.
+- [`itertools.accumulate` — Python documentation](https://docs.python.org/3/library/itertools.html#itertools-accumulate) — the standard-library prefix scan; note the `initial=` parameter, which is exactly the $P[0]=0$ cell.
+- [`std::partial_sum` — cppreference](https://en.cppreference.com/w/cpp/algorithm/partial_sum) — the C++ standard prefix scan, including the overload with a custom binary operation (and why it is the wrong tool when you need the padded $n+1$ table).
+- [`numpy.cumsum` — NumPy documentation](https://numpy.org/doc/stable/reference/generated/numpy.cumsum.html) — vectorised prefix sums with an `axis` argument; one call per axis builds the 2D table of @sec-pref-2d (without the zero border).

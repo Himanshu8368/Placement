@@ -1,0 +1,414 @@
+# Hashing Arrays & Multisets {#sec-hsh}
+
+<!--
+Outline (outline.yml) for chapter 26:
+  - Sum hashing of multisets
+  - XOR hashing of parities
+  - Equal multisets of subarrays
+  - Sequence hashing
+  - Hashing with prefix sums
+
+Provenance. Every sample output quoted in this file is produced by a cell here or in its registry
+problems and asserted against a brute force inside a random stress, so nothing is shown that the code
+does not check. The judge problems (CF 1175F, CF 1284D) keep their statement, constraints and rating
+from the Codeforces page; where a statement is paraphrased the numbers come from that page. Randomised
+fingerprints use 64-bit per-value weights throughout, and every "these are equal" claim is a
+fingerprint comparison, never a hand-waved one. Container hashing (hash sets/maps, anti-hash
+containers, complement lookups) is Chapter @sec-hash; this chapter is about *fingerprinting a
+structure* so that equality, parity, or containment can be read off a single number.
+-->
+
+::: {.callout-note title="Sources"}
+**CP-Algorithms**: "Polynomial hash" and "Finding substrings" (the ordered sequence hash in @sec-hsh-a4) · **CLRS** § 11 (universal hashing — why a random key map makes collisions improbable) and § 13.4 (randomised dictionaries) · **CPH** ch. 9 (rolling hash) and the `mt19937`/`splitmix64` random-weight idiom · KACTL "Hashing" (the double-modulus and 64-bit-overflow forms) · the **CSES Problem Set** "Adding Numbers" hashing notes · Sibling chapters: @sec-hash (hash tables as *containers* — this chapter fingerprints *structures* instead), @sec-pref (the prefix sum this chapter lifts from values to fingerprints), @sec-sorted (sorting as the deterministic alternative a fingerprint replaces), and @sec-str (string hashing — the same polynomial trick on characters). Coverage: order-blind multiset fingerprints from per-value random weights; XOR fingerprints that read only parity of the counts; invertible add/remove window hashes; order-sensitive polynomial (rolling) hashes with a power table; counting by prefix-fingerprint + a frequency map; and collision control (double hashing, random bases, 64-bit overflow, the birthday bound).
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Decide in $O(n)$ whether two arrays hold the **same multiset** (same elements with same multiplicities, any order) by summing per-value random weights, with collision probability about $2^{-64}$ (@sec-hsh-a1, @sec-hsh-p1).
+- Read off whether **every value occurs an even number of times** from a single XOR fingerprint, and know exactly what it cannot see (@sec-hsh-a2, @sec-hsh-p2).
+- Slide a window and keep its multiset fingerprint up to date in $O(1)$ with an **invertible** add/remove, testing "is this block a permutation?" without re-adding (@sec-hsh-a3, @sec-hsh-p1-subperm).
+- Hash an **ordered sequence** with a polynomial/rolling hash so that $\{1,2\}$ and $\{2,1\}$ differ, and compare any two equal-length subarrays in $O(1)$ from a prefix + power table (@sec-hsh-a4, @sec-hsh-p4).
+- **Count** subarrays with a multiset property by prefixing the fingerprint and pairing equal values with a frequency map (@sec-hsh-a5, @sec-hsh-p2-parity).
+- Control collisions with double hashing, a randomised base, and $2^{64}$ overflow, and **triage** a statement into fingerprint-vs-sort, multiset-vs-sequence, static-vs-sliding (@sec-hsh-a6).
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+
+random.seed(0)
+
+MASK64 = (1 << 64) - 1
+
+
+def rand_weights(*seqs, bits=64):
+    """Assign an independent random `bits`-bit weight to every value that occurs in seqs."""
+    seen = set()
+    for s in seqs:
+        seen.update(s)
+    return {v: random.getrandbits(bits) for v in seen}
+```
+
+## Why this matters {#sec-hsh-why}
+
+::: {.callout-note title="In plain words"}
+A **hash** here is not a hash table — it is a single number that *summarises* a whole collection so that you can compare two collections without comparing them element by element. Give every distinct value $v$ its own random weight $r[v]$. Add the weights of the elements you hold: the running total is a **fingerprint** of the multiset. Two multisets that are equal always share a fingerprint; two that differ share one only by astronomical coincidence. Swap "$+$" for "$\oplus$" (bitwise XOR) and pairs cancel, so the fingerprint instead reveals *which values occur an odd number of times*. Weight each element by its **position** ($r[v]\cdot B^i$) and order finally matters — that is the polynomial / rolling hash. The chapter is these three choices of accumulator ($+$, $\oplus$, positional powers) run forward as prefixes and backward as sliding windows.
+:::
+
+Sorting to compare multisets costs $O(n\log n)$; a fingerprint does it in $O(n)$, and — the reason contests love it — lets you maintain the answer for *every* one of the $O(n^2)$ subarrays in $O(n)$ total, because a subarray's fingerprint is a difference of two prefix fingerprints, exactly like a range sum is a difference of prefix sums. When a statement says "count subarrays that are permutations," "are these two ranges rearrangements of each other," "does this block contain every value an even number of times," or "do these two sets of intervals agree," the intended solution is almost always a fingerprint plus a prefix or a window. The catch that separates strong from weak solutions is **collision discipline**: a single $32$-bit hash is breakable and, at many comparisons, collides by the birthday bound; a randomised $64$-bit weight is not, and two independent weights are the gold standard.
+
+The triage table below is what you should be able to fill in after this chapter:
+
+| Statement hint | The object is | Fingerprint to use | Section |
+|---|---|---|---|
+| "same elements, **any order**, same counts" | multiset | $\sum r[v]$ over elements | @sec-hsh-a1 |
+| "**every** value appears an **even** number of times" | parity of counts | $\bigoplus r[v]$ | @sec-hsh-a2, @sec-hsh-p2 |
+| "is this window a **permutation** of $1..L$?" | sliding multiset | invertible $\sum r[v]$, add/remove | @sec-hsh-a3, @sec-hsh-p1 |
+| "these two **ranges are identical sequences**" | ordered sequence | polynomial / rolling hash | @sec-hsh-a4, @sec-hsh-p4 |
+| "**count** subarrays with a multiset property" | prefix + frequency map | prefix fingerprint, pair equals | @sec-hsh-a5 |
+| "do two interval-sets **agree everywhere**?" | set per coordinate | per-element random weight, sweep | @sec-hsh-p3 |
+
+::: {#fig-hsh-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "s": (-4.9, 0.0, "a collection\n(multiset / sequence)", "muted"),
+        "f": (-1.1, 0.0, "reduce it with\nper-value weights", "green"),
+        "e": (2.8, 0.75, "one number:\ncompare in $O(1)$", "indigo"),
+        "c": (2.8, -1.3, "collision? only by\nchance $\\approx 2^{-64}$", "pink"),
+    }, [("s", "f", ""), ("f", "e", "equal in"),
+        ("f", "c", "differ w.h.p.")], w=3.0, h=1.2)
+V.show(draw)
+```
+
+The whole chapter in one picture: collapse a collection into a single number using random per-value weights, then compare the numbers instead of the collections. The only way two genuinely-different objects get the same number is a collision, and a $64$-bit random weight makes that chance about $2^{-64}$ — negligible, provided you keep it random and wide enough.
+
+:::
+
+The six lessons build the three accumulators and the discipline; Part B turns them into four worked patterns.
+
+- **A1 — Sum hashing of multisets.** Per-value random weights, added; order-blind, sees multiplicity (@sec-hsh-a1).
+- **A2 — XOR hashing of parities.** The same weights, XOR-ed; reads only "even or odd" count (@sec-hsh-a2).
+- **A3 — Equal multisets of subarrays.** Make the fingerprint *invertible* so a window updates in $O(1)$ (@sec-hsh-a3).
+- **A4 — Sequence (rolling) hashing.** Weight by position so order matters; compare ranges in $O(1)$ (@sec-hsh-a4).
+- **A5 — Hashing with prefix sums.** Prefix the fingerprint and count with a frequency map (@sec-hsh-a5).
+- **A6 — Collision control & triage.** Double hashing, random bases, $2^{64}$ overflow, the birthday bound, and which fingerprint a statement wants (@sec-hsh-a6).
+
+Part B runs four patterns: multiset fingerprints (@sec-hsh-p1), parity & presence hashing (@sec-hsh-p2), randomised set hashing for interval agreement (@sec-hsh-p3), and ordered sequence hashing (@sec-hsh-p4).
+
+## Part A — Lessons
+
+## A1. Sum hashing of multisets {#sec-hsh-a1}
+
+::: {.callout-note title="In plain words"}
+You want to know whether two arrays are the **same bag of numbers**: same values, same number of copies of each, order irrelevant. The deterministic way is to sort both and compare, or to compare their `Counter`s — $O(n\log n)$ or $O(n)$ with hashing overhead, and you must keep the whole bag around. The fingerprint way is cheaper to *carry*: give each distinct value $v$ a random $64$-bit weight $r[v]$, and define $H(\text{bag}) = \sum_{x\in\text{bag}} r[x]$, counting each occurrence. Two equal bags obviously have the same $H$. Two different bags have the same $H$ only when a non-trivial integer combination $\sum_v (\text{cnt}_A[v]-\text{cnt}_B[v])\,r[v]$ happens to vanish — and with the $r[v]$ independent and uniform over $64$ bits that is a $\approx 2^{-64}$ event. Order is invisible because addition commutes, and multiplicity is *seen* because a value present twice adds $r[v]$ twice.
+:::
+
+Here is the fingerprint and the two-way check against the exact multiset comparison:
+
+```{python}
+def mset_sum(a, r):
+    """Order-blind fingerprint of the multiset of a: sum of per-value random weights."""
+    h = 0
+    for x in a:
+        h += r[x]
+    return h
+
+
+a = [3, 1, 2, 3]
+b = [2, 3, 1, 3]          # a rearrangement of b: same multiset
+c = [3, 1, 2, 2]          # different multiset (two 2s, one 3)
+r = rand_weights(a, b, c)
+assert mset_sum(a, r) == mset_sum(b, r)          # equal multisets -> equal fingerprints
+assert sorted(a) == sorted(b)
+assert mset_sum(a, r) != mset_sum(c, r)           # different multisets -> differ w.h.p.
+assert sorted(a) != sorted(c)
+```
+
+The one line that matters is that equality of fingerprints is *equivalent* to equality of multisets, not merely a proxy: same bag forces same sum, different bags differ unless a one-in-$2^{64}$ coincidence. Stress it against the `Counter` oracle on hundreds of random pairs, exactly as the earlier chapters stress-tested their recurrences:
+
+```{python}
+for _ in range(300):
+    a = [random.randint(1, 4) for _ in range(random.randint(0, 9))]
+    b = [random.randint(1, 4) for _ in range(random.randint(0, 9))]
+    r = rand_weights(a, b)
+    assert (mset_sum(a, r) == mset_sum(b, r)) == (Counter(a) == Counter(b))
+```
+
+::: {#fig-hsh-a1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.text(ax, p, 0, 4.2, "order is invisible to $\\sum r[v]$", color="muted")
+    V.array(ax, p, [3, 1, 2, 3], x=-4.0, y=2.6, label="A",
+            colors={0: "amber", 1: "cyan", 2: "green", 3: "amber"}, note="same bag")
+    V.array(ax, p, [2, 3, 1, 3], x=-4.0, y=1.0, label="B",
+            colors={0: "green", 1: "amber", 2: "cyan", 3: "amber"}, note="same bag")
+    V.text(ax, p, 1.7, 2.6, "$H(A)=r_3{+}r_1{+}r_2{+}r_3$", ha="left", color="indigo")
+    V.text(ax, p, 1.7, 1.0, "$H(B)=r_2{+}r_3{+}r_1{+}r_3$", ha="left", color="indigo")
+    V.arrow(ax, p, 1.55, 2.35, 1.55, 1.5, color="green")
+    V.text(ax, p, 1.7, 0.2, "$H(A)=H(B)$  (equal, always)", ha="left", color="green")
+V.show(draw)
+```
+
+Two arrangements of the same four numbers. Reading the weights in either order gives the same sum, so the fingerprint confirms they are one multiset; a third arrangement that swapped a $3$ for a $2$ would (almost surely) give a different sum.
+
+:::
+
+Because the accumulator is a plain sum, the fingerprint is **incremental**: you can add elements one at a time, and — the point of @sec-hsh-a3 — subtract them again. That invertibility is what makes it usable on sliding windows, and it is also what makes a *single* hash vulnerable if you choose the weights carelessly ($r[v]=v$ makes $\{3\}$ and $\{1,2\}$ collide); the fix in @sec-hsh-a6 is randomness and width.
+
+## A2. XOR hashing of parities {#sec-hsh-a2}
+
+::: {.callout-note title="In plain words"}
+Bitwise XOR is its own inverse: $x\oplus x = 0$. Feed that property your per-value weights and define $H_{\oplus}(\text{bag}) = \bigoplus_{x\in\text{bag}} r[x]$. A value present an **even** number of times contributes $r[v]\oplus r[v]\oplus\cdots = 0$ and vanishes; a value present an **odd** number of times contributes exactly one $r[v]$. So $H_{\oplus}=0$ if and only if *every* value occurs an even number of times. The fingerprint reads **parity of the counts**, and nothing else: it cannot tell a value present twice from a value present zero times, because both leave no residue. This is the same cancellation behind the classic "every value appears twice except one, find it in $O(n)$ with no memory" interview trick, which is $H_{\oplus}$ over the raw values with no randomisation at all.
+:::
+
+```{python}
+def xor_parity(a, r):
+    """Parity fingerprint of the multiset of a: XOR of per-value random weights."""
+    h = 0
+    for x in a:
+        h ^= r[x]
+    return h
+
+
+def all_even_counts(a):
+    return all(cnt % 2 == 0 for cnt in Counter(a).values())
+
+
+a = [5, 7, 5, 9, 7, 9]      # each value twice -> all even -> XOR is 0
+b = [5, 7, 5, 9]            # 7 once -> odd -> non-zero
+r = rand_weights(a, b)
+assert xor_parity(a, r) == 0 and all_even_counts(a)
+assert xor_parity(b, r) != 0 and not all_even_counts(b)
+
+for _ in range(300):
+    a = [random.randint(1, 4) for _ in range(random.randint(0, 9))]
+    r = rand_weights(a)
+    assert (xor_parity(a, r) == 0) == all_even_counts(a)
+```
+
+The limitation is the lesson. Two *different* multisets that differ only by adding a pair of some value look identical to $H_{\oplus}$:
+
+```{python}
+r = rand_weights([3], [3, 3, 3])
+assert xor_parity([3], r) == xor_parity([3, 3, 3], r)   # both leave residue r[3]
+assert Counter([3]) != Counter([3, 3, 3])                # but they are different bags
+```
+
+::: {#fig-hsh-a2-anim}
+
+```{python}
+#| echo: false
+seq = [4, 2, 4, 7, 2, 4]
+weights = rand_weights(seq)
+a2_frames = []
+a2_caps = []
+run = 0
+for k in range(1, len(seq) + 1):
+    window = seq[:k]
+    cnt = Counter(window)
+    run ^= weights[seq[k - 1]]
+    odd = sum(1 for v in cnt.values() if v % 2)
+    colors = {i: ("pink" if cnt[x] % 2 else "green") for i, x in enumerate(window)}
+    a2_frames.append((list(window), dict(colors), odd))
+    a2_caps.append(f"XOR of first {k}: fingerprint "
+                   f"{'= 0 (all even)' if run == 0 else '!= 0'}")
+
+
+def a2_frame(ax, p, k):
+    window, colors, odd = a2_frames[k]
+    V.array(ax, p, window, x=0.0, y=0.0, colors=colors, note=f"{odd} odd")
+    V.text(ax, p, 0.0, 1.7, "pink = odd count, green = paired away", ha="left", color="muted", size=9)
+
+
+V.animate(a2_frame, len(a2_frames), captions=a2_caps, interval=950)
+del seq, weights, a2_frames, a2_caps, run, k, window, colors, odd, cnt
+```
+
+XOR-ing per-value weights one element at a time. Each value is pink while its running count is odd and turns green the moment a second copy cancels it. Only the *parity* survives: three copies of $4$ leave the same residue as one copy of $4$, which is precisely what makes this fingerprint perfect for "is everything paired?" and useless for exact multiplicity.
+
+:::
+
+XOR pairs with the sum fingerprint in @sec-hsh-a5: prefix-XOR turns "count subarrays whose every value appears an even number of times" into "count pairs of equal prefix-XORs," a frequency-map tally. When you need the count itself and not just its parity, you go back to the additive fingerprint of A1, which does see multiplicity.
+
+
+## A3. Equal multisets of subarrays (an invertible window) {#sec-hsh-a3}
+
+::: {.callout-note title="In plain words"}
+A range sum is $P[r{+}1]-P[l]$ because the prefix sum is *invertible* — subtract and the left part disappears. The sum fingerprint of @sec-hsh-a1 is invertible for the same reason, and that is the whole trick behind every "for each window, is it a permutation?" problem. Slide a window of length $L$ one step: drop the element leaving and add the element entering, $H \mathrel{+}= r[\text{enter}]$, $H \mathrel{-}= r[\text{leave}]$, in $O(1)$. A window is a **permutation of $1..L$** exactly when its multiset is $\{1,2,\dots,L\}$, i.e. exactly when its fingerprint equals the fixed target $T[L] = r[1] + r[2] + \cdots + r[L]$. One $O(1)$ comparison replaces re-sorting the window, so all $n$ windows of length $L$ cost $O(n)$.
+:::
+
+The two functions below are the fingerprint-based test and the exact reference; they must agree on every window:
+
+```{python}
+def perms_via_hash(a, r):
+    """All (l, r) windows whose multiset is exactly {1, 2, ..., r-l+1}, by fingerprint."""
+    W = len(a)
+    target = [0] * (W + 1)
+    for L in range(1, W + 1):
+        target[L] = target[L - 1] + r[L]        # T[L] = r[1] + ... + r[L]
+    res = []
+    for L in range(1, W + 1):
+        cur = sum(r[x] for x in a[:L])          # first window of length L
+        if cur == target[L]:
+            res.append((0, L - 1))
+        for l in range(1, W - L + 1):           # slide: -leave, +enter
+            cur += r[a[l + L - 1]] - r[a[l - 1]]
+            if cur == target[L]:
+                res.append((l, l + L - 1))
+    return res
+
+
+def perms_brute(a):
+    """Exact reference: a window is a permutation iff all values are distinct, all are
+    >= 1, and the maximum equals the length."""
+    res = []
+    n = len(a)
+    for l in range(n):
+        seen = set()
+        ok = True
+        mx = 0
+        for r_ in range(l, n):
+            if a[r_] in seen or a[r_] < 1:
+                ok = False
+            seen.add(a[r_])
+            mx = max(mx, a[r_])
+            if ok and mx == r_ - l + 1:
+                res.append((l, r_))
+    return res
+
+
+a = [1, 2, 1, 2, 3]
+r = rand_weights(range(1, len(a) + 1), a)
+assert sorted(perms_via_hash(a, r)) == sorted(perms_brute(a))
+
+for _ in range(200):
+    a = [random.randint(1, 6) for _ in range(random.randint(1, 12))]
+    r = rand_weights(range(1, len(a) + 1), a)
+    assert sorted(perms_via_hash(a, r)) == sorted(perms_brute(a))
+```
+
+The `+enter / -leave` update is what you will see again on the judge problem @sec-hsh-p1-subperm. Watch a length-$3$ window slide and its fingerprint snap to the target exactly on the permutations:
+
+::: {#fig-hsh-a3-anim}
+
+```{python}
+#| echo: false
+a = [2, 1, 3, 1, 2]
+L = 3
+r = rand_weights(range(1, len(a) + 1), a)
+target = sum(r[k] for k in range(1, L + 1))
+a3_frames = []
+a3_caps = []
+for s in range(0, len(a) - L + 1):
+    win = a[s:s + L]
+    H = sum(r[x] for x in win)
+    colors = {s + i: ("green" if H == target else "amber") for i in range(L)}
+    a3_frames.append((dict(colors), H == target, list(win)))
+    a3_caps.append(f"window {win}: H "
+                   f"{'== T -> permutation' if H == target else '!= T'}")
+
+
+def a3_frame(ax, p, k):
+    colors, ok, win = a3_frames[k]
+    V.array(ax, p, a, colors=colors, note="perm" if ok else "no")
+
+
+V.animate(a3_frame, len(a3_frames), captions=a3_caps, interval=1050)
+del a, L, r, target, a3_frames, a3_caps, s, win, H, colors, k, ok
+```
+
+Three length-$3$ windows over $[2,1,3,1,2]$. The first $[2,1,3]$ and the last $[3,1,2]$ are permutations of $\{1,2,3\}$, so their fingerprint equals the target and the cells light green; the middle $[1,3,1]$ repeats a $1$, its fingerprint is off, and it stays amber. The update from one window to the next is a single add and a single subtract.
+
+:::
+
+For the full multiset-hash power — every window length at once — you can also prefix the fingerprint and read a window as a difference, which is @sec-hsh-a5. The invertible window is the right tool when the *length is fixed*; the prefix form is the right tool when you must answer about *all* lengths cheaply.
+
+## A4. Sequence (rolling) hashing {#sec-hsh-a4}
+
+::: {.callout-note title="In plain words"}
+Everything so far is **order-blind**: $\{1,2\}$ and $\{2,1\}$ are the same fingerprint. When the order is part of the data, give each *position* its own weight: a base $B$ raised to the index. The polynomial (rolling) hash of a sequence $s$ is $H = s_0 B^{k} + s_1 B^{k-1} + \cdots + s_{k-1}$, built by Horner's rule. Now $\{1,2\}$ gives $B+2$ and $\{2,1\}$ gives $2B+1$ — different, for any base. Compute it modulo a large prime (or modulo $2^{64}$ using unsigned overflow). Prefix it, $\text{pref}[i{+}1] = \text{pref}[i]\cdot B + s_i$, and any subarray hash is $H(l,r) = \text{pref}[r{+}1] - \text{pref}[l]\cdot B^{r-l+1}$ — one multiply, one subtract, $O(1)$ after a power table. This is the same machinery as @sec-str's string hash, run on integers instead of letters.
+:::
+
+```{python}
+M4 = 2**61 - 1                          # Mersenne prime; exact and fast to reduce in Python
+B4 = random.randrange(256, M4 - 1)      # randomised base, fixed for the rest of the chapter
+
+
+def seq_pref(a, B, M):
+    pref = [0]
+    for x in a:
+        pref.append((pref[-1] * B + x) % M)     # Horner step
+    return pref
+
+
+def pow_table(n, B, M):
+    p = [1]
+    for _ in range(n):
+        p.append(p[-1] * B % M)
+    return p
+
+
+def sub_hash(pref, ptab, l, r):
+    """Hash of a[l..r] (inclusive), normalised so position l starts the polynomial."""
+    return (pref[r + 1] - pref[l] * ptab[r - l + 1]) % M4
+```
+
+Order is now visible, and equal-length subarrays match if and only if they are identical:
+
+```{python}
+# the multiset hash sees nothing; the sequence hash separates the two orders
+h12 = sub_hash(seq_pref([1, 2], B4, M4), pow_table(3, B4, M4), 0, 1)
+h21 = sub_hash(seq_pref([2, 1], B4, M4), pow_table(3, B4, M4), 0, 1)
+assert h12 != h21
+
+for _ in range(300):
+    arr = [random.randint(0, 3) for _ in range(random.randint(2, 10))]
+    pr = seq_pref(arr, B4, M4)
+    pt = pow_table(len(arr) + 1, B4, M4)
+
+    def sh(l, r):
+        return (pr[r + 1] - pr[l] * pt[r - l + 1]) % M4
+
+    l1 = random.randrange(len(arr)); r1 = random.randrange(l1, len(arr))
+    l2 = random.randrange(len(arr)); r2 = random.randrange(l2, len(arr))
+    same = (r1 - l1) == (r2 - l2) and arr[l1:r1 + 1] == arr[l2:r2 + 1]
+    assert (sh(l1, r1) == sh(l2, r2)) == same
+```
+
+::: {#fig-hsh-a4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [4, 1, 7]
+    pr = seq_pref(a, 3, 10**9 + 7)
+    pt = pow_table(4, 3, 10**9 + 7)
+    V.grid(ax, p, [["a", str(x) for x in a]], x=0.0, y=3.0,
+           colors={(0, c): "cyan" for c in range(1, 4)})
+    V.grid(ax, p, [["pref"] + [str(v) for v in pr]], x=0.0, y=1.5,
+           colors={(0, c): "indigo" for c in range(1, 5)})
+    V.grid(ax, p, [["pow"] + [str(v) for v in pt]], x=0.0, y=0.0,
+           colors={(0, c): "amber" for c in range(1, 5)})
+    V.text(ax, p, 6.4, 1.5, "H(l,r) = pref[r+1]\n     - pref[l]*B^(r-l+1)",
+           ha="left", color="green", size=9)
+V.show(draw)
+```
+
+The prefix row $\text{pref}$ and the power row $B^i$ together turn any subarray comparison into two table reads and one multiply–subtract. A collision (identical hashes for different sequences) is about $1/M$ for a random base, astronomically unlikely at $M = 2^{61}{-}1$.
+
+:::
+
+The rolling hash powers the equal-length common-subarray pattern of @sec-hsh-p4 and, with the window length folded in, the LCP / longest-repeat style questions of @sec-str. It is the accumulator you reach for the moment "order" enters the statement.

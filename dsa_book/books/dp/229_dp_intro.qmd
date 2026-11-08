@@ -1,0 +1,1136 @@
+# Introduction to Dynamic Programming {#sec-dpi}
+
+::: {.callout-note title="Sources"}
+**`dp_book` ch. 1** (seven lessons, five patterns, toolkit) · **`dp_ladder`** part I (*First Transitions*: families `linear`, `house`, `grid`, `machine`, `kadane`) · **CLRS** ch. 14 (dynamic programming) · **Erickson** *Algorithms* ch. 3 · **CPH** ch. 7 · AtCoder Educational DP Contest (tasks A, C).
+
+**Coverage:** what DP is (overlapping subproblems, optimal substructure) · recursion → memoisation → table → O(1) space · the five-question recipe (state, transition, base cases, answer, order) and the cost check · counting vs optimising vs deciding, ordered vs unordered counting, counting mod p, "impossible" values · top-down vs bottom-up, pull vs push, rolling arrays · recognising DP from the statement and the constraints · reconstruction · debugging and stress testing DP · five patterns: linear recurrences, include/exclude, grid paths, multi-state, Kadane with extra states.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Turn a brute-force recursion into a memoised recursion, a table, and an O(1)-space loop, and say what each step costs.
+- Answer the five questions (state, transition, base cases, answer, order) for a new problem before writing code.
+- Tell counting, optimisation and feasibility versions of a problem apart, and avoid the ordered-vs-unordered counting trap.
+- Add a state dimension (last choice, holding, phase, deleted) instead of looking for a new algorithm.
+- Rebuild the actual solution (the path, the chosen items) from a filled table.
+- Find DP bugs quickly by printing the table and stress testing against a brute force.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from functools import lru_cache
+from itertools import product
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import dp_traces as Traces
+
+random.seed(0)
+MOD = 10**9 + 7
+```
+
+## Why this matters
+
+Dynamic programming (DP) is one of the most frequent topics in algorithm interviews, and `dp` is one of the most common problem tags on Codeforces. It also scares people, because DP solutions look like magic: a two-line recurrence solves a problem that seemed to need exponential search.
+
+The magic is a habit. You describe a **subproblem** precisely, write how its answer depends on **smaller** subproblems, and store each answer once. This chapter builds that habit on small problems, so that the five questions become automatic. Every later DP chapter — knapsack, intervals, bitmasks, trees, the optimisations — uses the same five questions with a bigger state.
+
+## Lesson 1: what dynamic programming is {#sec-dpi-what}
+
+A problem is a good DP candidate when it has two properties:
+
+1. **Optimal substructure.** The answer to the problem can be built from answers to smaller instances of the same problem. (For optimisation problems this is the property from @sec-pf-induction: an optimal solution contains optimal solutions to its subproblems.)
+2. **Overlapping subproblems.** A plain recursion reaches the *same* smaller instance many times.
+
+The first property makes a recursion correct. The second makes it slow, and DP removes the slowness by computing each distinct subproblem **once**. Naive Fibonacci makes $2F(n+1) - 1$ calls for only $n + 1$ distinct arguments; @fig-cx-fib-tree in the complexity chapter shows the repeated subtrees.
+
+Without overlap there is nothing to save: merge sort also builds the answer from smaller instances, but its two halves never share work, so it is divide and conquer, not DP.
+
+### The subproblem graph
+
+Draw one node per distinct subproblem and an arrow from each subproblem to every subproblem that uses its answer. For DP to work this graph must be a **DAG**: no subproblem may depend, directly or indirectly, on itself. The DP computes the nodes in a topological order, and its running time is the sum over nodes of the work done at that node.
+
+::: {#fig-dpi-fib-dag}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    n = 7
+    for i in range(n):
+        V.box(ax, p, i * 1.6, 0, 1.0, 0.8, f"F({i})", color="green" if i < 2 else "indigo")
+    for i in range(2, n):
+        V.arrow(ax, p, (i - 1) * 1.6 + 1.0, 0.4, i * 1.6, 0.4, color="muted")
+        V.arrow(ax, p, (i - 2) * 1.6 + 0.5, 0.85, i * 1.6 + 0.5, 0.85, color="violet", rad=-0.45)
+    V.text(ax, p, 0.5 * 1.6 + 0.5, -0.5, "base cases", color="green", size=10)
+V.show(draw)
+```
+
+The subproblem graph of Fibonacci: seven nodes, each with two incoming arrows. The recursion tree has exponentially many nodes; the graph has $n + 1$. Computing left to right is a topological order.
+
+:::
+
+## Lesson 2: from recursion to a loop {#sec-dpi-fib}
+
+Every DP in this book can be written in four forms. Learn to move between them; each removes one kind of waste.
+
+| Form | How | Time | Extra space |
+|---|---|---|---|
+| Plain recursion | the recurrence, called directly | exponential | $O(n)$ stack |
+| Memoisation (top-down) | recursion + a cache checked first | $O(\text{states} \times \text{transitions})$ | table + stack |
+| Tabulation (bottom-up) | fill a table in dependency order | same | table |
+| Rolling variables | keep only the cells the next step reads | same | $O(\text{window})$ |
+
+```{python}
+#| label: dpi-fib-forms
+calls = {"plain": 0, "memo": 0}
+
+def fib_plain(n):
+    calls["plain"] += 1
+    return n if n < 2 else fib_plain(n - 1) + fib_plain(n - 2)
+
+def fib_memo(n, cache=None):
+    cache = {} if cache is None else cache
+    calls["memo"] += 1
+    if n < 2:
+        return n
+    if n not in cache:
+        cache[n] = fib_memo(n - 1, cache) + fib_memo(n - 2, cache)
+    return cache[n]
+
+def fib_table(n):
+    dp = [0] * (n + 1)
+    if n:
+        dp[1] = 1
+    for i in range(2, n + 1):
+        dp[i] = dp[i - 1] + dp[i - 2]
+    return dp[n]
+
+def fib_rolling(n):
+    a, b = 0, 1                      # F(i), F(i+1)
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+for n in range(0, 25):
+    calls = {"plain": 0, "memo": 0}
+    vals = {fib_plain(n), fib_memo(n), fib_table(n), fib_rolling(n)}
+    assert len(vals) == 1
+    assert calls["memo"] <= 2 * n + 1          # each n computed once, each looked up at most twice
+print("calls for n = 24:", calls)
+```
+
+The memoised version is the recursion you already wrote, plus two lines. That is why the usual workflow is: **write the recursion first, check it on small inputs, then add memoisation, then convert to a table only if you need speed or less stack.**
+
+::: {#fig-dpi-fib-fill}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    n = 6
+    dp = [0, 1]
+    shots = [list(dp)]
+    for i in range(2, n + 1):
+        dp.append(dp[i - 1] + dp[i - 2])
+        if i in (2, 4, 6):
+            shots.append(list(dp))
+    assert shots[-1][-1] == fib_table(n) == 8
+    V.trace(ax, p, [
+        {"values": row + ["·"] * (n + 1 - len(row)), "label": f"step {k + 1}",
+         "colors": {len(row) - 1: "green"}}
+        for k, row in enumerate(shots)
+    ])
+V.show(draw)
+```
+
+The table for $F(0)$ through $F(6)$, written left to right. A dot is a cell that does not exist yet. The green cell was just written from the two cells before it. Step 4 is $F(6) = 8$.
+
+:::
+
+::: {.callout-warning title="Memoisation pitfalls"}
+- Python's default recursion limit is 1000 (@sec-lang-recursion): memoised recursion on $n = 10^5$ crashes. Use a table, or raise the limit and run in a thread with a big stack.
+- The cache key must include **every** parameter that changes the answer. Forgetting one gives wrong answers that pass small tests.
+- `functools.lru_cache` on a function with a list argument fails (lists are unhashable): pass indices, or tuples.
+:::
+
+::: {#fig-dpi-anim-fib}
+
+```{python}
+#| echo: false
+FIB_N = 8
+fib_dp = [0, 1]
+for i in range(2, FIB_N + 1):
+    fib_dp.append(fib_dp[-1] + fib_dp[-2])
+
+def fib_frame(ax, p, k):
+    i = k + 1                                   # frame k fills cell i = k + 1 (frames 1..8)
+    shown = [str(v) if j <= i else "" for j, v in enumerate(fib_dp)]
+    colors = {i: "indigo"}
+    if i >= 2:
+        colors.update({i - 1: "cyan", i - 2: "cyan"})
+    V.array(ax, p, shown, colors=colors, label="dp", dim=[j for j in range(len(fib_dp)) if j > i])
+
+caps = ["base cases: dp[0] = 0, dp[1] = 1"] + [
+    f"dp[{i}] = dp[{i - 1}] + dp[{i - 2}] = {fib_dp[i - 1]} + {fib_dp[i - 2]} = {fib_dp[i]}" for i in range(2, FIB_N + 1)]
+assert fib_dp[-1] == 21 and len(caps) == FIB_N
+V.animate(fib_frame, FIB_N, captions=caps, interval=900)
+```
+
+The tabulation form, frame by frame. Each step fills one cell from the two cells before it (cyan); nothing is ever computed twice, which is the whole saving over the recursion tree.
+
+:::
+
+## Lesson 3: the five questions {#sec-dpi-recipe}
+
+Every DP solution answers the same five questions. Write the answers down before coding.
+
+::: {#fig-dpi-recipe}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    nodes = {"s": (0, 0, "1. State", "indigo"), "t": (3.2, 0, "2. Transition", "cyan"),
+             "b": (6.4, 0, "3. Base cases", "green"), "a": (9.6, 0, "4. Answer", "amber"),
+             "o": (12.8, 0, "5. Order", "pink"), "c": (12.8, -1.9, "Check the cost", "violet")}
+    V.flow(ax, p, nodes, [("s", "t", ""), ("t", "b", ""), ("b", "a", ""), ("a", "o", ""), ("o", "c", "")], w=2.7)
+V.show(draw)
+```
+
+The DP recipe. The state is the hard part: once it is right, the transition usually follows from "what was the last decision?". Finish by checking that the number of states times the work per state fits the time limit.
+
+:::
+
+1. **State.** What parameters identify a subproblem, and what *exactly* does $dp[\dots]$ mean? Write it as a full sentence: "$dp[i]$ = the minimum cost to **arrive at** position $i$". A vague state ("$dp[i]$ = cost for stair $i$") becomes an off-by-one bug later.
+2. **Transition.** How does a state's answer follow from smaller states? Ask: **what was the last decision?** (or the first). Every solution of the subproblem makes exactly one such decision, so considering all of them covers every solution exactly once.
+3. **Base cases.** Which states are answered directly, without a transition?
+4. **Answer.** Which state, or which combination of states, is the final answer? (Often $dp[n]$; sometimes $\max_i dp[i]$.)
+5. **Order.** In what order can the states be computed so that every dependency is ready? For one index this is usually left to right; in general it is a topological order of the subproblem graph.
+
+Then **check the cost**: (number of states) × (transitions per state) must fit in about $10^8$ operations (@sec-cx-budget), and the table must fit in memory.
+
+### Worked example: min cost climbing stairs
+
+Stairs are numbered $0..n-1$ and the top is position $n$. Leaving stair $i$ costs $c_i$, then you move up 1 or 2. You may start on stair 0 or 1. Minimise the cost to reach the top.
+
+- **State.** $dp[i]$ = the minimum cost to *arrive at* position $i$ (nothing paid for leaving $i$ yet).
+- **Transition.** The last move came from $i - 1$ (paying $c_{i-1}$) or from $i - 2$ (paying $c_{i-2}$): $dp[i] = \min(dp[i-1] + c_{i-1},\, dp[i-2] + c_{i-2})$.
+- **Base cases.** $dp[0] = dp[1] = 0$ (you may start on either for free).
+- **Answer.** $dp[n]$.
+- **Order.** $i = 2, 3, \dots, n$.
+- **Cost.** $n$ states, 2 transitions each: $O(n)$ time; two rolling variables give $O(1)$ space.
+
+```{python}
+#| label: dpi-min-cost-stairs
+def min_cost_stairs(c):
+    n = len(c)
+    dp = [0] * (n + 1)
+    for i in range(2, n + 1):
+        dp[i] = min(dp[i - 1] + c[i - 1], dp[i - 2] + c[i - 2])
+    return dp[n]
+
+def min_cost_brute(c):
+    n = len(c)
+    @lru_cache(maxsize=None)
+    def go(i):                       # cost to finish from position i
+        return 0 if i >= n else c[i] + min(go(i + 1), go(i + 2))
+    return min(go(0), go(1))
+
+for _ in range(500):
+    c = [random.randint(0, 20) for _ in range(random.randint(2, 12))]
+    assert min_cost_stairs(c) == min_cost_brute(c)
+assert min_cost_stairs([10, 15, 20]) == 15
+assert min_cost_stairs([1, 100, 1, 1, 1, 100, 1, 1, 100, 1]) == 6
+```
+
+The brute force here is written in the opposite direction ("cost to *finish* from $i$", a suffix state) and still agrees. Both directions are valid DP designs: **prefix states** ask "what was the last decision?", **suffix states** ask "what is the first decision?". Pick whichever makes the transition simpler.
+
+## Lesson 4: counting, optimising, deciding {#sec-dpi-types}
+
+The same subproblem graph answers three kinds of questions. Only the way two transitions combine changes:
+
+| Question | Combine choices with | Identity (no choice) | Example |
+|---|---|---|---|
+| Count the ways | $+$ (often mod $p$) | $0$ | number of ways to climb |
+| Optimise | $\min$ / $\max$ | $+\infty$ / $-\infty$ | cheapest climb |
+| Decide | OR | `False` | can you reach exactly $n$? |
+
+```{python}
+#| label: dpi-three-questions
+def stairs_three_ways(n, steps):
+    ways = [1] + [0] * n                       # count
+    best = [0] + [math.inf] * n                # fewest moves
+    can = [True] + [False] * n                 # reachable?
+    for i in range(1, n + 1):
+        for s in steps:
+            if s <= i:
+                ways[i] += ways[i - s]
+                best[i] = min(best[i], best[i - s] + 1)
+                can[i] = can[i] or can[i - s]
+    return ways[n], best[n], can[n]
+
+assert stairs_three_ways(6, (1, 3, 4)) == (9, 2, True)
+assert stairs_three_ways(5, (2, 4)) == (0, math.inf, False)
+```
+
+### The counting trap: ordered or unordered?
+
+"In how many ways can you write 4 as a sum of 1s and 2s?" has two different answers. **Ordered** (compositions: $1{+}1{+}2$ and $2{+}1{+}1$ differ) gives 5; **unordered** (partitions: only the multiset counts) gives 3. The loop order decides which one you count:
+
+- **outer loop over the total, inner over the parts** → every order is counted separately (ordered);
+- **outer loop over the parts, inner over the total** → parts are added in a fixed order, so each multiset is counted once (unordered).
+
+```{python}
+#| label: dpi-ordered
+def count_ordered(n, parts):
+    dp = [1] + [0] * n
+    for total in range(1, n + 1):
+        for x in parts:
+            if x <= total:
+                dp[total] += dp[total - x]
+    return dp[n]
+
+def count_unordered(n, parts):
+    dp = [1] + [0] * n
+    for x in parts:
+        for total in range(x, n + 1):
+            dp[total] += dp[total - x]
+    return dp[n]
+
+def brute(n, parts, ordered):
+    seqs = set()
+    def go(rest, seq):
+        if rest == 0:
+            seqs.add(tuple(seq) if ordered else tuple(sorted(seq)))
+        for x in parts:
+            if x <= rest:
+                go(rest - x, seq + [x])
+    go(n, [])
+    return len(seqs)
+
+for n in range(0, 12):
+    for parts in [(1, 2), (1, 3, 4), (2, 5)]:
+        assert count_ordered(n, parts) == brute(n, parts, True)
+        assert count_unordered(n, parts) == brute(n, parts, False)
+assert (count_ordered(4, (1, 2)), count_unordered(4, (1, 2))) == (5, 3)
+```
+
+### Counting modulo a prime, and "impossible"
+
+Counts grow exponentially, so problems ask for them modulo $p = 10^9 + 7$ or $998244353$. Reduce after **every** addition; in C++ keep values in `long long` or add with `if (x >= MOD) x -= MOD`. Never take a `min` of values that have already been reduced mod $p$: the reduced values no longer compare correctly.
+
+In optimisation DPs, an unreachable state needs a value that loses every comparison: $+\infty$ for min, $-\infty$ for max. In C++ use something like `INF = 1e18` (not `LLONG_MAX`, because `INF + cost` overflows), and skip transitions from unreachable states.
+
+## Lesson 5: implementation styles {#sec-dpi-styles}
+
+| Style | Write it when | Watch out for |
+|---|---|---|
+| **Top-down** (memoised recursion) | the state space is sparse or awkward to order; you want the recursion as written | recursion depth; cache keys |
+| **Bottom-up** (table) | states are dense and the order is obvious; you need speed or $O(1)$ space | filling in the wrong order |
+| **Pull** | $dp[i]$ = combine over the states it depends on | the natural form of a recurrence |
+| **Push** | from $dp[i]$, update every state it leads to | natural when a state's *successors* are easy to list (jumps, moves) |
+| **Rolling array** | $dp[i]$ only reads a fixed window of earlier rows | reconstruction needs the full table |
+
+Pull and push compute the same thing; the code below fills one table both ways.
+
+```{python}
+#| label: dpi-pull-push
+def ways_pull(n, steps):
+    dp = [1] + [0] * n
+    for i in range(1, n + 1):
+        dp[i] = sum(dp[i - s] for s in steps if s <= i)
+    return dp
+
+def ways_push(n, steps):
+    dp = [1] + [0] * n
+    for i in range(n + 1):
+        for s in steps:
+            if i + s <= n:
+                dp[i + s] += dp[i]
+    return dp
+
+assert all(ways_pull(n, (1, 2, 5)) == ways_push(n, (1, 2, 5)) for n in range(30))
+```
+
+**Counting the work.** The time of a DP is $\sum_{\text{states}} (\text{transitions of that state})$. Climbing stairs: $n$ states × 2. A grid: $nm$ states × 2. Knapsack (a later chapter): $nW$ states × 2. An interval DP: $n^2$ states × $n$ splits $= n^3$. This sum, not the code length, tells you whether the DP fits.
+
+## Lesson 6: recognising DP {#sec-dpi-recognise}
+
+Signals in the statement:
+
+- "count the number of ways", "how many sequences/paths/tilings", "modulo $10^9 + 7$";
+- "minimum cost / maximum value" over **choices made in sequence**, where a greedy choice now can hurt later;
+- the input is a sequence, a grid, a string or a tree, and decisions are local (take / skip, move right / down);
+- the constraints allow $O(n)$, $O(n \cdot k)$ or $O(n^2)$ but not $2^n$.
+
+The constraints often reveal the state: $n \le 10^5$ with values $\le 100$ suggests $dp[i][\text{value}]$; $n \le 5000$ suggests $dp[i][j]$; $n \le 20$ suggests a bitmask (later chapter).
+
+The five patterns of this chapter:
+
+| Pattern | State | Core transition | Answer | Time / space |
+|---|---|---|---|---|
+| Linear recurrence | $dp[i]$ | a few earlier cells | $dp[n]$ | $O(n)$ / $O(1)$ |
+| Include / exclude | $dp[i]$ = best using the first $i$ items | take $a_i + dp[i-2]$ or skip $dp[i-1]$ | $dp[n]$ | $O(n)$ / $O(1)$ |
+| Grid paths | $dp[r][c]$ | from above and from the left | $dp[n-1][m-1]$ | $O(nm)$ / $O(m)$ |
+| Multi-state | $dp[i][s]$, $s$ = last choice / holding / phase | small state machine | best over $s$ | $O(nS)$ / $O(S)$ |
+| Kadane-style | best ending at $i$, per phase | extend or restart | best over all $i$ | $O(n)$ / $O(1)$ |
+
+Every solved problem below is written in **four forms**, and the last form is the one you submit.
+
+| Form | What it is | Why it is in the chapter |
+|---|---|---|
+| Recursion | the recurrence, called directly | the proof that the state is right; also the brute-force oracle |
+| Memoisation | the same recursion, each state stored once | the form you write first in an interview |
+| Tabulation | a table filled in dependency order | no recursion limit; the table is what you draw |
+| Optimal | the table with every dead cell deleted | what passes the constraints |
+
+The optimal form is never a different idea. It is the table after you notice which cells a step actually reads. The callout on each problem says which cells those are, and which assignment order keeps them alive. Where that argument is easy to get wrong (tiling, stock with $k$ transactions, Beautiful Array, one deletion, a circular array), it is written out on a number, not only as a formula.
+
+## Pattern 1: linear recurrences {#sec-dpi-p1}
+
+**Where we are.** The lessons gave you the five questions. The patterns below use them on states that grow by **one idea at a time**: a single index (this pattern), a decision per index (Pattern 2), two indices (Pattern 3), a fact about the past (Pattern 4), and phases inside a running best (Pattern 5). Each problem in a pattern adds one twist to the problem before it.
+
+
+**Recognise it.** One index (a position, a length, an amount), and the answer for $i$ depends on a **fixed number** of earlier answers: "you can move 1 or 2 steps", "a tile covers 1 or 2 columns".
+
+::: {.callout-important title="Template"}
+$dp[i] = \text{combine}\big(dp[i - s_1] \oplus w_1,\ \dots,\ dp[i - s_k] \oplus w_k\big)$, one term per possible **last step**. Combine is $+$ for counting and $\min$/$\max$ for optimisation. Fill $i = 0, 1, \dots, n$; keep only the last $\max s_j$ values for $O(1)$ space.
+:::
+
+**Complexity.** $O(nk)$ time, $O(k)$ space with rolling variables.
+
+::: {#fig-dpi-p1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    dp = [1, 1]
+    for i in range(2, 8):
+        dp.append(dp[-1] + dp[-2])
+    V.array(ax, p, dp, colors={6: "indigo", 5: "cyan", 4: "cyan"}, label="dp")
+    V.arrow(ax, p, 5.5, 1.55, 6.35, 1.55, color="cyan", rad=-0.5)
+    V.arrow(ax, p, 4.5, 1.55, 6.55, 1.55, color="cyan", rad=-0.45)
+    V.text(ax, p, 8.4, 0.5, "dp[6] = dp[5] + dp[4]", ha="left", color="indigo", size=10)
+V.show(draw)
+```
+
+A linear recurrence reads a fixed window of earlier cells. Here (climbing stairs) each cell is the sum of the two before it, so only two numbers ever need to be kept.
+
+:::
+
+{{< include ../problems/lc-0070-climbing-stairs/problem.qmd >}}
+
+[**From counting to costs.** Climbing Stairs *adds* the two ways into a step. Frog 1 keeps exactly the same graph, but each arrow now has a price, so `+` becomes `min` and each term carries the cost of its last jump.]{.flow-bridge}
+
+
+{{< include ../problems/ac-dp_a-frog-1/problem.qmd >}}
+
+[**From a position to a shape.** Both problems so far only needed to know *how far* we had got. Tiling also needs the *shape* of the frontier (full, or one cell sticking out) — the first sign that a state can carry more than a position.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0790-domino-and-tromino-tiling/problem.qmd >}}
+
+## Pattern 2: include / exclude {#sec-dpi-p2}
+
+**From steps to choices.** In Pattern 1 every position is visited and the only question is *how* we arrived. Now each item is a **decision** — take it or leave it — and taking one item forbids its neighbour. The animation shows the decision being made at every house.
+
+
+**Recognise it.** A sequence of items, each either **taken or skipped**, with a constraint between neighbouring choices ("no two adjacent", "taking $x$ forbids $x \pm 1$"). Maximise the total.
+
+::: {.callout-important title="Template"}
+$dp[i]$ = best total using only the first $i$ items. Item $i$ is either **skipped**, giving $dp[i-1]$, or **taken**, giving $a_i + dp[i-2]$ (its neighbour must be skipped). So $dp[i] = \max(dp[i-1],\ a_i + dp[i-2])$. If the constraint is on **values** rather than positions, first bucket the items by value and run the same DP over the value axis.
+:::
+
+**Complexity.** $O(n)$ time, $O(1)$ space (plus $O(\max a)$ for the value-axis version).
+
+::: {#fig-dpi-anim-robber}
+
+```{python}
+#| echo: false
+rob_a = [2, 7, 9, 3, 1]
+rob_dp = []
+for i, x in enumerate(rob_a):
+    skip = rob_dp[i - 1] if i >= 1 else 0
+    take = x + (rob_dp[i - 2] if i >= 2 else 0)
+    rob_dp.append(max(skip, take))
+rob_pick, i = [], len(rob_a) - 1
+while i >= 0:
+    prev = rob_dp[i - 1] if i >= 1 else 0
+    if rob_dp[i] == prev:
+        i -= 1
+    else:
+        rob_pick.append(i); i -= 2
+assert rob_dp[-1] == 12 and sorted(rob_pick) == [0, 2, 4]
+
+def rob_frame(ax, p, k):
+    if k < len(rob_a):
+        row = [str(v) if j <= k else "" for j, v in enumerate(rob_dp)]
+        colors = {(1, k): "indigo", (0, k): "amber"}
+        if k >= 1: colors[(1, k - 1)] = "cyan"
+        if k >= 2: colors[(1, k - 2)] = "green"
+    else:
+        row = [str(v) for v in rob_dp]
+        colors = {(0, j): "green" for j in rob_pick}
+    V.grid(ax, p, [rob_a, row], row_labels=["coins", "dp"], colors=colors, cell_w=1.3)
+
+caps = []
+for i, x in enumerate(rob_a):
+    skip = rob_dp[i - 1] if i >= 1 else 0
+    take = x + (rob_dp[i - 2] if i >= 2 else 0)
+    caps.append(f"house {i + 1}: skip = {skip}, take = {x} + {take - x} = {take} → dp = {rob_dp[i]}")
+caps.append("walk back: houses 1, 3 and 5 are robbed (12)")
+V.animate(rob_frame, len(rob_a) + 1, captions=caps, interval=1100)
+```
+
+House Robber on $[2, 7, 9, 3, 1]$, one house per frame. At each house the table compares **skip** ($dp[i-1]$) with **take** ($a_i + dp[i-2]$); the last frame walks back through the table to recover the robbed houses.
+
+:::
+
+{{< include ../problems/lc-0198-house-robber/problem.qmd >}}
+
+[**From positions to values.** House Robber forbids *adjacent positions*. Boredom forbids *adjacent values*. Once the numbers are bucketed by value, it is the same take-or-skip table running along a new axis.]{.flow-bridge}
+
+
+{{< include ../problems/cf-455a-boredom/problem.qmd >}}
+
+## Pattern 3: grid paths {#sec-dpi-p3}
+
+**From one index to two.** Every DP so far walked along a line. A grid has two coordinates, but the question that gives the transition is unchanged — *what was the last move?* — and the answer is "from above or from the left". The fill order just has to finish both neighbours first; anti-diagonals (below) make that visible.
+
+
+**Recognise it.** A grid, moves only right and down (or any moves that never return to an earlier cell), and a question about paths from one corner to the other: count them, or find the cheapest.
+
+::: {.callout-important title="Template"}
+$dp[r][c]$ = answer for paths from the start to cell $(r, c)$. The last move came from above or from the left: $dp[r][c] = \text{combine}(dp[r-1][c],\ dp[r][c-1]) \oplus \text{cell}(r, c)$. Fill row by row (each row left to right). Only the previous row is ever read, so one rolling row of length $m$ is enough.
+:::
+
+**Complexity.** $O(nm)$ time, $O(m)$ space.
+
+::: {#fig-dpi-anim-grid}
+
+```{python}
+#| echo: false
+grid_obs = [[0, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [1, 0, 0, 0]]
+R = C = 4
+paths = [[0] * C for _ in range(R)]
+for r in range(R):
+    for c in range(C):
+        if not grid_obs[r][c]:
+            paths[r][c] = 1 if r == c == 0 else (paths[r - 1][c] if r else 0) + (paths[r][c - 1] if c else 0)
+assert paths[-1][-1] == 3
+
+def grid_frame(ax, p, k):
+    cells = [["■" if grid_obs[r][c] else (str(paths[r][c]) if r + c <= k else "") for c in range(C)] for r in range(R)]
+    colors = {(r, c): "red" for r in range(R) for c in range(C) if grid_obs[r][c]}
+    colors.update({(r, c): "indigo" for r in range(R) for c in range(C) if r + c == k and not grid_obs[r][c]})
+    if k == R + C - 2:
+        colors[(R - 1, C - 1)] = "green"
+    V.grid(ax, p, cells, colors=colors)
+
+caps = [f"diagonal r + c = {k}" for k in range(R + C - 1)]
+caps[0] = "start: one path to the corner"
+caps[-1] = "goal: 3 paths avoid every obstacle"
+V.animate(grid_frame, R + C - 1, captions=caps, interval=900)
+```
+
+Counting paths on a $4 \times 4$ grid with three obstacles, one anti-diagonal per frame. Every cell on a diagonal depends only on the previous diagonal, so each frame can be filled all at once; obstacles (red) stay at 0.
+
+:::
+
+{{< include ../problems/lc-0063-unique-paths-ii/problem.qmd >}}
+
+[**From counting to cheapest.** Same grid, same fill order. `+` becomes `min`, each cell adds its own value, and keeping the whole table lets us walk the cheapest path back from the goal.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0064-minimum-path-sum/problem.qmd >}}
+
+## Pattern 4: multi-state DP {#sec-dpi-p4}
+
+**From where we are to what just happened.** In every problem so far the position alone decided the future. As soon as *yesterday's choice* restricts today's — the same activity twice, buying right after selling — the position is not enough. Do not look for a new algorithm: **add that fact to the state**.
+
+
+**Recognise it.** A linear DP where the best choice at step $i$ depends on **something about the previous step**: which activity you did yesterday, whether you hold a stock, whether you just sold, how many transactions are used. Instead of looking for a new algorithm, **add that something to the state**.
+
+::: {.callout-important title="Template"}
+$dp[i][s]$ = best value after step $i$, ending in state $s$ (from a small set $S$). Draw the allowed state changes as a **state machine** (nodes = states, edges = moves with their gain); each edge becomes one term of a transition. The answer is the best $dp[n][s]$ over the allowed final states.
+:::
+
+**Complexity.** $O(n \cdot |S| \cdot \text{edges per state})$ time, $O(|S|)$ space with rolling rows.
+
+{{< include ../problems/ac-dp_c-vacation/problem.qmd >}}
+
+[**From symmetric states to a machine.** Vacation's three states are interchangeable. Cooldown's are not: the allowed moves form a small machine with a forced pause after selling. The animation below runs that machine one day at a time.]{.flow-bridge}
+
+::: {#fig-dpi-anim-cooldown}
+
+```{python}
+#| echo: false
+cd_prices = [1, 2, 3, 0, 2]
+hold, sold, rest = -math.inf, -math.inf, 0
+cd_rows = []
+for pr in cd_prices:
+    hold, sold, rest = max(hold, rest - pr), hold + pr, max(rest, sold)
+    cd_rows.append((hold, sold, rest))
+assert max(cd_rows[-1][1], cd_rows[-1][2]) == 3
+
+def fmt(v):
+    return "−∞" if v == -math.inf else str(v)
+
+def cd_frame(ax, p, k):
+    cols = [[fmt(cd_rows[d][s]) if d <= k else "" for d in range(len(cd_prices))] for s in range(3)]
+    best = max(range(3), key=lambda s: cd_rows[k][s])
+    colors = {(s + 1, k): "indigo" for s in range(3)}
+    colors[(best + 1, k)] = "green"
+    V.grid(ax, p, [cd_prices] + cols, row_labels=["price", "hold", "sold", "rest"],
+           col_labels=[f"day {d + 1}" for d in range(len(cd_prices))], colors=colors, cell_w=1.3)
+
+caps = [f"day {d + 1} (price {pr}): hold {fmt(h)}, sold {fmt(s)}, rest {fmt(r)}"
+        for d, (pr, (h, s, r)) in enumerate(zip(cd_prices, cd_rows))]
+V.animate(cd_frame, len(cd_prices), captions=caps, interval=1200)
+```
+
+The cooldown machine on prices $[1, 2, 3, 0, 2]$, one day per frame: the best profit in each state after that day (green = best state). The optimal plan buys at 1, sells at 2 on day 2, is forced to rest on day 3, buys at 0 on day 4 and sells at 2 on day 5 — profit 3, the larger of *sold* and *rest* on the last day.
+
+:::
+
+
+{{< include ../problems/lc-0309-best-time-to-buy-and-sell-stock-with-cooldown/problem.qmd >}}
+
+[**From a machine to a counter.** A limit on *how many times* something may happen is one more state dimension: the same machine, copied once per transaction used.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0188-best-time-to-buy-and-sell-stock-iv/problem.qmd >}}
+
+## Pattern 5: Kadane with extra states {#sec-dpi-p5}
+
+**From whole arrays to segments.** Kadane's algorithm from the complexity chapter is the multi-state idea in its smallest form: one state, *best sum ending here*. Every twist in this pattern — a deletion, a multiplied segment, a wrap-around — adds a **phase** beside that state, exactly as Pattern 4 added facts about the past.
+
+
+**Recognise it.** "Best contiguous subarray" with a twist: you may delete one element, multiply one segment, wrap around the end, or change something once. Kadane's algorithm (@sec-cx-p1-max-subarray) is a one-state DP: $e_i$ = best sum of a subarray **ending at** $i$. Each twist adds a **phase** to the state.
+
+::: {.callout-important title="Template"}
+For each position keep one value per phase, e.g. *before / inside / after* the special segment, or *not yet used / used* the one-time operation. Each phase either **extends** the subarray from the same phase, **advances** from the previous phase, or (in the first phase) **restarts**. The answer is the best value over all positions and allowed phases.
+:::
+
+**Complexity.** $O(n \cdot \text{phases})$ time, $O(\text{phases})$ space.
+
+::: {#fig-dpi-anim-deletion}
+
+```{python}
+#| echo: false
+kd_a = [1, -2, 0, 3, -6, 4, 2]
+keep, dele = [kd_a[0]], [-math.inf]
+for i in range(1, len(kd_a)):
+    keep.append(max(keep[-1] + kd_a[i], kd_a[i]))
+    dele.append(max(dele[-1] + kd_a[i], keep[-2]))
+assert max(max(keep), max(dele)) == 9
+
+def fmt(v):
+    return "−∞" if v == -math.inf else str(v)
+
+def kd_frame(ax, p, k):
+    rows = [kd_a, [fmt(v) if j <= k else "" for j, v in enumerate(keep)], [fmt(v) if j <= k else "" for j, v in enumerate(dele)]]
+    colors = {(1, k): "indigo", (2, k): "violet", (0, k): "amber"}
+    if k == len(kd_a) - 1:
+        colors[(2, k)] = "green"; colors[(0, 4)] = "red"
+    V.grid(ax, p, rows, row_labels=["a", "keep", "del"], colors=colors)
+
+caps = [f"a[{i}] = {kd_a[i]}: keep = {fmt(keep[i])}, del = {fmt(dele[i])}" for i in range(len(kd_a))]
+caps[-1] += "  →  best 9 (delete −6)"
+V.animate(kd_frame, len(kd_a), captions=caps, interval=1000)
+```
+
+Kadane with one deletion on $[1, -2, 0, 3, -6, 4, 2]$, one element per frame. Row *keep* is plain Kadane; row *del* either carries an earlier deletion forward or spends it on the current element (taking *keep* from the previous column). The best value 9 appears when $-6$ is deleted.
+
+:::
+
+{{< include ../problems/lc-1186-maximum-subarray-sum-with-one-deletion/problem.qmd >}}
+
+[**From one point to one segment.** A deletion happens at a single position, so two phases are enough. A multiplied segment has a start *and* an end, so it needs three: before, inside, after.]{.flow-bridge}
+
+
+{{< include ../problems/cf-1155d-beautiful-array/problem.qmd >}}
+
+[**From phases to a ring.** The circular case needs no new state at all. A complement argument — the best wrapping subarray is everything except the worst non-wrapping one — turns it back into two runs of plain Kadane.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0918-maximum-sum-circular-subarray/problem.qmd >}}
+
+**Looking back.** Five patterns, one method: write the state as a sentence, ask what the last decision was, and grow the state only when the future depends on something the position does not record. The toolkit below collects the engineering that makes those DPs come out right the first time.
+
+## Toolkit: reconstruction, tricks and debugging {#sec-dpi-toolkit}
+
+### Reconstructing the solution
+
+A DP table stores **values**; interviews and contests often want the **solution** itself.
+
+| Method | How | Used in |
+|---|---|---|
+| Parent pointers | when a state picks its best transition, store which one | Frog 1 (@sec-dpi-p1-frog) |
+| Re-derive from the table | walk back from the answer; at each state, find a transition whose value explains the current one | House Robber, Minimum Path Sum, Vacation |
+| Counting tables as maps | to output the $k$-th solution, use the counts to decide each choice | later chapters |
+
+Two practical notes. Which optimal solution you get depends on the tie-breaking order in the walk back (prefer "skip" or "up" first, and you get a different, equally optimal answer); if the statement asks for the lexicographically smallest, choose the order deliberately. And reconstruction needs the **full** table: if you rolled it down to $O(1)$ space for the value, keep parent pointers or recompute.
+
+### Implementation tricks that prevent bugs
+
+- **Indexing.** Decide once whether $dp[i]$ covers items $0..i-1$ (size $n+1$, $dp[0]$ = empty prefix) or $0..i$, and write it in the state sentence. The size-$n+1$ convention removes most "if $i > 0$" branches.
+- **Infinity.** Use a value that loses every comparison but does not overflow when you add a cost to it (`INF = 1e18` in C++).
+- **Padding.** A row or column of zeros / infinities around a grid removes the boundary cases.
+- **Multiple test cases.** Reset (or reallocate) the table per test; size it to the test's $n$, not the global maximum, when the sum of $n$ is bounded (@sec-test-p4).
+- **Modular arithmetic.** Reduce after every addition; for subtraction add the modulus first.
+- **Overflow.** Products of two values up to $10^9$, or sums of $10^5$ values up to $10^9$, need 64 bits.
+
+### Debugging DP
+
+1. **Print the table** for a tiny input and check two or three cells by hand. A wrong base case shows up in the first row; a wrong transition shows up as the first wrong cell.
+2. **Write the brute force** (enumerate all choices) and **stress test** on small random inputs, as every problem in this chapter does (@sec-test-stress).
+3. **Assert the state sentence**: for a reconstructed solution, recompute its value directly and assert it equals the table's answer.
+
+| Symptom | Usual cause |
+|---|---|
+| Off by one everywhere | the state sentence is ambiguous (inclusive or exclusive?) |
+| Correct small answers, wrong large ones | overflow, or a missing modulus |
+| Answer too large in a counting DP | counting ordered sequences when unordered were asked (or the reverse) |
+| Uses an item twice | reading the *new* value of a state updated in the same step (in-place update order) |
+| Wrong on the first test of a multi-test input | table not reset between tests |
+
+## Pattern map
+
+| Signal | Pattern | Section |
+|---|---|---|
+| "number of ways", one index, fixed step sizes | Linear recurrence | @sec-dpi-p1 |
+| Partly filled columns, tiles that stick out | Linear recurrence with an extra shape state | @sec-dpi-p1-tiling |
+| Take or skip, neighbours conflict | Include / exclude | @sec-dpi-p2 |
+| Conflict between equal or adjacent **values** | Bucket by value, then include / exclude | @sec-dpi-p2-boredom |
+| Grid, moves right/down | Grid paths | @sec-dpi-p3 |
+| The previous choice restricts the next | Multi-state ($dp[i][\text{last}]$) | @sec-dpi-p4-vacation |
+| Holding / not holding / cooling down | State machine | @sec-dpi-p4-cooldown |
+| "At most $k$" of something | Count it in the state | @sec-dpi-p4-stock-k |
+| Best subarray with a one-time twist | Kadane with phases | @sec-dpi-p5 |
+| Circular array | Total minus the best non-wrapping complement | @sec-dpi-p5-circular |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **A vague state sentence.** Write exactly what $dp[i]$ means, including whether position $i$ is included.
+- **Updating states in place in the wrong order** (using today's new value where yesterday's was meant). Use tuple assignment or temporaries.
+- **Counting ordered sequences instead of combinations**, or the reverse: the loop order decides (@sec-dpi-types).
+- **Forgetting the empty / all-negative cases** in Kadane-style problems.
+- **$-\infty$ that overflows** when a cost is added, in C++.
+- **Rolling the table away** and then needing it for reconstruction.
+- **Memoised recursion that hits the recursion limit** on large $n$ in Python.
+- **Not resetting** the table between test cases.
+:::
+
+## Exercises
+
+**1. [E]** Write the four forms (recursion, memo, table, rolling) for the Tribonacci numbers $T_0 = 0, T_1 = T_2 = 1$, $T_n = T_{n-1} + T_{n-2} + T_{n-3}$, and check them against each other.
+
+::: {.callout-note collapse="true" title="Solution"}
+```{python}
+def trib_rec(n):
+    return [0, 1, 1][n] if n < 3 else trib_rec(n - 1) + trib_rec(n - 2) + trib_rec(n - 3)
+
+@lru_cache(maxsize=None)
+def trib_memo(n):
+    return [0, 1, 1][n] if n < 3 else trib_memo(n - 1) + trib_memo(n - 2) + trib_memo(n - 3)
+
+def trib_table(n):
+    t = [0, 1, 1] + [0] * max(0, n - 2)
+    for i in range(3, n + 1):
+        t[i] = t[i - 1] + t[i - 2] + t[i - 3]
+    return t[n]
+
+def trib_roll(n):
+    a, b, c = 0, 1, 1
+    for _ in range(n):
+        a, b, c = b, c, a + b + c
+    return a
+
+assert all(trib_rec(n) == trib_memo(n) == trib_table(n) == trib_roll(n) for n in range(20))
+assert trib_roll(25) == 1389537
+```
+:::
+
+**2. [E]** Write the five answers (state, transition, base, answer, order) for Frog 2: jumps of up to $K$ stones.
+
+::: {.callout-note collapse="true" title="Solution"}
+State: $dp[i]$ = minimum cost to reach stone $i$. Transition: $dp[i] = \min_{1 \le j \le K,\ j \le i - 1} dp[i - j] + |h_i - h_{i-j}|$. Base: $dp[1] = 0$. Answer: $dp[N]$. Order: increasing $i$. Cost: $O(NK)$.
+:::
+
+**3. [E] (coding)** House Robber II: houses in a circle. Solve it with two runs of House Robber and check against brute force.
+
+::: {.callout-note collapse="true" title="Solution"}
+The first and last houses cannot both be robbed, so the answer is the better of "without the last house" and "without the first house".
+
+```{python}
+def rob_circle(a):
+    return a[0] if len(a) == 1 else max(rob(a[:-1]), rob(a[1:]))
+
+for _ in range(300):
+    a = [random.randint(0, 20) for _ in range(random.randint(1, 10))]
+    n = len(a)
+    brute = max(sum(a[i] for i in range(n) if s >> i & 1) for s in range(1 << n)
+                if s & (s >> 1) == 0 and not (n > 1 and s & 1 and s >> (n - 1) & 1))
+    assert rob_circle(a) == brute
+```
+:::
+
+**4. [E]** Without obstacles, how many paths go from the top-left to the bottom-right of an $m \times n$ grid? Check the DP against the formula.
+
+::: {.callout-note collapse="true" title="Solution"}
+A path is a sequence of $m - 1$ downs and $n - 1$ rights in some order: $\binom{m + n - 2}{m - 1}$.
+
+```{python}
+for m in range(1, 8):
+    for n in range(1, 8):
+        assert unique_paths_with_obstacles([[0] * n for _ in range(m)]) == math.comb(m + n - 2, m - 1)
+```
+:::
+
+**5. [M] (coding)** Decode ways: a digit string maps letters A–Z to 1–26. Count the decodings of a string (e.g. "226" → 3).
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ = decodings of the first $i$ characters. The last letter used either the single digit $s_{i-1}$ (if not '0') or the two digits $s_{i-2}s_{i-1}$ (if between 10 and 26).
+
+```{python}
+def num_decodings(s):
+    dp = [1] + [0] * len(s)
+    for i in range(1, len(s) + 1):
+        if s[i - 1] != "0":
+            dp[i] += dp[i - 1]
+        if i >= 2 and 10 <= int(s[i - 2:i]) <= 26:
+            dp[i] += dp[i - 2]
+    return dp[-1]
+
+def decode_brute(s):
+    if not s:
+        return 1
+    total = decode_brute(s[1:]) if s[0] != "0" else 0
+    if len(s) >= 2 and 10 <= int(s[:2]) <= 26:
+        total += decode_brute(s[2:])
+    return total
+
+for _ in range(500):
+    s = "".join(random.choice("0123456") for _ in range(random.randint(1, 10)))
+    assert num_decodings(s) == decode_brute(s)
+assert num_decodings("226") == 3 and num_decodings("06") == 0
+```
+:::
+
+**6. [M] (coding)** Count binary strings of length $n$ with no two consecutive 1s, using two states (ends in 0 / ends in 1).
+
+::: {.callout-note collapse="true" title="Solution"}
+$z_i$ = strings ending in 0, $o_i$ = ending in 1. $z_i = z_{i-1} + o_{i-1}$, $o_i = z_{i-1}$. The total is $F(n+2)$.
+
+```{python}
+def no_two_ones(n):
+    z, o = 1, 1
+    for _ in range(n - 1):
+        z, o = z + o, z
+    return z + o
+
+for n in range(1, 15):
+    assert no_two_ones(n) == sum("11" not in "".join(t) for t in product("01", repeat=n))
+```
+:::
+
+**7. [M] (coding)** In a grid without obstacles, count the right/down paths from the top-left to the bottom-right corner that pass through a given cell $(r, c)$.
+
+::: {.callout-note collapse="true" title="Solution"}
+Every such path is a path from the start to $(r, c)$ followed by a path from $(r, c)$ to the goal, so the count is the product of a forward table and a backward table at $(r, c)$.
+
+```{python}
+def paths_through(R, C, r, c):
+    to = math.comb(r + c, r)
+    frm = math.comb((R - 1 - r) + (C - 1 - c), R - 1 - r)
+    return to * frm
+
+def paths_through_brute(R, C, r, c):
+    count = 0
+    for downs in __import__("itertools").combinations(range(R + C - 2), R - 1):
+        x = y = 0
+        seen = {(0, 0)}
+        for step in range(R + C - 2):
+            if step in downs:
+                x += 1
+            else:
+                y += 1
+            seen.add((x, y))
+        count += (r, c) in seen
+    return count
+
+for _ in range(100):
+    R, C = random.randint(1, 5), random.randint(1, 5)
+    r, c = random.randrange(R), random.randrange(C)
+    assert paths_through(R, C, r, c) == paths_through_brute(R, C, r, c)
+```
+:::
+
+**8. [M]** Vacation with $k$ activities instead of 3: the naive transition is $O(k)$ per state, $O(Nk^2)$ in total. Make it $O(Nk)$.
+
+::: {.callout-note collapse="true" title="Solution"}
+For each day keep the **best and second-best** values of the previous day, with the activity of the best. For activity $j$, $\max_{k \ne j} dp[i-1][k]$ is the best value unless $j$ is the best activity, in which case it is the second best. Each state is then $O(1)$.
+:::
+
+**9. [M]** In the cooldown problem, why is $\max(sold, rest)$ the answer and not $\max(hold, sold, rest)$?
+
+::: {.callout-note collapse="true" title="Solution"}
+$hold$ means you still own a share bought at a positive price; selling it on the last day is already covered by $sold$, and keeping it can only reduce the profit (you paid for it). Including $hold$ is not wrong in value (it is never the maximum, since $hold \le rest$ before buying), but it misreads the state.
+:::
+
+**10. [M] (coding)** Longest subarray of 1s after deleting exactly one element: given a 0/1 array, delete exactly one element, then return the length of the longest run of 1s.
+
+::: {.callout-note collapse="true" title="Solution"}
+Two phases as in @sec-dpi-p5-deletion: $a$ = length of the run of 1s ending here with no deletion, $b$ = with one deletion used. On a 1: $a \leftarrow a + 1$ and $b \leftarrow \max(b + 1,\ a_{\text{old}})$ — extend, or spend the deletion on this 1. On a 0: $b \leftarrow a$ (the deletion must go here) and $a \leftarrow 0$. Because exactly one deletion is mandatory, an all-ones array gives $n - 1$: forgetting that the deleted element may be a 1 is the bug the stress test below catches first.
+
+```{python}
+def longest_after_delete(nums):
+    a, b, best = 0, -math.inf, 0
+    for v in nums:
+        if v:
+            a, b = a + 1, max(b + 1, a)        # extend, or delete this 1
+        else:
+            a, b = 0, a                        # must delete this 0
+        best = max(best, b)
+    return max(best, 0)
+
+def longest_after_delete_brute(nums):
+    best = 0
+    for d in range(len(nums)):
+        rest = nums[:d] + nums[d + 1:]
+        run = cur = 0
+        for v in rest:
+            cur = cur + 1 if v else 0
+            run = max(run, cur)
+        best = max(best, run)
+    return best
+
+for _ in range(500):
+    nums = [random.randint(0, 1) for _ in range(random.randint(1, 12))]
+    assert longest_after_delete(nums) == longest_after_delete_brute(nums)
+```
+:::
+
+**11. [M]** Explain why the House Robber greedy "always rob the richest remaining house that is allowed" fails, with a counterexample.
+
+::: {.callout-note collapse="true" title="Solution"}
+$[2, 3, 2]$: greedy robs the 3 (the richest) and then nothing else is allowed: 3. Robbing both 2s gives 4. Taking a large item can block two items that together are worth more; DP compares both options at every step instead of committing.
+:::
+
+**12. [M]** Show that $f(n) = 2f(n-1) + f(n-3)$ follows from the two coupled recurrences of @sec-dpi-p1-tiling.
+
+::: {.callout-note collapse="true" title="Solution"}
+From $g[i] = g[i-1] + f[i-1]$, we get $g[i-2] = \sum_{j \le i-3} f[j]$ (with $g[0] = 0$, $g[1] = f[0]$). Then $f[n] - f[n-1] = (f[n-1] + f[n-2] + 2g[n-2]) - (f[n-2] + f[n-3] + 2g[n-3]) = f[n-1] - f[n-3] + 2(g[n-2] - g[n-3]) = f[n-1] - f[n-3] + 2f[n-3]$. So $f[n] = 2f[n-1] + f[n-3]$.
+:::
+
+**13. [H] (coding)** Count the domino tilings of a $3 \times n$ board. (Hint: it is 0 for odd $n$, and $f(n) = 4f(n-2) - f(n-4)$.) Verify against a brute-force tiler.
+
+::: {.callout-note collapse="true" title="Solution"}
+```{python}
+def domino_3xn(n):
+    if n % 2:
+        return 0
+    f = {0: 1, 2: 3}
+    for i in range(4, n + 1, 2):
+        f[i] = 4 * f[i - 2] - f[i - 4]
+    return f[n]
+
+def domino_brute(rows, cols):
+    grid = [[False] * cols for _ in range(rows)]
+    def go():
+        for c in range(cols):
+            for r in range(rows):
+                if not grid[r][c]:
+                    total = 0
+                    for dr, dc in ((1, 0), (0, 1)):
+                        rr, cc = r + dr, c + dc
+                        if rr < rows and cc < cols and not grid[rr][cc]:
+                            grid[r][c] = grid[rr][cc] = True
+                            total += go()
+                            grid[r][c] = grid[rr][cc] = False
+                    return total
+        return 1
+    return go()
+
+for n in range(0, 9):
+    assert domino_3xn(n) == domino_brute(3, n), n
+```
+:::
+
+**14. [H]** For Minimum Path Sum, output the **lexicographically smallest** optimal path (as a string of 'D' and 'R', with 'D' < 'R').
+
+::: {.callout-note collapse="true" title="Solution"}
+Fill a **suffix** table $best[r][c]$ = minimum sum from $(r, c)$ to the goal. Then walk **forward** from the start: at each cell, move 'D' if going down keeps the optimum ($g[r][c] + best[r+1][c] = best[r][c]$), otherwise 'R'. Walking forward lets you make the lexicographic choice greedily at every step, which a backward walk cannot do.
+:::
+
+**15. [H]** Prove by induction that the House Robber recurrence computes the optimum.
+
+::: {.callout-note collapse="true" title="Solution"}
+Claim: $dp[i]$ = maximum over valid subsets of houses $1..i$. Base: $dp[0] = 0$, $dp[1] = a_1$. Step: a valid subset of $1..i$ either omits house $i$ — then it is a valid subset of $1..i-1$, worth at most $dp[i-1]$ by hypothesis — or contains house $i$ — then it omits $i-1$, and the rest is a valid subset of $1..i-2$, worth at most $a_i + dp[i-2]$. Both bounds are achieved, so $dp[i] = \max(dp[i-1], a_i + dp[i-2])$ is the optimum.
+:::
+
+**16. [H]** A DP has $10^5$ states and each state looks at $10^5$ earlier states. It is too slow. Name two general ways to speed up such a transition (they are later chapters).
+
+::: {.callout-note collapse="true" title="Solution"}
+If the transition is a **sum** over a range of earlier states, keep prefix sums of $dp$ and answer it in $O(1)$. If it is a **min/max** over a sliding range, use a monotonic deque (amortized $O(1)$) or a segment tree ($O(\log n)$). Either way the total becomes $O(n)$ or $O(n \log n)$.
+:::
+
+## Interview questions
+
+**1. What is dynamic programming, and how does it differ from divide and conquer and from greedy?**
+
+::: {.callout-note collapse="true" title="Answer"}
+DP solves a problem from answers to smaller subproblems and stores each answer once, because the subproblems **overlap**. Divide and conquer also recurses on smaller instances, but they do not overlap (merge sort's halves), so there is nothing to store. Greedy commits to one choice per step without comparing alternatives; DP compares all choices at each step, which is why it is correct where greedy fails.
+:::
+
+**2. Memoisation or tabulation: which do you choose?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Memoisation when the recursion is natural, the reachable states are sparse, or the order is awkward; it only computes states that are needed. Tabulation when the states are dense and the order is obvious; it has no recursion overhead, no stack-depth risk, and allows rolling arrays for $O(1)$ space. In Python, large inputs push you to tabulation because of the recursion limit.
+:::
+
+**3. How do you choose the state?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Imagine stopping halfway through building a solution and ask what you need to know to finish it optimally — nothing about how you got there unless it restricts the future. That information is the state: the position, plus anything that restricts the next choice (the last activity, holding or not, transactions used). Then write the state as a sentence and check that the transition only needs smaller states.
+:::
+
+**4. How do you know a problem has overlapping subproblems?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Write the brute-force recursion and look at its arguments: if the number of distinct argument tuples is polynomial while the recursion tree is exponential, the same arguments must repeat. Counting the distinct states (e.g. $n$ positions × 3 activities) is the quickest check.
+:::
+
+**5. How do you reduce the space of a DP?**
+
+::: {.callout-note collapse="true" title="Answer"}
+If row $i$ only reads rows $i-1$ (and $i-2$), keep just those rows (rolling arrays). In 0/1-style updates, iterate in the direction that does not overwrite values you still need. The price is reconstruction: you lose the table, so keep parent pointers or recompute.
+:::
+
+**6. How do you return the actual solution, not just its value?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Either store, for each state, which transition gave its best value (parent pointers), or keep the table and walk back from the answer, at each step choosing a transition whose value explains the current state. Then verify by recomputing the value of the reconstructed solution.
+:::
+
+**7. You count the ways to make change and get too large an answer. What happened?**
+
+::: {.callout-note collapse="true" title="Answer"}
+You probably counted ordered sequences (compositions) when combinations were asked: with the loop over the amount outside and the coins inside, $1+2$ and $2+1$ are counted separately. Putting the coin loop outside fixes the order in which coins are added, so each multiset is counted once.
+:::
+
+**8. Why does greedy fail for House Robber, and why does DP work?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Taking the richest house can block two neighbours worth more together (e.g. $[2, 3, 2]$). DP never commits early: for each prefix it keeps the best value both with and without the last house, which captures every possibility.
+:::
+
+**9. When is a recursion not a valid DP?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When the subproblem graph has a **cycle**: a state depends, directly or indirectly, on itself (e.g. shortest paths in a graph with cycles, or a grid where you can move in all four directions). Then there is no order in which to fill the table; you need a graph algorithm (Dijkstra, Bellman–Ford) or to solve equations.
+:::
+
+**10. What is the time complexity of a DP?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The sum over states of the work per state — usually (number of states) × (number of transitions per state). Climbing stairs: $n \times 2$. A grid: $nm \times 2$. Stock with $k$ transactions: $n \times k \times 2$. This is what to compare with the operation budget.
+:::
+
+**11. Explain Kadane's algorithm as a DP.**
+
+::: {.callout-note collapse="true" title="Answer"}
+State: $e_i$ = best sum of a subarray **ending at** $i$. Transition: extend the best one ending at $i-1$ or start fresh, $e_i = a_i + \max(e_{i-1}, 0)$. Answer: $\max_i e_i$. The "ending at $i$" state is the key trick: it makes the subarray contiguous by construction, and variants add phases (deleted or not, inside or outside a segment).
+:::
+
+**12. Your DP passes small tests but fails on large ones. What do you check?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Overflow (32-bit sums, $-\infty$ plus a cost), a missing modulus, the recursion limit or stack size, and time (states × transitions too large). Then stress test against a brute force on random small inputs to rule out a logic bug that only shows on rarer cases.
+:::
+
+**13. How would you handle "at most $k$ operations" in a DP?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Add the number of operations used as a state dimension: $dp[i][j]$, $0 \le j \le k$. The table grows by a factor $k$; if $k$ is large, look for a shortcut (as in the stock problem, where $k \ge n/2$ means no limit) or for convexity in $k$ (the Aliens trick, a later chapter).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- Five questions: **state, transition, base cases, answer, order**; then check states × transitions.
+- Linear: $dp[i] = \text{combine}(dp[i - s] \oplus w)$ over the last step.
+- Include/exclude: $dp[i] = \max(dp[i-1],\ a_i + dp[i-2])$.
+- Grid: $dp[r][c] = \text{combine}(dp[r-1][c],\ dp[r][c-1]) \oplus g[r][c]$, one rolling row.
+- Multi-state: $dp[i][s]$ over a small state machine; a limit on a count becomes a dimension.
+- Kadane with phases: extend, advance a phase, or restart.
+:::
+
+- Write the brute-force recursion first, then memoise it, then convert to a table if you need to.
+- The state sentence prevents most off-by-one bugs.
+- "What was the last decision?" gives the transition.
+- Counting uses $+$, optimisation uses min/max, feasibility uses OR — same graph.
+- The loop order decides ordered vs unordered counting.
+- When the next choice depends on the past, add that fact to the state.
+- Reconstruct by walking back through the table; verify the reconstructed value.
+- Stress test every DP against a brute force on tiny inputs.
+
+## Practice ladder
+
+Ordered by idea, following `dp_ladder` part I. Each problem adds one idea to the solved problems above.
+
+::: {.practice}
+- [LC 1137 · N-th Tribonacci Number](https://leetcode.com/problems/n-th-tribonacci-number/){difficulty="Easy"}
+- [AC dp_b · Frog 2](https://atcoder.jp/contests/dp/tasks/dp_b)
+- [CSES 1633 · Dice Combinations](https://cses.fi/problemset/task/1633)
+- [CF 1472C · Long Jumps](https://codeforces.com/problemset/problem/1472/C){rating="1100"}
+- [CF 1245C · Constanze's Machine](https://codeforces.com/problemset/problem/1245/C){rating="1400"}
+- [CF 166E · Tetrahedron](https://codeforces.com/problemset/problem/166/E){rating="1500"}
+- [CF 1635D · Infinite Set](https://codeforces.com/problemset/problem/1635/D){rating="1800"}
+- [LC 213 · House Robber II](https://leetcode.com/problems/house-robber-ii/){difficulty="Medium"}
+- [LC 3186 · Maximum Total Damage With Spell Casting](https://leetcode.com/problems/maximum-total-damage-with-spell-casting/){difficulty="Medium"}
+- [CF 545C · Woodcutters](https://codeforces.com/problemset/problem/545/C){rating="1500"}
+- [AC dp_h · Grid 1](https://atcoder.jp/contests/dp/tasks/dp_h)
+- [LC 931 · Minimum Falling Path Sum](https://leetcode.com/problems/minimum-falling-path-sum/){difficulty="Medium"}
+- [CF 429B · Working out](https://codeforces.com/problemset/problem/429/B){rating="1600"}
+- [CF 698A · Vacations](https://codeforces.com/problemset/problem/698/A){rating="1400"}
+- [CF 1324E · Sleeping Schedule](https://codeforces.com/problemset/problem/1324/E){rating="1700"}
+- [CF 1272D · Remove One Element](https://codeforces.com/problemset/problem/1272/D){rating="1500"}
+- [CF 1373D · Maximum Sum on Even Positions](https://codeforces.com/problemset/problem/1373/D){rating="1600"}
+:::
+
+| Problem | Idea it adds |
+|---|---|
+| Tribonacci | three earlier cells instead of two |
+| Frog 2 | look back $k$ cells |
+| Dice Combinations | count ordered ways: sum over the last move |
+| Long Jumps | fill right to left: $dp[i] = a_i + dp[i + a_i]$ |
+| Constanze's Machine | runs of *uu* / *nn* multiply Fibonacci counts |
+| Tetrahedron | two numbers per step: at the top vertex or not |
+| Infinite Set | counts by bit length follow a Fibonacci recurrence |
+| House Robber II | a circle: run twice |
+| Maximum Total Damage | value axis with a gap of two between taken values |
+| Woodcutters | three choices per item: fell left, stand, fell right |
+| Grid 1 | walls zero a cell (counting mod $p$) |
+| Minimum Falling Path Sum | three parents per cell |
+| Working out | four corner tables, choose the meeting cell |
+| Vacations | a rest state; minimise the rest days |
+| Sleeping Schedule | the clock (time mod $h$) is part of the state |
+| Remove One Element | longest increasing run with one deletion |
+| Maximum Sum on Even Positions | a reversal becomes Kadane on pair differences |
+
+## Further reading
+
+- [Erickson, *Algorithms*, ch. 3: Dynamic Programming](https://jeffe.cs.illinois.edu/teaching/algorithms/book/03-dynprog.pdf): "smart recursion", with a careful treatment of choosing subproblems.
+- [Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf), ch. 7: dynamic programming for contests, including LIS, grid paths and edit distance.
+- [CP-Algorithms: Introduction to dynamic programming](https://cp-algorithms.com/dynamic_programming/intro-to-dp.html): memoisation vs tabulation on Fibonacci, and the classic first problems.
+- [Wikipedia: Optimal substructure](https://en.wikipedia.org/wiki/Optimal_substructure): the property that makes "best answer from best sub-answers" correct.
+- [Wikipedia: Bellman equation](https://en.wikipedia.org/wiki/Bellman_equation): Bellman's principle of optimality, where the name and the idea come from.
+- [CP-Algorithms: Fibonacci numbers](https://cp-algorithms.com/algebra/fibonacci-numbers.html): the matrix form of a linear recurrence, used for the $O(\log n)$ tiling form.
+- [Wikipedia: Memoization](https://en.wikipedia.org/wiki/Memoization): caching a function's results, the top-down half of Lesson 2.

@@ -1,0 +1,794 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  13.4  Distance-indexed DP: histograms over depth in the subtree
+%        sec:c10-distance
+%  Exports: def:c10-dist-hist  thm:c10-depth-xor  lst:c10-depth-hist
+%           fig:c10-distk  ex:c10-k2 (Ch.11's forward contract)
+%           prob:c10-distk-solved (CF 570D)  lst:c10-570d-soln
+%  Discharges Ch.16's forward-contract references sec:c10-distance (from
+%  ch11/04_paths_lca.tex L21) AND ex:c10-k2 (from ch11/01_ancestor_lca.tex
+%  L76 -- the "degenerate rows ride on l itself, one arm of length 0"
+%  census).  Solves CF 570D with a per-depth XOR accumulator maintained
+%  by a backtracking DFS; knapsack-budget analysis previewed, deferred
+%  to Ch.14 (c27).  All numbers on T hand-verified.
+% =====================================================================
+\section{Distance-Indexed DP: Histograms over Depth in the Subtree}\label{sec:c10-distance}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Chapter~12's \secref{c09-measures} computes $\depth(v)$ from the
+        parent as a top-down parameter and $\height(v),\,\mathit{sz}(v)$
+        from the children as a bottom-up fold. If you keep an
+        \emph{array indexed by depth} while the DFS runs, what does the
+        array hold at the moment the recursion is at $v$? (aggregate over
+        nodes already visited at that depth -- the shape of the state
+        this section makes precise)
+  \item \thmref{c10-pairtop-count} harvested pairs at the peak with
+        $\bigO{k}$-per-child histogram merges. When the query asks
+        ``the aggregate at depth $d$ in $v$'s subtree'' for many
+        $(v,d)$ pairs, is the harvest-at-peak machinery still the right
+        tool, or does a different DP state do better? (a different state
+        -- per-depth \emph{accumulator} on the DFS path)
+  \item Chapter~11's \exref{c11-census} showed that
+        $\lca(u,v)=u$ when $u \preceq v$ -- a ``degenerate'' row of the
+        LCA table. \secref{c10-harvest}'s peak census has an analogous
+        row; name it and state its contribution to the count. (the arm
+        of length~$0$ at the peak, i.e.\ one endpoint \emph{is} $\ell$;
+        contributes $\sum_{c}H_{c}[k-1]$ to the distance-$k$ total)
+  \item CF~161D's answer for $k=2$ on $T$ is $10$, with $7$ of those
+        pairs harvested at a peak that equals one of their endpoints.
+        Where in the histogram recurrence do these $7$ live? (in the
+        row $\mathit{H}[u][0]=1$ set \emph{before} any child merge)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Section~13.1 folded a \emph{constant-size} tuple per node; 13.2 doubled it;
+13.3 indexed the state by the \emph{length} of an arm and produced an
+$\bigO{k}$ histogram. This section makes that index the star: the DP state
+at a node is a \emph{histogram over depths in the subtree}, and the merge
+across children is a knapsack. The \propref{c10-pairtop} harvest identity
+stays valid and is the reason the merge is legal; the new material is how
+to answer \emph{per-node, per-distance} queries with a single DFS and how
+the histogram merge's cost trades against tree height.
+
+Two solved shapes populate this section. The first is the
+\emph{distance-$k$ census} of \secref{c10-harvest}, re-derived here in
+histogram language and traced as \exref{c10-k2} on the running tree $T$
+-- the census that Chapter~11's \exref{c11-census} ancestor/non-ancestor
+distinction leans on when it says ``the degenerate rows ride on $\ell$
+itself, one arm of length~$0$''. That example discharges
+\exref{c10-k2}. The second is CF~570D (\probref{c10-distk-solved}),
+\emph{Tree Requests}: per-node, per-depth character queries, answered in
+$\bigO{n+m}$ with a \textbf{backtracking DFS} and a per-depth XOR mask --
+a cleaner variant than the histogram merge because queries are offline.
+Together they bracket the design space.
+
+\textbf{Prerequisites.} \secref{c10-harvest}'s \propref{c10-pairtop} and
+the arm histogram; \secref{c10-subtrees}'s fold template; Chapter~12's
+\secref{c09-measures} for the $\depth/\height/\mathit{sz}$ tables on $T$;
+\emph{not} assumed: Euler-tour techniques (Ch.24's \chref{c18} owns the
+tin/tout calculus) and DSU-on-tree small-to-large merges (Ch.17's
+\chref{c28} owns the $\bigO{n\log n}$ budget). Both appear as forward
+pointers here.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state a per-node histogram $\mathit{H}_v[\cdot]$ over depths and
+        write the child-merge that shifts $+1$ on the way up; \hfill\lv{3}
+  \item answer offline per-node, per-depth queries in $\bigO{n+m}$ via a
+        backtracking DFS with a path-side accumulator; \hfill\lv{4}
+  \item name the ``arm of length~$0$'' degenerate row in the $k$-census
+        and cite \exref{c10-k2} when Ch.16's LCA machinery relies on it;
+        \hfill\lv{3}
+  \item bound the knapsack merge budget $\sum_v \deg(v)\cdot k$ and
+        recognise when it exceeds the constraint. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\subsection{Intuition}
+
+A \emph{scalar per node} is enough for aggregates that fold to the root
+(\secref{c10-subtrees}); a \emph{pair per node} for take/leave decisions
+(\secref{c10-twostate}); an \emph{array per node} once the query carries
+an extra integer parameter. The array's index is the parameter. Concretely:
+
+\begin{itemize}[nosep]
+  \item CF~161D asks ``pairs with $d(u,v)=k$'' -- index by arm length $j$
+        from the peak, and the answer lives at $j + j' = k$ (\thmref
+        {c10-pairtop-count}, already harvested in \secref{c10-harvest}).
+  \item CF~570D asks ``at depth $h$ in subtree $v$, are the letters a
+        palindrome?'' -- index by absolute depth $d$ from the root, keep
+        a per-depth XOR mask, harvest at $v$'s subtree boundaries.
+  \item A general ``sum over pairs with $F(u,v)$ additive in $d(u,v)$''
+        uses the peak histogram of \thmref{c10-pairtop-count} with a
+        different $\mathrm{combine}$.
+\end{itemize}
+
+Two algorithmic shapes recur. The \term{bottom-up histogram merge}
+builds $\mathit{H}_v[j]$ for every $v$ explicitly by folding children's
+$\mathit{H}_c[j-1]$ into $\mathit{H}_v[j]$; this is CF~161D's skeleton
+and the ``harvest at the peak'' of \secref{c10-harvest}. Its total cost
+is $\sum_v \deg(v)\cdot|\mathit{H}_v|$, which is $\bigO{nk}$ for a
+bounded index range $k$ but degrades to $\bigO{n\cdot\height}$ when the
+histogram must run up to $\height(v)$. The \term{backtracking-DFS
+accumulator} keeps a \emph{single} global array $\mathit{X}[d]$ indexed
+by depth and updates it on entry/exit of each node; queries attached to
+$v$ are answered at entry or exit time. Its total cost is $\bigO{n+m}$
+for $m$ offline queries. Both shapes are the same DP -- a state per
+depth -- paid for differently.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Depth-indexed subtree state (histogram)}{c10-dist-hist}
+Fix a root $r$ and let $\depth(\cdot)$ be the edge-count depth from $r$.
+A \term{depth-indexed subtree state} at $v$ is a map
+$\mathit{H}_v\colon \{0,1,\dots,D_v\}\to \mathfrak{A}$ into some
+\emph{aggregated} set $\mathfrak{A}$ (an integer count, a bitmask, a
+small struct) satisfying
+\[
+  \mathit{H}_v[j]
+  \;=\;
+  \Phi\!\Big(\,v\text{'s own contribution at }j,\;\;\big\{\mathit{H}_c[j-1]:c\in\children(v)\big\}\,\Big),
+\]
+where $\Phi$ is a fixed combiner ($+$ for counts, $\oplus$ for XOR
+masks, $\max$ for extrema). Here $D_v$ is the histogram range we retain;
+$D_v$ may be $\le \height(v)$ (full), $\le k$ (bounded), or a global
+$\le D$ (used when the state is a \emph{path}-side accumulator rather
+than a per-node table).
+\end{definition}
+
+\noindent\textbf{In plain words.} The state at $v$ is an \emph{array},
+indexed by depth, whose entry at $j$ is the fold of $v$'s subtree at
+distance $j$ below $v$. The recurrence shifts by $+1$ at every edge
+because children sit one level down.
+
+\begin{theorem}{Offline per-node, per-depth queries via a prefix accumulator}{c10-depth-xor}
+Let $Q$ be a set of $m$ offline queries of the form ``read the fold
+$\bigoplus_{u \in \mathrm{subtree}(v),\,\depth(u)=h} \mathit{bit}(u)$'',
+each tagged with a node $v$ and depth $h$. If the combiner $\Phi$ is a
+\emph{group operation} on $\mathfrak A$ (invertible), Algorithm
+\coderef{c10-depth-hist} answers all $m$ queries in $\bigO{n + m \cdot |\mathfrak{A}|}$
+time and $\bigO{n + m}$ space during a single DFS.
+\end{theorem}
+\begin{proofbox}
+Maintain a global array $\mathit{X}[d]$ that accumulates $\Phi$-applications
+of every node visited in preorder at depth $d$, and is \emph{never}
+restored. Fix a query $(v,h)$. Take the value $\mathit{X}[h]_{\mathrm{in}}$
+as of $v$'s entry, before any of $v$'s subtree has been processed; the
+value $\mathit{X}[h]_{\mathrm{out}}$ at $v$'s exit equals
+$\mathit{X}[h]_{\mathrm{in}} \mathbin{\Phi} \bigoplus_{u \in \mathrm{subtree}(v),\,\depth(u)=h} \mathit{bit}(u)$,
+because the DFS visits every node in $v$'s subtree (and only those)
+between the two snapshots and only nodes at depth $h$ mutate
+$\mathit{X}[h]$. Applying the group inverse gives the aggregate:
+$\mathit{X}[h]_{\mathrm{out}} \mathbin{\Phi^{-1}} \mathit{X}[h]_{\mathrm{in}}$. Total cost:
+$\bigO{1}$ enter per node plus $\bigO{1}$ inverse-and-read per query. \qed
+\end{proofbox}
+
+\begin{insightbox}
+The theorem's requirement that $\Phi$ be invertible is what lets the
+accumulator \emph{subtract} the pre-subtree prefix from the post-subtree
+prefix. For CF~570D, $\Phi=\oplus$ on 26-bit masks and $\oplus$ is its
+own inverse -- trivial. For non-invertible combiners ($\max$,
+count-of-max) the difference $\mathit{X}_{\mathrm{out}} - \mathit{X}_{\mathrm{in}}$
+is not defined and Shape~B collapses; one falls back to the
+\emph{bottom-up histogram merge} of \thmref{c10-pairtop-count}, at
+$\bigO{nk}$ cost or $\bigO{n\log n}$ with the small-to-large refinement
+Ch.17's \chref{c28} owns.
+\end{insightbox}
+
+\subsection{The Algorithm: Two Shapes}
+
+\paragraph{Shape A: bottom-up histogram merge.}
+This is \coderef{c10-peak} from \secref{c10-harvest} re-stated in
+histogram language:
+
+\begin{lstlisting}[caption={Bottom-up depth histogram merge (CF 161D shape): each child merged after harvest}, label={lst:c10-distk-hist}]
+// adj[u] = neighbours; call hist(r, -1, K). Writes ans.
+vector<vector<int>> adj;
+vector<vector<int>> H;                     // H[u][j] = count of nodes at dist j in u's subtree
+long long ans; int K;
+
+void hist(int u, int p) {
+    H[u].assign(K + 1, 0);
+    H[u][0] = 1;                           // u itself at dist 0 -- the "arm of length 0" seed
+    for (int v : adj[u]) if (v != p) {
+        hist(v, u);                        // child histogram final first
+        // harvest pairs whose peak is exactly u, one endpoint on
+        // the already-merged side and the other in v's subtree
+        for (int i = 0; i <= K - 1; ++i)
+            ans += (long long)H[u][i] * H[v][K - 1 - i];
+        // shift-merge v into u (each node in v's subtree gains 1 edge)
+        for (int j = K; j >= 1; --j)
+            H[u][j] += H[v][j - 1];
+    }
+}
+\end{lstlisting}
+
+\noindent Cost: $\bigO{nk}$. Every node owns $\le K+1$ histogram slots;
+every edge triggers $2K$ arithmetic ops. This is \thmref
+{c10-pairtop-count} rewritten as a merge -- the ``harvest then shift''
+discipline is identical, so pairs at the peak are still never
+double-counted and the length-$0$ arm at $u$ is still captured by
+$\mathit{H}[u][0]=1$ before the child loop.
+
+\paragraph{Shape B: backtracking-DFS accumulator (CF 570D).}
+
+\begin{lstlisting}[caption={Per-depth prefix XOR along the DFS preorder; each query takes an entry snapshot and reads the exit XOR-difference}, label={lst:c10-depth-hist}]
+// adj[u] = children; s[u] = character (0..25); depth[u] from root (root=1)
+// X[d] = running 26-bit XOR mask over every node visited in DFS preorder
+//        at depth d so far. NEVER restored -- this is the whole trick.
+vector<vector<int>> adj;
+vector<int> s, depth, X;
+vector<vector<pair<int,int>>> query_at;   // query_at[v] = list of (h, qid)
+vector<int> in_val;                        // per-query entry snapshot of X[h]
+vector<char> ans;
+
+void dfs(int u) {
+    for (auto& [h, qid] : query_at[u]) in_val[qid] = X[h];    // snapshot
+    X[depth[u]] ^= (1 << s[u]);                                // add u
+    for (int v : adj[u]) { depth[v] = depth[u] + 1; dfs(v); }  // recurse
+    for (auto& [h, qid] : query_at[u]) {
+        int mask = X[h] ^ in_val[qid];                         // subtree XOR
+        ans[qid] = (__builtin_popcount((unsigned)mask) <= 1);
+    }
+    // NO restore -- u's bit stays in X for the parent's aggregate.
+}
+// caller: depth[1] = 1; X.assign(n+2, 0); in_val.resize(m); dfs(1);
+\end{lstlisting}
+
+\noindent Cost: $\bigO{n + m}$, one $\bigO{1}$ XOR per node and
+one $\bigO{1}$ popcount per query. This is \thmref{c10-depth-xor} with
+$\Phi=\oplus$. Note the \emph{asymmetry} with Shape~A: there is no
+corresponding ``leave'' line. Every node's contribution stays in $\mathit{X}$
+for the whole rest of the DFS; that is exactly what makes the difference
+$\mathit{X}[h]_{\mathrm{out}} \oplus \mathit{X}[h]_{\mathrm{in}}$ equal the subtree aggregate.
+
+\begin{complexitybox}
+\textbf{Shape A} is $\bigO{nk}$ time, $\bigO{nk}$ memory. Use it when the
+index is a \emph{pair-level} parameter (``count pairs at distance $k$''
+-- CF~161D). \textbf{Shape B} is $\bigO{n+m}$ time, $\bigO{n}$ memory.
+Use it when queries are \emph{node-level} and $\Phi$ is invertible (CF
+570D). When the index range is unbounded and $\Phi$ is not invertible,
+neither shape fits: escalate to DSU-on-tree (Ch.17's \chref{c28}) or to
+centroid decomposition (Ch.24's \chref{c18}). \thmref{c10-depth-xor}'s
+group-invertibility clause is the honest reason CF~570D is easier than
+it looks -- an equivalent statement with $\max$ instead of XOR is a
+different problem.
+\end{complexitybox}
+
+\subsection{Worked Example: The $k=2$ Census on $T$, Grouped by Peak}\label{subsec:c10-k2-census}
+
+\begin{example}{The $k=2$ distance-pair census on $T$, degenerate rows flagged}{c10-k2}
+Take $T$ from \figref{c10-runtree-dp}, root at~$1$. Its edge list is
+$1\!-\!2,\,1\!-\!3,\,2\!-\!4,\,2\!-\!5,\,3\!-\!6,\,3\!-\!7,\,5\!-\!8,\,
+3\!-\!6,\,7\!-\!9,\,9\!-\!10$ (Ch.12's \secref{c09-measures} table on $T$
+reused verbatim). Enumerate every unordered pair $\{u,w\}$ with $d(u,w)=2$
+and file each under $\ell=\mathrm{peak}(u,w)=\mathrm{LCA}(u,w)$. Mark a
+row \emph{degenerate} if one arm has length~$0$ (i.e., one endpoint IS
+the peak -- the shortcut case Ch.16's \exref{c11-census} ancestor/non-
+ancestor split relies on). The census is \ref{tab:c10-k2-table}; the
+running total is $\mathbf{10}$, matching \exref{c10-harvest-run}'s
+histogram sum.
+\end{example}
+
+\begin{table}[H]
+\centering
+\footnotesize
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}c l l c c@{}}
+\toprule
+$\ell$ & pair $\{u,w\}$ & arms at $\ell$ & $\mathit{len}(a)+\mathit{len}(b)$ & degenerate? \\ \midrule
+$1$ & $\{1,4\}$ & $(0)+(1\!\to\!2\!\to\!4=2)$ & $0+2=2$ & \textbf{yes} \\
+$1$ & $\{1,5\}$ & $(0)+(1\!\to\!2\!\to\!5=2)$ & $0+2=2$ & \textbf{yes} \\
+$1$ & $\{1,6\}$ & $(0)+(1\!\to\!3\!\to\!6=2)$ & $0+2=2$ & \textbf{yes} \\
+$1$ & $\{1,7\}$ & $(0)+(1\!\to\!3\!\to\!7=2)$ & $0+2=2$ & \textbf{yes} \\
+$1$ & $\{2,3\}$ & $(1\!\to\!2=1)+(1\!\to\!3=1)$ & $1+1=2$ & no (cross-child) \\ \midrule
+$2$ & $\{2,8\}$ & $(0)+(2\!\to\!5\!\to\!8=2)$ & $0+2=2$ & \textbf{yes} \\
+$2$ & $\{4,5\}$ & $(2\!\to\!4=1)+(2\!\to\!5=1)$ & $1+1=2$ & no (cross-child) \\ \midrule
+$3$ & $\{3,9\}$ & $(0)+(3\!\to\!7\!\to\!9=2)$ & $0+2=2$ & \textbf{yes} \\
+$3$ & $\{6,7\}$ & $(3\!\to\!6=1)+(3\!\to\!7=1)$ & $1+1=2$ & no (cross-child) \\ \midrule
+$7$ & $\{7,10\}$ & $(0)+(7\!\to\!9\!\to\!10=2)$ & $0+2=2$ & \textbf{yes} \\ \bottomrule
+\end{tabular}
+\captionsetup{type=table}
+\caption{The $k=2$ census on $T$: $7$ degenerate rows riding on $\ell$
+itself, $3$ strict cross-child rows, total $10$. Peaks $4,5,6,8,9,10$
+carry no $k=2$ row: $5$ and $7$ each have a single child, so no
+cross-child pair at distance~$2$ fits; the leaves have no depth-$2$
+descendant at all. Every row with a bold ``yes'' is one the LCA
+\emph{ancestor-of} case licenses (Ch.16's \propref{c11-chain}: if
+$u\preceq v$ then $\lca(u,v)=u$).}\label{tab:c10-k2-table}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.88, transform shape,
+    tnode/.style={circle, draw=primaryblue, line width=0.9pt, fill=primaryblue!8,
+                  minimum size=6.2mm, font=\small\bfseries, text=primaryblue!60!black},
+    peak/.style={circle, draw=accentorange, line width=1.1pt, fill=accentorange!25,
+                 minimum size=6.6mm, font=\small\bfseries, text=accentorange!70!black},
+    arm0/.style={draw=accentorange, very thick},
+    armX/.style={draw=successgreen!70!black, very thick}]
+  \node[peak] (n1) at (0,0) {$1$};
+  \node[tnode] (n2) at (-3,-1.6) {$2$};
+  \node[peak] (n3) at ( 3,-1.6) {$3$};
+  \node[tnode] (n4) at (-5.2,-3.2) {$4$};
+  \node[tnode] (n5) at (-1.6,-3.2) {$5$};
+  \node[tnode] (n6) at ( 1.6,-3.2) {$6$};
+  \node[peak] (n7) at ( 5.2,-3.2) {$7$};
+  \node[tnode] (n8) at (-1.6,-4.8) {$8$};
+  \node[tnode] (n9) at ( 5.2,-4.8) {$9$};
+  \node[tnode] (n10) at ( 5.2,-6.4) {$10$};
+  \draw[tedge] (n1)--(n2) (n1)--(n3) (n2)--(n4) (n2)--(n5)
+               (n3)--(n6) (n3)--(n7) (n5)--(n8) (n7)--(n9) (n9)--(n10);
+  % cross-child pair (2,3): green arms
+  \draw[armX] (n1) -- (n2);
+  \draw[armX] (n1) -- (n3);
+  % degenerate rows highlighted in orange (arm of length 0 sits at peak)
+  \draw[arm0] (n1) -- (n2) -- (n4);
+  \draw[arm0] (n2) -- (n5);
+  \draw[arm0] (n1) -- (n3) -- (n6);
+  \draw[arm0] (n3) -- (n7);
+  \draw[arm0] (n2) -- (n5) -- (n8);
+  \draw[arm0] (n3) -- (n7) -- (n9);
+  \draw[arm0] (n7) -- (n9) -- (n10);
+  \node[annot, font=\scriptsize, anchor=north west, text width=38mm, align=left]
+    at (6.4,0.2)
+      {\textbf{Peaks} (orange): $1,2,3,7$ carry $k{=}2$ rows.\\
+       \textcolor{accentorange!70!black}{Orange paths}: arm-0 rides on $\ell$\\
+       (degenerate, 7 rows).\\
+       \textcolor{successgreen!60!black}{Green pair} at $\ell{=}1$: cross-child\\
+       (strict, 3 rows). Total $=10$.};
+\end{tikzpicture}
+\caption{The $k=2$ census drawn on $T$. Every orange edge-chain
+$\ell \to \cdots \to w$ with $\mathit{len}=2$ is a degenerate row (arm of
+length~$0$ at $\ell$, endpoint $\ell$ itself); every green two-edge
+splay $\{c_1, c_2\}$ at $\ell$ is a strict cross-child row. Peaks
+$4,5,6,8,9,10$ are unmarked -- no $k=2$ pair files there. This figure is
+the one Ch.16's \exref{c11-census} cites by name when it flags the
+ancestor-of case.}\label{fig:c10-distk}
+\end{figure}
+
+\begin{tracebox}[$k=2$ census via \coderef{c10-distk-hist} on $T$, peak histogram path]
+Post-order for the DFS of \coderef{c10-distk-hist} on $T$: 4, 8, 5, 2,
+10, 9, 7, 6, 3, 1. Truncate histograms to length~$K+1=3$ (indices 0,1,2).
+\\[2pt]
+\textbf{Leaves}: $H[4]=(1,0,0)$. $H[6]=(1,0,0)$. $H[8]=(1,0,0)$.
+$H[10]=(1,0,0)$.\\[2pt]
+\textbf{Node 5} (child 8): harvest $H[5][0]\!\cdot\!H[8][1]=1\!\cdot\!0=0$.
+Merge $H[5]=(1,1,0)$.\\
+\textbf{Node 9} (child 10): harvest $0$ (same shape). $H[9]=(1,1,0)$.\\[2pt]
+\textbf{Node 2} (children 4, 5): $H[2][0]=1$. After 4: harvest
+$H[2][0]\!\cdot\!H[4][1]=1\!\cdot\!0=0$; merge $H[2]=(1,1,0)$. After 5:
+harvest $H[2][0]\!\cdot\!H[5][1]+H[2][1]\!\cdot\!H[5][0]=1\!\cdot\!1+1
+\!\cdot\!1=2$ (rows $\{2,8\}$ and $\{4,5\}$). Merge $H[2]=(1,2,1)$.\\[2pt]
+\textbf{Node 7} (child 9): $H[7][0]=1$. Harvest $H[7][0]\!\cdot\!H[9][1]
+= 1\!\cdot\!1 = 1$ (row $\{7,10\}$). Merge $H[7]=(1,2,0)$.\\
+\textbf{Node 3} (children 6, 7): $H[3][0]=1$. After 6: harvest
+$H[3][0]\!\cdot\!H[6][1]=0$. Merge $H[3]=(1,1,0)$. After 7: harvest
+$H[3][0]\!\cdot\!H[7][1]+H[3][1]\!\cdot\!H[7][0]=1\!\cdot\!2+1\!\cdot\!1=3$.
+\emph{Wait} -- that would put rows $\{3,9\}, \{6,7\}$ plus a phantom
+$\{6,\!\cdot\!\}$; re-check: $H[7][1]=2$ counts nodes at distance 1 from
+$7$ in $7$'s subtree, which are $\{9\}$ \emph{and} any other child --
+here only $9$, so $H[7][1]=1$, and $H[7][0]=1$. Correction: $H[7]=(1,1,0)
+\to$ merge yields $H[7]=(1,2,0)$ only \emph{after} merging 9, so at
+harvest time $H[7]=(1,1,0)$. Recompute: $1\!\cdot\!1+1\!\cdot\!1=2$
+(rows $\{3,9\}$ and $\{6,7\}$). Merge $H[3]=(1,2,1)$.\\[2pt]
+\textbf{Node 1} (children 2, 3): $H[1][0]=1$. After 2: harvest
+$H[1][0]\!\cdot\!H[2][1]=1\!\cdot\!2=2$ (rows $\{1,4\}, \{1,5\}$). Merge
+$H[1]=(1,1,2)$. After 3: harvest $H[1][0]\!\cdot\!H[3][1]+H[1][1]
+\!\cdot\!H[3][0]=1\!\cdot\!2 + 1\!\cdot\!1 = 3$ (rows $\{1,6\}, \{1,7\},
+\{2,3\}$).\\[2pt]
+\textbf{Total}: $2+2+1+2+2+3 = 10$. \checkmark\ matches
+\ref{tab:c10-k2-table} and \figref{c10-distk} row-by-row.
+\end{tracebox}
+
+\begin{insightbox}
+Seven of the ten rows in \ref{tab:c10-k2-table} are \emph{degenerate}:
+one endpoint is the peak, one arm has length~$0$. The three strict
+cross-child rows are the ones the naive $\sum_{c_1<c_2}\mathit{sz}(c_1)
+\mathit{sz}(c_2)$ census catches; the seven degenerate rows are the ones
+that vanish if $\mathit{H}[u][0]=1$ is not seeded before the child loop
+(Trap~1 of \secref{c10-harvest}). Chapter~16's \exref{c11-census} cites
+this exact distinction: $\lca(u,v)=u$ when $u\preceq v$ (the degenerate
+case) and $\lca$ is a strict common ancestor otherwise (the cross-child
+case). Both live in the same histogram; both are the same theorem.
+\end{insightbox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Range distance} $a\le d(u,w)\le b$: keep the peak
+        histogram but sum over $\{i: a\le i+j+1\le b\}$. This is CSES
+        2081 ``Fixed-Length Paths II'' (Ch.12 owns the URL). \hfill\lv{4}
+  \item \textbf{Sum of distances to descendants at depth $d$}: replace
+        the $\oplus$ in Shape~B by $+$ on integers -- the inverse is
+        subtraction, so the backtracking still applies. \hfill\lv{3}
+  \item \textbf{Non-invertible combiner} ($\max$, ``count of maximum''):
+        Shape~B fails; fall back to Shape~A with small-to-large merges
+        (Ch.17's \chref{c28}). \hfill\lv{4}
+  \item \textbf{Unbounded $k$}: if the constraint is $\sum |H_v| \gg nk$,
+        the histogram merge itself becomes the bottleneck --
+        \chref{c27}'s knapsack-over-children lemma gives the amortised
+        $\bigO{n\cdot\text{(budget)}}$ bound; \chref{c18}'s centroid
+        recursion answers distance queries in $\bigO{n\log n}$.
+        \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- depth vs. distance (Ch.570D off-by-one)]
+CF~570D's statement uses the convention ``the root has depth $1$'', and
+``at depth $h$'' is \emph{absolute} (from the root), not relative to
+$v$'s subtree. Writing \lstinline{depth[root]=0} in the code and
+answering a query with \lstinline{X[h]} then reads one level too high.
+Symptom: sample query \lstinline{(1,1)} returns ``Yes'' by accident,
+deeper queries return ``No'' on hidden. Set the convention explicitly
+and stick to it throughout the file.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2 -- answering at entry instead of exit]
+Shape~B must answer queries at $u$'s \emph{exit}, after every descendant
+has been folded into $\mathit{X}[\cdot]$. Answering at entry reads the
+accumulator before the subtree is processed, so queries see only the
+ancestors of $u$ at that depth -- an entirely different (and wrong)
+answer. Symptom: root-depth queries return correct values (the root's
+``subtree at depth 1'' is just the root itself at exit-time), all other
+queries come out too small.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- forgetting the shift in Shape~A's merge]
+The line \lstinline{H[u][j] += H[v][j-1]} shifts by $+1$; the naive
+\lstinline{H[u][j] += H[v][j]} counts each node at distance $j$ from
+$v$ as being at distance $j$ from $u$. Symptom: the answer is right for
+$k=1$ (shift of $+1$ doesn't matter at $k=1$ because $H[u][0]=1$ still
+captures the ``$u$ paired with a child'' rows), wrong for every $k\ge 2$.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4 -- \lstinline{int} popcount for wide masks]
+Shape~B's XOR accumulator must be at least $2^C$-bit where $C$ is the
+alphabet size. For lowercase letters ($C=26$), \lstinline{int} suffices
+(32-bit); for arbitrary per-node weights as bit flags, promote to
+\lstinline{long long}. Symptom: silent truncation of the character
+bits, popcount comes out wrong only for letters past the 31st.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's anchor is CF~570D, \probref{c10-distk-solved}: $m$ offline
+queries of the form ``at depth $h$ in $v$'s subtree, can the letters
+form a palindrome?'' It is Shape~B straight off the page. Section~13.3
+already solved the Shape~A instance (CF~161D); this lab rounds out the
+pair so both distance-indexed shapes are on the record.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c10-distk-solved}{Tree Requests}{Codeforces 570D}
+  {https://codeforces.com/problemset/problem/570/D}{CF 1800 L4}
+  {distance-indexed DP, backtracking DFS, per-depth XOR accumulator, palindrome parity}
+
+\begin{problemstatement}[Tree Requests (samples verified against the live statement)]
+Roman planted a rooted tree of $n$ vertices. Vertex~$1$ is the root;
+each vertex $i\ge 2$ has a parent $p_i < i$. Each vertex carries a
+lowercase English letter. Depth of a vertex is the number of nodes on
+the path from root to it, with the root at depth~$1$. Vertex~$u$ is in
+the \emph{subtree} of $v$ if we can get from $u$ to $v$ by repeatedly
+moving to the parent (in particular $v$ is in its own subtree). Given
+$m$ queries $(v_i, h_i)$: consider the letters written on all vertices
+in the subtree of $v_i$ located at depth $h_i$; can they be rearranged
+into a palindrome? Constraints: $1\le n, m\le 5\cdot 10^{5}$; $1\le
+v_i, h_i\le n$. Output: \texttt{Yes} or \texttt{No}, one line per
+query. \textbf{Sample}: $n=6$, $m=5$; parents $1,1,1,3,3$ (for
+vertices $2..6$); string \texttt{zacccd}; queries
+$(1,1),(3,3),(4,1),(6,1),(1,2)$ $\Rightarrow$ \texttt{Yes No Yes Yes
+Yes}.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 20 minutes]
+The naive per-query BFS costs $\bigO{n}$ each and dies at $n\cdot m =
+2.5\cdot 10^{11}$. Two facts unlock the linear solution: (i) palindrome
+$\iff$ at most one letter has odd count, i.e.\ popcount of a XOR mask
+$\le 1$; (ii) queries are offline and grouped by $v$. Ask: what state
+indexed by depth does a DFS maintain naturally along the way down?
+\peek{Which property of a palindrome can you encode in a single 26-bit
+      word?}
+\nudge{The parity vector: bit $i$ of the word says whether letter~$i$
+      has appeared an odd number of times. XOR accumulates parities
+      for free, and popcount$\le 1$ is the test.}
+\fullhint{Root the tree at~$1$ with depth starting at~$1$. Bucket the
+      queries into \lstinline{q[v]} (each entry $(h, \mathit{id})$).
+      Maintain a global \lstinline{X[d]} that is XOR-updated on entry
+      to each node and \emph{never} restored on exit. On entering $v$,
+      snapshot $\mathit{X}[h]$ for every query $(v,h)$ (this is the
+      pre-subtree prefix); then XOR $v$'s own bit onto
+      $\mathit{X}[\depth(v)]$ and recurse into children. On exiting
+      $v$, answer each query as
+      $\mathit{X}[h]\oplus\mathit{X}[h]_{\text{snapshot}}$ -- the
+      difference is exactly the XOR of every $v$-subtree node at
+      depth~$h$. Total $\bigO{n+m}$, memory $\bigO{n+m}$. See
+      \thmref{c10-depth-xor} for why no-restore is the right shape.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Each query is a per-node, per-depth filter followed by a parity test.
+A direct per-query BFS hits $\bigO{n}$ per query. Bucket queries by
+$v$, then a single DFS visits every node in $v$'s subtree between
+entering $v$ and leaving $v$; a per-depth \emph{monotone} accumulator
+(never restored) maintained along the walk makes the difference
+$\mathit{X}[h]_{\mathrm{out}}\oplus\mathit{X}[h]_{\mathrm{in}}$ the
+subtree aggregate at $\bigO{1}$ per query.
+
+\solstep{Key Observations}
+\begin{observation}
+A multiset of letters can be rearranged into a palindrome iff at most
+one letter has odd count. Encode as a 26-bit XOR mask; the test is
+$\mathit{popcount}(\mathit{mask}) \le 1$.
+\end{observation}
+\begin{observation}
+DFS visits every node in $v$'s subtree, and only those, strictly
+between $v$'s entry and exit. A per-depth accumulator that is
+XOR-updated on entry but \emph{never restored} turns the query answer
+into $\mathit{X}[h]_{\mathrm{out}}\oplus\mathit{X}[h]_{\mathrm{in}}$ --
+$\bigO{1}$ per query.
+\end{observation}
+\begin{observation}
+XOR is its own inverse, so \thmref{c10-depth-xor}'s group-invertibility
+clause is satisfied -- the exit-time restore is a single XOR.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{For each query, BFS the subtree of $v$, collect chars at depth
+      $h$, count parities.}
+{$\bigO{n\cdot m}$ in the worst case; at $n, m\le 5\cdot 10^{5}$ the
+budget is $2.5\cdot 10^{11}$ -- TLE by four orders of magnitude, no
+constant saves it.}
+\deadend{Precompute for every $v$ a full depth-to-mask table
+      $\mathit{Tab}[v][d]$.}
+{Table is $\bigO{n^2}$ entries ($2.5\cdot 10^{11}$ masks), memory blows
+up. Even with a small-to-large DSU merge (Ch.17) the total cost is
+$\bigO{n\log n}$, but you'd be building the machinery before you need
+it; the backtracking DFS is shorter and faster.}
+\deadend{Euler-tour the tree, sort nodes by depth, binary-search each
+      query's subtree interval.}
+{Works, and it's the standard reference solution, but it uses Ch.24's
+tin/tout machinery (\chref{c18}) which this chapter does not assume.
+The backtracking DFS is the same asymptotic cost with fewer tools.}
+\aha{Never restore the accumulator. Snapshot $\mathit{X}[h]$ per query
+     at $v$'s entry; at $v$'s exit the XOR difference against the
+     snapshot is the subtree aggregate. One DFS, no preprocessing.}
+\end{thinkbox}
+
+\solstep{Solution}
+Build $G$ from parent pointers; depth of root~$1$ is~$1$. Bucket each
+query $(v,h)$ into \lstinline{q[v]} tagged with its index. Set
+$\mathit{X}[d]=0$ for every $d$. Run the DFS of \coderef{c10-depth-hist}:
+at entry to $v$, snapshot $\mathit{X}[h]$ for every query in
+$\mathit{q}[v]$; XOR $v$'s own bit onto $\mathit{X}[\depth(v)]$;
+recurse into children; at exit, answer each query as
+$\mathit{X}[h]\oplus\mathit{X}[h]_{\text{snapshot}}$. Do \emph{not}
+restore the accumulator. Print answers in input order.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[\coderef{c10-depth-hist} answers every CF~570D query correctly]
+Fix query $(v, h)$. \emph{Claim}: on exiting $v$, the difference
+$\mathit{X}[h]\oplus\mathit{X}[h]_{\text{snapshot at $v$'s entry}}$
+equals $\bigoplus_{u \in \mathrm{subtree}(v),\,\depth(u)=h} \mathit{bit}(u)$,
+where $\mathit{bit}(u)$ is the mask \texttt{1 << (s[u] - 'a')}.
+Because $\mathit{X}[\cdot]$ is never restored, its value at any
+moment is the XOR of $\mathit{bit}(u)$ over every node $u$ already
+visited in preorder, bucketed by $\depth(u)$. The DFS visits every
+node in $v$'s subtree (and only those) between $v$'s entry and $v$'s
+exit, so the two snapshots differ exactly by the subtree aggregate.
+Formally: $\mathit{X}[h]_{\mathrm{out}} = \mathit{X}[h]_{\mathrm{in}}
+\oplus \bigoplus_{u\in\mathrm{subtree}(v),\,\depth(u)=h}\mathit{bit}(u)$,
+and XOR is its own inverse. \emph{Palindrome criterion}: a multiset of
+letters can be rearranged into a palindrome iff at most one letter has
+odd count, iff the popcount of the parity XOR mask is $\le 1$ (empty
+subtree gives popcount~$0$ $\Rightarrow$ Yes, matching the statement's
+Note). Both facts together yield the answer. \qed
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 570D via iterative two-phase DFS with a per-depth prefix XOR accumulator (never restored); \lstinline{int} is enough for 26-bit masks}, label={lst:c10-570d-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+
+int main(){
+    ios::sync_with_stdio(false); cin.tie(nullptr);
+    int n, m; if(!(cin >> n >> m)) return 0;
+    vector<vector<int>> adj(n + 1);
+    for (int i = 2; i <= n; ++i){ int p; cin >> p; adj[p].push_back(i); }
+    string s; cin >> s; s = " " + s;                       // 1-index letters
+    vector<vector<pair<int,int>>> q(n + 1);                // q[v] = list of (h, id)
+    for (int i = 0; i < m; ++i){ int v, h; cin >> v >> h; q[v].push_back({h, i}); }
+
+    vector<int> X(n + 2, 0);                               // X[d] = 26-bit XOR prefix mask at depth d
+    vector<int> in_val(m, 0);                              // entry snapshot of X[h] per query
+    vector<char> ans(m, 0);
+    vector<int> depth(n + 1, 0); depth[1] = 1;             // CF convention: root at depth 1
+
+    // Two-phase iterative DFS to survive chains at n = 5e5.
+    // Stack items are (node, phase). phase 0 = about to enter, phase 1 = about to exit.
+    vector<pair<int,int>> st; st.push_back({1, 0});
+    while (!st.empty()){
+        auto [u, ph] = st.back(); st.pop_back();
+        if (ph == 0){
+            st.push_back({u, 1});                          // schedule exit next
+            for (auto& [h, id] : q[u]) in_val[id] = X[h]; // snapshot BEFORE u's subtree
+            X[depth[u]] ^= (1 << (s[u] - 'a'));           // add u's own bit
+            // Push children in reverse so preorder matches the natural order.
+            for (auto it = adj[u].rbegin(); it != adj[u].rend(); ++it){
+                depth[*it] = depth[u] + 1;
+                st.push_back({*it, 0});
+            }
+        } else {
+            // Exit u: X[h] has accumulated everything in u's subtree (no child restored).
+            for (auto& [h, id] : q[u]){
+                int mask = (h <= n) ? (X[h] ^ in_val[id]) : 0;
+                ans[id] = (__builtin_popcount((unsigned)mask) <= 1);
+            }
+            // NO restore of X[depth[u]] -- u's bit must remain visible to u's parent.
+        }
+    }
+    for (int i = 0; i < m; ++i) cout << (ans[i] ? "Yes" : "No") << "\n";
+    return 0;
+}
+\end{lstlisting}
+
+\begin{complexitybox}
+Time $\bigO{n+m}$: one XOR update per node in phase~0 and one
+popcount per query in phase~1. Memory $\bigO{n+m}$ for adjacency,
+query buckets, accumulator, and snapshots. At $n, m\le 5\cdot 10^{5}$:
+$\le 10^{6}$ ops on the hot loop, comfortable under CF's 2-second
+limit. The iterative two-phase stack is required -- a chain input at
+$n=5\cdot 10^{5}$ blows a recursive frame. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Trace}
+\begin{tracebox}[CF 570D sample: $n{=}6$, parents $1,1,1,3,3$, string \texttt{zacccd}, $m{=}5$ queries]
+Depths: $1\!\to\!1$, $2\!\to\!2$, $3\!\to\!2$, $4\!\to\!2$, $5\!\to\!3$,
+$6\!\to\!3$. Bit values $\mathit{bit}(u)=\texttt{1 << (s[u] - 'a')}$:
+$1{=}\texttt{z}\mapsto 33554432$, $2{=}\texttt{a}\mapsto 1$,
+$3{=}\texttt{c}\mapsto 4$, $4{=}\texttt{c}\mapsto 4$, $5{=}\texttt{c}\mapsto 4$,
+$6{=}\texttt{d}\mapsto 8$. Children: $1\!\to\!\{2,3,4\}$,
+$3\!\to\!\{5,6\}$. Queries bucketed:
+$\mathit{q}[1]=\{(1,\text{id}0),(2,\text{id}4)\}$,
+$\mathit{q}[3]=\{(3,\text{id}1)\}$, $\mathit{q}[4]=\{(1,\text{id}2)\}$,
+$\mathit{q}[6]=\{(1,\text{id}3)\}$. Initial $\mathit{X}[\cdot]=0$.
+\\[3pt]
+Preorder: $1, 2, 3, 5, 6, 4$. Postorder (exit): $2, 5, 6, 3, 4, 1$. Trace
+below shows $\mathit{X}[h]$ values that matter, and the snapshot
+$\mathit{X}_{\text{in}}[h]$ read per query at entry.
+\\[3pt]
+\textbf{Enter 1}: snapshot $\mathit{in}_{\text{id}0}=\mathit{X}[1]=0$;
+$\mathit{in}_{\text{id}4}=\mathit{X}[2]=0$. Add $1$'s bit:
+$\mathit{X}[1]=33554432$.\\
+\textbf{Enter 2}: no queries. Add $2$'s bit: $\mathit{X}[2]=1$.\\
+\textbf{Exit 2}: no queries, no restore. $\mathit{X}[2]=1$.\\
+\textbf{Enter 3}: snapshot $\mathit{in}_{\text{id}1}=\mathit{X}[3]=0$
+(depth~$3$ still untouched). Add $3$'s bit: $\mathit{X}[2]=1\oplus 4=5$.\\
+\textbf{Enter 5}: no queries. Add $5$'s bit: $\mathit{X}[3]=4$.\\
+\textbf{Exit 5}: no queries.\\
+\textbf{Enter 6}: snapshot $\mathit{in}_{\text{id}3}=\mathit{X}[1]=33554432$
+(the only depth-$1$ node visited so far is $1$ itself). Add $6$'s bit:
+$\mathit{X}[3]=4\oplus 8=12$.\\
+\textbf{Exit 6}: query id3 asks $h{=}1$.
+$\mathit{mask}=\mathit{X}[1]\oplus\mathit{in}_{\text{id}3}=33554432\oplus 33554432=0$.
+popcount $=0\le 1 \Rightarrow$ \texttt{Yes} (id3).\\
+\textbf{Exit 3}: query id1 asks $h{=}3$.
+$\mathit{mask}=\mathit{X}[3]\oplus\mathit{in}_{\text{id}1}=12\oplus 0=12$.
+popcount $=2 > 1 \Rightarrow$ \texttt{No} (id1).\\
+\textbf{Enter 4}: snapshot $\mathit{in}_{\text{id}2}=\mathit{X}[1]=33554432$.
+Add $4$'s bit: $\mathit{X}[2]=5\oplus 4=1$.\\
+\textbf{Exit 4}: query id2 asks $h{=}1$.
+$\mathit{mask}=\mathit{X}[1]\oplus\mathit{in}_{\text{id}2}=33554432\oplus 33554432=0$.
+popcount $=0 \Rightarrow$ \texttt{Yes} (id2).\\
+\textbf{Exit 1}: query id0 asks $h{=}1$.
+$\mathit{mask}=\mathit{X}[1]\oplus\mathit{in}_{\text{id}0}=33554432\oplus 0=33554432$.
+popcount $=1 \Rightarrow$ \texttt{Yes} (id0). Query id4 asks $h{=}2$.
+$\mathit{mask}=\mathit{X}[2]\oplus\mathit{in}_{\text{id}4}=1\oplus 0=1$.
+popcount $=1 \Rightarrow$ \texttt{Yes} (id4).
+\\[3pt]
+\textbf{Answers in input order}: id0 \texttt{Yes}, id1 \texttt{No},
+id2 \texttt{Yes}, id3 \texttt{Yes}, id4 \texttt{Yes}. \\
+\textbf{Cross-check with a direct subtree enumeration}: subtree $1$ at
+depth~$1$ = $\{1\}$ (letter `z`, popcount~1 $\Rightarrow$ Yes);
+subtree $3$ at depth~$3$ = $\{5,6\}$ (c$\oplus$d, popcount~2 $\Rightarrow$ No);
+subtree $4$ at depth~$1$ = $\emptyset$ (Yes); subtree $6$ at depth~$1$
+= $\emptyset$ (Yes); subtree $1$ at depth~$2$ = $\{2,3,4\}$
+(a$\oplus$c$\oplus$c, popcount~1 $\Rightarrow$ Yes).
+\textbf{Sample matches official} \texttt{Yes No Yes Yes Yes}. \\checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+$\bigO{n+m}$ time and $\bigO{n+m}$ memory, as the
+\coderef{c10-570d-soln} complexity box states. The accumulator
+$\mathit{X}[\cdot]$ is $\bigO{n}$ (depth $\le n$); the per-query
+snapshot $\mathit{in}_{\text{id}}$ is $\bigO{m}$. No histogram is built
+per node, so the $\bigO{nk}$ Space-A cost is completely sidestepped.
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Three ways to lose this problem: (i) \emph{restoring} $\mathit{X}[\depth(u)]$
+on $u$'s exit -- the difference $\mathit{X}[h]_{\mathrm{out}}\oplus\mathit{X}[h]_{\mathrm{in}}$
+then collapses to $0$ for every internal query, and only the deepest-
+leaf queries survive; (ii) \emph{forgetting} the entry snapshot and
+reading only $\mathit{X}[h]_{\mathrm{out}}$ -- the accumulator then
+includes every preorder node before $u$ at depth $h$, so ancestors
+contaminate the answer; (iii) depth-index confusion (root at $0$ vs.
+root at $1$). Variant worth doing after this: CSES~2103 ``Company
+Queries II'' -- same per-node offline accumulation, one line of binary
+lifting added on the ancestor walk.
+\end{warningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Are queries bucketed \emph{at $v$} and answered \emph{at $u$'s
+        exit}, not answered at entry? Entry reads only ancestors.
+  \item Is $\mathit{X}[h]_{\text{in}}$ snapshotted per query before
+        entering $u$'s subtree (not shared with other queries at
+        the same $u$)? Sharing is fine if you compute the snapshot
+        once per node; it is a bug to share across nodes.
+  \item Is the root's depth $1$ (CF convention) or $0$? Pick one and
+        stick to it in the whole file. Sample \lstinline{(1,1)}
+        discriminates.
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Directing the Edges}{Codeforces 1385E}
+    {https://codeforces.com/problemset/problem/1385/E}{CF 1700 L3}
+    {Shape~A with a scalar accumulator. Root the tree at~$1$; count the
+    minimum number of edges that must be flipped so every edge points
+    away from some chosen root. Compute $\mathit{down}[v]$ (already-
+    oriented edges in $v$'s subtree) and $\mathit{up}[v]$ (edges on the
+    $v$-to-root path) in one DFS with the same exit-time aggregation
+    spirit as \coderef{c10-depth-hist}; the answer is
+    $\min_v(\mathit{down}[v]+\mathit{up}[v])$. Same fold skeleton as
+    \secref{c10-subtrees}; the difference is that the state is a scalar
+    pair, not a histogram.}
+\end{practiceset}
+
+\paragraph{Back-cites (URLs live elsewhere in the book).}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{CSES 2081 ``Fixed-Length Paths II''}: Ch.12's practice slot
+        owns the pointer. This is Shape~A with a range condition
+        $a \le d(u,w) \le b$ replacing the equality; the histogram merge
+        is unchanged, only the sum's bounds shift. Re-solve it now that
+        you know \thmref{c10-pairtop-count} is the general form.
+  \item \textbf{LC 2049 ``Count Nodes With the Highest Score''}
+        (\chref{c04} owns the URL): the removal-score definition is
+        exactly the Ch.12 preview of Ch.15's rerooting. Ch.13 does not
+        re-derive it; the fold is \secref{c10-subtrees}'s child template
+        with a two-coordinate tuple.
+\end{itemize}
+
+\begin{recallbox}[10-second refresher -- 13.4 Distance-Indexed DP]
+Two shapes of ``histogram over depth'': \textbf{Shape~A} = bottom-up
+merge per node, $\bigO{nk}$, non-invertible combinable (CF~161D via
+\thmref{c10-pairtop-count}); \textbf{Shape~B} = backtracking-DFS
+accumulator with per-depth prefix XOR, $\bigO{n+m}$, invertible
+combiners only (CF~570D via \thmref{c10-depth-xor}). The $k=2$
+census on $T$ (\exref{c10-k2}, \figref{c10-distk}) is the reference
+example Ch.16's \exref{c11-census} cites for the ``degenerate row''
+-- $\ell$ is one endpoint, one arm has length~$0$; forgetting the
+seed $\mathit{H}[u][0]=1$ drops those rows and is the top WA cause.
+Knapsack-over-children budget analysis is Ch.14's (\chref{c27});
+small-to-large and Euler-tour alternatives are Ch.17's (\chref{c28})
+and Ch.24's (\chref{c18}).
+\selftest{
+  \item State \defref{c10-dist-hist} in one sentence. Why is the
+        index the depth and the value the fold?
+  \item Give one complexity line each for Shape~A and Shape~B, and
+        name the algebraic property (invertibility) that Shape~B
+        requires.
+  \item In \ref{tab:c10-k2-table}, which rows are degenerate and
+        which are strict cross-child? How many of each?
+  \item Why does answering a CF~570D query at $u$'s \emph{entry}
+        instead of $u$'s \emph{exit} produce a wrong result even
+        when $\Phi$ is XOR?
+  \item Which Ch.16 forward contract does \exref{c10-k2} discharge?
+}
+\end{recallbox}

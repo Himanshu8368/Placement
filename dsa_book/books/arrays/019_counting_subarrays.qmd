@@ -1,0 +1,1514 @@
+# Counting Subarrays, Pairs and Triples: The Contribution Technique {#sec-cnt}
+
+<!--
+Author-facing provenance (not rendered): Chapter 19 of the arrays volume, the opener of Part IV,
+per outline.yml ("Counting Subarrays, Pairs & Triples: the Contribution Technique"): Sum over all
+subarrays; Sum over all pairs; Counting subarrays with a property; Complementary counting; Fix the
+middle: triples; Index and value conditions; Small-value counting. Lesson labels keep their
+historical names: sec-cnt-a1 (swap), a2 (spans), pairsum, a3 (pair counting), idxval, a4
+(windows with a property), comp (complementary counting), a5 (triples and small values).
+Pattern labels: p1, psum, p2, pidx, p3, pcomp, p4, p5 in reading order. Solved problems are
+registry files homed here (lc-1588, lc-2104, lc-0477, cf-1648a, lc-1512, lc-1010,
+ac-abc166_e, cf-1541b, lc-0930, lc-1513, lc-2475, cf-1475c, lc-1395, lc-1534, lc-1442, lc-1394,
+lc-1781); storyboards of the original ten come from books/traces/arr019_traces.py. LC 560, 974,
+992, CF 1538C and CF 1520D are homed in chapters 6-9 and appear here as cards only.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 2 (counting inversions — a pair count), ch. 10 (direct addressing) and appendix A (manipulating summations) · **CPH** ch. 1 (running-time estimates) and ch. 22 (combinatorics: binomial coefficients, inclusion–exclusion) · **CP-Algorithms**: Inclusion–exclusion principle · Coverage: the contribution swap over subarrays, subsequences and pairs; cover counts $(i+1)(n-i)$; winner spans; sums over pairs by algebra, sorting and bits; pair counting by sweep and histogram; index-and-value conditions; counting windows with a property; complementary counting and inclusion–exclusion; fixing the middle of a triple; value-indexed tables.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Replace a double loop over windows by a **dot product with cover counts**: slot $i$ lies in $(i+1)(n-i)$ subarrays, so any $\sum_{\text{windows}} \text{linear}(\text{window})$ is one pass (@sec-cnt-a1).
+- Count the subarrays in which an element is the **maximum** (or minimum) with monotonic-stack spans and opposite tie-breaking, and hence evaluate $\sum (\max - \min)$ in $O(n)$ (@sec-cnt-a2).
+- Evaluate a **sum over all pairs** — of products, absolute differences, XORs or Hamming distances — in $O(n)$ or $O(n \log n)$ by algebra, by sorting with rank weights $2k - n + 1$, or bit by bit with $c(n-c)$ (@sec-cnt-pairsum).
+- Count **pairs** by fixing the right end and charging `seen[value]`, or by closing a histogram with $\binom{c}{2}$ — including complementary bucket counts modulo $k$ (@sec-cnt-a3) — and separate a condition that mixes **indices and values** into keys (@sec-cnt-idxval).
+- Count subarrays **with a property** by prefix-hash equality or by $\text{atMost}(K) - \text{atMost}(K-1)$, say which survives negative numbers (@sec-cnt-a4), and count the **complement** instead when "bad" is easier to describe, with inclusion–exclusion when two bad events overlap (@sec-cnt-comp).
+- Count **triples** by fixing the middle: multiply left and right counts when the outer indices are unrelated, query a value interval when they are, and recognise when small values make the value itself an index (@sec-cnt-a5).
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import arr019_traces as Traces
+
+random.seed(0)
+```
+
+## Why this matters {#sec-cnt-why}
+
+::: {.callout-note title="In plain words"}
+The earlier chapters of this volume taught you to *read* an array: sweep it, sort it, index it, wrap a structure around it. This chapter is about the questions where the array is not the input but the **index of the answer** — "sum over all subarrays", "how many pairs satisfy $P$", "count the triples with $a \le |x-y| \le b$". The naive answer is always the same: two or three nested loops, $O(n^2)$ or $O(n^3)$ windows, and at $n = 10^5$ that is $5 \cdot 10^9$ windows and you are done as a candidate. The technique that fixes it is one move, made three ways. **Re-index the sum.** Instead of walking the windows and adding up what is inside them, walk the *elements* and ask each how many windows it is inside: slot $i$ of an $n$-cell array is covered by $(i+1)(n-i)$ subarrays, so $\sum_{\text{subarrays}} \text{sum} = \sum_i a_i (i+1)(n-i)$ — a dot product, one pass, and the whole of @sec-cnt-p1-oddsum. When the window statistic is not linear (a maximum, a $\max - \min$) the same swap still works but the cover count becomes geometric: the element is charged with the subarrays in which it *rules*, which is a product of two monotonic-stack spans (@sec-cnt-a2). When the object is a pair rather than a window, the same swap sums over pairs by sorting or by bits (@sec-cnt-pairsum), and to *count* pairs you fix one end and let a histogram answer for the other (@sec-cnt-a3). When the object is a window with a *property*, the answer is either an equality among prefix values (@sec-cnt-a4) or a difference of two easier counts — "exactly $K$" is "at most $K$" minus "at most $K-1$" — and when the bad windows are easier to describe than the good ones, you count everything and subtract (@sec-cnt-comp). And when the object is a triple, one of its three indices usually appears in two of the three conditions: **fix the middle**, and the two remaining conditions become an interval query over values, answered by a histogram of a small range (@sec-cnt-a5).
+:::
+
+This chapter opens Part IV, and it stands on tools you already own. The prefix-sum identity $P[j] - P[i]$ of @sec-pref-def and its hash-map counting form @sec-pref-hash (with the prefix XOR of @sec-pref-other) turn "a window with a property" into "a pair of prefixes". The complement lookups and grouping keys of @sec-hash are how pairs are counted in one pass. The two-pointer counting of @sec-tp ("for each right end, how many left ends") and the window counting of @sec-sw-a4 ("everything ending at $r$", and "at most $K$ minus at most $K-1$") count pairs and windows when the array is sorted or non-negative. The value-as-index tables of @sec-lts-a5 and @sec-idx, the "fix two rows" reduction of @sec-mat, and the frequency-table designs of @sec-ds round out the toolkit. What this chapter adds is the *reframing* — the decision of which object to iterate over — and the arithmetic that makes the reframing exact.
+
+The lessons build that reframing in eight steps:
+
+- **A1 — the contribution swap.** $\sum_{\text{windows}} \to \sum_{\text{elements}} \times \text{cover count}$, proved by swapping the order of summation, with the cover count $(i+1)(n-i)$ derived by counting start and end choices.
+- **A2 — spans: who does a window belong to.** When the statistic is a maximum, credit each window to its winner; a monotonic stack measures the spans, and opposite tie-breaking stops equal values being charged twice.
+- **A3 — sums over all pairs.** The same swap with pairs instead of windows: algebra for products, rank weights after sorting for $|a_i - a_j|$, and one column per bit for XOR.
+- **A4 — counting pairs.** Fix the right end and charge `seen[complement]`; or close each group with $\binom{c}{2}$.
+- **A5 — index and value conditions.** Separate a condition like $j - i = a_i + a_j$ into a key per side; use a size bound when it cannot be separated.
+- **A6 — windows with a property.** Prefix equality and at-most differences, with a clear account of which needs non-negative entries.
+- **A7 — complementary counting.** Count everything, subtract the bad; inclusion–exclusion when two bad events overlap.
+- **A8 — triples and small values.** Fix the middle; multiply left and right counts, or query a value interval; let the value be the address when the range is tiny.
+
+Part B turns each lesson into a pattern with at least two fully solved problems. The next chapter (GCD and number-theoretic arrays) keeps the counting mindset and adds divisibility: counting pairs by their GCD, and harmonic loops over multiples like the one in @sec-cnt-pidx-pleasant.
+
+## Part A — Lessons
+
+## A1. The contribution swap {#sec-cnt-a1}
+
+::: {.callout-note title="In plain words"}
+You are asked for the sum of something over all subarrays. There are $\binom{n+1}{2}$ of them, so the loop is $O(n^2)$ and at $n = 10^5$ it is hopeless — unless the quantity you are adding is **linear in the elements**, in which case you never needed the windows at all. Swap the order of summation: an element $a_i$ is added once for every subarray that contains it, and those subarrays are exactly the choices of a start in $0..i$ and an end in $i..n-1$, i.e. $(i+1)(n-i)$ of them. So $\sum_{\text{subarrays}} \text{sum}(\text{subarray}) = \sum_i a_i (i+1)(n-i)$. Two "which one do I iterate over" questions with the same answer but wildly different cost — and the cheaper one is always "iterate over the things that are fewest", here the $n$ elements rather than the $n^2$ windows.
+:::
+
+The counting is worth doing slowly once, because every later variant reuses it. A subarray is a pair $(\text{start}, \text{end})$ with $\text{start} \le i \le \text{end}$. Fix $i$. The start may be any of $0, 1, \dots, i$ — that is $i+1$ choices; the end may be any of $i, i+1, \dots, n-1$ — that is $n-i$ choices. The two choices are independent, so the number of windows containing slot $i$ is the product $(i+1)(n-i)$. For $n = 4$ the cover counts are $[4, 6, 6, 4]$: the two middle slots are covered half again as often as the two ends, which is the shape you would guess from the picture — a cell in the middle sits inside more windows — and the shape a `for start: for end:` loop produces if you instrument it.
+
+Written as algebra, the whole technique is one exchange of two finite sums. A subarray is a pair $(l, r)$ with $0 \le l \le r \le n-1$, and its sum is $\sum_{i=l}^{r} a_i$. Sum over all subarrays, then exchange the order — the double sum runs over the triples $(l, i, r)$ with $l \le i \le r$, and they can be listed by $i$ first:
+
+$$\sum_{l=0}^{n-1}\sum_{r=l}^{n-1}\sum_{i=l}^{r} a_i \;=\; \sum_{i=0}^{n-1} a_i \cdot \#\{(l, r) : 0 \le l \le i \le r \le n-1\} \;=\; \sum_{i=0}^{n-1} a_i\,(i+1)(n-i).$$ {#eq-cnt-swap}
+
+Nothing in @eq-cnt-swap is specific to sums of windows. Whenever an answer is $\sum_{\text{objects}} \sum_{\text{elements in the object}} w(\text{element})$, exchanging the sums gives $\sum_{\text{elements}} w(\text{element}) \cdot \#\{\text{objects containing it}\}$, and the work moves to counting that set. For subsequences instead of subarrays the set is "all subsets of the other $n - 1$ elements", so each element lies in $2^{n-1}$ subsequences and the sum over all subsequence sums is $2^{n-1} \sum_i a_i$; for pairs it is "the other $n-1$ elements", which gives $\sum_{i<j}(a_i + a_j) = (n-1)\sum_i a_i$. @fig-cnt-a1-contain shows the set for subarrays: it is a rectangle of start choices times end choices.
+
+::: {#fig-cnt-a1-contain}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a1c_n, a1c_i = 5, 2
+a1c_cells = [[(f"[{l}..{r}]" if l <= r else "") for r in range(a1c_n)] for l in range(a1c_n)]
+a1c_hit = {(l, r): "cyan" for l in range(a1c_n) for r in range(a1c_n) if l <= a1c_i <= r}
+assert len(a1c_hit) == (a1c_i + 1) * (a1c_n - a1c_i) == 9
+
+
+def draw(ax, p):
+    V.array(ax, p, ["a0", "a1", "a2", "a3", "a4"], x=1.4, y=2.2, colors={a1c_i: "amber"},
+            pointers=[(a1c_i, "slot i = 2", "amber", "top")], cell_w=1.2)
+    V.grid(ax, p, a1c_cells, x=0.0, y=0.0, colors=a1c_hit, cell_w=1.2,
+           row_labels=[f"start {l}" for l in range(a1c_n)],
+           col_labels=[f"end {r}" for r in range(a1c_n)])
+V.show(draw)
+```
+
+All $\binom{6}{2} = 15$ subarrays of a length-5 array, placed by start (row) and end (column); the empty lower triangle is "end before start". The cyan block is every subarray that contains slot $2$: start in $\{0, 1, 2\}$ and end in $\{2, 3, 4\}$, a $3 \times 3$ rectangle — $(i+1)(n-i) = 9$ windows. Move the slot and the rectangle changes shape but stays a rectangle, which is why the count is a product.
+
+:::
+
+```{python}
+def cover_counts(n):
+    return [(i + 1) * (n - i) for i in range(n)]
+
+
+def all_subarrays(a):
+    return [a[j:k + 1] for j in range(len(a)) for k in range(j, len(a))]
+
+
+a = [2, 3, 5, 7]
+w = cover_counts(len(a))
+assert w == [4, 6, 6, 4]
+assert sum(w) == 4 * 5 * 6 // 6 == 20          # sum_i (i+1)(n-i) = n(n+1)(n+2)/6
+assert len(all_subarrays(a)) == 4 * 5 // 2 == 10
+assert sum(sum(s) for s in all_subarrays(a)) == sum(x * y for x, y in zip(a, w)) == 84
+
+# the same swap restricted to odd-length windows
+def a1_odd_cover(n):
+    return [((i + 1) * (n - i) + 1) // 2 for i in range(n)]
+
+
+assert a1_odd_cover(4) == [2, 3, 3, 2]
+assert sum(a1_odd_cover(4)) == 10              # = sum of the ODD window lengths, not their count
+assert sum(k - j + 1 for j in range(4) for k in range(j, 4)
+           if (k - j + 1) % 2 == 1) == 10
+oddsum = sum(sum(s) for s in all_subarrays(a) if len(s) % 2 == 1)
+assert oddsum == sum(x * y for x, y in zip(a, a1_odd_cover(4))) == 42
+for n in range(1, 31):                         # cross-check both identities
+    arr = [random.randint(1, 50) for _ in range(n)]
+    cov = cover_counts(n)
+    assert sum(sum(s) for s in all_subarrays(arr)) == sum(x * y for x, y in zip(arr, cov))
+    oc = a1_odd_cover(n)
+    assert sum(sum(s) for s in all_subarrays(arr) if len(s) % 2) == sum(
+        x * y for x, y in zip(arr, oc))
+    # the cover count is exactly the number of (l, r) with l <= i <= r
+    assert all(sum(1 for l in range(n) for r in range(l, n) if l <= i <= r) == cov[i]
+               for i in range(n))
+# the same exchange for subsequences and for pairs
+from itertools import combinations
+for n in range(1, 9):
+    arr = [random.randint(-5, 9) for _ in range(n)]
+    subseq_total = sum(sum(c) for k in range(1, n + 1) for c in combinations(arr, k))
+    assert subseq_total == 2 ** (n - 1) * sum(arr)
+    assert sum(x + y for x, y in combinations(arr, 2)) == (n - 1) * sum(arr)
+```
+
+::: {#fig-cnt-a1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["index i",          "0", "1", "2", "3"],
+                   ["a[i]",             "2", "3", "5", "7"],
+                   ["#starts (i+1)",    "1", "2", "3", "4"],
+                   ["#ends (n-i)",      "4", "3", "2", "1"],
+                   ["(i+1)(n-i)",       "4", "6", "6", "4"],
+                   ["a[i] * cover",     "8", "18", "30", "28"]],
+           colors={(4, 2): "cyan", (4, 3): "cyan", (5, 3): "green"},
+           cell_w=1.15)
+V.show(draw)
+```
+
+Rows 3 and 4 are the two independent choices, recorded as counts: $i+1$ starts (`1, 2, 3, 4`) and $n-i$ ends (`4, 3, 2, 1`), so at $i = 0$ there is one start but four ends, and at $i = 3$ four starts but one end. Row 5 is their product, row 6 the element's credit, and $8 + 18 + 30 + 28 = 84$ is the sum over all ten subarrays — obtained without ever naming a subarray.
+
+:::
+
+Two cautions, both of which recur all chapter. **(1) The swap needs linearity.** $\sum_{\text{windows}} \text{sum}(\text{window})$ rearranges because addition is associative and commutative; $\sum_{\text{windows}} \max(\text{window})$ does *not* rearrange this way, and trying to force it is how people write wrong $O(n)$ solutions to @sec-cnt-p1-ranges. What you can do with a maximum is change the *domain* of the credit from "windows containing $i$" to "windows in which $i$ is the winner" — that is @sec-cnt-a2. **(2) A cover count is not a window count.** $\sum_i (i+1)(n-i) = \frac{n(n+1)(n+2)}{6} = 20$ for $n = 4$, while there are only $\binom{n+1}{2} = 10$ windows: the cover sum counts *windows weighted by length*. That is a legitimate quantity (it is the sum of lengths) but it is not a check on your arithmetic, and the odd-length version bites harder — $\sum_i \lceil (i+1)(n-i)/2 \rceil = 10$ at $n = 4$ is the sum of odd window lengths, whereas the *number* of odd-length windows is $6$.
+
+The number of odd-length windows is a pleasant one-liner and it is worth deriving rather than memorising, because the derivation is the same trick this chapter keeps using. Write a window as a pair of **cut points** $(j, k+1)$ with $0 \le j < k+1 \le n$; the length is $k - j + 1$, so the window has odd length exactly when the two cuts have *different* parity. Among $0 .. n$ there are $\lfloor n/2 \rfloor + 1$ even cuts and $\lceil n/2 \rceil$ odd ones, so odd windows $= (\lfloor n/2 \rfloor + 1)\lceil n/2 \rceil$ and even windows are the same-parity pairs $\binom{\lfloor n/2 \rfloor + 1}{2} + \binom{\lceil n/2 \rceil}{2}$. At $n = 4$: even cuts $\{0,2,4\}$, odd cuts $\{1,3\}$, so $3 \times 2 = 6$ odd and $3 + 1 = 4$ even — totalling $\binom{5}{2} = 10$. Parity is a bucket, and counting is multiplication: @sec-cnt-a3 in miniature.
+
+## A2. Spans: who does a window belong to {#sec-cnt-a2}
+
+::: {.callout-note title="In plain words"}
+"Sum of $\max$ over all subarrays" looks linear-friendly but is not: a maximum is not a sum of per-element contributions. The repair is to keep the swap and change what is being counted. Ask instead: for each slot $i$, **in how many subarrays is $a_i$ the maximum?** If the answer is $\text{left}_i \times \text{right}_i$ — how far left the boundary may sit, how far right — then the credit $\sum_i a_i \cdot \text{left}_i \cdot \text{right}_i$ is exactly the quantity you wanted. Both spans are the "distance to the nearest element that blocks me" that a monotonic stack hands you in $O(n)$; @sec-cx-p3-temperatures is the book's other use of the same one-pass stack (there the question is "how long until a warmer day"), and the counting form is developed from scratch in @sec-cnt-p1-ranges because you do not need the stack to be a topic yet.
+:::
+
+Left span for slot $i$ = the number of choices of the window's start = the distance to the previous element **strictly greater** than $a_i$, or to the left edge if there is none. Right span = the number of choices of the end = the distance to the next element **greater than or equal to** $a_i$, or to the right edge. Multiply, weight by $a_i$, sum. Then the subtlety that decides whether the code is right:
+
+**Ties must be broken in opposite directions on the two sides.** With duplicates there is no unique maximum, so the algorithm must *appoint* one — and the appointment must cover every window exactly once. The rule that works is "pop while $\le$ when scanning left-to-right, pop while $<$ when scanning right-to-left" (or the exact mirror image). The left pass pops equal values, so a slot's left span reaches *past* its equals; the right pass stops at an equal value, so a window whose maximum appears twice is credited to the **rightmost** of them. Every window therefore gets exactly one winner. Mirror both comparisons and the winner becomes the leftmost — also correct; keep the same strictness on both sides and the appointment breaks. Take $[3, 3]$: with opposite tie-breaking the two slots are credited $[1, 2]$ windows — three claims for the three windows $[3], [3], [3,3]$, and the maximum credit is $3 \cdot 1 + 3 \cdot 2 = 9$, which is right. Use the **same pop predicate as on the left** — both passes pop equals — and the credits become $[2, 2]$ on $[3, 3]$: four claims for three windows, and the sum of maxima comes out $12$ against a true $9$. On $[1, 3, 3]$ the same slip reports $22$ where the truth is $16$; flip the slip to "strict on both sides" and the credits shrink to $[1, 2, 1]$ — only $4$ claims for $6$ windows — and the answer drifts the other way to $10$, which is the failure mode @sec-cnt-p1-ranges warns about in its edge list.
+
+```{python}
+def a2_spans(nums, greater):
+    """left[i], right[i]: how far slot i rules as max (greater=True) or min.
+
+    Ties are broken in opposite directions: pop while <= going left, < going right.
+    """
+    n = len(nums)
+    left, right, st = [0] * n, [0] * n, []
+    for i, v in enumerate(nums):
+        while st and (nums[st[-1]] <= v if greater else nums[st[-1]] >= v):
+            st.pop()
+        left[i] = i - st[-1] if st else i + 1
+        st.append(i)
+    st = []
+    for i in range(n - 1, -1, -1):
+        v = nums[i]
+        while st and (nums[st[-1]] < v if greater else nums[st[-1]] > v):
+            st.pop()
+        right[i] = st[-1] - i if st else n - i
+        st.append(i)
+    return left, right
+
+
+L, R = a2_spans([1, 3, 3], True)
+assert (L, R) == ([1, 2, 3], [1, 1, 1]) and [l * r for l, r in zip(L, R)] == [1, 2, 3]
+M, N = a2_spans([1, 3, 3], False)
+assert (M, N) == ([1, 1, 2], [3, 1, 1]) and [l * r for l, r in zip(M, N)] == [3, 1, 2]
+assert sum(v * l * r for v, l, r in zip([1, 3, 3], L, R)) == 16     # sum of maxes
+assert sum(v * l * r for v, l, r in zip([1, 3, 3], M, N)) == 12     # sum of mins
+assert 16 - 12 == 4                                                 # sum of ranges
+
+for trial in range(120):
+    arr = [random.randint(1, 6) for _ in range(random.randint(1, 9))]
+    ss = [arr[j:k + 1] for j in range(len(arr)) for k in range(j, len(arr))]
+    La, Ra = a2_spans(arr, True)
+    Mb, Nb = a2_spans(arr, False)
+    assert sum(max(s) for s in ss) == sum(v * l * r for v, l, r in zip(arr, La, Ra))
+    assert sum(min(s) for s in ss) == sum(v * l * r for v, l, r in zip(arr, Mb, Nb))
+    assert sum(max(s) - min(s) for s in ss) == sum(
+        v * (l * r - x * y) for v, l, r, x, y in zip(arr, La, Ra, Mb, Nb))
+```
+
+::: {#fig-cnt-a2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["index i",          "0", "1", "2"],
+                   ["nums[i]",          "1", "3", "3"],
+                   ["max: left span",   "1", "2", "3"],
+                   ["max: right span",  "1", "1", "1"],
+                   ["max credit L*R",   "1", "2", "3"],
+                   ["min credit L*R",   "3", "1", "2"]],
+           colors={(2, 2): "cyan", (2, 3): "cyan", (4, 3): "green", (5, 1): "amber"},
+           cell_w=1.3)
+V.show(draw)
+```
+
+The two cyan cells are the tie: the run of `3`s is credited by the opposite-comparison rule to its rightmost member, so slot 2 takes $[3,3]$ as well as its own single-cell window. Both credit rows add to $6 = \binom{4}{2}$ — every window appoints exactly one maximum slot and exactly one minimum slot (the amber cell says slot $0$ is the minimum of the three windows that start at it), which is the certificate that the tie rule is doing its job. Sum of maxima $= 1\cdot1 + 3\cdot2 + 3\cdot3 = 16$, sum of minima $= 1\cdot3 + 3\cdot1 + 3\cdot2 = 12$, so the sum of ranges is $4$ — and the six per-window ranges $[0, 2, 2, 0, 0, 0]$ add up to the same $4$.
+
+:::
+
+Three things to take from the cell. Distances are not credits: `a2_spans` returns **distances to the blocking element**, and the number of windows is the product of the two distances, not their sum. Sum of $\max$ and sum of $\min$ use the *same* code with `greater` flipped, and the difference of the two credits is the sum of ranges — $\sum (\max - \min) = \sum \max - \sum \min$ is linearity of a different kind, applied at the level of the statistic rather than the element. And "sum over windows" problems whose statistic is an extremum are nearly always this: **one extremal role, one stack, one credit** — so a problem that asks for $\max + \min$, or $\max^2$, or "count windows where the max is unique" is the same machinery with a different weight. The full ladder, including the $O(n^2)$ version you should write first to have an oracle, is @sec-cnt-p1-ranges. The monotonic stack itself — and the classic "sum of subarray minimums" (LC 907, the min half of this computation, usually asked with a modulus) — belongs to the stack volume of the book; here the stack is used only as a tool that measures spans, and the counting argument is the part to keep.
+
+## A3. Sums over all pairs {#sec-cnt-pairsum}
+
+**From windows to pairs.** A1 and A2 summed over the $\binom{n+1}{2}$ windows; the other quadratic family in a statement is the $\binom{n}{2}$ **pairs** $i < j$. The swap is the same — ask what each element contributes — but a pair has two members, so the contribution of $a_i$ depends on *who it is paired with*, and the work is in organising the partners so that their effect can be added up in one step.
+
+::: {.callout-note title="In plain words"}
+"Sum of $f(a_i, a_j)$ over all pairs" has three standard escapes from the double loop. **Algebra** when $f$ splits: $\sum_{i<j}(a_i + a_j)$ gives every element $n - 1$ partners, and $\sum_{i<j} a_i a_j$ is half of $(\sum a)^2 - \sum a^2$. **Sorting** when $f$ is a distance: after sorting, $|a_i - a_j|$ is just "later minus earlier", so the element of rank $k$ is added $k$ times and subtracted $n - 1 - k$ times. **Bits** when $f$ is bitwise: XOR, AND and OR act on each bit separately, so count the ones in each bit column and multiply. In every case the pair loop disappears into a count.
+:::
+
+The sorting case is the one to prove carefully, because it is the one interviewers ask for. Sort the values into $b_0 \le b_1 \le \cdots \le b_{n-1}$; the set of pairs is unchanged, so the sum is unchanged. For $k < m$ we have $|b_m - b_k| = b_m - b_k$, so
+
+$$\sum_{k<m} |b_m - b_k| \;=\; \sum_{m} b_m \cdot \#\{k : k < m\} \;-\; \sum_{k} b_k \cdot \#\{m : m > k\} \;=\; \sum_{k=0}^{n-1} b_k\,\bigl(k - (n-1-k)\bigr) = \sum_{k=0}^{n-1} b_k\,(2k - n + 1).$$ {#eq-cnt-rank}
+
+The same total arrives as a running sweep: when the cursor reaches $b_m$, the $m$ earlier values are each subtracted once, so the step adds $m \cdot b_m - P_m$, where $P_m$ is the sum of the earlier values. That **count-and-sum of the earlier ones** is the general tool whenever the charge of a pair is linear in the earlier member; @sec-cnt-p4-xortri uses it with indices in place of values. For bitwise $f$ the exchange is over bits: in bit $b$, $c_b$ numbers have a `1`; a pair's XOR has that bit exactly when the pair takes one `1` and one `0`, which happens for $c_b(n - c_b)$ pairs, so $\sum_{i<j} (a_i \oplus a_j) = \sum_b 2^b\, c_b (n - c_b)$. AND needs both ones, $\binom{c_b}{2}$; OR needs *not both zeros*, $\binom{n}{2} - \binom{n - c_b}{2}$ — complementary counting (@sec-cnt-comp) inside one bit.
+
+```{python}
+def pairsum_brute(a, f):
+    return sum(f(a[i], a[j]) for i in range(len(a)) for j in range(i + 1, len(a)))
+
+
+def pairsum_absdiff(a):
+    b = sorted(a)
+    n = len(b)
+    return sum(x * (2 * k - n + 1) for k, x in enumerate(b))       # (eq-cnt-rank)
+
+
+def pairsum_absdiff_sweep(a):
+    total = prefix = 0
+    for m, x in enumerate(sorted(a)):
+        total += m * x - prefix              # x minus each of the m earlier values
+        prefix += x
+    return total
+
+
+def pairsum_products(a):
+    s = sum(a)
+    return (s * s - sum(x * x for x in a)) // 2
+
+
+def pairsum_bits(a, op, bits=20):
+    n, total = len(a), 0
+    for b in range(bits):
+        c = sum((x >> b) & 1 for x in a)
+        if op == "xor":
+            pairs = c * (n - c)
+        elif op == "and":
+            pairs = c * (c - 1) // 2
+        else:                                                    # "or": not both zero
+            pairs = n * (n - 1) // 2 - (n - c) * (n - c - 1) // 2
+        total += pairs << b
+    return total
+
+
+assert pairsum_absdiff([8, 1, 4, 3]) == pairsum_absdiff_sweep([8, 1, 4, 3]) == 22
+assert [2 * k - 4 + 1 for k in range(4)] == [-3, -1, 1, 3]
+for _ in range(200):
+    arr = [random.randint(-30, 30) for _ in range(random.randint(1, 10))]
+    assert pairsum_absdiff(arr) == pairsum_absdiff_sweep(arr) == pairsum_brute(arr, lambda x, y: abs(x - y))
+    assert pairsum_products(arr) == pairsum_brute(arr, lambda x, y: x * y)
+    nat = [abs(x) * 997 % (1 << 12) for x in arr]
+    assert pairsum_bits(nat, "xor") == pairsum_brute(nat, lambda x, y: x ^ y)
+    assert pairsum_bits(nat, "and") == pairsum_brute(nat, lambda x, y: x & y)
+    assert pairsum_bits(nat, "or") == pairsum_brute(nat, lambda x, y: x | y)
+# index differences are a sum over pairs too: sum_{i<j} (j - i) = C(n+1, 3)
+assert all(pairsum_brute(list(range(n)), lambda x, y: y - x) == math.comb(n + 1, 3)
+           for n in range(1, 12))
+```
+
+::: {#fig-cnt-pairsum}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ps_b = sorted([8, 1, 4, 3])
+ps_w = [2 * k - len(ps_b) + 1 for k in range(len(ps_b))]
+ps_c = [x * w for x, w in zip(ps_b, ps_w)]
+assert sum(ps_c) == 22 == pairsum_absdiff([8, 1, 4, 3])
+
+
+def draw(ax, p):
+    V.grid(ax, p, [["rank k", "0", "1", "2", "3"],
+                   ["sorted value", *map(str, ps_b)],
+                   ["added (k times)", "0", "1", "2", "3"],
+                   ["subtracted (n-1-k)", "3", "2", "1", "0"],
+                   ["weight 2k-n+1", *map(str, ps_w)],
+                   ["contribution", *map(str, ps_c)]],
+           colors={(4, 0 + 1): "pink", (4, 4): "green", (5, 4): "green", (5, 1): "pink"},
+           cell_w=1.1)
+V.show(draw)
+```
+
+`[8, 1, 4, 3]` sorted. The smallest value is subtracted in all three of its pairs (weight $-3$), the largest is added in all three (weight $+3$), and the middle ranks partly cancel. The contributions add to $22 = 2 + 3 + 7 + 1 + 5 + 4$, the six pairwise distances.
+
+:::
+
+Two warnings travel with these formulas. A sum over pairs grows like $n^2$ times the values, so it overflows 32 bits long before the pair *count* does — @sec-cnt-psum-weird's answer reaches about $10^{14}$. And the rank weight needs the list sorted: on the unsorted `[8, 1, 4, 3]` the same weights give $-3 \cdot 8 - 1 + 4 + 9 = -12$, a negative "sum of distances".
+
+## A4. Counting pairs: fix one end, or close a histogram {#sec-cnt-a3}
+
+::: {.callout-note title="In plain words"}
+A pair is a window of two positions, so the same re-indexing applies with $O(n^2)$ pairs replaced by $n$ decisions. Two shapes. **Fix the right end**: sweep $j$ from left to right holding a count of everything seen, and when you arrive at $j$ add how many earlier indices are compatible with it — for equal-value pairs, `ans += seen[v]; seen[v] += 1`. **Or don't sweep at all**: count the histogram first, and note that a group of $c$ mutually-compatible items contributes $\binom{c}{2}$ pairs. Both are $O(n)$; the first is what you need when the compatibility relation is *asymmetric* or you must respect index order, the second when it is an equivalence relation and order is irrelevant.
+:::
+
+Read the charges position by position and the two forms become the same arithmetic. At index $2$ the value `1` already has two earlier friends, so the sweep adds $2$; at index $4$ the value `2` has one, so it adds $1$. The group of `1`s therefore accumulates $0 + 1 + 2 = 3$ pairs and the group of `2`s $0 + 1 = 1$, totalling $4$ — which is $\binom{3}{2} + \binom{2}{2} = 3 + 1$, the histogram form arriving at the same number by a different route. The sweep charges each pair to its **right** member, the histogram charges each pair to its **group**. Choosing between them is choosing which loop you want to avoid.
+
+```{python}
+def pairs_equal_scan(a):
+    seen, ans = Counter(), 0
+    for v in a:
+        ans += seen[v]              # pair (earlier i, here): charge to the right end
+        seen[v] += 1
+    return ans
+
+
+def pairs_equal_hist(a):
+    return sum(c * (c - 1) // 2 for c in Counter(a).values())
+
+
+def pairs_target_scan(a, t):
+    seen, ans = Counter(), 0
+    for v in a:
+        ans += seen[t - v]          # the complement is looked up, not searched
+        seen[v] += 1
+    return ans
+
+
+assert pairs_equal_scan([1, 1, 1, 2, 2]) == pairs_equal_hist([1, 1, 1, 2, 2]) == 4
+assert pairs_equal_scan([1, 2, 3]) == 0
+assert pairs_target_scan([1, 5, 7, 3, 6], 8) == 2        # (1,7) and (5,3)
+assert pairs_target_scan([1, 5, 3, 6], 8) == 1           # 7 is absent, so only (5,3)
+assert pairs_target_scan([1, 1, 1], 2) == 3              # a value may be its own complement
+assert math.comb(3, 2) + math.comb(2, 2) == 4
+# index-order-sensitive relations break the histogram form
+a = [3, 1, 2, 1]
+s = 0
+for i in range(len(a)):
+    for j in range(i + 1, len(a)):
+        if a[i] > a[j]:
+            s += 1
+assert s == 4                       # (3,1), (3,2), (3,1) and (2,1)
+assert sum(c * (c - 1) // 2 for c in Counter(a).values()) == 1   # the two 1s only
+# the per-position charges drawn in the figure
+seen, a3_charges, total = Counter(), [], 0
+for v in [1, 1, 1, 2, 2]:
+    a3_charges.append(seen[v])
+    total += seen[v]
+    seen[v] += 1
+assert a3_charges == [0, 1, 2, 0, 1] and total == 4
+```
+
+::: {#fig-cnt-a3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["index",                "0", "1", "2", "3", "4"],
+                   ["a[i]",                 "1", "1", "1", "2", "2"],
+                   ["earlier equals",       "0", "1", "2", "0", "1"],
+                   ["charge to right end",  "0", "1", "2", "0", "1"],
+                   ["running total",        "0", "1", "3", "3", "4"]],
+           colors={(3, 3): "cyan", (3, 5): "amber", (4, 5): "green",
+                   (2, 1): "muted", (2, 4): "muted"},
+           cell_w=1.1)
+V.show(draw)
+```
+
+Rows 3 and 4 coincide by construction — the charge *is* the number of earlier equals, read before the current element is inserted — and row 5 is their prefix sum, ending at the answer $4$. The two muted cells are where a group restarts: index $3$ is the first `2`, so it pairs with nothing, exactly as index $0$ is the first `1`. Read row 5 as the sweep and the group columns as the histogram and you have both rungs of @sec-cnt-p2-goodpairs in one picture.
+
+:::
+
+The one place the two forms genuinely differ is **index order**. "Pairs with $a_i = a_j$" is symmetric, so a histogram is enough. "Pairs with $i < j$ and $a_i > a_j$" (an inversion, CLRS ch. 2) is not: on `[3, 1, 2, 1]` there are $4$ inversions while the equal-value histogram sees only the pair of `1`s. The sweep form generalises to those (fix the right end, ask a structure how many earlier items are smaller — a Fenwick tree, which is later territory), while $\binom{c}{2}$ does not.
+
+Overflow is a real design decision here rather than a footnote, because pair counts grow quadratically: $\binom{60000}{2} = 1{,}799{,}970{,}000$ fits in a signed 32-bit int with about $16\%$ of headroom and $\binom{10^5}{2} = 4{,}999{,}950{,}000$ does not fit at all (@sec-cnt-p2-goodpairs goes over the same cliff). Accumulate in 64 bits in C++/Java; in Python it is free.
+
+## A5. Index and value conditions {#sec-cnt-idxval}
+
+**From values to positions.** A4's relations looked only at values: $a_i = a_j$, or $a_i + a_j \equiv 0$. Many statements also put the **indices** into the condition — "$a_j - a_i = j - i$", "$j - i = a_i + a_j$", "$a_i \cdot a_j = i + j$", "equal values at distance at least $d$". The index stops being a mere address and becomes part of the data, and the counting tools of A4 apply only after you decide what to do with it.
+
+::: {.callout-note title="In plain words"}
+Treat the index as a second number that each element carries, and ask whether the condition can be split into "something about $i$" equal to "something about $j$". If it can, compute that something per position and you are back to A4: equal keys on both sides mean a histogram, different keys on the two sides mean a sweep that reads one key and writes the other. If it cannot be split, look for a **bound**: when a product of values must equal a sum of indices, the values involved must be small, and only a few candidates per element survive. And conditions on the *distance* between indices ("at least $d$ apart") are handled by the order of the loop — insert an element into the table only once it is far enough behind the cursor.
+:::
+
+There are four recurring shapes, and each has one move:
+
+1. **Separable and symmetric.** $a_j - a_i = j - i \iff a_i - i = a_j - j$: the key $a_i - i$ is computed the same way on both sides, so group by it and add $\binom{c}{2}$. This is CF 1520D, homed in @sec-hash (its card is in @sec-cnt-pidx).
+2. **Separable but asymmetric.** $j - i = a_i + a_j \iff i + a_i = j - a_j$: the left member contributes the key $i + a_i$, the right member the key $j - a_j$. A histogram cannot pair two different functions, so fix the right end (@sec-cnt-a3): read `cnt[j - a_j]`, then write `cnt[j + a_j]` — @sec-cnt-pidx-message.
+3. **Not separable, but bounded.** $a_i \cdot a_j = i + j$ ties a product to a sum. Since $i + j < 2n$, only pairs with a small product qualify, and for a fixed $i$ the partner must satisfy $j \equiv -i \pmod{a_i}$; stepping through that residue class costs $O(n / a_i)$, and with distinct values the total is a harmonic sum, $O(n \log n)$ — @sec-cnt-pidx-pleasant.
+4. **A distance constraint.** "Pairs with $a_i = a_j$ and $j - i \ge d$": when the cursor is at $j$, the eligible partners are exactly the indices $\le j - d$, so insert `a[j - d]` into the table *just before* reading it — a delayed insertion, and the order of the loop enforces the index condition for free.
+
+Index conditions that are inequalities between keys ("$a_i - i < a_j - j$") turn the count into an inversion-like count: sort or use a Fenwick tree (later volume). The point of this lesson is the reflex of rewriting the condition until it says which per-index number to put in the table.
+
+```{python}
+def idx_same_diff(a):                                  # shape 1: one key on both sides
+    return sum(c * (c - 1) // 2 for c in Counter(v - i for i, v in enumerate(a)).values())
+
+
+def idx_two_keys(a):                                   # shape 2: j - i = a_i + a_j
+    cnt, ans = Counter(), 0
+    for j, v in enumerate(a):
+        ans += cnt[j - v]                              # read the right-end key
+        cnt[j + v] += 1                                # write the left-end key
+    return ans
+
+
+def idx_far_equal(a, d):                               # shape 4: a_i == a_j and j - i >= d
+    cnt, ans = Counter(), 0
+    for j, v in enumerate(a):
+        if j - d >= 0:
+            cnt[a[j - d]] += 1                         # a[j-d] just became eligible
+        ans += cnt[v]
+    return ans
+
+
+def idx_brute(a, cond):
+    return sum(1 for i in range(len(a)) for j in range(i + 1, len(a)) if cond(i, j))
+
+
+for _ in range(300):
+    a = [random.randint(1, 6) for _ in range(random.randint(1, 12))]
+    d = random.randint(1, 4)
+    assert idx_same_diff(a) == idx_brute(a, lambda i, j: a[j] - a[i] == j - i)
+    assert idx_two_keys(a) == idx_brute(a, lambda i, j: j - i == a[i] + a[j])
+    assert idx_far_equal(a, d) == idx_brute(a, lambda i, j: a[i] == a[j] and j - i >= d)
+assert idx_same_diff([3, 5, 1, 4, 6, 6]) == 1                 # only (3, 5): 6-4 = 5-3
+assert idx_two_keys([2, 3, 3, 1, 3, 1]) == 3                  # ABC166 E, first sample
+assert idx_far_equal([1, 1, 1, 1], 2) == 3                    # (0,2), (0,3), (1,3)
+```
+
+::: {#fig-cnt-idxval}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+iv_a = [2, 3, 3, 1, 3, 1]                                     # 0-based positions here
+iv_left = [i + v for i, v in enumerate(iv_a)]
+iv_right = [j - v for j, v in enumerate(iv_a)]
+iv_match = [sum(1 for i in range(j) if iv_left[i] == iv_right[j]) for j in range(len(iv_a))]
+assert iv_match == [0, 0, 0, 1, 0, 2] and sum(iv_match) == 3
+
+
+def draw(ax, p):
+    V.grid(ax, p, [["j", "0", "1", "2", "3", "4", "5"],
+                   ["a[j]", *map(str, iv_a)],
+                   ["left key j + a[j]", *map(str, iv_left)],
+                   ["right key j - a[j]", *map(str, iv_right)],
+                   ["earlier left keys equal", *map(str, iv_match)]],
+           colors={(2, 1): "cyan", (2, 4): "cyan", (3, 4): "cyan", (3, 6): "cyan",
+                   (2, 2): "cyan", (4, 4): "green", (4, 6): "green"},
+           cell_w=1.0)
+V.show(draw)
+```
+
+The first sample of @sec-cnt-pidx-message with 0-based positions. Every position carries two keys; a pair $(i, j)$ qualifies when the *left* key of $i$ equals the *right* key of $j$. At $j = 3$ the right key $2$ meets the left key of $i = 0$; at $j = 5$ the right key $4$ meets the left keys of $i = 1$ and $i = 3$. Three pairs, found by one sweep that reads row 4 and writes row 3.
+
+:::
+
+## A6. Counting subarrays with a property {#sec-cnt-a4}
+
+**From pairs back to windows.** A window is a pair of cut points, so everything in A4 and A5 applies to windows once the window's property is written as a relation between its two cut points. This lesson collects the relations that come up, and says which tool each one permits.
+
+::: {.callout-note title="In plain words"}
+Now the window has a *condition* to satisfy, so there is no linearity to exploit and the answer is a genuine **count**. Three framings, in order of generality. **Prefix equality**: "sum equals $K$" is "$P[r+1] - P[l] = K$", i.e. for each $r$ count earlier prefixes equal to $P[r+1] - K$ — one hash map, $O(n)$, and the *only* version that works with negative entries (@sec-pref-hash). **At-most differences**: for non-negative entries, "everything ending at $r$ that is still legal" is a window width $r - \text{left} + 1$, so a shrinking loop counts $\text{atMost}(K)$; then $\text{exactly}(K) = \text{atMost}(K) - \text{atMost}(K-1)$ (@sec-sw-a4). **Runs**: a property that no legal window can cross a bad cell splits the array into runs, and a run of length $L$ holds $\binom{L+1}{2}$ windows. When the *bad* windows are the easy ones to describe, count those and subtract — the subject of @sec-cnt-comp.
+:::
+
+Work through the prefix version once by hand and you will never misplace the seed again. For `[1,0,1,0,1]` with goal $2$ the prefix sums are $[0, 1, 1, 2, 2, 3]$: six values, positions $0..5$ in cut-point space. A window is a pair of cut points $(l, r+1)$, and it is good when the later value exceeds the earlier by exactly $2$. The pairs are $(0,3), (0,4), (1,5), (2,5)$ — four of them, the sample, corresponding to the windows `a[0..2]`, `a[0..3]`, `a[1..4]`, `a[2..4]` — and notice they are *not* pairs of equal values, they are pairs with a fixed difference. That is the whole algorithm: sweep, and for the current prefix $p$ add the count of previously seen prefixes equal to $p - K$. The seed `cnt[0] = 1` is the empty prefix at cut point $0$: without it the windows that start at index $0$ are invisible, and @sec-cnt-p3-binsum's storyboard shows the loss ($2$ instead of $4$).
+
+```{python}
+def count_prefix(a, K):
+    cnt = {0: 1}                     # the empty prefix: cut point 0
+    s = ans = 0
+    for v in a:
+        s += v
+        ans += cnt.get(s - K, 0)     # earlier prefixes exactly K below the current one
+        cnt[s] = cnt.get(s, 0) + 1
+    return ans
+
+
+def count_atmost(a, K):
+    if K < 0:
+        return 0
+    left = s = ans = 0
+    for right, v in enumerate(a):
+        s += v
+        while s > K:
+            s -= a[left]
+            left += 1
+        ans += right - left + 1      # every start in left..right is legal
+    return ans
+
+
+assert count_prefix([1, 0, 1, 0, 1], 2) == 4
+assert count_atmost([1, 0, 1, 0, 1], 2) - count_atmost([1, 0, 1, 0, 1], 1) == 4
+assert count_prefix([1, 1, 1], 2) == 2                      # LC 560's first sample
+assert count_prefix([1, -1, 1, -1, 1], 0) == 6              # negatives: still fine
+assert count_atmost([1, -1, 1, -1, 1], 0) == 10            # ... and this is the trap
+neg = [1, -1, 1, -1, 1]
+honest_atmost = sum(1 for i in range(5) for j in range(i, 5) if sum(neg[i:j + 1]) <= 0)
+brute = sum(1 for i in range(5) for j in range(i, 5) if sum(neg[i:j + 1]) == 0)
+assert honest_atmost == 9 and brute == count_prefix(neg, 0) == 6
+# the remainder form of the same idea (LC 974): equality of prefix *residues*
+def count_divisible(a, k):
+    cnt = {0: 1}
+    s = ans = 0
+    for v in a:
+        s = (s + v) % k
+        ans += cnt.get(s, 0)
+        cnt[s] = cnt.get(s, 0) + 1
+    return ans
+
+
+assert count_divisible([4, 5, 0, -2, -3, 1], 5) == 7
+assert count_divisible([5, 0, 0, 0], 3) == 6      # the three zeros give 6 zero-sum windows
+# complementary counting: the universe is all windows, and the complement is a partition
+n = 5
+assert math.comb(n + 1, 2) == 15                  # 15 windows in [1,-1,1,-1,1]
+bad = sum(1 for i in range(n) for j in range(i, n) if sum(neg[i:j + 1]) != 0)
+assert bad == 15 - count_prefix(neg, 0) == 9
+for trial in range(80):
+    a = [random.randint(0, 2) for _ in range(random.randint(1, 9))]
+    K = random.randint(0, 6)
+    b = sum(1 for i in range(len(a)) for j in range(i, len(a)) if sum(a[i:j + 1]) == K)
+    assert count_prefix(a, K) == b == count_atmost(a, K) - count_atmost(a, K - 1)
+```
+
+::: {#fig-cnt-a4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["index i",              "0", "1", "2", "3", "4"],
+                   ["a[i]",                 "1", "0", "1", "0", "1"],
+                   ["prefix s",             "1", "1", "2", "2", "3"],
+                   ["look for s-K (K=2)",   "-1","-1","0", "0", "1"],
+                   ["seen count (charge)",  "0", "0", "1", "1", "2"],
+                   ["running answer",       "0", "0", "1", "2", "4"]],
+           colors={(3, 3): "cyan", (3, 4): "cyan", (4, 5): "amber", (5, 5): "green"},
+           cell_w=1.1)
+V.show(draw)
+```
+
+Row 4 is the lookup the sweep performs at each step and row 5 is what the map answers: by index $4$ two earlier prefixes equal $s - 2 = 1$ (at cut points $1$ and $2$), so the last element collects the amber $2$ and the running answer in row 6 lands on the green $4$. The two cyan cells are the lookups that found the *seeded* prefix $0$ — they are the windows that start at index $0$, and they exist only because `cnt[0] = 1` was seeded; delete the seed and row 6 finishes at $2$.
+
+:::
+
+The middle assertion in the last loop is the chapter's most useful identity and the trap assertion three lines above it is its most useful *limitation*: $\text{exactly}(K) = \text{atMost}(K) - \text{atMost}(K-1)$ is correct for non-negative arrays and silently wrong the moment a negative appears. The shrink loop rests on the claim "if `a[left..right]` is legal, every shorter suffix of it is too", which is only true when extending a window leftwards can never *lower* the sum. On `[1,-1,1,-1,1]` with $K = 0$ the claim fails: when `right = 4` the loop holds `left = 1` and books four windows ending at $4$, two of which (`a[2..4]` and `a[4..4]`) have sum $1$. The rung answers $10$ where the honest "at most $0$" count is $9$ and the "exactly $0$" count is $6$ — wrong twice, and wrong in both directions. The prefix-hash form has no such assumption: it is $O(n)$ on any integers, which is why LC 560 (with negatives) is a prefix-map problem and LC 930 (binary, so non-negative) can be solved either way, and why @sec-cnt-p3-binsum presents both and compares them.
+
+Modulo is a third framing worth naming explicitly because students lose points on it: "sum divisible by $k$" is prefix *residue* equality, and in C++/Java `(-2) % 5` is $-2$, so the residue must be normalised with `((s % k) + k) % k`. The Python cell above relies on Python's always-non-negative `%`. The book's write-ups of LC 560 and LC 974 live in the prefix-sums chapter (@sec-pref-p2-a and @sec-pref-p2-b); this chapter's job is to tell you *which* of the three framings your condition belongs to, and the decision table is at the end of @sec-cnt-p3.
+
+## A7. Complementary counting {#sec-cnt-comp}
+
+**From the good objects to the bad ones.** Every framing so far counted the objects you want directly. Sometimes the wanted property is an "and" of several conditions, or an "at least one", while its negation is a single simple condition. Then it is cheaper to count **everything** — a number you know in closed form — and subtract the objects that fail.
+
+::: {.callout-note title="In plain words"}
+Count the whole universe, count the bad part, subtract. The universes have closed forms: $\binom{n}{2}$ pairs, $\binom{n+1}{2}$ subarrays, $\binom{n}{3}$ triples. "At least one $x$ in the window" is hard to track directly but its negation, "no $x$ at all", means the window sits inside a run of non-$x$ cells, and a run of length $L$ holds $\binom{L+1}{2}$ windows. When the bad part is a union of two events — "shares a boy *or* shares a girl" — counting each event and adding counts the objects in both events twice, so you add their intersection back once: $|A \cup B| = |A| + |B| - |A \cap B|$. That is **inclusion–exclusion**, and complementary counting is its one-event special case.
+:::
+
+Why it is exact: the universe $U$ splits into the good set $G$ and the bad set $B = U \setminus G$, with no overlap and nothing left over, so $|G| = |U| - |B|$. For two bad events, an object in $A \cap B$ is counted once in $|A|$ and once in $|B|$, so it must be subtracted once more; an object in exactly one event is counted once. The identity is a statement about how many times each object is counted, which is the contribution technique of @sec-cnt-a1 applied to *membership* instead of values. Three shapes cover most problems:
+
+- **Pairs with different keys** $= \binom{n}{2} - \sum_v \binom{c_v}{2}$, the complement of A4's equal-key count (LC 2364 is this with the key $a_i - i$).
+- **Windows containing at least one marked cell** $= \binom{n+1}{2} - \sum_{\text{runs of unmarked cells}} \binom{L+1}{2}$.
+- **Windows containing both an $x$ and a $y$** $= \text{all} - \text{no } x - \text{no } y + \text{neither}$; the last term is the intersection that inclusion–exclusion adds back.
+
+```{python}
+def comp_brute(a, ok):
+    return sum(1 for l in range(len(a)) for r in range(l, len(a)) if ok(a[l:r + 1]))
+
+
+def comp_runs(a, bad):
+    """Windows that avoid every cell with bad(cell): sum of C(L+1, 2) over runs."""
+    total = run = 0
+    for v in a:
+        run = 0 if bad(v) else run + 1
+        total += run                          # windows avoiding bad cells that end here
+    return total
+
+
+def comp_at_least_one(a, x):
+    n = len(a)
+    return n * (n + 1) // 2 - comp_runs(a, lambda v: v == x)
+
+
+def comp_both(a, x, y):                       # inclusion-exclusion over two bad events
+    n = len(a)
+    no_x = comp_runs(a, lambda v: v == x)
+    no_y = comp_runs(a, lambda v: v == y)
+    neither = comp_runs(a, lambda v: v in (x, y))
+    return n * (n + 1) // 2 - no_x - no_y + neither
+
+
+assert comp_at_least_one([1, 0, 2, 2, 0, 3], 0) == 21 - 5 == 16
+for _ in range(300):
+    a = [random.randint(0, 3) for _ in range(random.randint(1, 10))]
+    assert comp_at_least_one(a, 0) == comp_brute(a, lambda w: 0 in w)
+    assert comp_both(a, 1, 2) == comp_brute(a, lambda w: 1 in w and 2 in w)
+    n = len(a)
+    diff_pairs = sum(1 for i in range(n) for j in range(i + 1, n) if a[i] != a[j])
+    assert diff_pairs == math.comb(n, 2) - sum(math.comb(c, 2) for c in Counter(a).values())
+```
+
+::: {#fig-cnt-comp}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+cp_a = [1, 0, 2, 2, 0, 3]
+assert comp_at_least_one(cp_a, 0) == 16 and comp_runs(cp_a, lambda v: v == 0) == 5
+
+
+def draw(ax, p):
+    V.array(ax, p, cp_a, colors={1: "amber", 4: "amber"},
+            regions=[(0, 1, "muted", "L=1: 1"), (2, 4, "cyan", "L=2: 3"),
+                     (5, 6, "muted", "L=1: 1")],
+            label="a", note="all 21 windows - 5 without a 0 = 16")
+V.show(draw)
+```
+
+Windows of `[1, 0, 2, 2, 0, 3]` that contain at least one `0` (amber). Instead of tracking zeros inside every window, count the windows that avoid them: they live inside the three runs between the zeros, worth $\binom{2}{2} + \binom{3}{2} + \binom{2}{2} = 1 + 3 + 1 = 5$. All $\binom{7}{2} = 21$ windows minus those $5$ leaves $16$.
+
+:::
+
+The trap is overlap. If the bad events can happen together and you subtract both, the objects in both are subtracted twice; for "contains both $1$ and $2$" the windows containing neither must be added back. When the events are disjoint — "this triple repeats value $v$" for different $v$ in @sec-cnt-pcomp-unequal, or "shares a boy" and "shares a girl" between distinct couples in @sec-cnt-pcomp-ball — the intersection is empty, and the proof that it is empty is part of the solution.
+
+## A8. Triples and small values {#sec-cnt-a5}
+
+**From pairs to triples.** Every structure so far had two free choices: two ends of a window, two members of a pair. A triple $i < j < k$ has three, and the naive loop is $O(n^3)$. The pivot from @sec-tp (fix one element, solve the rest) comes back, but the element to fix is chosen by the *conditions*, and the leftover is a counting question rather than a search.
+
+::: {.callout-note title="In plain words"}
+Three indices $i < j < k$, three conditions, and the naive answer is $O(n^3)$. The escape is to notice that the conditions are not symmetric: usually **one index appears in two of them**. Pivot on that middle index. If there is no condition between the two outer indices, the left choice and the right choice are independent, and the number of triples with middle $j$ is simply (choices on the left) $\times$ (choices on the right). If there *is* a third condition linking the outer indices, the product overcounts; fix $j$ and $k$, and the condition on $i$ becomes an *interval of values*, which a histogram of the values left of $j$ answers in $O(1)$ with a cumulative table. Either way $O(n^3)$ becomes $O(n^2)$ or better, because you stopped iterating over the object that was expensive to enumerate.
+:::
+
+The product case first, on the sample of @sec-cnt-p4-teams: `rating = [2, 5, 3, 4, 1]`, and a team is $i < j < k$ with ratings increasing or decreasing. Both conditions of an increasing team involve $j$ ($r_i < r_j$ and $r_j < r_k$), and nothing relates $r_i$ to $r_k$ directly, so with $j$ fixed every smaller rating on the left pairs with every larger rating on the right. @fig-cnt-anim-middle steps the middle across the array.
+
+::: {#fig-cnt-anim-middle}
+
+```{python}
+#| echo: false
+mid_r = [2, 5, 3, 4, 1]
+mid_states, mid_total = [], 0
+mid_states.append(({}, [], "rating = [2, 5, 3, 4, 1]; a team is increasing or decreasing; total = 0"))
+for jj in range(1, len(mid_r) - 1):
+    lt = [i for i in range(jj) if mid_r[i] < mid_r[jj]]
+    gt = [i for i in range(jj) if mid_r[i] > mid_r[jj]]
+    rg = [k for k in range(jj + 1, len(mid_r)) if mid_r[k] > mid_r[jj]]
+    rl = [k for k in range(jj + 1, len(mid_r)) if mid_r[k] < mid_r[jj]]
+    add = len(lt) * len(rg) + len(gt) * len(rl)
+    mid_total += add
+    colors = {jj: "amber"}
+    colors.update({i: "cyan" for i in lt})
+    colors.update({k: "green" for k in rg})
+    colors.update({i: "pink" for i in gt})
+    colors.update({k: "violet" for k in rl})
+    mid_states.append((colors, [(jj, "j", "amber")],
+                       f"j={jj} (rating {mid_r[jj]}): smaller-left {len(lt)} x larger-right {len(rg)}"
+                       f" + larger-left {len(gt)} x smaller-right {len(rl)} = {add}; total = {mid_total}"))
+brute_teams = sum(1 for i in range(5) for j in range(i + 1, 5) for k in range(j + 1, 5)
+                  if mid_r[i] < mid_r[j] < mid_r[k] or mid_r[i] > mid_r[j] > mid_r[k])
+assert mid_total == brute_teams == 3
+mid_states.append(({}, [], "the ends cannot be a middle; sum over middles = 0 + 2 + 1 = 3 teams"))
+
+
+def mid_frame(ax, p, t):
+    colors, ptrs, _ = mid_states[t]
+    V.array(ax, p, mid_r, colors=dict(colors), pointers=ptrs, label="rating", cell_w=1.2)
+
+
+V.animate(mid_frame, len(mid_states), captions=[s[2] for s in mid_states], interval=1400)
+```
+
+The middle $j$ (amber) walks from index $1$ to index $3$. Cyan cells are smaller ratings on its left and green cells larger ratings on its right — each cyan–green combination is one increasing team; pink (larger, left) and violet (smaller, right) combine into decreasing teams. The counts multiply because nothing links the left choice to the right choice.
+
+:::
+
+@sec-cnt-p4-triplets is the full ladder for the coupled case; here is the shape of the argument with the numbers from its sample. For `arr = [3,0,1,1,9,7]`, $a = 7$, $b = 2$, $c = 3$ there are $4$ good triplets, and they are $(0,1,2), (0,1,3), (0,2,3), (1,2,3)$ — all living in the first four slots. Pivoting on $j$: the charges by middle index are $j = 1 \to 2$ and $j = 2 \to 2$, everything else $0$. For $j = 1$ ($arr[j] = 0$) the two admissible $k$ are $2$ and $3$ (both hold $1$, so $|arr[j] - arr[k]| = 1 \le 2 = b$), and the only $i < j$ is $0$: $|arr[i] - arr[j]| = |3 - 0| = 3 \le 7 = a$ and $|arr[i] - arr[k]| = |3 - 1| = 2 \le 3 = c$ both hold, so each of the two $k$'s contributes $1$ and the row totals $2$. Written as an algorithm with the middle fixed, the inner step is:
+
+$$\#\{i < j : |a_i - a_j| \le a\} \text{ restricted by } |a_i - a_k| \le c
+\;=\; \sum_{v \,:\, \max(a_j - a,\; a_k - c,\; 0) \le v \le \min(a_j + a,\; a_k + c,\; V)} \mathrm{left}[v].$$
+
+That is a *range sum over an array indexed by value*, which is one subtraction on a cumulative table.
+
+```{python}
+def a5_tri_scan(arr, A, B, C):
+    return sum(1 for i in range(len(arr)) for j in range(i + 1, len(arr))
+               for k in range(j + 1, len(arr))
+               if abs(arr[i] - arr[j]) <= A and abs(arr[j] - arr[k]) <= B
+               and abs(arr[i] - arr[k]) <= C)
+
+
+def a5_tri_middle(arr, A, B, C, VMAX):
+    n, ans = len(arr), 0
+    left = [0] * (VMAX + 1)                 # histogram of values strictly left of j
+    left[arr[0]] += 1
+    for j in range(1, n - 1):
+        cum = [0] * (VMAX + 2)              # cum[x] = #left values < x
+        for v in range(VMAX + 1):
+            cum[v + 1] = cum[v] + left[v]
+        for k in range(j + 1, n):
+            if abs(arr[j] - arr[k]) > B:
+                continue
+            lo = max(0, arr[j] - A, arr[k] - C)      # clamp: no negative addressing
+            hi = min(VMAX, arr[j] + A, arr[k] + C)
+            if lo <= hi:
+                ans += cum[hi + 1] - cum[lo]
+        left[arr[j]] += 1
+    return ans
+
+
+assert a5_tri_scan([3, 0, 1, 1, 9, 7], 7, 2, 3) == 4
+assert a5_tri_middle([3, 0, 1, 1, 9, 7], 7, 2, 3, 1000) == 4
+assert a5_tri_scan([0, 0, 0], 0, 0, 0) == 1                 # only (0,1,2)
+assert a5_tri_middle([0, 0, 0], 0, 0, 0, 1000) == 1
+assert a5_tri_scan([1, 1, 1, 1], 0, 0, 0) == 4              # every triple of four slots
+assert math.comb(4, 3) == 4
+# when does fixing the middle beat three loops? count the primitive steps.
+# rung 2 rebuilds a cumulative table of VMAX+2 cells per middle index and then walks k,
+# so its work is (n-2)(VMAX+2) + (number of (j,k) pairs) against binom(n,3) for rung 1.
+def a5_steps_middle(n, VMAX):
+    return (n - 2) * (VMAX + 2) + sum(n - 1 - j for j in range(1, n - 1))
+
+
+assert a5_steps_middle(6, 1000) == 4018 > math.comb(6, 3) == 20       # rung 1 wins early
+assert a5_steps_middle(78, 1000) == 79078 > math.comb(78, 3) == 76076  # still behind
+assert a5_steps_middle(80, 1000) == 81237 < math.comb(80, 3) == 82160  # crossover
+assert a5_steps_middle(100, 1000) == 103047 < math.comb(100, 3) == 161700
+assert a5_steps_middle(1000, 1000) == 1498497 < math.comb(1000, 3) == 166167000
+first_win = {V: min(n for n in range(3, 400) if a5_steps_middle(n, V) < math.comb(n, 3))
+             for V in (26, 500, 1000)}
+assert first_win == {26: 16, 500: 57, 1000: 80}
+for trial in range(40):
+    arr = [random.randint(0, 12) for _ in range(random.randint(3, 9))]
+    A, B, C = (random.randint(0, 6) for _ in range(3))
+    assert a5_tri_scan(arr, A, B, C) == a5_tri_middle(arr, A, B, C, 1000)
+```
+
+::: {#fig-cnt-a5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.grid(ax, p, [["middle j",              "1",  "2",  "3", "4"],
+                   ["arr[j]",                "0",  "1",  "1", "9"],
+                   ["k with |arr[j]-arr[k]|<=2", "{2,3}", "{3}", "-", "{5}"],
+                   ["i counted for each k",  "{0}", "{0,1}", "-", "{}"],
+                   ["charge",                "2",  "2",  "0", "0"]],
+           colors={(2, 1): "cyan", (2, 2): "cyan", (4, 1): "amber", (4, 2): "amber",
+                   (3, 4): "muted", (2, 4): "muted"},
+           cell_w=1.5)
+V.show(draw)
+```
+
+With $j$ fixed the two remaining conditions split cleanly: row 3 lists the $k$'s that pass the *middle-to-right* test $|arr[j] - arr[k]| \le b$, and row 4 answers the *left* test with one lookup over the value histogram — for $j = 2$ both $i = 0$ and $i = 1$ are eligible, and the table says so in $O(1)$ instead of a loop. The charges in row 5 add to the sample's $4$. The two muted cells are the $j = 4$ column: $|9 - 7| = 2 \le b$ does admit $k = 5$, but then no $i$ survives both $|arr[i] - 9| \le 7$ and $|arr[i] - 7| \le 3$ (the only candidate, $i = 0$, fails the second with $|3 - 7| = 4$), so the interval is empty and the charge is $0$. At $j = 3$ even the $k$ test fails for both remaining values.
+
+:::
+
+Two general lessons sit inside those lines. **"Index condition" versus "value condition."** $i < j < k$ is a condition on *positions*; $|a_i - a_j| \le 7$ is a condition on *values*. Position conditions are handled by the order in which you loop (fix $j$ and everything to its left is automatically eligible), and value conditions are handled by a table over values — the same division of labour as @sec-cnt-idxval, where the order of insertion enforced $j - i \ge d$. A problem that mixes them wants exactly this split — and @sec-cnt-p4-xortri shows the degenerate case where a value condition ($a == b$) *eliminates* the middle index entirely, so the pivot moves to the ends and the free middle contributes a multiplicative $k - i$.
+
+**Small values are a gift: let the value be the address.** The cumulative table above is $O(V)$ to rebuild and $O(1)$ to query, and it is affordable only because $V = 1000$. Whenever you see "$1 \le arr[i] \le 500$" or "lowercase letters only", the statement is offering you an array of $500$ or $26$ cells indexed by *value* — @sec-lts-a5, and the reason @sec-cnt-p5-lucky can answer "which value occurs exactly as many times as itself?" with a table sweep, and @sec-cnt-p5-beauty can decide a maximum and minimum frequency by cursors over frequency buckets instead of a scan. Two arithmetic facts to keep handy. First, a table over values costs $O(V)$ to rebuild, so the fixed-middle rung is $O(nV + n^2)$ — which is why the crossover depends on $V$ and not only on $n$: with $V = 1000$ the rung starts winning at $n = 80$, with $V = 500$ at $n = 57$, and with an alphabet-sized $V = 26$ at $n = 16$. Second, a *count* table can be indexed by the count itself: if $\mathrm{cnt}[v] == v$ then the value $v$ occupies $v$ slots and therefore consumes $v^2$ of the array's $n$ cells, so $\sum_{v\ \text{lucky}} v^2 \le n$ — at $n = 500$ at most $10$ values can be lucky, since $1^2 + \cdots + 10^2 = 385 \le 500 < 506 = 1^2 + \cdots + 11^2$.
+
+## Part B — Patterns
+
+## Pattern 1: The contribution swap — charge the elements, not the windows {#sec-cnt-p1}
+
+**Where we are.** The eight patterns of Part B climb one idea at a time. Pattern 1 sums over all **windows** by charging each element its cover count. Pattern 2 sums over all **pairs** the same way. Pattern 3 stops summing and starts *counting* pairs, and Pattern 4 lets the indices into the pair condition. Pattern 5 returns to windows, now counted by a property. Pattern 6 counts the complement when the property is easier to violate than to satisfy. Pattern 7 adds a third index and fixes the middle one. Pattern 8 notices that small values turn every table in the chapter into a plain array. Pattern 1 is where the reframing starts: A1's dot product is the entire pattern, and its two problems differ in one question — *is the thing you are adding linear in the elements?* The first is the pure case, a sum of sums filtered only by window length, so the cover count changes and nothing else does. The second breaks linearity on purpose: its statistic is $\max - \min$, so the credit has to be re-derived as "the windows in which this slot wins", which is A2's spans.
+
+::: {.callout-important title="Template"}
+Never enumerate the object you were asked to iterate over — enumerate the object that is *fewer*:
+
+- Slot $i$ of an $n$-cell array is covered by $(i+1)(n-i)$ subarrays, so $\sum_{\text{windows}} \text{sum} = \sum_i a_i (i+1)(n-i)$ in one pass (@eq-cnt-swap).
+- A *filter* on the window (odd length, a length range) changes only how many of those covering windows count — for odd length it is $\lceil (i+1)(n-i)/2 \rceil$.
+- A *non-linear statistic* ($\max$, $\max - \min$) changes the credit into "windows in which $i$ is the winner", a product of two monotonic-stack spans with opposite tie-breaking (@sec-cnt-a2).
+:::
+
+::: {#fig-cnt-anim-p1}
+
+```{python}
+#| echo: false
+p1_arr = Traces.OS_ARR                       # [1, 4, 2, 5, 3]
+p1_cover = [((i + 1) * (len(p1_arr) - i) + 1) // 2 for i in range(len(p1_arr))]
+p1_credit = [v * c for v, c in zip(p1_arr, p1_cover)]
+assert p1_cover == [3, 4, 5, 4, 3] and sum(p1_credit) == 58
+p1_states = [
+    ([str(v) for v in p1_arr], {}, "rung 1: add up the 9 odd-length windows, one window per loop"),
+    ([str(c) for c in p1_cover], {i: "cyan" for i in range(5)},
+     "re-index: how many odd-length windows cover each slot"),
+    ([str(c) for c in p1_credit], {i: "green" for i in range(5)},
+     "credit = value x cover; 3+16+10+20+9 = 58, one pass"),
+]
+
+
+def p1_frame(ax, p, t):
+    cells, colours, _ = p1_states[t]
+    V.array(ax, p, cells, colors=dict(colours), label=["arr", "odd cover", "credit"][t])
+
+
+V.animate(p1_frame, 3, captions=[s[2] for s in p1_states], interval=1200)
+```
+
+The film is a change of *what the array means*. Frame 1 is the input, whose definition asks for a loop over its $9$ odd-length windows; frame 2 replaces each value by its odd-window cover count $[3, 4, 5, 4, 3]$; frame 3 multiplies the two. $58$ is the answer @sec-cnt-p1-oddsum works out from its statement's example, reached without naming a single window.
+
+:::
+
+**Reading the animation.** Cover counts are a *shape*, not data: $[3, 4, 5, 4, 3]$ depends only on $n = 5$, so you can compute them once, cache them, or — the trick every final form in this pattern uses — generate them inside the loop as `(i + 1) * (n - i)`. The odd-length filter is the one wrinkle worth memorising: of the windows covering a slot, the odd-length ones are half, rounded up when $(i+1)(n-i)$ is odd, so the count is $\lceil (i+1)(n-i)/2 \rceil$. @sec-cnt-p1-oddsum walks that ladder ($O(n^3)$ rescan $\to$ prefix sums $\to$ cover counts); @sec-cnt-p1-ranges then takes the swap to the case where it is *not* directly legal and rebuilds the credit from spans.
+
+{{< include ../problems/lc-1588-sum-of-all-odd-length-subarrays/problem.qmd >}}
+
+[**From a linear statistic to an extremal one.** 1588 adds element values, so each element's contribution is its value times a cover count that depends only on position. 2104 asks for $\max - \min$ per window, and a maximum is not a sum — the cover count must be re-derived as "windows in which this slot is the appointed winner", which is a product of two distances a monotonic stack measures.]{.flow-bridge}
+
+{{< include ../problems/lc-2104-sum-of-subarray-ranges/problem.qmd >}}
+
+## Pattern 2: Sums over all pairs — split the pair into per-element charges {#sec-cnt-psum}
+
+**From windows to pairs.** Pattern 1 charged each element for the windows that cover it. A pair has two members instead of a range of cells, so the charge of an element depends on its partner, and the swap needs one more step: arrange the partners so their effect is a count. For bitwise quantities that step is "one bit column at a time"; for distances it is "sort, so every difference has a known sign" (@sec-cnt-pairsum). The first problem uses bits, where each column is a two-colour split and the count is $c(n-c)$. The second needs sorting, because a coordinate is a number, not a bit, and it adds grouping by colour and splitting by axis on top.
+
+::: {.callout-important title="Template"}
+$\sum_{i<j} f(a_i, a_j)$ without the double loop:
+
+- **Separable $f$.** $\sum_{i<j}(a_i + a_j) = (n-1)\sum a$; $\sum_{i<j} a_i a_j = \tfrac12\bigl((\sum a)^2 - \sum a^2\bigr)$.
+- **Distance $|a_i - a_j|$.** Sort; the element of rank $k$ has weight $2k - n + 1$ (@eq-cnt-rank), or sweep with `total += k * x - prefix`.
+- **Bitwise $f$.** Per bit $b$ with $c_b$ ones: XOR pays $2^b c_b(n - c_b)$, AND pays $2^b \binom{c_b}{2}$, OR pays $2^b\bigl(\binom{n}{2} - \binom{n - c_b}{2}\bigr)$.
+- **Sum of independent parts** (Manhattan distance, Hamming distance): split, solve each part, add.
+:::
+
+{{< include ../problems/lc-0477-total-hamming-distance/problem.qmd >}}
+
+[**From bits to coordinates.** 477's columns are bits, so a pair either differs in a column or not, and $c(n-c)$ is the whole count. 1648A's columns are coordinates, so a pair differs by an *amount*; sorting turns that amount into "later minus earlier", and the count becomes a rank weight.]{.flow-bridge}
+
+{{< include ../problems/cf-1648a-weird-sum/problem.qmd >}}
+
+## Pattern 3: Counting pairs — fix one end, or close a histogram {#sec-cnt-p2}
+
+**From summing to counting.** Pattern 2 added up a quantity over every pair. Now each pair contributes $1$ or $0$ — it satisfies a relation or not — and the job is to count the $1$s. A4's two shapes are both "count pairs without the double loop", and the choice between them is a property of the relation, not a style preference. The first problem is the relation $a_i = a_j$ with $i < j$ — an equivalence, so both shapes work and the write-up shows the same total arriving by both. The second adds arithmetic: the condition is $(t_i + t_j) \bmod 60 = 0$, which pairs each residue class with its *complementary* class, and two classes ($r = 0$ and $r = 30$) pair with themselves.
+
+::: {.callout-important title="Template"}
+A pair is one loop shorter than a window, and the loop you delete is the inner one:
+
+- **Fix the right end.** Sweep $j$ left-to-right keeping `seen[value]`; on arrival `ans += seen[complement]`, then insert $a_j$ (@sec-cnt-a3). This respects $i < j$ and works for asymmetric relations.
+- **Or close a histogram.** If compatibility is an equivalence relation, count $c$ per class once and add $\binom{c}{2}$ — no order, no sweep.
+- **Modular conditions**: key the map by $t \bmod k$ and look up $(-t) \bmod k$; residues $0$ and $k/2$ (when $k$ is even) self-pair, so their class is $\binom{c}{2}$, not $c^2$.
+- **Range conditions** ($l \le a_i + a_j \le r$): sort and count with two pointers, as below.
+:::
+
+::: {#fig-cnt-anim-p2}
+
+```{python}
+#| echo: false
+p2_arr = Traces.GP_NUMS                     # [1, 2, 3, 1, 1, 3]
+p2_seen, p2_charges = Counter(), []
+for v in p2_arr:
+    p2_charges.append(p2_seen[v])
+    p2_seen[v] += 1
+assert p2_charges == [0, 0, 0, 1, 2, 1] and sum(p2_charges) == 4
+assert sum(math.comb(c, 2) for c in p2_seen.values()) == 4
+p2_states = [
+    ({3: "amber", 0: "cyan"}, "arrive at j=3 (value 1): one earlier 1, charge 1; running total 1"),
+    ({4: "amber", 0: "cyan", 3: "cyan"}, "j=4 (value 1): two earlier 1s, charge 2; running total 3"),
+    ({5: "amber", 2: "cyan"}, "j=5 (value 3): one earlier 3, charge 1; running total 4"),
+    (None, "histogram {1: 3, 2: 1, 3: 2}: C(3,2) + C(1,2) + C(2,2) = 3 + 0 + 1 = 4"),
+]
+
+
+def p2_frame(ax, p, t):
+    colours, _ = p2_states[t]
+    if colours is not None:
+        V.array(ax, p, p2_arr, colors=dict(colours), label="nums")
+    else:
+        V.bars(ax, p, [p2_seen[1], p2_seen[2], p2_seen[3]], height=3.0,
+               colors={0: "cyan", 2: "green"}, index=False)
+        for c, lab in enumerate(["v=1", "v=2", "v=3"]):
+            V.text(ax, p, c + 0.5, -0.5, lab, size=9, color="muted")
+
+
+V.animate(p2_frame, 4, captions=[s[1] for s in p2_states], interval=1300)
+```
+
+Frames 1–3 are the sweep: each amber cursor is charged by the cyan cells to its left that hold the same value. Frame 4 is the histogram: the three bars $[3, 1, 2]$ close to $\binom{3}{2} + \binom{1}{2} + \binom{2}{2} = 4$. Two bookkeeping schemes, one answer, because "good pair" is symmetric here.
+
+:::
+
+**Reading the animation.** Frames 1–3 are the sweep and frame 4 is the histogram, and the point of putting them in one film is that *neither is a loop over pairs*: both are $O(n)$ with a different constant. The sweep charges a pair the moment its right end appears, which is why it survives asymmetric relations (inversions, or the two-key condition of @sec-cnt-pidx-message) and the histogram does not (@sec-cnt-a3's `[3,1,2,1]` counterexample). @sec-cnt-p2-goodpairs builds the equivalence case from both sides; @sec-cnt-p2-songs then changes the lookup from "the same value" to "the complementary residue".
+
+{{< include ../problems/lc-1512-number-of-good-pairs/problem.qmd >}}
+
+[**From "equal values" to "complementary residues".** Good pairs ask for `seen[v]` — the class you are already in. Song pairs ask for `seen[(60 - r) % 60]`: the same one-loop sweep with a lookup two characters different, and two classes (residues $0$ and $30$) that must be paired *within* themselves rather than across, which is where a careless $c \cdot c'$ double-counts.]{.flow-bridge}
+
+{{< include ../problems/lc-1010-pairs-of-songs-with-total-durations-divisible-by-60/problem.qmd >}}
+
+When the relation is a *range* of sums rather than one exact complement, no single key answers it. The two-pointer chapter counts those pairs after sorting: "$l \le a_i + a_j \le r$" is "sum $\le r$" minus "sum $\le l - 1$", and each one-sided count is one squeeze. That problem is solved in full there; here is its card, as the third shape of pair counting.
+
+{{< include ../problems/cf-1538c-number-of-pairs/card.qmd >}}
+
+## Pattern 4: Index and value conditions — give each index a key {#sec-cnt-pidx}
+
+**From values to indices.** Pattern 3's relations looked only at values. Now the index is part of the condition, and the first move is algebra: rewrite the condition until one side mentions only $i$ and the other only $j$ (@sec-cnt-idxval). When the two sides are the same function you are back to a histogram — the hashing chapter solved exactly that case, and its card is below. The first new problem has two *different* functions on the two sides, so the sweep must read one key and write the other. The second cannot be separated at all, and a bound on the values replaces the separation.
+
+::: {.callout-important title="Template"}
+Rewrite the condition, then pick the counting shape:
+
+- **One key on both sides** ($a_i - i = a_j - j$): group by the key, $\sum \binom{c}{2}$.
+- **Two keys** ($i + a_i = j - a_j$): sweep $j$; `ans += cnt[rightkey(j)]`, then `cnt[leftkey(j)] += 1`. Keys that can never be matched may be dropped, which often turns the map into an array.
+- **No separation, but a bound** ($a_i a_j = i + j < 2n$): enumerate only the candidates the bound allows — multiples, residue classes — and pay a harmonic sum $O(n \log n)$ when the values are distinct.
+- **A distance between indices** ($j - i \ge d$): delay the insertion of $a_{j-d}$ until the cursor reaches $j$.
+:::
+
+{{< include ../problems/cf-1520d-same-differences/card.qmd >}}
+
+{{< include ../problems/ac-abc166_e-this-message-will-self-destruct-in-5s/problem.qmd >}}
+
+[**From two keys to no keys.** ABC 166 E splits into $i + A_i$ and $j - A_j$, so a map does the matching. Pleasant Pairs ties a *product* of values to a *sum* of indices, which no rearrangement splits; what saves it is that the product must stay below $2n$.]{.flow-bridge}
+
+{{< include ../problems/cf-1541b-pleasant-pairs/problem.qmd >}}
+
+## Pattern 5: Windows with a property — equality, at-most, or runs {#sec-cnt-p3}
+
+**From pairs of elements to pairs of cut points.** Patterns 3 and 4 counted pairs of elements. A window is a pair of *cut points*, so the same tools count windows once the property is written as a relation between the two cut points — a fixed difference of prefix sums, an equal residue, or "no bad cell in between". The first problem is unusually instructive because *two* framings apply to the same input and must be made to agree. The second drops the sum entirely: the property is "every character is a `1`", which is a statement about runs, and the count comes from a run-length decomposition plus $\binom{L+1}{2}$ — the same arithmetic as the odd-length window count in @sec-cnt-a1, arriving from a different direction.
+
+::: {.callout-important title="Template"}
+Read the condition first, then choose the object to hash:
+
+- **Fixed difference among prefixes.** "sum $= K$" is $P[\text{right}] - P[\text{left}] = K$: sweep, `ans += cnt[p - K]`, `cnt[p] += 1`, seeded `cnt[0] = 1` (@sec-pref-hash). Works with negatives.
+- **Residue equality.** "divisible by $k$" is the same sweep with `p % k` and `ans += cnt[p]`; normalise the residue in C++/Java.
+- **At-most difference.** For non-negative entries only: $\text{exactly}(K) = \text{atMost}(K) - \text{atMost}(K-1)$, each from one shrinking loop (@sec-sw-a4).
+- **Runs.** "all `1`s": decompose into maximal runs and count inside each, $\sum_{\text{runs}} \binom{L+1}{2}$, or stream it as `cur = cur + 1 if good else 0; ans += cur`.
+:::
+
+The prefix sweep is drawn step by step in @fig-cnt-a4, and the three framings each have a home write-up already. The two prefix-map problems are solved in the prefix-sums chapter and the at-most difference with a distinct-count window in the sliding-window chapter; their cards stand here as the reference shapes, and the two new problems below are the ones where the framings meet.
+
+{{< include ../problems/lc-0560-subarray-sum-equals-k/card.qmd >}}
+
+{{< include ../problems/lc-0974-subarray-sums-divisible-by-k/card.qmd >}}
+
+{{< include ../problems/lc-0992-subarrays-with-k-different-integers/card.qmd >}}
+
+The one-line diagnostic for which framing you are allowed to use is *does the array contain negatives?* Prefix equality does not care; `atMost` does, because its shrink loop is a monotonicity argument (@sec-cnt-a4's trap). @sec-cnt-p3-binsum therefore ships both and cross-checks them, and its storyboard is where the missing seed shows up as an answer of $2$ instead of $4$. @sec-cnt-p3-ones then removes the sum altogether — the object counted is a run, and a run of length $L$ is worth $\binom{L+1}{2}$ windows whether you materialise the runs or stream `cur`.
+
+{{< include ../problems/lc-0930-binary-subarrays-with-sum/problem.qmd >}}
+
+[**From a sum condition to a shape condition.** 930 asks what a window *adds up to*, so the key is a prefix value. 1513 asks what a window *is made of* — all `1`s — and that is local: a window cannot cross a `0`, so the universe splits into runs and the count is one $\binom{L+1}{2}$ per run. Same re-indexing reflex, different object.]{.flow-bridge}
+
+{{< include ../problems/lc-1513-number-of-substrings-with-only-1s/problem.qmd >}}
+
+## Pattern 6: Complementary counting — count the bad, subtract {#sec-cnt-pcomp}
+
+**From counting what you want to counting what you do not.** Pattern 5's runs counted windows that *avoid* a bad cell — and "avoid" is half of a complement. Here the complement is the whole strategy (@sec-cnt-comp): the universe has a closed form, the bad objects are described by one simple condition, and the answer is the difference. The first problem's bad events (one value repeated, for different values) are disjoint, so one subtraction per value is exact. The second has two bad events that could overlap, and inclusion–exclusion has to check the overlap.
+
+::: {.callout-important title="Template"}
+- Universe: $\binom{n}{2}$ pairs, $\binom{n+1}{2}$ windows, $\binom{n}{3}$ triples.
+- **One bad event, or disjoint ones**: answer $= |U| - \sum |B_v|$.
+- **Two overlapping bad events**: answer $= |U| - |A| - |B| + |A \cap B|$; prove what $A \cap B$ is (often empty).
+- **"At least one"** is the complement of "none", and "none" in a window means "inside a run of good cells": $\binom{n+1}{2} - \sum_{\text{runs}} \binom{L+1}{2}$.
+:::
+
+{{< include ../problems/lc-2475-number-of-unequal-triplets-in-array/problem.qmd >}}
+
+[**From disjoint bad events to overlapping ones.** In 2475 a triplet repeats at most one value, so the bad sets for different values never meet and plain subtraction is exact. In Ball in Berland a pair of couples can be bad for two reasons — a shared boy or a shared girl — and the solution must say what happens when both reasons hold.]{.flow-bridge}
+
+{{< include ../problems/cf-1475c-ball-in-berland/problem.qmd >}}
+
+## Pattern 7: Fix the middle — triples as left counts times right counts {#sec-cnt-p4}
+
+**From pairs to triples.** Patterns 3–5 counted objects with two free choices, and Pattern 6 met triples only through groups of values. A triple has three, and A8's pivot is the pattern: fix the index that appears in two of the three conditions. The three problems are its three cases. In the first, nothing links the outer indices, so the left and right counts simply multiply (@fig-cnt-anim-middle). In the second, a third condition links them, so the product overcounts and an interval query over values takes its place. In the third, the condition says nothing about the middle at all, so the middle is free and contributes a multiplicative factor instead of a loop.
+
+::: {.callout-important title="Template"}
+Three indices, three conditions: **find the index that appears in two of them and fix it**.
+
+- **No condition between the ends**: answer $= \sum_j \text{left}_j \cdot \text{right}_j$ (@sec-cnt-p4-teams).
+- **A condition between the ends**: with $j$ and $k$ pinned, the admissible $a_i$ are an *interval of values* — one subtraction on a cumulative table over the left histogram (@sec-cnt-a5). Keep the histogram moving with $j$ (`left[arr[j]] += 1` after processing $j$), and clamp the interval to $[0, V]$ before indexing.
+- **A condition that ignores the middle**: pivot on the ends, count the pairs of ends that work and multiply by the number of free middles.
+:::
+
+::: {#fig-cnt-anim-p4}
+
+```{python}
+#| echo: false
+p4_arr = list(Traces.GT_ARR)                 # [3, 0, 1, 1, 9, 7]
+p4_charge = []
+for jj in range(1, len(p4_arr) - 1):
+    p4_charge.append(sum(1 for i in range(jj) for k in range(jj + 1, len(p4_arr))
+                         if abs(p4_arr[i] - p4_arr[jj]) <= 7 and abs(p4_arr[jj] - p4_arr[k]) <= 2
+                         and abs(p4_arr[i] - p4_arr[k]) <= 3))
+assert p4_charge == [2, 2, 0, 0] and sum(p4_charge) == 4
+p4_states = [
+    ({1: "amber"}, [(1, "j", "amber")], "fix j=1 (value 0): k must satisfy |0 - arr[k]| <= 2, so k in {2, 3}"),
+    ({1: "amber", 2: "green", 0: "cyan"}, [(1, "j", "amber"), (2, "k", "green")],
+     "k=2: arr[i] must lie in [max(0-7, 1-3), min(0+7, 1+3)] = [-2, 4], clamped to [0, 4]; the left pool {3} has 1 hit"),
+    ({4: "amber", 5: "green"}, [(4, "j", "amber"), (5, "k", "green")],
+     "j=4, k=5 pass |9-7| <= 2, but [max(2, 4), min(16, 10)] = [4, 10] holds none of {3, 0, 1, 1}"),
+    (None, None, "charges by middle: j=1 -> 2, j=2 -> 2, j=3 -> 0, j=4 -> 0; total 4"),
+]
+
+
+def p4_frame(ax, p, t):
+    colours, ptrs, _ = p4_states[t]
+    if colours is not None:
+        V.array(ax, p, p4_arr, colors=dict(colours), pointers=ptrs, label="arr")
+    else:
+        V.bars(ax, p, p4_charge, height=3.0, colors={0: "green", 1: "green"}, index=False)
+        for c, lab in enumerate(["j=1", "j=2", "j=3", "j=4"]):
+            V.text(ax, p, c + 0.5, -0.5, lab, size=9, color="muted")
+
+
+V.animate(p4_frame, 4, captions=[s[2] for s in p4_states], interval=1500)
+```
+
+The coupled case on @sec-cnt-p4-triplets' sample ($a = 7$, $b = 2$, $c = 3$). With $j$ and $k$ fixed the third condition becomes an interval of values for $a_i$; frame 3 shows a pair $(j, k)$ that passes its own test and still gets nothing, because the interval misses every value on the left. The last frame is the whole answer by middle index.
+
+:::
+
+**Reading the animation.** Compare it with @fig-cnt-anim-middle: there the left and right counts were independent and multiplied; here frame 3 is exactly the case where multiplying would be wrong, since $(3, 9, 7)$ passes the two chain conditions and fails the closing one. @sec-cnt-p4-teams is the product case, @sec-cnt-p4-triplets walks rescan $\to$ value scan $\to$ cumulative table, and @sec-cnt-p4-xortri is the degenerate pivot, where an XOR identity ($a == b \iff a \oplus b == 0$) deletes the middle entirely and leaves pairs of equal prefix XORs, each worth $k - i$ triplets.
+
+{{< include ../problems/lc-1395-count-number-of-teams/problem.qmd >}}
+
+[**From independent sides to coupled sides.** In Count Number of Teams nothing relates the left soldier to the right one, so the counts multiply. Count Good Triplets adds $|arr[i] - arr[k]| \le c$, a condition between the ends; the product would overcount, and the fix is to pin $k$ too and turn the condition on $i$ into an interval of values.]{.flow-bridge}
+
+{{< include ../problems/lc-1534-count-good-triplets/problem.qmd >}}
+
+[**From a pivot that pays to a pivot that vanishes.** 1534 needs the middle: it is where two of the three conditions meet. 1442's condition lives only at the two ends, so the middle is free — and the cleverness is not the histogram but the identity that turns "$a == b$" into "the XOR of the whole span is $0$", which is the prefix XOR of @sec-pref-other.]{.flow-bridge}
+
+{{< include ../problems/lc-1442-count-triplets-that-can-form-two-arrays-of-equal-xor/problem.qmd >}}
+
+## Pattern 8: Small values — let the value be the address {#sec-cnt-p5}
+
+**From index tables to value tables.** Every pattern so far stored counts in a map keyed by a value, a residue or a computed key. A8's last paragraph is this pattern: a stated bound on values is an offer of a plain array indexed by value. The first problem takes the offer literally ($1 \le arr[i] \le 500$, so a $501$-cell table replaces a search). The second takes it one level up — the *counts* are small too ($\le 500$), so a table indexed by frequency answers "what is the largest and smallest frequency in this window?" without sorting anything, the counter-of-counters design of @sec-ds used inside a window.
+
+::: {.callout-important title="Template"}
+- **Bounded values → direct address.** `cnt[v]` in $O(1)$ with no hashing (@sec-lts-a5); sweep the table when the question quantifies over *values* rather than positions.
+- **A condition like $\mathrm{cnt}[v] == v$** is checked by walking the finished table, and the answer's shape ("largest such $v$") decides the sweep direction: ascending with `best = v`, or descending and return on the first hit.
+- **Counter of counters.** When the question is about a frequency, index a bucket table by frequency (`how[f]`) and keep `maxf`/`minf` cursors; a bucket can only be judged once its value stops changing.
+:::
+
+::: {#fig-cnt-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+p5_in = list(Traces.LUCK_ARR)                 # [1, 2, 2, 3, 3, 3]
+p5_cnt = [p5_in.count(v) for v in (1, 2, 3)]
+assert p5_cnt == [1, 2, 3] and max(v for v, c in zip((1, 2, 3), p5_cnt) if c == v) == 3
+
+
+def draw(ax, p):
+    V.array(ax, p, p5_in, x=0.0, y=4.6, label="arr")
+    V.bars(ax, p, p5_cnt, x=0.5, y=0.0, height=3.0, colors={0: "green", 1: "green", 2: "green"},
+           index=False)
+    for c, lab in enumerate(["v=1", "v=2", "v=3"]):
+        V.text(ax, p, c + 1.0, -0.5, lab, size=9, color="muted")
+    V.text(ax, p, 4.2, 1.5, "cnt[v] == v for v = 1, 2, 3; largest is 3", ha="left", size=9,
+           color="muted")
+V.show(draw)
+```
+
+The bars are the count table, not the input: the six values fill three buckets, and every bucket passes the test $\mathrm{cnt}[v] = v$, so the largest lucky value is $3$ — LC 1394's sample. The table has $501$ cells, and the bound $\sum_{v \text{ lucky}} v^2 \le n$ of @sec-cnt-a5 says no more than $10$ of them can ever pass when $n = 500$.
+
+:::
+
+**Reading the figure.** Two habits are being trained here. First, *re-read the constraint line for a bound on values*, because it converts a search into an array walk: @sec-cnt-p5-lucky goes `arr.count(v)` per distinct value (an $O(n \cdot d)$ rescan that is still fast at $n = 500$) $\to$ sorted runs $\to$ the direct table. Second, when the quantity is itself a count, index *by* it: @sec-cnt-p5-beauty's windows have frequencies $\le 500$, so `how[f]` plus two cursors turns "max frequency minus min frequency" into $O(1)$ per window instead of a scan of $26$ cells — and the subtlety is entirely in when a cursor is allowed to move.
+
+{{< include ../problems/lc-1394-find-lucky-integer-in-an-array/problem.qmd >}}
+
+[**From a table indexed by value to a table indexed by count.** 1394 asks a question about a value and its own frequency, so one direct-address table answers it. 1781 asks about the *spread of frequencies* inside every substring: the values are only $26$ letters, but the interesting array is now `how[f]` — a counter of counters, with a reset on each new letter's first arrival.]{.flow-bridge}
+
+{{< include ../problems/lc-1781-sum-of-beauty-of-all-substrings/problem.qmd >}}
+
+**Looking back.** One sentence ran through all eight patterns: *count by contribution — decide which object to iterate over, and charge everything else to it.* Pattern 1 iterated over elements and charged them windows; Pattern 2 iterated over elements, bits or ranks and charged them pairs; Patterns 3 and 4 iterated over right ends and charged them their earlier partners, after rewriting the condition into keys; Pattern 5 iterated over cut points; Pattern 6 iterated over the bad objects because there were fewer kinds of them; Pattern 7 iterated over middles and charged them products or interval counts; Pattern 8 iterated over values because there were fewer values than positions. Each time the answer had to be *exact*, and each time the check was the same: a brute force on small inputs and a second framing that must agree.
+
+## Pattern map
+
+Every row is the same decision — *which object do I iterate over?* — taken against a different
+shape of statement.
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Sum of `sum(arr[i..j])` over all subarrays" | Contribution swap: charge slot $i$ with $(i+1)(n-i)$ | @sec-cnt-a1, @sec-cnt-p1 |
+| "Sum over all **odd-length** subarrays" | Same swap, cover count $\lceil (i+1)(n-i)/2 \rceil$ | @sec-cnt-p1-oddsum |
+| "Sum of ranges / of maxima / of minima of all subarrays" | Credit the *winner*: product of two monotonic-stack spans, opposite tie-breaking | @sec-cnt-a2, @sec-cnt-p1-ranges |
+| "Sum of $|a_i - a_j|$ / of products / of XORs over all pairs" | Sort and weight by rank $2k - n + 1$; expand the square; count ones per bit, $c(n-c)$ | @sec-cnt-pairsum, @sec-cnt-psum |
+| "Sum of distances over same-coloured pairs of cells" | Group by colour, split into coordinates, sort each | @sec-cnt-psum-weird |
+| "Count pairs with `nums[i] == nums[j]`, $i < j$" | Fix the right end and charge `seen[v]`, or close the group with $\binom{c}{2}$ | @sec-cnt-a3, @sec-cnt-p2-goodpairs |
+| "Count pairs with $(t_i + t_j) \bmod k = 0$" | Residue histogram + complementary bucket; $r=0$ and $r=k/2$ self-pair | @sec-cnt-p2-songs |
+| "Count pairs with $l \le a_i + a_j \le r$" | Sort; two one-sided counts with two pointers | @sec-tp |
+| "Count pairs with $a_j - a_i = j - i$" | One key on both sides, $a_i - i$; histogram | @sec-cnt-idxval, @sec-hash |
+| "Count pairs with $j - i = a_i + a_j$" | Two keys, $i + a_i$ and $j - a_j$; fix the right end | @sec-cnt-pidx-message |
+| "Count pairs with $a_i \cdot a_j = i + j$, values distinct and $\le 2n$" | Enumerate the residue class of $j$; harmonic sum | @sec-cnt-pidx-pleasant |
+| "Count subarrays with sum $= K$ (values may be negative)" | Prefix equality in a hash map, seeded `cnt[0] = 1` | @sec-cnt-a4, @sec-pref-p2-a |
+| "Count subarrays divisible by $k$" | The same sweep keyed on `prefix % k` | @sec-pref-p2-b |
+| "Count subarrays with **exactly** $K$ of something (non-negative)" | $\text{atMost}(K) - \text{atMost}(K-1)$, one shrinking window each | @sec-cnt-a4, @sec-cnt-p3-binsum |
+| "Count substrings that are all `1`" | Split into runs, $\sum_{\text{runs}} \binom{L+1}{2}$ | @sec-cnt-p3-ones |
+| "Count windows containing at least one $x$" / "both $x$ and $y$" | Complement: all windows minus the runs that avoid $x$; inclusion–exclusion for two | @sec-cnt-comp |
+| "Count triples with pairwise **distinct** values" | $\binom{n}{3}$ minus the triples that repeat a value | @sec-cnt-pcomp-unequal |
+| "Count pairs of objects sharing **no** attribute" | $\binom{k}{2}$ minus same-attribute pairs, plus the overlap | @sec-cnt-pcomp-ball |
+| "Count increasing (or decreasing) triples $i < j < k$" | Fix the middle: smaller-left $\times$ larger-right | @sec-cnt-a5, @sec-cnt-p4-teams |
+| "Count triples $(i, j, k)$ with three pairwise value conditions" | Fix the middle; the rest is one interval query on a value histogram | @sec-cnt-a5, @sec-cnt-p4-triplets |
+| "Count triplets with $a == b$ where $a, b$ are XORs of the two halves" | The middle cancels: count zero-XOR windows, weight each by $k - i$ | @sec-cnt-p4-xortri |
+| "$1 \le arr[i] \le 500$ and a condition like $\mathrm{cnt}[v] = v$" | Direct addressing: let the value be the address and sweep the table | @sec-cnt-a5, @sec-cnt-p5-lucky |
+| "Sum of a spread of *frequencies* over all windows" | Counter of counters `how[f]` plus two cursors | @sec-cnt-p5-beauty |
+| "The answer is a count of $\binom{n+1}{2}$-sized things and $n \ge 10^5$" | Any of the above — the double loop is not the answer | @sec-cnt-why |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Forgetting the `cnt[0] = 1` seed.** The prefix *before the first element* is a legal left end, and a map that starts empty cannot see it. On `[1, 0, 1, 0, 1]` with $K = 2$ the seeded sweep returns $4$; the unseeded one returns $2$ — exactly the two windows that start at index $0$ (@sec-cnt-a4's `fig-cnt-a4`, where the two cyan lookups are the seed being read).
+- **Using $\text{atMost}(K) - \text{atMost}(K-1)$ on an array with negatives.** The rung rests on "if `a[left..right]` is legal, every shorter suffix of it is too", which a negative entry breaks. On `[1,-1,1,-1,1]` with $K = 0$ the difference answers $10$, the honest "at most $0$" count is $9$, and "exactly $0$" is $6$ — three different numbers, none of them right twice. Use the prefix hash (@sec-cnt-a4, @sec-cnt-p3-binsum).
+- **Breaking ties in the same direction on both sides of a span count.** Pop `<=` left and `<` right (or the exact mirror) and the credits partition the windows. Pop `<=` on both and `[3, 3]` is credited $[2, 2]$ — four claims for three windows, sum of maxima $12$ against a true $9$; on `[1, 3, 3]` the credits are $[1, 4, 3]$ and the answer is $22$ instead of $16$. Pop `<` on both and `[1, 3, 3]` shrinks to $[1, 2, 1]$, answering $10$. The diagnostic is cheap: **each credit row must sum to $\binom{n+1}{2}$** (@sec-cnt-a2, @sec-cnt-p1-ranges).
+- **Reading the cover-sum as a window count.** $\sum_i (i+1)(n-i) = \frac{n(n+1)(n+2)}{6}$, which at $n = 4$ is $20$ — the *sum of window lengths*, not the $\binom{5}{2} = 10$ windows. Likewise $\sum_i \lceil (i+1)(n-i)/2 \rceil = 10$ at $n = 4$ is the sum of odd window *lengths*, while the *number* of odd windows is $6$, from cut-point parity (@sec-cnt-a1).
+- **Closing a histogram for a relation that is not an equivalence.** $\sum_c \binom{c}{2}$ counts unordered *same-class* pairs. On inversions ($a_i > a_j$ with $i < j$) the classes are not a partition at all: for `[3, 1, 2, 1]` the value histogram is $\{3:1, 1:2, 2:1\}$, whose $\sum \binom{c}{2} = 1$ is supposed to stand in for $4$ inversions. Order-sensitive conditions need the fix-one-end sweep, with a Fenwick tree once $n$ is large (@sec-cnt-a3).
+- **Counting inversions with the pair sweep at $n = 10^5$.** "Fix the right end" is $O(n)$ only when the complement is a single key. Inversions need a prefix-count over values, which is @sec-lts-a5's table or a tree — and the count is $\binom{n}{2}$, which is where the next bullet bites.
+- **An `int` accumulator.** Pair counts and window counts reach $\binom{n}{2}$: @sec-cnt-p1-oddsum's constraints ($n \le 100$, $arr[i] \le 1000$) cap the answer at $1000 \cdot \frac{100 \cdot 101 \cdot 102}{6} = 171{,}700{,}000$, an `int`; @sec-cnt-p2-songs at $n = 6 \cdot 10^4$ can report $\binom{60000}{2} = 1{,}799{,}970{,}000$, which fits with only $347{,}513{,}647$ to spare; @sec-cnt-p1-ranges at $n = 1000$ and $|v| \le 10^9$ reaches $500{,}500 \cdot 10^9 \approx 5 \cdot 10^{14}$ for the maxima alone, and @sec-cnt-p3-ones at $n = 10^5$ reaches $5{,}000{,}050{,}000$ — more than four times $2^{31}$, which is why its statement hands you a modulus (@sec-cnt-a3, @sec-arr-size-trap).
+- **A raw `s % k` in C++ or Java on a negative prefix.** `(-2) % 5` is $-2$, not $3$, so residue buckets split into mirror images and the count comes out low. Normalise with `((s % k) + k) % k`; Python's `%` already returns a non-negative residue, which is why the same bug is invisible in the Python tab (@sec-cnt-a4, @sec-pref-p2-b).
+- **An unclamped value interval.** With $lo = \max(a_j - a, a_k - c)$ and $hi = \min(a_j + a, a_k + c)$, nothing forces $0 \le lo$ or $hi \le V$: the clamped `lo = max(0, ...)` / `hi = min(V, ...)` is what stops a negative index (which in *Python* silently wraps and reads the wrong end of the table) and an out-of-range read. And if $lo > hi$ the interval is empty — `cum[hi + 1] - cum[lo]` then returns a *negative* charge. @sec-cnt-p4-triplets shows both failures as runnable asserts (@sec-cnt-a5).
+- **"Count the valid $(i,j)$ pairs, count the valid $(j,k)$ pairs, multiply."** When the three conditions form a triangle rather than a chain, the closing condition couples the halves. On @sec-cnt-p4-triplets' first sample that shortcut answers $5$ instead of $4$; the intruder is $(0,4,5) = (3,9,7)$, where $|3-9| = 6 \le a$ and $|9-7| = 2 \le b$ hold but $|3-7| = 4 > c$. Keep the pivot and query the interval instead (@sec-cnt-a5).
+- **Reading $i < j \le k$ as $i < j < k$.** @sec-cnt-p4-xortri's $j$ may sit *on* $k$, because then $b$ is the single element $arr[k]$; on the first sample two of the four triplets are of that shape, charging each zero-XOR window $k - i$ (the right count of split points) gives $4$, while $k - i - 1$, or counting windows instead of split points, gives $2$ (@sec-cnt-p4-xortri).
+- **Judging a frequency bucket while its value is still moving.** In a counter of counters, `how[f]` only becomes meaningful once no future increment can change the letter that produced it. Move `maxf`/`minf` lazily, clamp them to the live range, and never read a bucket for a letter whose count is still being written in the same step (@sec-cnt-p5-beauty, @sec-ds).
+- **Rank weights on an unsorted list.** $\sum_k b_k(2k - n + 1)$ is the sum of pairwise distances only when $b$ is sorted; on `[8, 1, 4, 3]` as given it returns $-12$ instead of $22$ (@sec-cnt-pairsum).
+- **One key for an asymmetric index condition.** $j - i = a_i + a_j$ pairs the key $i + a_i$ of the *left* member with the key $j - a_j$ of the *right* member; grouping by either key alone and adding $\binom{c}{2}$ counts a different relation (@sec-cnt-idxval, @sec-cnt-pidx-message).
+- **Subtracting two overlapping bad sets without adding back.** "Contains $x$ and $y$" is all windows minus no-$x$ minus no-$y$ **plus** neither; drop the last term and every window with neither value is subtracted twice. On `[1, 2, 1, 3, 2]` the right answer is $8$ (@sec-cnt-comp).
+- **Multiplying left and right counts when the ends are coupled.** The product $\text{left}_j \cdot \text{right}_j$ is exact only when no condition links $i$ and $k$ (@sec-cnt-p4-teams); with one (@sec-cnt-p4-triplets) it overcounts.
+:::
+
+## Exercises
+
+**1. [E] For $n = 5$ write out the cover counts $(i+1)(n-i)$. What is their sum, how many subarrays are there, and what do the two numbers mean?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[5, 8, 9, 8, 5]$, summing to $35 = \frac{5 \cdot 6 \cdot 7}{6}$. There are $\binom{6}{2} = 15$ subarrays. The $35$ is the cover sum — each window counted once *per element it contains*, i.e. the sum of window lengths — so it is not a check on your arithmetic; the $15$ is the window count (@sec-cnt-a1).
+:::
+
+**2. [E] For $n = 5$ give the odd-length cover counts and their sum, then count the odd-length windows two different ways.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\lceil (i+1)(n-i)/2 \rceil = [3, 4, 5, 4, 3]$, sum $19$, which is the *sum of the odd window lengths*. The number of odd-length windows comes from cut-point parity: among $0 .. 5$ there are $3$ even and $3$ odd cuts, so $3 \times 3 = 9$ odd windows and $\binom{3}{2} + \binom{3}{2} = 6$ even ones — $15$ in total (@sec-cnt-a1).
+:::
+
+**3. [E] For `nums = [2, 1, 2]` list the six subarrays and their maxima, then compute the max-credits under the canonical rule (pop `<=` left, `<` right) and under both same-predicate variants. Which rows actually partition the windows?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The six maxima are $[2]=2$, $[1]=1$, $[2]=2$, $[2,1]=2$, $[1,2]=2$, $[2,1,2]=2$, so $\sum \max = 11$. Canonical: $L = [1, 1, 3]$, $R = [2, 1, 1]$, credits $[2, 1, 3]$ — they sum to $6 = \binom{4}{2}$ and weight to $2\cdot2 + 1\cdot1 + 2\cdot3 = 11$ ✓. Both passes popping `<=`: credits $[3, 1, 3]$ — seven claims for six windows, total $13$. Both passes popping `<`: credits $[2, 1, 2]$ — five claims, total $9$. The middle slot's credit is $1$ in all three rows; the disagreement is entirely about the window `[2, 1, 2]`, whose maximum appears twice: popping `<=` on both sides lets both `2`s claim it, popping `<` on both sides lets neither claim it (@sec-cnt-a2).
+:::
+
+**4. [E] On `nums = [1, 2, 3, 1, 1, 3]` give the charge `seen[v]` collected at each index, the final histogram, and the two totals. Why do both work here?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Charges $[0, 0, 0, 1, 2, 1]$ sum to $4$. The histogram is $\{1: 3, 2: 1, 3: 2\}$, and $\binom{3}{2} + \binom{1}{2} + \binom{2}{2} = 3 + 0 + 1 = 4$. Both work because "equal values" is an equivalence relation with no direction to respect; the sweep is the one that survives when the relation stops being symmetric (@sec-cnt-a3, @sec-cnt-p2-goodpairs).
+:::
+
+**5. [E] Run the seeded prefix sweep on (a) `[1, 1, 1, 1]` with $K = 2$ and (b) `[0, 0, 0]` with $K = 0$. Then delete the `cnt[0] = 1` seed and re-run on `[1, 0, 1, 0, 1]` with $K = 2$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) $3$ (the three length-two windows). (b) $6$ — every window, since all $\binom{4}{2} = 6$ of them sum to $0$; zeros are the worst case for a map keyed by prefix value, because the prefix never moves and all four cut points share one key. (c) With the seed $4$; without it $2$. The two that vanish are `[1,0,1]` and `[1,0,1,0]`, the windows whose left end is the *empty* prefix — the entry `cnt[0] = 1` is the only thing that can report them (@sec-cnt-a4).
+:::
+
+**6. [E] For `a = [1, -1, 1, -1, 1]` report the number of windows with sum exactly $0$, the number with sum at most $0$, the number with sum at least $1$, and $\binom{6}{2}$. What does $\text{atMost}(0) - \text{atMost}(-1)$ give?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Exactly $0$: $6$. At most $0$: $9$. At least $1$: $15 - 9 = 6$ by complement, and the total is $\binom{6}{2} = 15$. The sliding-window rung reports `atMost(0) = 10` (its shrink loop books four windows at `right = 4`, two of which — `a[2..4]` and `a[4..4]` — have sum $1$), and `atMost(-1) = 0`, so the difference claims there are $10$ windows with sum exactly $0$ when there are $6$ — an over-count of $4$ that comes entirely from the non-monotone shrink loop (@sec-cnt-a4).
+:::
+
+**7. [E] Count the windows of `[4, 5, 0, -2, -3, 1]` whose sum is divisible by $5$ two ways: the seeded residue sweep and the $\sum \binom{c}{2}$ closure over residue classes. Why does the second one work even though the array has negatives?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Both give $7$. The residue sweep keys on `p % k` and adds `cnt[r]`; the closure buckets the six prefix residues and adds $\binom{c}{2}$ per bucket. They agree because "same residue" *is* an equivalence relation — the ordering-sensitive part lives entirely in "the earlier prefix is a left end", which $\binom{c}{2}$ handles by choosing two cut points from one class. The C++ versions must normalise with `((s % k) + k) % k` (@sec-cnt-a4, @sec-pref-p2-b).
+:::
+
+**8. [E] How many subarrays of `[11, 21, 35, 77]` have an odd sum? Do it by parity buckets rather than by looping, and say which invariant makes that legal.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The prefix parities over the five cut points $0..4$ are $[0, 1, 0, 1, 0]$: three even, two odd. A window is odd exactly when its two cuts differ in parity, giving $3 \times 2 = 6$ windows, which matches the brute count. The invariant is that only the *parity of the prefix* is used, so $11$ and $21$ are interchangeable — the same cut-parity argument as the odd-length window count in @sec-cnt-a1, but keyed on value parity instead of index parity (@sec-cnt-a4, [LC 1524 · Number of Sub-arrays With Odd Sum](https://leetcode.com/problems/number-of-sub-arrays-with-odd-sum/){difficulty="Medium"}).
+:::
+
+**9. [M] Exactly $k$ odd numbers, from two rungs. For `nums = [1, 1, 1, 1]` and $k = 2$ report $\text{atMost}(2)$, $\text{atMost}(1)$ and the difference. Do the same for `[1, 0, 1, 0, 1]` with $k = 1$ and for `[2, 4, 6]` with $k = 2$. What do the zeros contribute, and what would $\text{exactly}(0)$ require?**
+
+::: {.callout-note collapse="true" title="Solution"}
+`[1,1,1,1]`: $\text{atMost}(2) = 7$ (the four singletons plus the three length-two windows), $\text{atMost}(1) = 4$, difference $3$ — and the three are exactly the windows `[0..1]`, `[1..2]`, `[2..3]`. `[1,0,1,0,1]`: $\text{atMost}(1) = 10$, $\text{atMost}(0) = 2$ (the two single-`0` windows), so $\text{exactly}(1) = 8$ out of $\binom{6}{2} = 15$. `[2,4,6]`: $\text{atMost}(2) = \text{atMost}(1) = 6$, difference $0$ — the rung reports an impossible target without a special case. Zeros are what make $\text{atMost}(0)$ non-zero, and $\text{exactly}(0)$ needs the convention $\text{atMost}(-1) = 0$ (@sec-cnt-a4, @sec-cnt-p3-binsum, [LC 1248 · Count Number of Nice Subarrays](https://leetcode.com/problems/count-number-of-nice-subarrays/){difficulty="Medium"}).
+:::
+
+**10. [E] Two credit rows, one answer. You already have $\sum \max = 11$ for `[2, 1, 2]`. Compute $\sum \min$ and the sum of ranges. Then give the closed forms of both rows for a *strictly increasing* array and check them on `[1, 2, 3]`**.
+
+::: {.callout-note collapse="true" title="Solution"}
+Minima $8$, ranges $11 - 8 = 3$ — which is the direct list ($0$ for each singleton, $1$ for each of the three longer windows). On a strictly increasing array the maximum of a window is always its **last** element, so slot $k$ wins the $k+1$ windows that end at it: $\sum \max = \sum_k a_k (k+1) = 1 + 4 + 9 = 14$. The minimum is always its **first** element, so slot $j$ wins the $n-j$ windows that start there: $\sum \min = \sum_j a_j (n - j) = 3 + 4 + 3 = 10$. Difference $4$, which is LC 2104's first-sample answer (@sec-cnt-a2, @sec-cnt-p1-ranges).
+:::
+
+**11. [M] Which condition are you allowed to drop? On `arr = [3, 0, 1, 1, 9, 7]`, $a = 7$, $b = 2$, $c = 3$, count the triples satisfying only the two *adjacent* conditions $|arr_i - arr_j| \le a$ and $|arr_j - arr_k| \le b$. Which extra triple appears, and what does the fixed-middle loop compute instead**?
+
+::: {.callout-note collapse="true" title="Solution"}
+Five instead of four. The intruder is $(0,4,5) = (3,9,7)$: $|3 - 9| = 6 \le 7$ and $|9 - 7| = 2 \le 2$ both hold, while the closing condition fails with $|3 - 7| = 4 > 3$. The pivot never multiplies two independent counts: at $j = 4$ the only admissible $k$ is $5$ and the value interval is $[\max(9-7, 7-3),\ \min(9+7, 7+3)] = [4, 10]$, which holds none of the left multiset $\{3, 0, 1, 1\}$, so the charge is $0$ (@sec-cnt-a5, @sec-cnt-p4-triplets).
+:::
+
+**12. [M] Charges and costs. Reproduce the charge-by-middle-index table for `arr = [3, 0, 1, 1, 9, 7]`, count the primitive steps each rung takes at $n = 6$ with $V = 1000$, and say where the fixed-middle rung overtakes the triple loop for $V = 1000$, $V = 500$ and $V = 26$**.
+
+::: {.callout-note collapse="true" title="Solution"}
+Charges $j = 1 \to 2$, $j = 2 \to 2$, $j = 3 \to 0$, $j = 4 \to 0$, totalling $4$. Rung 1 touches $\binom{6}{3} = 20$ triples; rung 2 rebuilds a $V + 2 = 1002$-cell cumulative table once per middle index — $(n-2)(V+2) + \binom{n-1}{2}$-ish pair work $= 4018$ steps, about $200$ times as many. The table rebuild is the whole cost, so the crossover is a statement about $V$ as much as $n$: the first $n$ where the rung wins is $80$ at $V = 1000$ ($81{,}237 < 82{,}160$), $57$ at $V = 500$, and $16$ once $V$ is alphabet-sized at $26$. Rebuilding the table *only when a value enters it* is what turns $O(nV)$ into $O(n^2)$ or better (@sec-cnt-a5).
+:::
+
+**13. [M] Cut points, windows and a free index. For `arr = [2, 3, 1, 6, 7]` write the prefix-XOR array, list the pairs of equal prefixes, and turn each pair into triplets $(i, j, k)$ with $i < j \le k$. What goes wrong if you charge $k - i - 1$, or if you insist on $j < k$**?
+
+::: {.callout-note collapse="true" title="Solution"}
+`px = [0, 2, 1, 0, 6, 1]`, so the equal-prefix cut pairs are $(0, 3)$ and $(2, 5)$ — the zero-XOR windows $(0, 2)$ and $(2, 4)$. For a window $(i, k)$ the split point $j$ may be any of $i+1 .. k$, i.e. $k - i$ choices, so each window is worth $2$ and the total is $4$: $(0,1,2), (0,2,2), (2,3,4), (2,4,4)$. Charging $k - i - 1$ counts only the *strictly interior* cut points and returns $2$; forbidding $j = k$ deletes the two triplets whose second array is the single element $arr[k]$ — also $2$, and counting windows instead of triplets gives $2$ for the same reason. On `[1, 1, 1, 1, 1]` the correct sweep returns $10$ (@sec-cnt-p4-xortri).
+:::
+
+**14. [E] Reading a count table. Which of these arrays have a lucky value ($\mathrm{cnt}[v] = v$, report the largest): `[1, 2, 2, 3, 3, 3]`, `[2, 2, 3, 3, 3]`, `[2, 2, 3, 3, 3, 1, 1]`, `[2, 2, 2]`, `[7, 7, 7]`, `[1]`, `[5, 5, 5]`? Bound the number of lucky values when $n = 500$**.
+
+::: {.callout-note collapse="true" title="Solution"}
+$3$, $3$, $3$, $-1$, $-1$, $1$, $-1$. In `[2, 2, 3, 3, 3, 1, 1]` all three values are candidates and two pass ($\mathrm{cnt}[2] = 2$, $\mathrm{cnt}[3] = 3$) while $\mathrm{cnt}[1] = 2$ misses by one; `[5, 5, 5]` has $\mathrm{cnt}[5] = 3$, so a value larger than $n$ can never be lucky. A lucky $v$ occupies $v$ slots, so the lucky values consume $\sum_v v^2$ cells of an $n$-cell array: $1^2 + \cdots + 10^2 = 385 \le 500 < 506 = 1^2 + \cdots + 11^2$, so at most $10$ of the $501$ table cells can pass the test (@sec-cnt-a5, @sec-cnt-p5-lucky).
+:::
+
+**15. [E] Which buckets pair with themselves? For `times = [30, 20, 150, 100, 40]` list the residues mod $60$ and build the pair count from cross-class products plus $\binom{c}{2}$ inside self-pairing classes. Which residues self-pair, and how does the one-pass sweep dodge the taxonomy?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Residues $[30, 20, 30, 40, 40]$. Cross: the one `20` with the two `40`s gives $1 \times 2 = 2$; inside: the two `30`s give $\binom{2}{2} = 1$; residue `0` is empty, contributing $\binom{0}{2} = 0$. Total $3$, which is the brute count. Self-pairing residues are those with $2r \equiv 0$, i.e. $r = 0$ and $r = k/2 = 30$ — they take $\binom{c}{2}$, never $c^2$. The sweep never classifies anything: it adds `cnt[(60 - r) % 60]` *before* inserting the current song, so a `30` can only ever be charged against earlier `30`s (@sec-cnt-p2-songs).
+:::
+
+**16. [E] A key is a design decision. For `dominoes = [(1, 2), (2, 1), (1, 2), (1, 3)]` count the equivalent pairs by brute force and then by a histogram over the key $\min \cdot 10 + \max$. What has to change if faces can reach $500$, and does the answer size worry you?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Brute force finds $3$ pairs; the histogram is $\{12: 3, 13: 1\}$, closing to $\binom{3}{2} + \binom{1}{2} = 3$. Reversal makes $(a,b)$ and $(b,a)$ one class, so this is an equivalence relation — no order to respect, no sweep needed (@sec-cnt-a3). The mixed-radix key needs a base strictly above the largest face: $10$ is legal only while faces are $\le 9$, which is exactly the stated constraint; at $500$ you need $\min \cdot 501 + \max \le 251{,}000$ (fine as an array index or a `long long`) or a tuple key in a hash map. At $n \le 4 \cdot 10^4$ the count tops out at $\binom{40000}{2} = 799{,}980{,}000$ — still a signed `int`, with room to spare (@sec-cnt-p5-lucky's table-vs-map choice is the same decision, [LC 1128 · Number of Equivalent Domino Pairs](https://leetcode.com/problems/number-of-equivalent-domino-pairs/){difficulty="Easy"}).
+:::
+
+**17. [M] Rounding up to a group size. How many rabbits are in the forest when `answers = [1, 1, 2]`, `[1, 1, 1]`, `[2, 2, 2, 2, 2]`, `[10]`, `[0, 0, 0]`?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\sum_x \lceil n_x / (x+1) \rceil \cdot (x+1)$ gives $5$, $4$, $6$, $11$ and $3$. A rabbit answering $x$ is claiming a group of $x+1$ rabbits, so $n_x$ reporters fill $\lceil n_x/(x+1) \rceil$ whole groups; $[1,1,2] = \lceil 2/2 \rceil \cdot 2 + \lceil 1/3 \rceil \cdot 3 = 2 + 3$. Note the shape of the reasoning: the answer is not the number of *rabbits observed* but the number implied by rounding a *count-table entry* up to a capacity — a counter-of-counters one level below @sec-cnt-p5-beauty and @sec-ds ([LC 781 · Rabbits in Forest](https://leetcode.com/problems/rabbits-in-forest/){difficulty="Medium"}).
+:::
+
+**18. [M] One string, three questions. For `s = "0110111"` give (a) the number of substrings, (b) the number made only of `1`s, and (c) the number containing at most one `0`**.
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) $\binom{8}{2} = 28$. (b) $9$: the stream charges $[0, 1, 2, 0, 1, 2, 3]$ (the length of the `1`-run ending at each position), and the runs $[0, 2, 3]$ give $\binom{1}{2} + \binom{3}{2} + \binom{4}{2} = 0 + 3 + 6$. (c) $24 = 9 + 15$, where the fifteen single-zero substrings come from each `0` at $p$ with its neighbouring zeros at $\ell$ and $r$ worth $(p - \ell)(r - p)$: the `0` at index $0$ gives $1 \times 3 = 3$ and the one at index $3$ gives $3 \times 4 = 12$. (b) counts a run, (c) counts *around* the zeros — complementary counting in the sense of @sec-cnt-p3-ones, and if the question had been "longest run after flipping at most one `0`" you would be in [LC 1004 · Max Consecutive Ones III](https://leetcode.com/problems/max-consecutive-ones-iii/){difficulty="Medium"}, the optimisation twin of the same statistic.
+:::
+
+**19. [M] A bucket table read too early. Recompute the beauty sum for `"aaab"`, `"aaabbb"` and `"abc"`, then evaluate the common slip of using $\max_f - 1$ in place of $\max_f - \min_f$ on each and on `"aabcb"`**.
+
+::: {.callout-note collapse="true" title="Solution"}
+The correct answers are $3$, $8$, $0$ and $5$. The slip gives $6$ on `"aabcb"` and $0$ on `"abc"` — i.e. it is *invisible* on a string whose letters are all distinct, because there $\max_f = \min_f = 1$ and $\max_f - 1$ happens to agree. $\min_f$ is the minimum over letters *present in the window*, so it has to come from a table that is touched when a letter arrives for the first time, and the cursor for $\min_f$ may only move while the bucket it leaves is provably empty (@sec-cnt-p5-beauty, @sec-ds).
+:::
+
+**20. [H] Name the pattern, then the rung. Classify each statement and give the complexity of the best answer: (i) "sum of $\max$ over all subarrays"; (ii) "count subarrays with sum exactly $K$, values may be negative"; (iii) "count pairs $i < j$ with $\mathrm{nums}[i] > \mathrm{nums}[j]$"; (iv) "count triples with $|a_i - a_j| \le a$, $|a_j - a_k| \le b$, $|a_i - a_k| \le c$"; (v) "count subarrays whose set of values equals the set of the whole array, $n \le 1000$"**.
+
+::: {.callout-note collapse="true" title="Solution"}
+(i) Credit the winner: two monotonic-stack passes with opposite tie-breaking, $O(n)$ (@sec-cnt-a2, @sec-cnt-p1-ranges). (ii) Prefix equality in a hash map seeded with `cnt[0] = 1`, $O(n)$ — the $\text{atMost}$ difference is forbidden (@sec-cnt-a4, [LC 560 · Subarray Sum Equals K](https://leetcode.com/problems/subarray-sum-equals-k/){difficulty="Medium"}). (iii) An order-sensitive relation: fix the right end and ask a structure how many earlier values are larger — $O(n + V)$ with @sec-lts-a5's table when $V$ is small, otherwise $O(n \log n)$ with @sec-salgo-a3's merge (or a Fenwick tree, a later volume); $\sum \binom{c}{2}$ is simply wrong here (@sec-cnt-a3, [LC 2537 · Count the Number of Good Subarrays](https://leetcode.com/problems/count-the-number-of-good-subarrays/){difficulty="Medium"} for the same shape with a threshold). (iv) Fix the middle and answer one interval query on a value histogram, $O(nV + n^2)$ — and at $n \le 100$, $V \le 1000$ the plain triple loop is $161{,}700$ steps, which is also fine (@sec-cnt-p4-triplets). (v) Enumerate the left end and extend a `seen` map until every distinct value has appeared: $O(n^2)$ with $n \le 1000$ is $10^6$ steps, so the naive loop *is* the answer — recognising when a double loop is affordable is half of @sec-cnt-why ([LC 2799 · Count Complete Subarrays in an Array](https://leetcode.com/problems/count-complete-subarrays-in-an-array/){difficulty="Medium"}).
+:::
+
+**21. [E] For `a = [1, 2, 3, 4]` compute $\sum_{i<j} a_i a_j$ and $\sum_{i<j} (a_i + a_j)$ without listing pairs.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\sum a = 10$ and $\sum a^2 = 30$, so $\sum_{i<j} a_i a_j = (100 - 30)/2 = 35$ — the six products $2 + 3 + 4 + 6 + 8 + 12$. Each element has $n - 1 = 3$ partners, so $\sum_{i<j}(a_i + a_j) = 3 \cdot 10 = 30$. Both are @eq-cnt-swap with "pairs containing $a_i$" as the set (@sec-cnt-pairsum).
+:::
+
+**22. [M] For `a = [1, 2, 3]` compute the sums of $a_i \oplus a_j$, $a_i \,\&\, a_j$ and $a_i \mid a_j$ over all pairs, bit by bit.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Bit 0 is set in $1$ and $3$ ($c_0 = 2$), bit 1 in $2$ and $3$ ($c_1 = 2$), $n = 3$. XOR: $c(n-c) = 2$ pairs per bit, so $2 \cdot 1 + 2 \cdot 2 = 6$. AND: $\binom{2}{2} = 1$ pair per bit, so $1 + 2 = 3$. OR: $\binom{3}{2} - \binom{1}{2} = 3$ pairs per bit, so $3 + 6 = 9$. Directly: XORs $3, 2, 1$; ANDs $0, 1, 2$; ORs $3, 3, 3$ (@sec-cnt-pairsum).
+:::
+
+**23. [M] Count the pairs $i < j$ with $j - i = a_i + a_j$ in `a = [1, 1, 1, 1]` (0-based indices) with the two-key sweep, and explain why grouping by $i + a_i$ alone fails.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Left keys $i + a_i = [1, 2, 3, 4]$, right keys $j - a_j = [-1, 0, 1, 2]$. At $j = 2$ the right key $1$ meets the left key of $i = 0$; at $j = 3$ the right key $2$ meets $i = 1$: two pairs, $(0, 2)$ and $(1, 3)$, both with $j - i = 2 = 1 + 1$. Grouping by $i + a_i$ finds no repeated key at all and answers $0$, because the condition compares a left key with a *right* key, which is a different function of the index (@sec-cnt-idxval).
+:::
+
+**24. [M] How many windows of `[1, 2, 1, 3, 2]` contain both a `1` and a `2`? Use inclusion–exclusion.**
+
+::: {.callout-note collapse="true" title="Solution"}
+All windows: $\binom{6}{2} = 15$. Without a `1`: the runs `[2]` and `[3, 2]` hold $1 + 3 = 4$. Without a `2`: the runs `[1]` and `[1, 3]` hold $1 + 3 = 4$. Without either: the run `[3]` holds $1$. So $15 - 4 - 4 + 1 = 8$. Forgetting the $+1$ answers $7$: the window `[3]` was removed twice (@sec-cnt-comp).
+:::
+
+**25. [M] Count pairs $i < j$ with $a_i = a_j$ and $j - i \ge 2$ in `[1, 2, 1, 1, 2]` with one sweep. Where does the index condition go?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Into the insertion order: when the cursor is at $j$, insert $a_{j-2}$ first, so the table holds exactly the indices at distance at least $2$. The sweep finds $(0, 2)$ at $j = 2$, $(0, 3)$ at $j = 3$ (index $2$ is not yet eligible) and $(1, 4)$ at $j = 4$: $3$ pairs. The pair $(2, 3)$ is excluded because index $2$ enters the table only at $j = 4$ (@sec-cnt-idxval).
+:::
+
+**26. [H] Ball in Berland, but couples may repeat: $(1,1), (1,1), (2,2)$. Count pairs of couples with no common person.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\binom{3}{2} = 3$ pairs. Same boy: boy $1$ has degree $2$, one pair. Same girl: girl $1$ has degree $2$, one pair. Both: the two identical couples share both, one pair, and inclusion–exclusion adds it back: $3 - 1 - 1 + 1 = 2$. The good pairs are the two that use couple $(2,2)$. With distinct couples the last term is $0$, which is why the problem as stated needs no add-back (@sec-cnt-pcomp-ball).
+:::
+
+## Interview questions
+
+**1. How do you compute the sum of the sums of every subarray in one pass, and why is the formula right?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Do not enumerate windows; ask how many of them contain slot $i$. A window is a pair of cut points with the left one in $\{0..i\}$ and the right one in $\{i..n-1\}$, so $i$ is covered $(i+1)(n-i)$ times and the answer is $\sum_i a_i (i+1)(n-i)$. Sanity-check by putting $a_i = 1$: the cover sum must be $\frac{n(n+1)(n+2)}{6}$, the *sum of window lengths* — $20$ at $n = 4$, against $\binom{5}{2} = 10$ windows. Both numbers come out of the same formula, and naming the difference is what separates a derivation from a recitation (@sec-cnt-a1).
+:::
+
+**2. How does that answer change if only odd-length subarrays count?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Nothing about the swap changes; only the cover count does. Of the $(i+1)(n-i)$ windows covering slot $i$, half have odd length, and when that product is odd the odd class is the larger one, so it is $\lceil (i+1)(n-i)/2 \rceil$. At $n = 5$ the odd covers are $[3, 4, 5, 4, 3]$ and the answer for `[1,4,2,5,3]` is $3 + 16 + 10 + 20 + 9 = 58$. Watch for the trap in the follow-up: "and how many odd-length windows are there?" is *not* $19$ — it is $(\lfloor n/2 \rfloor + 1) \lceil n/2 \rceil$, i.e. $3 \times 3 = 9$ at $n = 5$ and $3 \times 2 = 6$ at $n = 4$, counted by choosing cut points of opposite parity (@sec-cnt-a1, @sec-cnt-p1-oddsum).
+:::
+
+**3. Why do cover counts fail for the sum of $\max - \min$ over all subarrays, and what replaces them?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A maximum is not additive, so the credit has to be re-derived as "the windows in which this slot is the *appointed* winner", and the appointment has to be unique. Each slot's span is a product $L_i R_i$ of two distances found by a monotonic stack, and the tie-break must be strict on one side and non-strict on the other — pop `<=` going left, `<` going right (or the mirror). Then $\sum \max - \min = \sum_i a_i (L_i R_i - L'_i R'_i)$ in $O(n)$. Prove you know the failure mode: on `[3, 3]` with the same predicate on both passes the credits are $[2,2]$ — four claims for three windows — and the sum of maxima comes out $12$ instead of $9$. The cheap invariant is that each credit row must sum to $\binom{n+1}{2}$ (@sec-cnt-a2, @sec-cnt-p1-ranges).
+:::
+
+**4. Can a sliding window count the subarrays that sum to $K$ when the array has negatives?**
+
+::: {.callout-note collapse="true" title="Answer"}
+No. A shrink loop is a monotonicity argument — "if `a[left..right]` is legal, every shorter suffix is too" — and a negative entry breaks it. On `[1,-1,1,-1,1]` with $K = 0$ the window rung answers $10$, the honest at-most-$0$ count is $9$, and the true exactly-$0$ count is $6$. Use prefix equality: $P[r] - P[l] = K$, so sweep the right end and add `cnt[p - K]` before inserting `cnt[p]`, seeded with `cnt[0] = 1`. $O(n)$ on any integers, and the seed is what lets a window start at index $0$ (@sec-cnt-a4, @sec-pref-p2-a).
+:::
+
+**5. How do you count subarrays whose sum is divisible by $k$, and why might a C++ version disagree with Python?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Same sweep, keyed on the *residue*: $P[r] \equiv P[l] \pmod k$, so add `cnt[p]` then `cnt[p] += 1` with `p = ((s % k) + k) % k`. In C++ and Java `(-2) % 5` is $-2$, not $3$, so unnormalised keys split each bucket into two mirror images and the count comes out low; Python's `%` is already non-negative, which is why the bug is invisible there. Equivalent offline statement: bucket the $n+1$ prefix residues and add $\binom{c}{2}$ per bucket — that form works even with negatives because "same residue" is an equivalence relation (@sec-cnt-a4, @sec-pref-p2-b, cross-checked on `[4, 5, 0, -2, -3, 1]` with $k = 5$, which gives $7$ both ways).
+:::
+
+**6. When do you reach for $\text{atMost}(k) - \text{atMost}(k-1)$ to count windows with exactly $k$ of something?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When the window statistic is monotone under shrinking, which for sums means non-negative entries — binary arrays, counts of odds, lengths. Then two calls to one shrinking loop give $O(n)$, with $\text{atMost}(-1) = 0$ as the base case. On `[1,1,1,1]` with $k = 2$ that is $7 - 4 = 3$; on `[1,0,1,0,1]` with $k = 1$, $10 - 2 = 8$. With negatives the identity is false (@sec-cnt-a4). The other reflex to state: $\text{exactly}$ of a *shape* property (all `1`s) is a run decomposition, not a difference of two rungs (@sec-cnt-p3-ones).
+:::
+
+**7. What are the two ways to count equal-value pairs, and which one generalises to inversions?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Fix the right end and add `seen[v]`, or build the histogram once and add $\binom{c}{2}$ — on `[1, 2, 3, 1, 1, 3]` both give $4$ (charges $[0,0,0,1,2,1]$, and $\binom{3}{2} + \binom{1}{2} + \binom{2}{2}$). Only the first generalises, because $\sum \binom{c}{2}$ presumes the relation is an equivalence: for inversions on `[3, 1, 2, 1]` the histogram answers $1$ where there are $4$ inversions. When $i < j$ and $a_i > a_j$ matter, "how many earlier values are bigger?" is a prefix query over *values* — a table if the range is small, otherwise merge sort or a Fenwick tree (@sec-cnt-a3, @sec-lts-a5, @sec-salgo-a3).
+:::
+
+**8. How do you count triples $(i, j, k)$ with three pairwise value conditions when $n \le 100$ and $arr[i] \le 1000$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Start with the triple loop ($\binom{100}{3} = 161{,}700$ steps — say out loud that it is affordable), then improve it by pivoting on $j$: with $j$ fixed, the condition on $i$ and the condition on $k$ are independent, and "$|a_i - a_j| \le a$ and $|a_i - a_k| \le c$" is one interval $[\max(a_j - a, a_k - c), \min(a_j + a, a_k + c)]$ clamped to $[0, V]$, answered by a subtraction on a cumulative histogram. $O(nV + n^2)$. Two traps to volunteer: clamping (an unclamped negative index reads the wrong end of the table in Python and is undefined behaviour in C++), and not multiplying the two pair counts — on `[3, 0, 1, 1, 9, 7]`, $a = 7, b = 2, c = 3$ the product method gives $5$ because $(0,4,5) = (3,9,7)$ passes the two chain conditions and fails $|3 - 7| \le 3$ (@sec-cnt-a5, @sec-cnt-p4-triplets).
+:::
+
+**9. When counting triplets whose left-part XOR equals their right-part XOR, why does the middle index disappear?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Because $x \oplus x = 0$: writing $a = P[j] \oplus P[i]$ and $b = P[k+1] \oplus P[j]$ (with $P$ the prefix XOR), $a = b$ iff $P[i] = P[k+1]$, and $P[j]$ cancels. So count equal-prefix cut pairs — windows $(i, k)$ with $P[i] = P[k+1]$ — and then remember that every $j \in \{i+1..k\}$ is a legal split, which is $k - i$ triplets, not $k - i - 1$. On `[2, 3, 1, 6, 7]`: $P = [0, 2, 1, 0, 6, 1]$, windows $(0,2)$ and $(2,4)$, each worth $2$, total $4$. Dropping the $j = k$ case (a single-element right array) gives $2$ (@sec-cnt-p4-xortri).
+:::
+
+**10. Before writing an $O(n)$ counting solution, how do you choose the accumulator type and decide whether the answer needs a modulus?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Estimate the answer first. $\binom{60000}{2} = 1{,}799{,}970{,}000$ fits a signed 32-bit int with $347{,}513{,}647$ left over; $\binom{10^5}{2} = 4{,}999{,}950{,}000$ does not, and LC 1513's answer $5{,}000{,}050{,}000$ (all-`1` string at $n = 10^5$) is why that statement hands you $10^9 + 7$. Mixed products are worse: LC 2104 at $n = 1000$ with $|v| \le 10^9$ reaches about $5 \cdot 10^{14}$ for the maxima alone, so the *credit* must be 64-bit even though $n$ is small. Accumulate in `long long`, reduce only at the end (or after each addition, never before) (@sec-cnt-a3, @sec-arr-size-trap).
+:::
+
+**11. What does a constraint like $1 \le arr[i] \le 500$ buy you?**
+
+::: {.callout-note collapse="true" title="Answer"}
+An array indexed by *value*: $501$ cells, $O(1)$ lookups, no hashing, no sorting. Conditions like $\mathrm{cnt}[v] = v$ (@sec-cnt-p5-lucky) or "$|a_i - a_j| \le a$" (@sec-cnt-a5) become table reads, and the same trick gives a bound for free: a lucky $v$ occupies $v$ slots, so lucky values cost $\sum v^2 \le n$ — at $n = 500$ at most $10$ of them, since $1^2 + \cdots + 10^2 = 385 \le 500 < 506$. Alphabet-size constraints ($26$ letters, $\le 100$ values) are the same gift. The failure mode is solving it with maps and sorts when the statement offered an address (@sec-lts-a5).
+:::
+
+**12. For the sum of beauty (max frequency minus min frequency) over all substrings, how do you improve an $O(n^2 \cdot 26)$ solution's inner step?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The outer $O(n^2)$ is the enumeration; the win is making each extension $O(1)$. Keep `cnt[letter]` *and* `how[f]` — a counter of counters — so the extremes are cursors over frequency buckets instead of a scan of $26$ cells. The hard part is the discipline: $\min_f$ is over letters *present* in the window, so a bucket only becomes meaningful once a letter's first arrival has been recorded, and a cursor may move only while the bucket it is leaving is provably empty. Two sample values to keep: `"aabcb"` $= 5$ over $\binom{6}{2} = 15$ windows, `"aaabbb"` $= 8$. And the trap: using $\max_f - 1$ gives $6$ instead of $5$ on `"aabcb"` and no error at all on `"abc"`, so a sample can hide it completely (@sec-cnt-p5-beauty, @sec-ds).
+:::
+
+**13. Rabbits report how many others share their colour; what is the smallest population consistent with the reports?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Group by the answer: $n_x$ rabbits reporting $x$ must be split into groups of size $x+1$, so they imply $\lceil n_x / (x+1) \rceil \cdot (x+1)$ rabbits. On `[1,1,2]` that is $2 + 3 = 5$; `[1,1,1]` is $4$ (one group of two, one rabbit short of a third pair), `[2,2,2,2,2]` is $6$, `[10]` is $11$, `[0,0,0]` is $3$. Pedagogically it is the same move as this chapter's count tables: the quantity you read is not the value but the *count of a count*, rounded up to a capacity (@sec-cnt-a5).
+:::
+
+**14. How do you test a counting solution whose answer you cannot verify by hand?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Three things, all cheap. (1) A brute force at $n \le 9$ with values in a tiny range, fuzzed over hundreds of cases — every pattern in this chapter is locked that way (120 trials for the span credits, 80 for the at-most/exactly pair, 40 for the triplets). (2) A second independent framing, since rungs 2 and 3 disagree informatively: sweep vs $\sum \binom{c}{2}$, prefix-hash vs at-most difference, and they must agree exactly. (3) Structural invariants that fail loudly: credit rows sum to $\binom{n+1}{2}$, cover counts sum to $\frac{n(n+1)(n+2)}{6}$, answers are monotone in $K$, and $\text{exactly}(K) \le \text{atMost}(K)$ (@sec-cnt-a1, @sec-cnt-a2, @sec-cnt-a4; the harness is @sec-cnt-why's bookkeeping).
+:::
+
+**15. How do you sum $|a_i - a_j|$ over all pairs when $n = 10^5$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort; the set of pairs does not change. In sorted order $|b_m - b_k| = b_m - b_k$ for $k < m$, so the element of rank $k$ is added $k$ times (as the larger member) and subtracted $n - 1 - k$ times, weight $2k - n + 1$. $O(n \log n)$ for the sort and one pass. The running form `total += k * x - prefix` is the same sum and generalises to any charge linear in the earlier member. Use 64 bits: with $n = 10^5$, half the values at $0$ and half at $10^9$, the answer is $(n/2)^2 \cdot 10^9 = 2.5 \cdot 10^{18}$, which still fits a signed 64-bit integer (@sec-cnt-pairsum, @sec-cnt-psum-weird).
+:::
+
+**16. Why is a single histogram wrong for counting pairs with $j - i = a_i + a_j$, and what works instead?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Rewrite as $i + a_i = j - a_j$. The two sides are different functions of the index, so the relation is not "same key" and $\binom{c}{2}$ over one key counts something else. Sweep $j$ left to right: add the number of earlier indices whose left key equals $j - a_j$, then file $j + a_j$. Keys above $n$ can be dropped, so an array of size $n + 1$ replaces the hash map (@sec-cnt-idxval, @sec-cnt-pidx-message).
+:::
+
+**17. When does complementary counting need inclusion–exclusion, and how do you get the intersection term?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Whenever the bad set is a union of events that can happen together. Each object in $A \cap B$ is subtracted once for $A$ and once for $B$, so it is added back once: $|U| - |A| - |B| + |A \cap B|$. The intersection is usually either provably empty (distinct couples cannot share both a boy and a girl) or another quantity of the same shape (windows containing neither $x$ nor $y$ are again runs). Say which one it is out loud — that is the step interviewers check (@sec-cnt-comp, @sec-cnt-pcomp-ball).
+:::
+
+**18. How do you count increasing triples $i < j < k$, which index do you fix, and can you beat $O(n^2)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Fix the middle: $\sum_j (\#\text{smaller on the left}) \cdot (\#\text{larger on the right})$, exact because nothing relates $a_i$ to $a_k$ directly. Counting both sides by scanning is $O(n^2)$. Both counts are prefix counts over values, so a Fenwick tree over (compressed) values gives each in $O(\log n)$ and the whole answer in $O(n \log n)$; when the values are small, a cumulative table does the same job (@sec-cnt-a5, @sec-cnt-p4-teams).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Contribution swap.** $\sum_{\text{windows}} = \sum_i (\text{charge}_i)$: for a linear statistic the charge is the cover count $(i+1)(n-i)$ (odd length: $\lceil (i+1)(n-i)/2 \rceil$); for an extremal one it is $L_i R_i$, two monotonic-stack spans measured with *opposite* tie-breaks (@sec-cnt-a1, @sec-cnt-a2).
+- **Sums over pairs.** Algebra for separable terms; sort and weight rank $k$ by $2k - n + 1$ for distances; per bit $c_b(n - c_b)$ for XOR (@sec-cnt-pairsum).
+- **Pairs.** Fix the right end and add `seen[complement]`, or close an equivalence class with $\binom{c}{2}$. Modular conditions key on $t \bmod k$ and look up $(-t) \bmod k$; residues $0$ and $k/2$ self-pair and must not be squared (@sec-cnt-a3, @sec-cnt-p2-songs).
+- **Index and value conditions.** Rewrite until each side mentions one index: one key means a histogram, two keys mean a sweep that reads one and writes the other, no separation means a bound and a harmonic enumeration (@sec-cnt-idxval).
+- **Windows with a property.** Prefix equality (`ans += cnt[p - K]`, seeded `cnt[0] = 1`) works on any integers; $\text{exactly}(K) = \text{atMost}(K) - \text{atMost}(K-1)$ only on a monotone window statistic; shape properties decompose into runs, $\sum_{\text{runs}} \binom{L+1}{2}$ (@sec-cnt-a4, @sec-cnt-p3-ones).
+- **Complement.** $|U|$ minus the bad set; for two overlapping bad events $|U| - |A| - |B| + |A \cap B|$ (@sec-cnt-comp).
+- **Triples.** Pivot on the index that appears in two of the three conditions. With no condition between the ends, multiply left and right counts. Otherwise the leftover is one interval $[\max(a_j - a, a_k - c), \min(a_j + a, a_k + c)]$, clamped to $[0, V]$ and answered by a subtraction on a cumulative histogram — $O(nV + n^2)$ (@sec-cnt-a5, @sec-cnt-p4-triplets).
+- **Small values.** Let the value be the address: $\mathrm{cnt}[v] = v$ is a table read, and when the interesting quantity is itself a frequency, index the table by it (`how[f]`) and move the cursors lazily (@sec-cnt-p5-lucky, @sec-cnt-p5-beauty).
+:::
+
+- One decision generates all eight patterns: *enumerate the object that is fewer*. There are $\binom{n+1}{2}$ windows but $n$ slots; there are $\binom{n}{2}$ pairs but $n$ right ends, $30$ bit columns or $n$ ranks; there are $\binom{n}{3}$ triples but $n$ middle indices. The chapter is that sentence applied eight times, with a different credit each time (@sec-cnt-why).
+- Every swap has to be *exact*, and exactness is checked by double counting, not by trusting the derivation: the cover counts sum to $\frac{n(n+1)(n+2)}{6}$, a winner-credit row sums to $\binom{n+1}{2}$, and two independent framings of the same condition must agree on hundreds of random cases before you ship either (@sec-cnt-a1, @sec-cnt-a2, @sec-cnt-a4).
+- The answer is a number that grows, so decide its type before you decide the algorithm: $\binom{60000}{2} = 1{,}799{,}970{,}000$ is a coin-flip away from $2^{31} - 1$, $\binom{10^5}{2} = 4{,}999{,}950{,}000$ is past it, and the sum of maxima over all windows at $n = 1000$ with values up to $10^9$ is about $5 \cdot 10^{14}$ (@sec-cnt-a3, @sec-arr-size-trap).
+- The three framings for "windows with a property" are ordered by what they are allowed to assume — prefix hash (any integers), residue map (any integers, with normalisation in C++/Java), at-most difference (non-negative only). Part of the skill is picking the strongest tool your condition permits, and part of it is knowing that you may not (@sec-cnt-a4, @sec-cnt-p3-binsum).
+- "Index condition" and "value condition" are different machinery: positions are handled by the order of your loops (or folded into a per-index key), values by a table indexed by value. Problems that mix them (ABC 166 E, LC 1534, LC 1442) split cleanly once you name which is which (@sec-cnt-idxval, @sec-cnt-a5).
+- Complementary counting is the same swap wearing a different hat: count the bad objects because there are fewer *kinds* of them, then subtract from a universe you know in closed form. Every "count the things with property $P$" has a "count the things with $\lnot P$" next to it, the two always add up to the universe, and overlapping bad events cost one inclusion–exclusion term (@sec-cnt-comp, @sec-cnt-pcomp).
+
+## Practice ladder
+
+Ordered by concept, following the eight patterns. The seventeen problems solved in Part B are marked `.solved`; every other entry is "solve it after the lesson named". Counting pairs and triples is what many Codeforces Div. 2 B and C problems are made of, so the Codeforces entries are the ones to do under a timer.
+
+::: {.practice}
+- [LC 1588 · Sum of All Odd Length Subarrays](https://leetcode.com/problems/sum-of-all-odd-length-subarrays/){.solved difficulty="Easy"} — the cover count with one parity filter on it (@sec-cnt-p1-oddsum).
+- [LC 2063 · Vowels of All Substrings](https://leetcode.com/problems/vowels-of-all-substrings/){difficulty="Medium"} — the cover count $(i+1)(n-i)$ charged only at vowels; @eq-cnt-swap in one line.
+- [CF 608B · Hamming Distance Sum](https://codeforces.com/problemset/problem/608/B){rating="1500"} — cover counts when the window slides over a *second* string: charge each position of the short string by the alignments that reach it (@sec-cnt-a1).
+- [LC 2104 · Sum of Subarray Ranges](https://leetcode.com/problems/sum-of-subarray-ranges/){.solved difficulty="Medium"} — the same swap when the statistic is extremal: two stack passes, opposite tie-breaks, one subtraction (@sec-cnt-p1-ranges).
+- [LC 907 · Sum of Subarray Minimums](https://leetcode.com/problems/sum-of-subarray-minimums/){difficulty="Medium"} — the min half of 2104 on its own, with the modulus; the stack is developed in the stack volume.
+- [LC 2262 · Total Appeal of A String](https://leetcode.com/problems/total-appeal-of-a-string/){difficulty="Hard"} — contribution where a character is charged the windows in which it is the *first* occurrence of its letter.
+- [LC 477 · Total Hamming Distance](https://leetcode.com/problems/total-hamming-distance/){.solved difficulty="Medium"} — one bit column at a time, $c(n-c)$ (@sec-cnt-psum-hamming).
+- [CF 1420B · Rock and Lever](https://codeforces.com/problemset/problem/1420/B){rating="1200"} — $a_i \,\&\, a_j \ge a_i \oplus a_j$ means "same highest bit"; group by it and add $\binom{c}{2}$.
+- [CF 1648A · Weird Sum](https://codeforces.com/problemset/problem/1648/A){.solved rating="1400"} — group, split coordinates, sort, weight by rank (@sec-cnt-psum-weird).
+- [LC 1685 · Sum of Absolute Differences in a Sorted Array](https://leetcode.com/problems/sum-of-absolute-differences-in-a-sorted-array/){difficulty="Medium"} — the rank weight per element, with prefix sums (@sec-cnt-pairsum).
+- [CF 1311F · Moving Points](https://codeforces.com/problemset/problem/1311/F){rating="1900"} — pairwise distances over the pairs that never meet; counts and sums of earlier points by speed need a Fenwick tree.
+- [LC 1512 · Number of Good Pairs](https://leetcode.com/problems/number-of-good-pairs/){.solved difficulty="Easy"} — sweep and histogram, both, in the same write-up (@sec-cnt-p2-goodpairs).
+- [LC 1128 · Number of Equivalent Domino Pairs](https://leetcode.com/problems/number-of-equivalent-domino-pairs/){difficulty="Easy"} — equivalence under reversal plus a normalised key; exercise 16.
+- [CF 50B · Choosing Symbol Pairs](https://codeforces.com/problemset/problem/50/B){rating="1500"} — a pair count over a character histogram, where ordered versus unordered is the entire problem (@sec-cnt-a3).
+- [LC 1010 · Pairs of Songs With Total Durations Divisible by 60](https://leetcode.com/problems/pairs-of-songs-with-total-durations-divisible-by-60/){.solved difficulty="Medium"} — complementary residues with two self-pairing classes (@sec-cnt-p2-songs).
+- [AC abc166_e · This Message Will Self-Destruct in 5s](https://atcoder.jp/contests/abc166/tasks/abc166_e){.solved} — two keys, one sweep (@sec-cnt-pidx-message).
+- [LC 2364 · Count Number of Bad Pairs](https://leetcode.com/problems/count-number-of-bad-pairs/){difficulty="Medium"} — the key $nums[i] - i$, then the complement of the good pairs (@sec-cnt-idxval, @sec-cnt-comp).
+- [LC 1814 · Count Nice Pairs in an Array](https://leetcode.com/problems/count-nice-pairs-in-an-array/){difficulty="Medium"} — separate the condition into the key $nums[i] - rev(nums[i])$, with a modulus.
+- [CF 1541B · Pleasant Pairs](https://codeforces.com/problemset/problem/1541/B){.solved rating="1200"} — a product bound and a harmonic sum (@sec-cnt-pidx-pleasant).
+- [LC 930 · Binary Subarrays With Sum](https://leetcode.com/problems/binary-subarrays-with-sum/){.solved difficulty="Medium"} — the one input where the prefix map and the at-most difference must be made to agree (@sec-cnt-p3-binsum).
+- [LC 523 · Continuous Subarray Sum](https://leetcode.com/problems/continuous-subarray-sum/){difficulty="Medium"} — residue equality *plus* a minimum length, so the map stores the earliest index of each residue rather than a count (@sec-cnt-a4).
+- [LC 1524 · Number of Sub-arrays With Odd Sum](https://leetcode.com/problems/number-of-sub-arrays-with-odd-sum/){difficulty="Medium"} — two parity buckets and a modulus; exercise 8.
+- [LC 1248 · Count Number of Nice Subarrays](https://leetcode.com/problems/count-number-of-nice-subarrays/){difficulty="Medium"} — exactly $k$ odds by the at-most difference; exercise 9.
+- [LC 1513 · Number of Substrings With Only 1s](https://leetcode.com/problems/number-of-substrings-with-only-1s/){.solved difficulty="Medium"} — runs, streamed or materialised, with the modulus the size demands (@sec-cnt-p3-ones).
+- [CF 1840C · Ski Resort](https://codeforces.com/problemset/problem/1840/C){rating="1000"} — runs of cold days, counting only windows of length at least $k$ inside each run.
+- [LC 1358 · Number of Substrings Containing All Three Characters](https://leetcode.com/problems/number-of-substrings-containing-all-three-characters/){difficulty="Medium"} — fix the right end and charge $\min(\text{last seen}) + 1$, or count the complement (@sec-cnt-comp).
+- [LC 2475 · Number of Unequal Triplets in Array](https://leetcode.com/problems/number-of-unequal-triplets-in-array/){.solved difficulty="Easy"} — $\binom{n}{3}$ minus the triples that repeat a value (@sec-cnt-pcomp-unequal).
+- [CF 1475C · Ball in Berland](https://codeforces.com/problemset/problem/1475/C){.solved rating="1400"} — inclusion–exclusion with an empty intersection (@sec-cnt-pcomp-ball).
+- [LC 2537 · Count the Number of Good Subarrays](https://leetcode.com/problems/count-the-number-of-good-subarrays/){difficulty="Medium"} — "at least $k$ equal pairs inside" is monotone, so for each left end every longer window qualifies: count with one shrinking window (@sec-sw-a4).
+- [LC 1395 · Count Number of Teams](https://leetcode.com/problems/count-number-of-teams/){.solved difficulty="Medium"} — fix the middle, multiply the sides (@sec-cnt-p4-teams).
+- [LC 2367 · Number of Arithmetic Triplets](https://leetcode.com/problems/number-of-arithmetic-triplets/){difficulty="Easy"} — fix the middle value and look up both neighbours.
+- [CF 1106A · Lunar New Year and Cross Counting](https://codeforces.com/problemset/problem/1106/A){rating="800"} — count X-shapes by iterating the centre cell: the pivot in two dimensions.
+- [LC 1534 · Count Good Triplets](https://leetcode.com/problems/count-good-triplets/){.solved difficulty="Easy"} — fix the middle; write the interval, clamp it, query the cumulative table (@sec-cnt-p4-triplets).
+- [CF 1462E1 · Close Tuples (easy version)](https://codeforces.com/problemset/problem/1462/E1){rating="1500"} — triples with $\max - \min \le 2$ and values in $[1, n]$: fix the smallest value and count by value.
+- [LC 1995 · Count Special Quadruplets](https://leetcode.com/problems/count-special-quadruplets/){difficulty="Easy"} — four indices with $nums[a] + nums[b] + nums[c] = nums[d]$: fix $c$ as a pivot and hash the differences on its right.
+- [LC 1442 · Count Triplets That Can Form Two Arrays of Equal XOR](https://leetcode.com/problems/count-triplets-that-can-form-two-arrays-of-equal-xor/){.solved difficulty="Medium"} — the middle cancels, so the pivot moves to the ends and the free split contributes $k - i$ (@sec-cnt-p4-xortri).
+- [LC 1394 · Find Lucky Integer in an Array](https://leetcode.com/problems/find-lucky-integer-in-an-array/){.solved difficulty="Easy"} — $\mathrm{cnt}[v] = v$ as a table sweep, with $\sum v^2 \le n$ as the free bound (@sec-cnt-p5-lucky).
+- [LC 781 · Rabbits in Forest](https://leetcode.com/problems/rabbits-in-forest/){difficulty="Medium"} — round a count-table entry up to a group capacity; exercise 17.
+- [LC 1781 · Sum of Beauty of All Substrings](https://leetcode.com/problems/sum-of-beauty-of-all-substrings/){.solved difficulty="Medium"} — a counter of counters with two cursors and one easy-to-miss reset (@sec-cnt-p5-beauty).
+- [LC 2799 · Count Complete Subarrays in an Array](https://leetcode.com/problems/count-complete-subarrays-in-an-array/){difficulty="Medium"} — $n \le 1000$, so the honest $O(n^2)$ with a `seen` table is the right answer (exercise 20).
+:::
+
+## Further reading
+
+- [Wikipedia — Tetrahedral number](https://en.wikipedia.org/wiki/Tetrahedral_number) — $\sum_i (i+1)(n-i) = \frac{n(n+1)(n+2)}{6} = \binom{n+2}{3}$, the total of the cover counts in @sec-cnt-a1.
+- [Wikipedia — Binomial coefficient](https://en.wikipedia.org/wiki/Binomial_coefficient) — the identities behind $\binom{n+1}{2}$ windows, $\binom{L+1}{2}$ windows per run, and the hockey-stick sum $\sum_k \binom{k}{2} = \binom{n+1}{3}$.
+- [CP-Algorithms — The Inclusion-Exclusion Principle](https://cp-algorithms.com/combinatorics/inclusion-exclusion.html) — complementary counting and inclusion–exclusion over many events, with contest applications (@sec-cnt-comp).
+- [CP-Algorithms — Fenwick tree](https://cp-algorithms.com/data_structures/fenwick.html) — the structure that turns "how many earlier values are smaller?" into $O(\log n)$, the missing piece for inversions and for increasing triples at large $n$ (@sec-cnt-a3, @sec-cnt-p4-teams).
+- [USACO Guide — Introduction to Prefix Sums](https://usaco.guide/silver/prefix-sums) — prefix sums with the CSES counting problems *Subarray Sums II* (prefix equality with a map) and *Subarray Divisibility* (equal residues), the two framings of @sec-cnt-a4.
+- [Wikipedia — Double counting (proof technique)](https://en.wikipedia.org/wiki/Double_counting_(proof_technique)) — counting one set in two ways, the argument behind the swap of summation order in @eq-cnt-swap and every credit check in this chapter.

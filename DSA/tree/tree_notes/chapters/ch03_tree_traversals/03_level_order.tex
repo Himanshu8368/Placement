@@ -1,277 +1,661 @@
 % !TEX root = ../../tree_notes.tex
 % =====================================================================
-%  3.3  Breadth-First / Level Order                       sec:c03-bfs
-%  Exports: def:c03-bfs  prop:c03-bfs-depth
-%           lst:c03-bfs  ex:c03-level-agg
-%           prob:c03-level-bottom  prob:c03-zigzag
+%  3.3  Breadth-First / Level Order                         sec:c03-bfs
+%  Exports: def:c03-level  def:c03-frontier  thm:c03-bfs-levels
+%           thm:c03-bfs-shortest  lst:c03-bfs  ex:c03-bfs-run
+%           prob:c03-nary-level  prob:c03-zigzag  prob:c03-largest-row
 % =====================================================================
-\section{Breadth-First Traversal: Level Order}\label{sec:c03-bfs}
+\section{Breadth-First / Level Order}\label{sec:c03-bfs}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item What does the explicit stack in inorder traversal remember, and what is the
+        breadth-first analogue we build today? (\defref{c03-explicit-stack})
+  \item Morris reached what space bound, and why can level order not? (\thmref{c03-morris-linear})
+  \item On $R$, list the depth-first orders once more -- which of them already looks
+        ``row by row''? (\secref{c03-dfs}, \figref{c03-running})
+\end{enumerate}
+\end{previouslybox}
 
 \begin{topicintro}
-Depth-first orders dive all the way down before moving sideways. The fourth classic order
-does the opposite: it visits the tree \emph{row by row} -- root, then all nodes at depth
-$1$, then all at depth $2$, and so on. This is \term{breadth-first search} (BFS), and its
-tool is a \term{queue} (first in, first out) instead of a stack. Level order is the most
-tested traversal family on LeetCode, because almost every ``per level'' problem -- zigzag,
-right side view, level averages -- is the same five-line template with one different line
-inside.
-
-\textbf{Prerequisites.} \figref{c03-runner} (our running tree) and the notion of
-\emph{depth} from \secref{c01-anatomy}. Stack-vs-recursion from \secref{c03-iterative}
-helps but is not required.
+Depth-first plunges to a leaf before backing off; breadth-first does the opposite -- it
+finishes every node at depth $d$ before touching depth $d{+}1$. The resulting sequence is
+\emph{row by row}, and it is produced by a queue instead of a stack. This single change of
+data structure turns the same walk into the tool for everything shaped like ``by level'':
+per-row statistics, the right-side view, and (on general graphs) shortest hop-counts. The
+one idea to internalise is the \term{level frontier}: snapshot \code{q.size()} once to know
+exactly how many nodes belong to the current row.
+\textbf{Prerequisites.} \secref{c03-dfs} (the DFS family, for contrast); FIFO queue basics.
 
 \textbf{After this section you can}
 \begin{itemize}[nosep]
-  \item run level order by hand on any tree, showing the queue at every step;
-  \item split the flat walk into one list per level with the \code{sz = q.size()} trick;
-  \item solve bottom-up and zigzag variants by changing \emph{one line} of the template;
-  \item explain why BFS discovers nodes in non-decreasing depth (shortest paths).
+  \item emit a tree level-by-level with the queue + frontier-size template;         \hfill\lv{2}
+  \item adapt it to zigzag, bottom-up, and per-row aggregate variants;              \hfill\lv{3}
+  \item handle N-ary nodes and \code{next}-pointer rewiring inside the same loop;   \hfill\lv{3}--\lv{4}
 \end{itemize}
 \end{topicintro}
 
-\subsection{The Queue Idea}
+\begin{recognitionbox}[Pattern card -- breadth-first / level order]
+\reckey{``by level / row / from top to bottom'', ``zigzag level order'', ``right side
+view'', ``the largest value in each row'', ``average per level'' -- the answer is grouped
+by \emph{depth}.}
+\recuse{
+  \item the output must be organised \emph{per depth} (a list of lists, one row each);
+  \item a per-row statistic (max, mean, the visible right edge) is requested;
+  \item hop-count / shortest-level questions, where first-visit order matters.
+}
+\recnotuse{
+  \item the answer needs a fixed \emph{subtree} order (pre/in/post) -- \secref{c03-dfs};
+  \item memory is capped at $\bigO{1}$ -- level order needs a whole frontier
+        ($\bigO{w}$); use Morris (\secref{c03-iterative}) if a DFS order will do;
+  \item a plain ``does a path with property $P$ exist'' -- a Chapter~2 recursion may beat BFS.
+}
+One-line test: \emph{would the answer change if I regrouped nodes by depth? If the problem
+speaks in rows, you are here.}
+\end{recognitionbox}
 
-\begin{analogybox}[The office announcement]
-A manager tells the news to her two direct reports; then \emph{each of them} tells
-\emph{their} reports, in the order they heard it. Nobody tells anyone twice, and everyone
-hears it at their exact distance from the top. That rumour spreading is BFS: the queue is
-the ``waiting to tell their own reports'' list.
-\end{analogybox}
+\subsection{Intuition}
 
-\begin{definition}{Level order / breadth-first traversal}{c03-bfs}
-Start by enqueuing the root. Repeat: dequeue the front node, \emph{visit} it, then enqueue
-its existing children left to right. The walk visits nodes in non-decreasing depth, and
-within one depth, left to right. A \term{queue} is FIFO: elements leave in the order they
-entered -- the exact opposite of a stack, and that single difference turns DFS into BFS.
+Picture the tree cut into horizontal bands. Breadth-first sweeps one band at a time, and
+the queue always holds exactly ``the next band, waiting.'' The subtle move -- the one every
+correct level-order solution makes -- is to \emph{freeze} the queue length at the top of
+each outer iteration: that number is how many nodes are in the current row, and processing
+precisely that many pops the whole row while enqueuing the next.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape]
+  \node[troot] (r) at (0,0) {$1$};
+  \node[tnode] (a) at (-1.7,-1.4) {$2$};
+  \node[tnode] (b) at (1.7,-1.4) {$3$};
+  \node[tleaf] (c) at (-2.6,-2.8) {$4$};
+  \node[tleaf] (d) at (-0.8,-2.8) {$5$};
+  \node[tnode] (e) at (1.7,-2.8) {$6$};
+  \draw[tedge] (r) -- (a); \draw[tedge] (r) -- (b);
+  \draw[tedge] (a) -- (c); \draw[tedge] (a) -- (d);
+  \draw[tedge] (b) -- (e);
+  \draw[<-, accentorange, line width=1pt] (-3.6,-0.05) -- (3.4,-0.05) node[right, font=\scriptsize, text=accentorange] {level 0};
+  \draw[<-, primaryblue,  line width=1pt] (-3.6,-1.45) -- (3.4,-1.45) node[right, font=\scriptsize, text=primaryblue] {level 1};
+  \draw[<-, successgreen,line width=1pt] (-3.6,-2.85) -- (3.4,-2.85) node[right, font=\scriptsize, text=successgreen] {level 2};
+  \node[annot, anchor=north west, align=left, font=\scriptsize] at (4.2,0.2)
+    {start of row 1:\\ queue $=[\,2\;\;3\,]$,\\ snapshot \code{sz}$=2$\\ $\Rightarrow$ pop 2 nodes};
+\end{tikzpicture}
+\caption{Level order on $R$ sweeps one band at a time. At the start of processing level
+$1$ the queue holds exactly that row $\{2,3\}$; freezing \code{sz}$=2$ tells the inner loop
+to pop two nodes (emitting $2,3$) and enqueue their children $4,5,6$ as the next row.
+Output: $1$ / $2,3$ / $4,5,6$.}\label{fig:c03-bfs}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Level (breadth-first) order}{c03-level}
+The \term{level order} of a rooted tree lists nodes by increasing depth, breaking ties
+left-to-right within a level: all of level $0$, then level $1$, and so on. It is produced
+by \term{breadth-first search} (BFS), which explores the frontier nearest the root first.
 \end{definition}
 
-\vsbox{Stack vs queue}{Stack (DFS)}{Queue (BFS)}{last in, first out -- re-expands the most
-recently discovered node: dives deep}{first in, first out -- re-expands the
-longest-waiting node: spreads wide}
+\begin{definition}{Level frontier}{c03-frontier}
+During BFS, at the instant an outer iteration begins, the queue content is exactly one
+whole level; its size is the \term{frontier width} $w$ of that level. The maximum such $w$
+over the run is the \emph{width} of the tree and bounds BFS memory.
+\end{definition}
 
-\subsection{The Template, and the Level-Split Trick}
+\noindent\textbf{In plain words.} A stack reaches \emph{down} (depth-first); a queue reaches
+\emph{across} (breadth-first). ``Snapshot the size'' is how you tell a queue, which has no
+notion of ``level,'' where one row ends and the next begins.
 
-The plain walk produces the flat list $1,2,3,4,5,6$ on the running tree. Useful as-is, but
-LeetCode almost always wants \emph{one vector per level}. The trick: at the top of each
-outer loop the queue holds \emph{exactly one whole level, and nothing else}; freeze its
-size first, then do exactly that many dequeues.
+\subsection{Properties}
 
-\begin{lstlisting}[caption={Level-order template: the frozen \code{sz} is where one level ends and the next begins}, label={lst:c03-bfs}]
+\begin{theorem}{One Iteration, One Level}{c03-bfs-levels}
+The template \coderef{c03-bfs}, with \code{sz = q.size()} taken before the inner loop,
+emits exactly the nodes of one depth per outer iteration, in left-to-right order.
+\end{theorem}
+\begin{proofbox}
+Induction on the outer iteration, i.e.\ on depth $d$. Base $d=0$: the queue starts with
+only the root, \code{sz}$=1$, and the inner loop emits it and enqueues precisely its
+children (level $1$). Step: assume at the top of iteration $d$ the queue holds exactly
+level $d$ (left-to-right) and nothing deeper. \code{sz} freezes that count; the inner loop
+pops all $d$-level nodes \emph{before} any newly pushed node (FIFO), emitting them in order
+and appending their children -- which are exactly level $d{+}1$ -- to the back, preserving
+left-to-right order. So at the top of iteration $d{+}1$ the queue holds level $d{+}1$
+only. The invariant holds, giving one level per iteration.
+\end{proofbox}
+
+\begin{theorem}{BFS Reaches Shallowest First}{c03-bfs-shortest}
+BFS visits nodes in non-decreasing depth; the first time a node is dequeued is via a
+minimum-edge path from the root.
+\end{theorem}
+\begin{proofbox}
+By \thmref{c03-bfs-levels} all depth-$d$ nodes are emitted before any depth-$(d{+}1)$
+node, so visit order is non-decreasing in depth. A node at depth $d$ is enqueued by a
+depth-$(d{-}1)$ parent, hence reached by a $d$-edge path; no shallower path exists (else
+its parent would be at depth $<d{-}1$ and it would have been enqueued an iteration
+earlier). Thus first-dequeue depth equals true minimum distance.
+\end{proofbox}
+\begin{insightbox}
+On a \emph{tree} every root-to-node path is unique, so \thmref{c03-bfs-shortest} is only
+``deeper later''; its real power appears on general graphs (\chref{c07}), where it is the
+shortest-path algorithm. We keep it here to justify ``first-touch is optimal'' reasoning
+used by the right-side-view and depth variants.
+\end{insightbox}
+
+\subsection{The Template}
+
+\begin{lstlisting}[caption={Binary-tree level order -- the frontier-size snapshot}, label={lst:c03-bfs}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
 vector<vector<int>> levelOrder(TreeNode* root) {
     vector<vector<int>> res;
     if (!root) return res;
-    queue<TreeNode*> q; q.push(root);
+    queue<TreeNode*> q;
+    q.push(root);
     while (!q.empty()) {
-        int sz = (int)q.size();               // FREEZE: nodes waiting = this level
+        int sz = q.size();                 // FREEZE the frontier: this row's width
         vector<int> level;
-        for (int i = 0; i < sz; i++) {        // consume exactly this level
-            TreeNode* v = q.front(); q.pop();
-            level.push_back(v->val);
-            if (v->left)  q.push(v->left);    // children wait for the NEXT round
-            if (v->right) q.push(v->right);
+        while (sz--) {                     // process exactly `sz` nodes == one level
+            TreeNode* n = q.front(); q.pop();
+            level.push_back(n->val);
+            if (n->left)  q.push(n->left); // next level accumulates at the back
+            if (n->right) q.push(n->right);
         }
         res.push_back(level);
     }
     return res;
 }
 \end{lstlisting}
+\begin{complexitybox}
+Time $\bigO{n}$: each node is enqueued and dequeued once. Space $\bigO{w}$ where $w$ is the
+maximum level width ($\bigO{n}$ worst case -- a perfect tree's last row has $\sim n/2$
+nodes). This frontier memory is the price of breadth-first order and cannot be driven to
+$\bigO{1}$ the way Morris drives a DFS order.
+\end{complexitybox}
 
-\begin{tracebox}[Level order on the running tree, queue frozen per round]
-Queue written front-first. Round 1 starts with the queue holding only the root, so
-$\text{sz}=1$; during the round we \emph{add} children but the frozen $\text{sz}$ never
-changes -- that is the whole trick.
-\begin{center}\ttfamily\footnotesize
-\begin{tabular}{@{}c l l l@{}}
-\textbf{Round} & \textbf{Queue at freeze} & \textbf{sz} & \textbf{Emitted level}\\ \midrule
-1 & [1]           & 1 & [1]\\
-2 & [2, 3]        & 2 & [2, 3]\\
-3 & [4, 5, 6]     & 3 & [4, 5, 6]  \checkmark\\
-4 & []            & - & \textit{done}
-\end{tabular}
-\end{center}
-\medskip
-Detail of round 2: dequeue $2$ (emit, enqueue $4,5$), dequeue $3$ (emit, enqueue $6$ -- its
-missing \emph{left} child is simply never pushed). Queue at end of round: $[4,5,6]$ -- the
-next level, in left-to-right order, assembled automatically.
+\subsection{Worked Example}
+
+\begin{example}{Level order of $R$}{c03-bfs-run}
+Freeze-sizes go $1,2,3$: iteration~1 pops $1$ (push $2,3$); iteration~2 pops $2,3$
+(push $4,5$ then nothing from $3$'s missing left, then $6$); iteration~3 pops $4,5,6$.
+Result \code{\{[1],[2,3],[4,5,6]\}}.
+\end{example}
+\begin{tracebox}[Queue content at each outer top on $R$]
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item top 1: $[\,1\,]$, \code{sz}=1 $\to$ emit $1$; enqueue $2,3$
+  \item top 2: $[\,2,3\,]$, \code{sz}=2 $\to$ emit $2,3$; enqueue $4,5,6$ (note $3$'s
+        null left enqueues nothing)
+  \item top 3: $[\,4,5,6\,]$, \code{sz}=3 $\to$ emit $4,5,6$; enqueue none
+  \item queue empty $\to$ stop. Levels: $1$ / $2,3$ / $4,5,6$.
+\end{itemize}
 \end{tracebox}
 
-\begin{insightbox}[Why the queue always holds exactly one level]
-Induction: suppose at freeze time the queue is level $d$ in order. Each dequeue emits one
-level-$d$ node and appends its children -- all level $d+1$, left before right -- after
-anything already queued. So after exactly $\text{sz}$ dequeues nothing of level $d$
-remains and the queue is precisely level $d+1$ in order. One line of \coderef{c03-bfs}
-(``push children'') is doing all the ordering work.
-\end{insightbox}
+\subsection{Variations and Twists}
 
-\begin{notebox}[You have met this before]
-LeetCode 102 (Binary Tree Level Order Traversal) and 199 (Binary Tree Right Side View)
-were practice lists in \chref{c01} -- go back and redo them now with
-\coderef{c03-bfs}; they are two-line diffs from here. 102 is the template verbatim;
-199 keeps only \code{level.back()} per round.
-\end{notebox}
+\begin{itemize}[nosep]
+  \item \textbf{Zigzag}: reverse every other emitted row (or fill a preallocated
+        \code{level} from both ends).                       \hfill\lv{3}
+  \item \textbf{Bottom-up}: run level order, then \code{reverse(res)} -- LC 107.  \hfill\lv{2}
+  \item \textbf{Right side view}: push only \code{level.back()} of each row -- LC 199,
+        referenced in \secref{c03-rebuild}'s practice notes.  \hfill\lv{2}
+  \item \textbf{Per-row statistic}: fold max/sum/avg inside the inner loop --
+        \probref{c03-largest-row}, LC 637.                     \hfill\lv{2}
+  \item \textbf{N-ary nodes}: replace the two fixed \code{push} calls with a loop over
+        \code{children} -- \probref{c03-nary-level}.            \hfill\lv{2}
+\end{itemize}
 
-\subsection{BFS Finds Shortest Distances}
+\subsection{Common Pitfalls}\label{sec:c03-bfs-pitfalls}
 
-\begin{proposition}{BFS orders by depth}{c03-bfs-depth}
-In the level-order walk, a node $v$ with $\depth(v)=d$ is visited for the first time in
-round $d+1$ (root in round~1), and no node of depth $> d$ is visited before it.
-\end{proposition}
-\begin{proofbox}
-By the invariant of the insight box above, round $r$ emits exactly the nodes of depth
-$r-1$ -- and by \thmref{c01-unique-path} every node appears in exactly one depth class, so
-it is emitted in exactly one round. Nothing deeper can appear earlier: a node enters the
-queue only when its (unique) parent was dequeued, one round before.
-\end{proofbox}
+\begin{warningbox}[Trap 1 -- reading \code{q.size()} inside the inner loop]
+The frontier \emph{grows} as you enqueue children, so \code{while (i < q.size())} never
+terminates the row correctly (it chases its own tail). Snapshot once \emph{before} the
+inner loop.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: moving goalpost -- row never ends}, language=C++, basicstyle=\ttfamily\small]
+while (!q.empty()) {
+    for (int i = 0; i < (int)q.size(); ++i) {   // q.size() re-read each test!
+        auto* n = q.front(); q.pop(); /* ... push children ... */
+    }
+}
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: freeze the width once}, language=C++, basicstyle=\ttfamily\small]
+while (!q.empty()) {
+    int sz = q.size();                           // one snapshot = this row's width
+    while (sz--) { auto* n = q.front(); q.pop(); /* ... push children ... */ }
+}
+\end{lstlisting}
 
-\usedin{Chapter 8 and graph BFS}{On an unweighted \emph{graph} the same argument gives
-true shortest paths (first visit $=$ minimum edges); in a tree there is only one path
-anyway, so BFS is simply ``by depth'' -- which is still exactly what ``minimum depth''
-style problems want.}
+\begin{warningbox}[Trap 2 -- enqueuing null children]
+Pushing \code{n->left} unconditionally puts $\nil$ in the queue, so you dereference it
+next iteration (RE) or emit phantom values. Guard both pushes with a non-null test -- and
+do \emph{not} rely on a \code{if(!n) continue} patch to hide it.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: nulls pollute the frontier}, language=C++, basicstyle=\ttfamily\small]
+q.push(n->left); q.push(n->right);   // may enqueue nullptr
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: only real nodes enter the queue}, language=C++, basicstyle=\ttfamily\small]
+if (n->left)  q.push(n->left);
+if (n->right) q.push(n->right);
+\end{lstlisting}
 
-\subsection{Per-Level Aggregates}
+\begin{warningbox}[Trap 3 -- forgetting the empty-tree guard]
+\code{q.push(root)} on a null root (LC's ``tree can be empty'' case) makes the first
+iteration dereference $\nil$. Return the empty result before touching the queue.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}}  , language=C++, basicstyle=\ttfamily\small]
+queue<TreeNode*> q; q.push(root);   // root may be nullptr
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}}, language=C++, basicstyle=\ttfamily\small]
+if (!root) return res;               // handle the empty tree up front
+queue<TreeNode*> q; q.push(root);
+\end{lstlisting}
 
-Replacing \code{level.push\_back} by a running number per round gives every
-``aggregate by level'' variant in one edit.
 
-\begin{example}{Sums and averages per level of the running tree}{c03-level-agg}
-Levels from the trace above: $[1]$, $[2,3]$, $[4,5,6]$.
-Sums: $1$, $5$, $15$. Averages: $1.0$, $2.5$, $5.0$ -- LeetCode 637 verbatim. Max per
-level: $1$, $3$, $6$ -- LeetCode 515. Deepest-level sum: $15$ -- LeetCode 1302, which the
-Chapter~2 practice list also set \emph{top-down with DFS}; same answer, two directions.
-\end{example}
+\subsection{Problem Lab}
 
-\subsection{Solved Problems}
+One \lv{2} warm-up (N-ary level order -- the template with a children loop) solved
+concisely, then two \lv{3} core problems that reshape the emitted rows: zigzag
+(reverse alternate rows) and per-row maximum (fold inside the loop).
 
-\solvedproblem{c03-level-bottom}{Binary Tree Level Order Traversal II}{LeetCode 107}
-  {https://leetcode.com/problems/binary-tree-level-order-traversal-ii/}{LC Easy}
-  {BFS template, output reversed}
+\solvedproblem{c03-nary-level}{N-ary Tree Level Order Traversal}{LeetCode 429}
+  {https://leetcode.com/problems/n-ary-tree-level-order-traversal/}{LC Medium L2}
+  {BFS, frontier snapshot, N-ary children loop}
 
-\begin{problemstatement}[Level Order II (bottom-up)]
-Return level-order lists, but starting from the \emph{deepest} level up to the root.
+\begin{problemstatement}[N-ary Level Order]
+Given an N-ary tree (each node has a \code{vector<Node*> children}), return its level
+order traversal -- one list per depth, children in the given left-to-right order.
 \end{problemstatement}
 
 \solstep{Understanding the Problem}
-Exactly \coderef{c03-bfs} with the output read backwards. The running tree wants
-\code{[[4,5,6], [2,3], [1]]}.
+Identical to \coderef{c03-bfs} except a node may have any number of children: replace the
+two guarded pushes with a single loop over \code{children}. The frontier snapshot still
+draws the level boundary.
 
 \solstep{Key Observations}
 \begin{observation}
-Either call \code{reverse} once on \code{res} at the end, or insert every \code{level} at
-the front (\code{res.begin()}) -- the single final reverse is cheaper and cleaner.
+The child-count is irrelevant to BFS -- you enqueue all of them and the frozen \code{sz}
+already accounts for the whole next row.
 \end{observation}
 \begin{observation}
-Do \emph{not} reverse inside the walk by enqueueing right-to-left: that changes
-left/right order \emph{within} each level, which the problem does not ask for.
+The empty tree is \code{root == nullptr}; guard before pushing (Trap 3).
 \end{observation}
 
+\solstep{Solution}
+Standard level-order loop; inner body emits \code{n->val} then pushes every child.
+
 \solstep{Implementation}
-\begin{lstlisting}[caption={Bottom-up level order (LeetCode 107) -- template + one reverse}, label={lst:c03-107}]
+\begin{lstlisting}[caption={N-ary Level Order (LeetCode 429)}, label={lst:c03-nary-level}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Node {
+public:
+    int val;
+    vector<Node*> children;
+    Node() {}
+    Node(int v) : val(v) {}
+};
+
 class Solution {
 public:
-    vector<vector<int>> levelOrderBottom(TreeNode* root) {
+    vector<vector<int>> levelOrder(Node* root) {
         vector<vector<int>> res;
         if (!root) return res;
-        queue<TreeNode*> q; q.push(root);
+        queue<Node*> q; q.push(root);
         while (!q.empty()) {
-            int sz = (int)q.size();
+            int sz = q.size();
             vector<int> level;
-            for (int i = 0; i < sz; i++) {
-                TreeNode* v = q.front(); q.pop();
-                level.push_back(v->val);
-                if (v->left)  q.push(v->left);
-                if (v->right) q.push(v->right);
+            while (sz--) {
+                Node* n = q.front(); q.pop();
+                level.push_back(n->val);
+                for (Node* c : n->children) q.push(c);  // the ONLY change vs binary BFS
             }
             res.push_back(level);
         }
-        reverse(res.begin(), res.end());      // the only new line vs \coderef{c03-bfs}
         return res;
     }
 };
 \end{lstlisting}
 
+\solstep{Trace}
+\begin{tracebox}[On LC's sample \code{[1,null,2,3,4,null,null,5,6]}]
+Row 0: $[1]$. Row 1: $[2,3,4]$ (children of $1$). Row 2: $[5,6]$ (children of $2$).
+Result \code{\{[1],[2,3,4],[5,6]\}}. \ac.
+\end{tracebox}
+
 \solstep{Complexity}
 \begin{complexitybox}
-Time $\bigO{n}$, memory $\bigO{w}$ for the queue, where $w$ = maximum level width: the
-queue never holds more than the rest of the current level plus the next one. Contrast the
-two memory profiles: DFS costs $\bigO{h}$ (tall on skewed trees, tiny on balanced) and BFS
-costs $\bigO{w}$ (tall $=$ wide on balanced trees, tiny on skewed chains) -- neither
- dominates, which is why both traversals exist.
+Time $\bigO{n}$, space $\bigO{w}$ (widest row). Verdict: \ac.
 \end{complexitybox}
 
+\begin{insightbox}[Key takeaway]
+BFS is \emph{representation-agnostic}: binary or N-ary, only the ``add my children'' step
+changes -- the frontier logic is untouched. Compare with \probref{c03-preorder}'s N-ary
+preorder (LC 589): same principle on the DFS side.
+\end{insightbox}
+
 \solvedproblem{c03-zigzag}{Binary Tree Zigzag Level Order Traversal}{LeetCode 103}
-  {https://leetcode.com/problems/binary-tree-zigzag-level-order-traversal/}{LC Medium}
-  {BFS template, reverse alternate levels}
+  {https://leetcode.com/problems/binary-tree-zigzag-level-order-traversal/}{LC Medium L3}
+  {BFS, conditional row reversal}
 
 \begin{problemstatement}[Zigzag Level Order]
-Level 0 left to right, level 1 right to left, level 2 left to right, alternating -- return
-the lists.
+Return level order traversal, but alternating direction: level $0$ left-to-right, level
+$1$ right-to-left, level $2$ left-to-right, and so on.
 \end{problemstatement}
 
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, 15 minutes]
+A fair attempt: produce plain level order, then fix the direction per row.
+\peek{is the \emph{walk} actually different, or only the \emph{listing} of each row?}
+\nudge{collect each row normally; keep a boolean that flips every level and reverse the
+row when it is \code{false}.}
+\fullhint{BFS + \code{bool leftToRight}; \code{if(!leftToRight) reverse(level.begin(),
+level.end());} before pushing. The queue order never changes -- only the emitted row. Full
+build below.}
+\end{attemptgate}
+
 \solstep{Understanding the Problem}
-The walk itself does not change at all -- only the \emph{reporting} of odd levels. Running
-tree: levels $[1]$, $[2,3]$, $[4,5,6]$ become $[[1],[3,2],[4,5,6]]$.
+The traversal (what enters the queue and when) is \emph{exactly} \coderef{c03-bfs}; only
+the \emph{presentation} of alternate rows is mirrored. Recognising that the BFS machinery
+is unchanged is the whole trick -- do not try to traverse right-to-left by reordering
+pushes (that breaks the next level).
 
 \solstep{Key Observations}
 \begin{observation}
-Keep a round counter (or test \code{res.size() \% 2}): after building \code{level}
-normally, \code{if (odd) reverse(level.begin(), level.end());}. One line.
+Reversing a collected row is $\bigO{\text{width}}$ and local to one level; it cannot
+corrupt the queue because the queue was already filled in canonical order.
 \end{observation}
 \begin{observation}
-A deque variant (push front on odd rounds) saves the reversal but is error-prone; the
-reverse version is what to write in an interview \emph{and} on LeetCode.
+Direction is a pure function of level parity -- one flipping boolean suffices, no depth
+counter needed.
 \end{observation}
 
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Alternate the \emph{push} order (children right-then-left on odd levels).}{The
+queue now holds next-level nodes in mirrored order, so \emph{their} children get mirrored
+too, compounding the error every level -- you fix rows $1,3,5$ but break $2,4$. Direction
+must live in the output, not the frontier.}
+\aha{run canonical BFS untouched; reverse only the vector you are about to store on odd
+levels.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} mirror the pushes & reorder enqueue & $O(n)$ & \textbf{WA} \\
+2 & \lv{3} BFS + reverse row & canonical BFS, flip output & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Solution}
+Plain level-order BFS. Maintain \code{bool ltr=true}; after building \code{level}, if
+\code{!ltr} reverse it, push to \code{res}, then flip \code{ltr}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By \thmref{c03-bfs-levels} the un-reversed rows are the correct left-to-right level lists.
+Reversing row $d$ when $d$ is odd yields right-to-left for those rows and leaves even rows
+left-to-right, which is precisely the zigzag specification; the queue state is untouched by
+the reversal, so all rows remain correct.
+\end{proofbox}
+
 \solstep{Implementation}
-\begin{lstlisting}[caption={Zigzag level order (LeetCode 103) -- template + conditional reverse}, label={lst:c03-103}]
+\begin{lstlisting}[caption={Zigzag Level Order (LeetCode 103)}, label={lst:c03-zigzag}]
 class Solution {
 public:
     vector<vector<int>> zigzagLevelOrder(TreeNode* root) {
         vector<vector<int>> res;
         if (!root) return res;
         queue<TreeNode*> q; q.push(root);
-        bool leftToRight = true;
+        bool ltr = true;                            // level 0 goes left -> right
         while (!q.empty()) {
-            int sz = (int)q.size();
-            vector<int> level(sz);
-            for (int i = 0; i < sz; i++) {
-                TreeNode* v = q.front(); q.pop();
-                int pos = leftToRight ? i : sz - 1 - i;   // the whole zigzag logic
-                level[pos] = v->val;
-                if (v->left)  q.push(v->left);
-                if (v->right) q.push(v->right);
+            int sz = q.size();
+            vector<int> level;
+            while (sz--) {
+                TreeNode* n = q.front(); q.pop();
+                level.push_back(n->val);
+                if (n->left)  q.push(n->left);
+                if (n->right) q.push(n->right);
             }
+            if (!ltr) reverse(level.begin(), level.end());   // only the OUTPUT flips
             res.push_back(level);
-            leftToRight = !leftToRight;
+            ltr = !ltr;
         }
         return res;
     }
 };
 \end{lstlisting}
 
+\solstep{Trace}
+\begin{tracebox}[On $R$]
+Level 0: \code{ltr}$=$true $\to [1]$. Level 1 collected $[2,3]$, \code{ltr}$=$false
+$\to$ reversed $[3,2]$. Level 2 collected $[4,5,6]$, \code{ltr}$=$true $\to [4,5,6]$.
+Result \code{\{[1],[3,2],[4,5,6]\}}. \ac.
+\end{tracebox}
+
 \solstep{Complexity}
 \begin{complexitybox}
-Time $\bigO{n}$, memory $\bigO{w}$. Writing into \code{level[pos]} instead of building
-then reversing avoids a per-level \code{reverse} call -- same $\bigO{w}$ total either way,
-because a level is reversed at most once.
+Time $\bigO{n}$ (each node visited once; total reversal work over all rows is
+$\bigO{n}$). Space $\bigO{w}$. A deque variant fills odd rows front-first to avoid the
+explicit reverse -- same asymptotics, marginally fewer writes.
 \end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Empty tree & returns \{\} at the guard \\
+Single node & one row $[\,\mathit{root}\,]$, no reversal \\
+Full last level & reversal cost $\bigO{n/2}$ but still linear overall \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Reversing \emph{inside} the inner loop (per node) instead of once per row costs a factor
+and confuses indices; collect the whole row, then reverse once. Variant: fill
+\code{level[mid $\pm$ j]} from both ends to skip the reverse (a matter of constant
+factor, not correctness).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item When a problem changes only how a level is \emph{presented}, keep the traversal
+        canonical and post-process the row.
+  \item ``Don't touch the frontier for a cosmetic requirement'' generalises: the queue/
+        stack invariant is fragile; output shaping is free.
+  \item Level parity is a $\bigO{1}$-state toggle -- most zigzag bugs come from tracking it
+        wrong, not from BFS.
+\end{enumerate}
+\end{insightbox}
+
+\solvedproblem{c03-largest-row}{Find Largest Value in Each Tree Row}{LeetCode 515}
+  {https://leetcode.com/problems/find-largest-value-in-each-tree-row/}{LC Medium L3}
+  {BFS with per-row reduction, or DFS-with-depth alternative}
+
+\begin{problemstatement}[Largest Value Per Row]
+Given a binary tree, return a vector whose $i$-th element is the maximum node value at
+depth $i$. Node values fit in signed 32-bit (may be negative).
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, 15 minutes]
+A fair attempt: sweep levels and take each row's max.
+\peek{does a per-row reduction need anything beyond the frontier loop?}
+\nudge{fold \code{rowMax = max(rowMax, n->val)} inside the inner loop; reset per row; use
+\code{INT\_MIN} as the seed since values can be negative.}
+\fullhint{level-order BFS, one \code{curMax} per row reinitialised to \code{INT\_MIN}.
+A DFS that indexes \code{res[depth]} is the space-friendly twin. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+This is a per-row \emph{aggregate}, not a per-row \emph{listing} -- the same frontier loop
+reduced with \code{max} instead of collected. The negative-value range is the one real
+hazard (seeding \code{curMax} at $0$ fails a row of all-negatives).
+
+\solstep{Key Observations}
+\begin{observation}
+The maximum of a row is computed by folding \code{max} over the inner loop's nodes; no
+extra storage per row is needed (contrast \probref{c03-zigzag}).
+\end{observation}
+\begin{observation}
+Values can be negative, so the per-row seed must be \code{INT\_MIN}, never $0$.
+\end{observation}
+\begin{observation}
+A DFS reaches the same answer by keeping \code{res[depth]} and updating it on each visit --
+$\bigO{h}$ stack instead of $\bigO{w}$ queue.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Recompute each row's max by a fresh DFS to depth $d$ for every $d$.}{Correct but
+$\bigO{n \cdot h}$ -- you re-walk upper levels for each row.}
+\deadend{Init \code{curMax}$=0$.}{A row like $\{-5,-2\}$ yields max $0$, wrong; the
+negative range is a deliberate trap.}
+\aha{One BFS sweep, one fold of \code{max} per row, seeded at \code{INT\_MIN}.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} per-row depth DFS & re-walk for each level & $O(n\cdot h)$ & \tle \\
+2 & \lv{3} BFS fold & one sweep, \code{max} per row & $O(n)$, $O(w)$ & \ac \\
+3 & \lv{3} DFS + depth index & \code{res[depth]} update & $O(n)$, $O(h)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rungs 2 and 3 tie asymptotically (which is ``better'' depends on whether $h$ or $w$
+dominates); we build BFS to stay inside this section's tool.
+
+\solstep{Solution}
+Level-order BFS; for each row run \code{sz} pops, doing \code{curMax = max(curMax,
+n->val)} and enqueueing children; push \code{curMax} after the row.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By \thmref{c03-bfs-levels} iteration $d$ processes exactly the depth-$d$ nodes, so the
+fold $\max$ over those pops equals the row maximum. \code{INT\_MIN} is the identity of
+\code{max} over a non-empty set and is $\le$ every legal value, so a negative-only row is
+handled correctly; every row is non-empty by construction (BFS stops when there are none).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Largest Value in Each Row (LeetCode 515)}, label={lst:c03-largest-row}]
+class Solution {
+public:
+    vector<int> largestValues(TreeNode* root) {
+        vector<int> res;
+        if (!root) return res;
+        queue<TreeNode*> q; q.push(root);
+        while (!q.empty()) {
+            int sz = q.size();
+            int curMax = INT_MIN;                 // identity for max; handles negatives
+            while (sz--) {
+                TreeNode* n = q.front(); q.pop();
+                curMax = max(curMax, n->val);
+                if (n->left)  q.push(n->left);
+                if (n->right) q.push(n->right);
+            }
+            res.push_back(curMax);
+        }
+        return res;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$]
+Row 0 \code{max(INT\_MIN,1)}$=1$; Row 1 over $\{2,3\}$ $=3$; Row 2 over $\{4,5,6\}$ $=6$.
+Result \code{[1,3,6]}. \ac.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, space $\bigO{w}$ (queue). The DFS twin is $\bigO{n}$ / $\bigO{h}$, which
+wins memory on a wide-but-shallow tree and loses on a tall-thin one.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+All-negative values & \code{INT\_MIN} seed yields the true (negative) row max \\
+Single node & returns \code{[\,root->val\,]} \\
+Value $=\texttt{INT\_MIN}$ & seed equals value; \code{max} still returns it -- safe \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Seeding \code{curMax}$=0$ (or \code{curMax}$=$ first child value read lazily) is the classic
+miss on all-negative rows. Variant LC 199 (right side view) replaces the fold with
+``keep \code{level.back()}''; LC 637 (row averages) folds \code{sum} and divides by the
+snapshot \code{sz} -- both are this loop with a different reducer.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Per level, compute $X$'' is one template: swap the reducer (\code{max},
+        \code{sum}, collect) to serve a dozen LC problems.
+  \item Reduction identities (\code{INT\_MIN} for max, $0$ for sum) must respect the value
+        domain -- the negative case is where these die.
+  \item BFS ($\bigO{w}$) and DFS-with-depth ($\bigO{h}$) are interchangeable for per-row
+        answers; pick by which of width/height dominates.
+\end{enumerate}
+\end{insightbox}
 
 \subsection{Practice Problems}
 
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you snapshot \code{q.size()} \emph{before} the inner loop? (Trap 1.)
+  \item Do both child pushes have non-null guards, and is the empty-tree case returned
+        early? (Traps 2--3.)
+  \item For a per-row aggregate, is your fold identity correct for negative values?
+  \item Is your cosmetic change (zigzag/order) in the \emph{output}, not the queue?
+        (\probref{c03-zigzag}'s dead end.)
+\end{itemize}
+\end{stuckbox}
+
 \begin{practiceset}
+  \practice{Binary Tree Level Order Traversal II}{LeetCode 107}
+    {https://leetcode.com/problems/binary-tree-level-order-traversal-ii/}{LC Medium L2}
+    {Run ordinary level order, then \code{reverse(res)} -- bottom-up is one line away from
+    \coderef{c03-bfs}. (The plain top-down LC 102 is this template verbatim.)}
   \practice{Average of Levels in Binary Tree}{LeetCode 637}
-    {https://leetcode.com/problems/average-of-levels-in-binary-tree/}{LC Easy}
-    {template with a \code{double sum} and counter per round instead of a vector; divide at freeze-size \code{sz}.}
-  \practice{N-ary Tree Level Order Traversal}{LeetCode 429}
-    {https://leetcode.com/problems/n-ary-tree-level-order-traversal/}{LC Medium}
-    {identical template; the inner \code{if (left/right)} pair becomes \code{for (c : children) q.push(c);}.}
-  \practice{Find Largest Value in Each Tree Row}{LeetCode 515}
-    {https://leetcode.com/problems/find-largest-value-in-each-tree-row/}{LC Medium}
-    {template with \code{mx = max(mx, v->val)} per round; start \code{mx} at \code{INT\_MIN}, not 0 -- values can be negative.}
-  \practice{Populating Next Right Pointers in Each Node}{LeetCode 116}
-    {https://leetcode.com/problems/populating-next-right-pointers-in-each-node/}{LC Medium}
-    {level order where the work is a pointer, not a value: inside the \code{sz}-loop link \code{prev = q-previous node of this round}; \code{prev->next = v}.}
-  \practicehh{Reverse Odd Levels of Binary Tree}{LeetCode 2641}
-    {https://leetcode.com/problems/reverse-odd-levels-of-binary-tree/}{LC Medium}
-    {level BFS with the round number: on odd rounds, collect the level's node POINTERS, then swap their \code{val}s pairwise.}
-    {swapping values (not pointers) makes the tree surgery trivial -- one vector of \code{TreeNode*}, two-pointer swap inside it.}
+    {https://leetcode.com/problems/average-of-levels-in-binary-tree/}{LC Easy L2}
+    {Per-row fold of \code{sum}, then divide by the frozen \code{sz}; use \code{long long}
+    or \code{double} to avoid integer truncation and overflow.}
+  \practice{Populating Next Right Pointers in Each Node II}{LeetCode 117}
+    {https://leetcode.com/problems/populating-next-right-pointers-in-each-node-ii/}{LC Medium L4}
+    {Within each level, link \code{prev->next = cur} as you pop; the harder follow-up is to
+    do it in $\bigO{1}$ space by treating the current level as a linked list that builds
+    the next -- the ``BFS without a queue'' trick.}
 \end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 3.3 Breadth-first / level order]
+Queue, not stack: BFS sweeps one depth at a time. \emph{Freeze} \code{q.size()} to mark the
+row, pop that many, enqueue children (guarded, non-null), and the frozen width is your
+per-row loop bound. Per-row answers = same loop, different reducer; cosmetic reordering
+lives in the output, never the frontier. Memory is $\bigO{w}$ -- no $\bigO{1}$ space here.
+\selftest{
+  \item Write \coderef{c03-bfs} from memory, marking the snapshot line and why it must be
+        frozen.
+  \item State BFS time and space, and the case where the queue hits $\bigO{n}$.
+  \item On $R$, give level order, zigzag, and the per-row maximum without looking.
+  \item Why must you not reorder child \emph{pushes} to get zigzag?
+  \item Give the correct fold-identity for per-row max and for per-row sum.
+}
+\end{recallbox}

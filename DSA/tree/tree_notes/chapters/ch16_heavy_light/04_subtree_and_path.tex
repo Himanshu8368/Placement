@@ -1,0 +1,296 @@
+% =====================================================================
+%  22.4  Subtree and Path in One Order: why heavy-first pos serves BOTH,
+%        the plain-tin vs HLD-pos conflation note, the re-rooted subtree
+%        that splits into two intervals, and a query-shape gallery.
+%  Exports: sec:c16-subpath  def:c16-orders  fig:c16-orders
+%           lst:c16-subpath  prob:c16-916e  lst:c16-916e
+%  Reuses lst:c16-build (22.1) and lst:c16-pathupdate (22.3) -- no re-teach.
+%  Numbers agree with 00_opener: pos=(1,7,2,10,8,6,3,9,4,5),
+%    B=(3,4,5,7,0,1,2,1,3,5), subtree(3)=[2..6], subtree(2)=[7..10].
+%  Plain-Euler contrast computed on T (tin = DFS entering children in increasing
+%    id order): tin=(1,4,2,3,5,9,6,10,7,8) -- subtree(3)=[2..6] (same interval as
+%    the HLD order) but subtree(2)=[4..5] in tin vs [7..10] under pos.
+%  Worked composite on T: add 10 to path 4--10 (22.3), then read subtree(3)=33.
+%  CF 916E Jamie and Tree (2400), verified live: 1 v = re-root; 2 u v x = add x to
+%    the subtree of SMALLEST SIZE containing u and v (= subtree of lca under the
+%    current root); 3 v = subtree sum.  n,q<=1e5, |a_i|,|x|<=1e8.  Sample 1:
+%    n=6 q=7, a=(1,4,2,8,5,7), edges 1-2,3-1,4-3,4-5,3-6; queries
+%    3 1 / 2 4 6 3 / 3 4 / 1 6 / 2 2 4 -5 / 1 4 / 3 3   ->  27 19 5.
+% =====================================================================
+\section{Subtree and Path in a Single Order}\label{sec:c16-subpath}
+
+\begin{previouslybox}[Two orders, one promise: the flatten gave subtrees, the chains gave paths -- here they are the same array]
+Chapter~5 (\chref{c24}) flattened the tree with a plain \(\tin\) DFS and proved the subtree-is-an-interval law; Chapters~19--20 answered range queries and range writes on such an array.  Section~22.1 (\(\secref{c16-decomp}\)) built a \emph{different} order, \(\mathit{pos}\), whose extra property is that chains are intervals too -- and it kept the subtree law as a free bonus, because \(\mathit{pos}\) is still a DFS preorder (\(\defref{c16-pos}\)).  Sections~22.2--22.3 spent that second property on paths.  This section cashes the first: everything a path query or update does, and everything a subtree query or update does, run on the \emph{same} segment tree over the \emph{same} \(\mathit{pos}\), with no auxiliary structure.  This is exactly what \(\secref{c16-decomp}\)'s opener promised -- ``one cut, two payoffs'' -- and it is the composite shape the last rows of the opener's Which-Tool table reserve for HLD.
+\end{previouslybox}
+
+\begin{topicintro}
+A mixed workload asks, in arbitrary order, for a path fold, a path write, a subtree fold, and a subtree write over one mutable set of values.  A plain Euler order handles the subtree pair but scatters paths; a per-chain structure would handle paths but break subtrees into pieces unless the chain order is chosen carefully.  The heavy-first \(\mathit{pos}\) is the unique ordering used here that does both: a subtree is exactly \([\mathit{pos}(v),\mathit{pos}(v)+\mathit{size}(v)-1]\), and a path is \(O(\log n)\) ranges in the very same coordinates.  Two subtleties make the section non-trivial.  First, the \emph{tin/pos conflation}: under a fixed root the two orders frequently give the same interval for the same subtree, which tempts readers into treating them as interchangeable -- they are not, and the gallery below pins down when they differ.  Second, a \emph{re-rooted} subtree need not be an interval at all: with the root moved, ``below \(v\)'' can become the complement of a child's subtree, which costs two ranges.  Both are handled without leaving the one array.
+
+\textbf{Prerequisites.} \(\secref{c16-decomp}\) (\(\mathit{pos}\), subtree intervals), \(\secref{c16-pathq}\)/\(\secref{c16-pathupd}\) (the jump loop and the lazy tag).  Chapter~5 (\chref{c24}) -- the plain \(\tin/\tout\) flatten, contrasted here and \emph{not} replaced.  Chapter~11 (\chref{c11}) -- \(\mathrm{lca}\) under a fixed root, used to name the update target.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item answer a subtree sum and a path sum from one segment tree, and write either with one lazy tag; \hfill\lv{4}--\lv{5}
+  \item state precisely when the plain \(\tin\) and the HLD \(\mathit{pos}\) give the same interval, and when they do not; \hfill\lv{4}
+  \item decompose a re-rooted subtree into at most two \(\mathit{pos}\)-intervals and justify the bound; \hfill\lv{5}
+  \item reconcile node-centred and edge-centred bookkeeping inside one structure. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{Two orders, and the trap of confusing them}
+% ---------------------------------------------------------------
+
+\begin{definition}{Plain Euler \(\tin\) versus heavy-first \(\mathit{pos}\)}{c16-orders}
+Fix a root. The \term{plain Euler order} \(\tin\) enters each node and then recurses into its children in increasing id; the \term{HLD order} \(\mathit{pos}\) enters each node and recurses into the heavy child \emph{first}, then the light children by increasing id (\(\defref{c16-pos}\)). Both are DFS preorders, so for every \(v\) both place \(\mathrm{sub}(v)\) on a contiguous interval of length \(\mathit{size}(v)\) starting at the node's own number -- but the intervals are computed in \emph{different coordinate systems}, and a chain is contiguous in \(\mathit{pos}\) only.
+\end{definition}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.86, transform shape,
+  hd/.style={font=\scriptsize\bfseries, text=white},
+  c1/.style={fill=primaryblue, rounded corners=1.5pt},
+  c2/.style={fill=successgreen, rounded corners=1.5pt},
+  c3/.style={fill=difforange, rounded corners=1.5pt},
+  c4/.style={fill=warningred, rounded corners=1.5pt}]
+  % plain tin strip: preorder 1,2,4,5,8,3,6,7,9,10  (children increasing, heavy ignored)
+  \node[font=\scriptsize\bfseries, anchor=east] at (0,0.9) {\(\tin\) (plain)};
+  \foreach \lab/\col [count=\k from 0] in {1/c1,2/c2,4/c4,5/c2,8/c2,3/c1,6/c3,7/c1,9/c1,10/c1}
+    \node[\col, hd, minimum width=6.2mm, minimum height=6mm] at (0.5+\k*0.68,0.9) {\(\lab\)};
+  \node[font=\scriptsize\ttfamily, text=darkgray, anchor=west] at (7.6,0.9) {sub(2)=[2..5]};
+  % HLD pos strip: positions 1..10 hold nodes 1,3,7,9,10,6,2,5,8,4
+  \node[font=\scriptsize\bfseries, anchor=east] at (0,-0.2) {\(\mathit{pos}\) (HLD)};
+  \foreach \lab/\col [count=\k from 0] in {1/c1,3/c1,7/c1,9/c1,10/c1,6/c3,2/c2,5/c2,8/c2,4/c4}
+    \node[\col, hd, minimum width=6.2mm, minimum height=6mm] at (0.5+\k*0.68,-0.2) {\(\lab\)};
+  \node[font=\scriptsize\ttfamily, text=darkgray, anchor=west] at (7.6,-0.2) {sub(2)=[7..10]};
+  % chain spans under pos
+  \draw[line width=1.6pt, draw=primaryblue] (0.5,-0.62) -- (3.88,-0.62) node[midway, above=1pt, font=\tiny, text=primaryblue] {\(C_1=[1..5]\)};
+  \draw[line width=1.6pt, draw=successgreen] (4.22,-0.62) -- (6.26,-0.62) node[midway, above=1pt, font=\tiny, text=successgreen] {\(C_2=[7..9]\)};
+  \node[font=\scriptsize, text=darkgray, anchor=west, align=left] at (0.05,-1.35)
+    {same tree, same root, two numberings: \(C_1=\{1,3,7,9,10\}\) is one block \([1..5]\) in \(\mathit{pos}\) but three scattered cells in \(\tin\)};
+\end{tikzpicture}
+\caption{The plain \(\tin\) order and the HLD \(\mathit{pos}\) order of \(T\) side by side (cells show the node stored at each position; colour \(=\) chain). Both are DFS preorders, so both keep every subtree contiguous -- but they assign \emph{different coordinates} to the same subtree: subtree~2 is \([2..5]\) under \(\tin\) and \([7..10]\) under \(\mathit{pos}\), subtree~3 is \([6..10]\) under \(\tin\) and \([2..6]\) under \(\mathit{pos}\). Only \(\mathit{pos}\) additionally makes each chain one block (\(C_1=[1..5]\)). Any structure must commit to ONE of the two coordinate systems; ranges taken from the other are silently wrong.}
+\label{fig:c16-orders}
+\end{figure}
+
+\begin{warningbox}[The tin-versus-pos conflation: this chapter's most common silent wrong answer]
+Under the fixed root~1 the two orders are the same length and agree on the whole tree (\(\text{sub}(1)=[1..10]\) in both), and a hand-written subtree query looks equally plausible in either numbering -- so a swapped pair of arrays slips past reading and breaks on the judge.  The rules that never fail: a chain is an interval only in \(\mathit{pos}\); \(\mathit{size}\) must index the array that produced it (a \(\tin\) subtree ends at \(\tin(v)+\mathit{size}(v)-1\), a \(\mathit{pos}\) subtree at \(\mathit{pos}(v)+\mathit{size}(v)-1\)); and a segment tree is built on \emph{exactly one} of the two.  Chapter~5's \(\tin\) and this chapter's \(\mathit{pos}\) are different coordinate systems that happen to overlap on part of the tree.
+\end{warningbox}
+
+\begin{tracebox}[The two orders on T, computed once and for all]
+\(\tin\) (enter the node, then recurse into children by increasing id): \(1,2,4,5,8,3,6,7,9,10\), i.\(\mathrm{e.}\) \(\tin=(1,2,6,3,4,7,8,5,9,10)\) over nodes \(1..10\). \(\mathit{pos}\) (heavy child first): \((1,7,2,10,8,6,3,9,4,5)\). Subtree~3 \(=\{3,6,7,9,10\}\): in \(\tin\) it spans \(\tin(3)=6\) to \(6+5-1=10\) \(=\{3,6,7,9,10\}\) ✓; in \(\mathit{pos}\) it spans 2 to 6 ✓ -- both one interval, in \emph{different} coordinates. Subtree~2 \(=\{2,4,5,8\}\): \(\tin=[2..5]\), \(\mathit{pos}=[7..10]\) -- again both contiguous, never the same numbers. Chain \(C_1=\{1,3,7,9,10\}\): contiguous \([1..5]\) in \(\mathit{pos}\); in \(\tin\) it is \(\{1,6,7,9,10\}\) at times \(1,6,8,9,10\) -- broken into three runs. That asymmetry is the whole reason \(\mathit{pos}\), not \(\tin\), is the coordinate a path engine must use (\figref{c16-orders}).
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Subtree write, path read -- the composite}
+% ---------------------------------------------------------------
+
+Because the ranges live in one array, mixing operations costs nothing extra. The composite we want on \(T\) is: \emph{add 10 to every node on path \(4\)--\(10\)}, then \emph{read the sum of subtree~3}.
+
+\begin{lstlisting}[caption={Subtree operations in the HLD order: range add / range sum over [pos(v), pos(v)+size(v)-1] on the SAME lazy tree that serves the path loop of lst:c16-pathupdate}, label={lst:c16-subpath}]
+// One segment tree over pos[] with Ch.20's lazy tag serves BOTH roles:
+long long subtreeSum(int v){                       // subtree = one interval
+    return rangeSum(1,1,cur, pos[v], pos[v] + sz[v] - 1);
+}
+void subtreeAdd(int v, long long x){               // rewrite a whole subtree
+    rangeAdd(1,1,cur, pos[v], pos[v] + sz[v] - 1, x);
+}
+// pathAdd / pathSum are exactly lst:c16-pathupdate -- same seg[], same lazy[].
+// Mixing them is free: every operation is a range op on one array.
+\end{lstlisting}
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Update the path, read the subtree.} \(\text{pathAdd}(4,10,10)\) tags \([10,10],[7,7],[1,5]\); then \(\text{subtreeSum}(3)\) reads the one interval \([2..6]\) \(=B'=(14,15,17,10,1)\), sum \(=\mathbf{57}\). Cross-check: the seed subtree~3 sum over \(\{3,6,7,9,10\}\) is \(4{+}1{+}5{+}7{+}0=17\), and four of those nodes \(\{3,7,9,10\}\) also lie on the updated path \(4\)--\(10\), so \(17+4\cdot10=57\). One tree, both roles.
+  \item \textbf{Update the subtree, read the path.} \(\text{subtreeAdd}(3,5)\) tags only \([2..6]\); a path \(6\)--\(10\) fold reads \([6,6]\) then the same-chain \([2,5]\) in the same tree, picking up the \(+5\) wherever the path dips inside subtree~3 (here every node except~6).
+\end{itemize}
+
+\begin{observation}
+The reverse mix (subtree update + path query) is where a \emph{BIT on the plain Euler order} would quietly fail: the update stays one \(\tin\)-interval, but the path is scattered in \(\tin\), so the query would need \(O(n)\) point reads. HLD keeps both sides logarithmic precisely because the order it commits to is the one that serves \emph{both} shapes.
+\end{observation}
+
+% ---------------------------------------------------------------
+\subsection{Re-rooting: when a subtree stops being one interval}
+% ---------------------------------------------------------------
+
+Fix the DFS at root~1 and let \(\mathit{pos},\mathit{size}\) be computed there forever -- the structure never changes. Only the \emph{meaning} of ``subtree'' moves with a declared root \(r\). Under root \(r\), \(\mathrm{sub}_r(v)\) is the set of nodes whose path to \(r\) passes through \(v\). Three cases, and only three:
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \(v=r\): the whole tree, \([1..n]\).
+  \item \(v\) is \emph{not} an ancestor of \(r\) (in the fixed root-1 sense): the re-rooting does not disturb \(v\) -- \(\mathrm{sub}_r(v)=\mathrm{sub}_1(v)\), one interval \([\mathit{pos}(v),\mathit{pos}(v)+\mathit{size}(v)-1]\).
+  \item \(v\) \emph{is} a proper ancestor of \(r\): let \(c\) be the child of \(v\) that is also an ancestor of \(r\) (found by lifting \(r\) up to depth \(\mathit{depth}(v)+1\), Ch.~11). Then \(\mathrm{sub}_r(v)\) is every node \emph{except} those in \(\mathrm{sub}_1(c)\): the complement, which is the union of the (\emph{at most}) two intervals \([1,\mathit{pos}(c)-1]\) and \([\mathit{pos}(c)+\mathit{size}(c),\,n]\).
+\end{itemize}
+
+\begin{insightbox}[At most two ranges -- and no rebuild]
+A re-rooting never forces a re-decomposition. The tree is still rooted at 1 for bookkeeping; only the query interpretation changes, and the worst case costs two range operations instead of one. That is the entire price of supporting the ``change the root'' instruction that problems like CF~916E (and the Summit) pose, and it is why the heavy-first order remains the right commitment even when the root is mutable.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 916E -- re-root, subtree add, subtree sum}
+% ---------------------------------------------------------------
+
+\solvedproblem{c16-916e}{Jamie and Tree}{CF 916E}
+  {https://codeforces.com/problemset/problem/916/E}{CF 2400 L5}
+  {one HLD order serving subtree range-add and range-sum; re-rooted subtree as a two-interval complement; lca + lift under a fixed root; Ch.20 lazy tag}
+
+\begin{problemstatement}[CF 916E Jamie and Tree]
+A tree on \(n\) vertices, each with an integer value; the root starts at~1. Three query types:
+\begin{itemize}[nosep]
+  \item \code{1 v}: change the root to \(v\).
+  \item \code{2 u v x}: add \(x\) to every vertex in the \emph{smallest subtree that contains both \(u\) and \(v\)} (subtrees taken under the current root).
+  \item \code{3 v}: print the sum of the values in the subtree of \(v\), under the current root.
+\end{itemize}
+
+\textbf{Input.} \(n,q\le 10^5\); the \(n\) values (\(|a_i|\le 10^8\)); \(n-1\) edges; then \(q\) queries with \(|x|\le 10^8\).
+
+\textbf{Output.} One line per type-3 query.
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+6 7
+1 4 2 8 5 7
+1 2
+3 1
+4 3
+4 5
+3 6
+3 1
+2 4 6 3
+3 4
+1 6
+2 2 4 -5
+1 4
+3 3
+
+Output:
+27
+19
+5
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 40 minutes]
+The ``smallest subtree containing \(u\) and \(v\)'' is a subtree of a single node under any root -- identify which one. Then remember the re-rooting only changes \emph{which} interval, not the array.
+\peek{under a fixed root, what is the smallest subtree containing two nodes, expressed with one Ch.11 operation?}
+\nudge{\(\mathrm{lca}(u,v)\): its subtree is exactly the intersection of all subtrees containing both. But \(\mathrm{lca}\) must be taken under the CURRENT root -- the node it names depends on \(r\).}
+\fullhint{Work under the fixed root~1 and keep \(\mathit{pos},\mathit{size}\) plus a lazy range-add/range-sum tree. For root \(r\) and node \(v\) the re-rooted subtree is the three-case object above (whole tree / plain interval / complement of \(\mathrm{sub}_1(c)\), where \(c\) is the child of \(v\) on the path to \(r\), found by lifting). The smallest subtree containing \(u,v\) under root \(r\) is \(\mathrm{sub}_r(\mathrm{lca}_r(u,v))\), and \(\mathrm{lca}_r(u,v)\) is the \emph{deepest} of the three fixed-root LCAs \(\mathrm{lca}(u,v),\mathrm{lca}(u,r),\mathrm{lca}(v,r)\). So a type-2 is one subtree-add (one or two ranges) and a type-3 one subtree-sum (one or two ranges). Sample replay: \(\mathit{pos}=(1,3,6,2,4,5)\) over nodes \(1..6\); \code{3 1} with \(r=1=v\) reads the whole array \(=27\); \code{2 4 6 3} has \(\mathrm{lca}(4,6)=3\), not an ancestor of root~1, so it is the single range \([2..5]\) adding 3 to \(\{3,4,5,6\}\); \code{3 4} reads \(\text{sub}(4)=\{4,5\}\) as ranges \([2,2]\cup[4,5]=10+9=\mathbf{19}\); after \code{1 6}, \code{2 2 4 -5} (\(\mathrm{lca}_6(2,4)=1\), the root, so the whole tree) and \code{1 4}, \code{3 3} splits \(\text{sub}_4(3)=V\setminus\text{sub}_1(4)\) into \([1,1]\cup[2,6]=13+24=\mathbf{5}\). \(\bigO{(n+q)\log n}\), \ac.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Every operation is a subtree operation; paths never appear. What makes it HLD-chapter material is that the single heavy-first order answers them \emph{while the root moves}: subtree ranges stay one or two intervals in the same array, so one Ch.~20 lazy tree serves add and sum without any rebuild, and the only extra machinery is a lift to find the child of \(v\) that contains the root.
+
+\solstep{Key Observations}
+\begin{observation}
+``Smallest subtree containing \(u\) and \(v\)'' \(=\) the subtree of \(\mathrm{lca}_r(u,v)\); under a different root that node changes, and the identity \(\mathrm{lca}_r(u,v)=\) the deepest of \(\mathrm{lca}(u,v),\mathrm{lca}(u,r),\mathrm{lca}(v,r)\) (depths w.r.t. the fixed root) computes it with three ordinary LCAs.
+\end{observation}
+\begin{observation}
+Re-rooting only ever \emph{inverts} the ancestor relation along the path from the old root to the new one, so a re-rooted subtree is either the old interval or its complement -- never an arbitrary set. Hence at most two ranges.
+\end{observation}
+
+\solstep{Solution}
+Decompose once at root~1 (\(\coderef{c16-build}\)); build a lazy range-add/range-sum tree over the values. Maintain the current root \(r\). Implement \(\mathit{subRange}(v,r)\) returning one or two \(\mathit{pos}\)-intervals per the three cases, and \(\mathit{rootedLca}\) via the deepest-of-three rule. Type~2 adds \(x\) to \(\mathit{subRange}(\mathit{rootedLca}(u,v,r),r)\); type~3 sums \(\mathit{subRange}(v,r)\).
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 916E: one HLD order + Ch.20 lazy sum tree; re-rooted subtree as one or two pos-intervals; rooted LCA as the deepest of three plain LCAs}, label={lst:c16-916e}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+const int N = 100005, LOGK = 18;
+vector<int> adj[N];
+ll val[N];
+int sz[N], heavy[N], head[N], pos[N], nodeAt[N], dep[N], par[N], cur;
+ll sum[4*N], lazy[4*N];
+int up[LOGK][N];
+
+void dfs1(int v, int p){
+    par[v]=p; dep[v]=p?dep[p]+1:0; up[0][v]=p; sz[v]=1; heavy[v]=-1; int best=0;
+    for (int j=1;j<LOGK;j++) up[j][v]=up[j-1][ up[j-1][v] ];
+    for (int to : adj[v]) if (to!=p){ dfs1(to,v); sz[v]+=sz[to];
+        if (sz[to]>best){ best=sz[to]; heavy[v]=to; } }
+}
+void dfs2(int v, int p, int h){
+    head[v]=h; pos[v]=++cur; nodeAt[cur]=v;
+    if (heavy[v]!=-1) dfs2(heavy[v], v, h);
+    for (int to : adj[v]) if (to!=p && to!=heavy[v]) dfs2(to,v,to);
+}
+void build(int i,int l,int r){ if(l==r){ sum[i]=val[nodeAt[l]]; return; } int m=(l+r)>>1;
+    build(i<<1,l,m); build(i<<1|1,m+1,r); sum[i]=sum[i<<1]+sum[i<<1|1]; }
+void push(int i,int l,int r){ if(!lazy[i]||l==r) return; int m=(l+r)>>1;
+    sum[i<<1]+=lazy[i]*(m-l+1);  lazy[i<<1]+=lazy[i];
+    sum[i<<1|1]+=lazy[i]*(r-m);  lazy[i<<1|1]+=lazy[i];
+    lazy[i]=0; }
+void add(int i,int l,int r,int a,int b,ll x){ if(a>b) return; push(i,l,r);
+    if(a<=l&&r<=b){ sum[i]+=x*(r-l+1); lazy[i]+=x; return; } int m=(l+r)>>1;
+    add(i<<1,l,m,a,min(b,m),x); add(i<<1|1,m+1,r,max(a,m+1),b,x);
+    sum[i]=sum[i<<1]+sum[i<<1|1]; }
+ll qsum(int i,int l,int r,int a,int b){ if(a>b) return 0; push(i,l,r);
+    if(a<=l&&r<=b) return sum[i]; int m=(l+r)>>1;
+    return qsum(i<<1,l,m,a,min(b,m))+qsum(i<<1|1,m+1,r,max(a,m+1),b); }
+
+bool isAnc(int a, int b){                         // a ancestor of b (root 1)
+    return pos[a]<=pos[b] && pos[b]<pos[a]+sz[a];
+}
+int lift(int v, int d){                           // climb v to depth d
+    for (int j=LOGK-1;j>=0;j--) if (dep[v]-(1<<j)>=d) v=up[j][v];
+    return v;
+}
+int lca(int a,int b){
+    if (isAnc(a,b)) return a; if (isAnc(b,a)) return b;
+    int u=a;
+    for (int j=LOGK-1;j>=0;j--) if (up[j][u] && !isAnc(up[j][u], b)) u=up[j][u];
+    return par[u];
+}
+// the child of v whose subtree holds r (requires v a proper ancestor of r)
+int childOnPath(int v, int r){ return lift(r, dep[v]+1); }
+// rooted LCA of u,v when the tree's root is r
+int rootedLca(int u,int v,int r){                 // deepest of the three plain LCAs
+    int a=lca(u,v), b=lca(u,r), c=lca(v,r);
+    int best=a;
+    if (dep[b]>dep[best]) best=b;
+    if (dep[c]>dep[best]) best=c;
+    return best;
+}
+int n; ll rRoot;
+void subAdd(int v, int r, ll x){                  // add x to subtree_r(v)
+    if (v==r){ add(1,1,n,1,n,x); return; }
+    if (!isAnc(v,r)){ add(1,1,n,pos[v],pos[v]+sz[v]-1,x); return; }
+    int c=childOnPath(v,r);                        // complement of sub_1(c)
+    add(1,1,n, 1, pos[c]-1, x);
+    add(1,1,n, pos[c]+sz[c], n, x);
+}
+ll subSum(int v, int r){                           // sum of subtree_r(v), same 3 cases
+    if (v==r) return qsum(1,1,n,1,n);
+    if (!isAnc(v,r)) return qsum(1,1,n,pos[v],pos[v]+sz[v]-1);
+    int c=childOnPath(v,r);
+    return qsum(1,1,n,1,pos[c]-1) + qsum(1,1,n,pos[c]+sz[c],n);
+}
+int main(){
+    int q; scanf("%d%d",&n,&q);
+    for (int i=1;i<=n;i++) scanf("%lld",&val[i]);
+    for (int i=1;i<n;i++){ int u,v; scanf("%d%d",&u,&v); adj[u].push_back(v); adj[v].push_back(u); }
+    dfs1(1,0); cur=0; dfs2(1,0,1); build(1,1,n);
+    rRoot=1;
+    while (q--){
+        int t; scanf("%d",&t);
+        if (t==1){ int v; scanf("%d",&v); rRoot=v; }
+        else if (t==2){ int u,v; ll x; scanf("%d%d%lld",&u,&v,&x);
+            subAdd(rootedLca(u,v,(int)rRoot),(int)rRoot,x); }
+        else { int v; scanf("%d",&v);
+            printf("%lld\n", subSum(v,(int)rRoot)); }
+    }
+}
+\end{lstlisting}
+
+\begin{hardeningbox}[Sample replay, and the split that carries the last answer]
+Sample~1 has \(n=6\), edges \(1\!-\!2,3\!-\!1,4\!-\!3,4\!-\!5,3\!-\!6\), so under root~1 the children of~1 are \(2,3\), \(\text{sub}(3)=\{3,4,5,6\}\) and \(\text{sub}(4)=\{4,5\}\). Sizes \(2,5,1,2,1,1\) make \(3\) heavier than \(2\) and \(4\) heavier than\(5\), giving \(\mathit{pos}=(1,3,6,2,4,5)\) over nodes \(1..6\) and the value array \(B=(1,2,8,5,7,4)\).\\
+\textbf{\(\mathbf{3\ 1}\)} \(v=1=r\): the whole array, \(1{+}2{+}8{+}5{+}7{+}4=\mathbf{27}\) ✓.\\
+\textbf{\(\mathbf{2\ 4\ 6\ 3}\)} deepest of \(\mathrm{lca}(4,6)=3,\mathrm{lca}(4,1)=1,\mathrm{lca}(6,1)=1\) is~3; 3 is not an ancestor of root~1, so \(\text{sub}_1(3)\) is one range \([2..5]\) and nodes \(3,4,5,6\) become \(5,11,8,10\).\\
+\textbf{\(\mathbf{3\ 4}\)} root is still~1 and 4 is not an ancestor of~1, so \(\text{sub}_1(4)=\{4,5\}\) is the single interval \([\mathit{pos}(4),\mathit{pos}(4)+\mathit{size}(4)-1]=[2,3]\), values \(11+8=\mathbf{19}\) ✓.\\
+\textbf{\(\mathbf{1\ 6}\), \(\mathbf{2\ 2\ 4\ {-}5}\), \(\mathbf{1\ 4}\)} root goes to 6, then \(\mathrm{lca}_6(2,4)=1\) which \emph{is} the root, so \(-5\) lands on the whole tree (\(B\) now \((-4,-3,3,0,2,-1)\)); then root becomes~4.\\
+\textbf{\(\mathbf{3\ 3}\)} node~3 is a proper ancestor of root~4 in the fixed root-1 tree, and the child of~3 that holds~4 is node~4 itself, so \(\text{sub}_4(3)=V\setminus\text{sub}_1(4)=\{1,5,6\}\) -- \textbf{two ranges} \([1,1]\cup[4,6]\) -- summing \(-4+2+4=\mathbf{5}\) ✓. The complement case is the whole difficulty, and it never leaves the one array.
+\end{hardeningbox}
+
+\begin{recallbox}[22.4 in one breath]
+\emph{Commit to the heavy-first order and one lazy tree answers subtree ranges, path ranges, and their mix. Plain \(\tin\) and HLD \(\mathit{pos}\) agree on some subtrees and disagree on others -- different coordinate systems, never interchangeable. Under a mutable root, a subtree is either its old interval or the complement of one child interval, so at most two ranges, and no re-decomposition is ever needed.}
+\selftest{\item Under root~4 of \(T\), is \(\text{sub}(3)\) an interval in the fixed root-1 \(\mathit{pos}\), and what is it if not? \emph{Not in general -- if 3 is a proper ancestor of the new root 4 the subtree becomes the complement of the child interval holding 4, i.e. two ranges; if it is not an ancestor of 4 it stays one interval.}}
+\end{recallbox}

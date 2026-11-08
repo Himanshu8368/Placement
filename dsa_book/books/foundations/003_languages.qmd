@@ -1,0 +1,1596 @@
+# Python and C++ for DSA {#sec-lang}
+
+::: {.callout-note title="Sources"}
+**CPH** ch. 1 (programming techniques, input and output, number representation), ch. 4 (data structures in the C++ standard library) · **CP-Algorithms**: binary exponentiation, modular inverse, factorials modulo $p$ · **Python documentation**: `collections`, `heapq`, `bisect`, `itertools`, `functools`, sorting HOWTO, and the TimeComplexity page of the Python wiki · **cppreference**: containers, iterator invalidation, the *Compare* requirement (strict weak ordering) · **Codeforces blog** "Blowing up unordered_map, and how to stop getting hacked on it" (neal).
+
+**Coverage:** Python `list`, `dict`, `set`, `collections` (`deque`, `Counter`, `defaultdict`, `OrderedDict`), `heapq` (min-heap, max-heap by negation, tuple entries and tie-breakers, lazy deletion), `bisect`, `itertools`, `functools` (`lru_cache`, `cmp_to_key`), sorting with keys, stability, string building, big integers · C++ `vector`, `deque`, `list`, `set`/`multiset`/`map`, `unordered_map`, `priority_queue` (min-heap with `greater<>`), `lower_bound`/`upper_bound`, comparators and strict weak ordering, `pair`/`tuple`, structured bindings, iterator invalidation · the real cost of each common operation in both languages · fast input and output · recursion limits and iterative conversion · integer overflow, floating-point traps, modular arithmetic · anti-hash tests and randomised hashing · contest templates, and what to do when Python is too slow.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Pick the right container for a task in Python and in C++, and state the true cost of every operation you call on it.
+- Use heaps for "repeatedly take the best", including max-heaps in Python, tuple tie-breakers, custom comparators and lazy deletion.
+- Sort with keys and comparators, and check that a C++ comparator is a strict weak ordering.
+- Answer "largest $\le x$" and "first $\ge x$" queries with `bisect`, `lower_bound`, `upper_bound` and `multiset`, and simulate a multiset in Python.
+- Write programs that read $10^6$ numbers and recurse $10^5$ levels deep without TLE or a crash.
+- Avoid integer overflow, floating-point equality, negative remainders, and hash-collision attacks.
+:::
+
+```{python}
+#| include: false
+import heapq
+import math
+import random
+import sys
+import time
+from bisect import bisect_left, bisect_right, insort
+from collections import Counter, OrderedDict, defaultdict, deque
+from fractions import Fraction
+from functools import cmp_to_key, lru_cache, reduce
+from itertools import accumulate, combinations, groupby, pairwise, permutations, product
+
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters
+
+An algorithm only scores when it runs. Between the idea and the accepted verdict sit dozens of small language facts: `list.pop(0)` is linear, `std::set` has no random access, `endl` flushes the output, `-7 % 3` is $-1$ in C++, a Python recursion of depth $10^5$ crashes, and `unordered_map` can be made quadratic by a hacker. None of these is an algorithm, but each one turns a correct solution into **Time Limit Exceeded**, **Runtime Error** or **Wrong Answer**.
+
+Interviews test the same knowledge in a different form. "Implement an LRU cache" is a question about `OrderedDict` or `list` plus iterators. "Top $k$ elements" is a question about heaps. "Why did you use `long long`?" and "What is the complexity of `in` on a list?" are standard follow-ups.
+
+This chapter is the reference for both languages. It first lists the tools and their real costs (Chapter 1's @sec-cx-p6 already covers the basic hidden costs, and @sec-cx-budget the operation budget). Then it turns them into seven patterns, each with fully solved problems in both languages.
+
+::: {.callout-note title="In plain words"}
+You already know how to solve the problem on paper. This chapter is about the last mile — the handful of small language facts that decide whether a correct idea actually gets accepted. Skim the tables once now and keep them open while you code; come back whenever a submission behaves strangely. You do not have to memorise any of it.
+:::
+
+## The Python toolbox {#sec-lang-python}
+
+### Built-in containers
+
+Python hands you four everyday containers for free. Try to pick from this table before you reach for anything fancier.
+
+| Type | What it is | Use it for |
+|---|---|---|
+| `list` | dynamic array of references | stacks (`append`/`pop`), indexing, sorting |
+| `tuple` | immutable array | dictionary keys, heap entries, multi-key sorting |
+| `dict` | hash table, **keeps insertion order** (guaranteed since 3.7) | counting, grouping, memoisation, maps |
+| `set`, `frozenset` | hash set | membership, deduplication |
+| `str`, `bytes` | immutable sequences | text; build with `"".join(parts)` |
+| `int` | arbitrary precision | never overflows, but large values cost $O(\text{digits})$ per operation |
+
+### The `collections` module
+
+When one of the built-ins is *almost* right, the `collections` module usually has the finished version of it.
+
+| Type | Key operations | Notes |
+|---|---|---|
+| `deque` | `append`, `appendleft`, `pop`, `popleft` in $O(1)$; `rotate(k)` | queues, BFS, sliding windows. Indexing the middle is $O(n)$ |
+| `Counter` | `Counter(iterable)`, `c[x]` (0 if missing), `most_common(k)`, `c + d`, `c - d` | frequency tables. `c[x]` on a missing key does **not** insert it |
+| `defaultdict` | `defaultdict(list)`, `defaultdict(int)` | grouping. Reading `d[x]` on a missing key **inserts** it; use `x in d` or `d.get(x)` to test |
+| `OrderedDict` | `move_to_end(k, last=True)`, `popitem(last=False)` | LRU caches: a dict plus a doubly linked list, both operations $O(1)$ |
+
+### `heapq`, `bisect`, `itertools`, `functools`
+
+- **`heapq`** works on a plain list as a binary **min**-heap: `heapify(a)` in $O(n)$, `heappush`, `heappop`, `heappushpop`, `heapreplace` in $O(\log n)$, `a[0]` is the minimum. For a max-heap push `-x`. `nsmallest(k, it)` and `nlargest(k, it)` cost $O(n\log k)$. `heapq.merge(*sorted_iterables)` merges lazily.
+- **`bisect`** works on a sorted list: `bisect_left(a, x)` is the first index with `a[i] >= x`, `bisect_right(a, x)` the first index with `a[i] > x`. Both are $O(\log n)$. Since 3.10 they accept `key=`. `insort(a, x)` finds the position in $O(\log n)$ but **inserts in $O(n)$**.
+- **`itertools`**: `accumulate` (prefix sums, prefix max with `func=max`), `product`, `permutations`, `combinations`, `combinations_with_replacement`, `groupby` (groups **consecutive** equal keys, so sort first), `pairwise` (3.10+), `chain.from_iterable`, `islice`.
+- **`functools`**: `lru_cache(maxsize=None)` or `cache` memoises a function of hashable arguments; `cmp_to_key` turns a two-argument comparator into a sort key; `reduce`.
+
+```{python}
+#| label: lang-python-toolbox
+c = Counter("mississippi")
+assert c.most_common(2) == [("i", 4), ("s", 4)] and c["z"] == 0 and "z" not in c
+
+d = defaultdict(list)
+_ = d["missing"]                       # reading inserts an empty list
+assert "missing" in d
+
+q = deque([1, 2, 3, 4])
+q.rotate(1)
+assert list(q) == [4, 1, 2, 3]
+
+h = [5, 1, 4, 2]
+heapq.heapify(h)
+assert h[0] == 1 and heapq.nsmallest(2, h) == [1, 2] and heapq.nlargest(1, h) == [5]
+
+a = [1, 3, 3, 3, 7]
+assert (bisect_left(a, 3), bisect_right(a, 3), bisect_left(a, 4), bisect_right(a, 0)) == (1, 4, 4, 0)
+
+assert list(accumulate([3, 1, 4, 1, 5])) == [3, 4, 8, 9, 14]
+assert list(accumulate([3, 1, 4, 1, 5], max)) == [3, 3, 4, 4, 5]
+assert [(k, len(list(g))) for k, g in groupby("aaabccaa")] == [("a", 3), ("b", 1), ("c", 2), ("a", 2)]
+assert list(pairwise([1, 2, 4])) == [(1, 2), (2, 4)]
+assert len(list(combinations(range(5), 2))) == 10 and len(list(permutations(range(4)))) == 24
+
+# Sorting is stable: equal keys keep their input order.
+people = [("bob", 25), ("amy", 30), ("cat", 25)]
+assert sorted(people, key=lambda p: p[1]) == [("bob", 25), ("cat", 25), ("amy", 30)]
+assert sorted(people, key=lambda p: (-p[1], p[0])) == [("amy", 30), ("bob", 25), ("cat", 25)]
+
+# Big integers are exact, but converting a huge int to str is capped at 4300 digits (3.11+).
+assert 2**100 == 1267650600228229401496703205376
+try:
+    str(10**5000)
+    capped = False
+except ValueError:
+    capped = True
+assert capped
+```
+
+### Sorting
+
+`list.sort()` and `sorted()` use Timsort: $O(n\log n)$ worst case, $O(n)$ on already sorted runs, and **stable**. Three ways to say what order you want:
+
+1. **A key function**: `sorted(a, key=len)`. The key is computed once per element.
+2. **A tuple key** for several criteria: `key=lambda p: (-p.score, p.name)` sorts by score descending, then name ascending. Negation works only for numbers.
+3. **A comparator**: `key=cmp_to_key(cmp)` where `cmp(a, b)` returns a negative number if `a` goes first. Use it only when the order is not a property of each element alone (@sec-lang-p3-largest).
+
+Because the sort is stable, you can also sort by the secondary key first and then by the primary key.
+
+### Strings and big integers
+
+Strings are immutable. `s += t` in a loop *may* be linear in CPython (it resizes in place when nothing else refers to `s`), but this is not guaranteed; collect parts in a list and call `"".join(parts)` once. `s[i:j]` copies $j - i$ characters.
+
+Python integers never overflow, which removes a whole class of bugs. The costs: each `int` object takes 28+ bytes, arithmetic on a $d$-digit number costs $O(d)$ or more, and `str(x)` for $x$ with more than 4300 digits raises `ValueError` unless you call `sys.set_int_max_str_digits(0)`.
+
+## The C++ toolbox {#sec-lang-cpp}
+
+### Containers
+
+C++ splits what Python's single `list` and `dict` do into purpose-built containers. The choice is mostly about one question: do you need the elements to stay **sorted**? If not, reach for the array or the hash table; if yes, reach for the tree.
+
+| Container | Structure | Use it for |
+|---|---|---|
+| `vector<T>` | dynamic array | almost everything; `reserve(n)` avoids reallocations |
+| `deque<T>` | blocks of arrays | queues, both ends $O(1)$, indexing $O(1)$ |
+| `list<T>` | doubly linked list | $O(1)$ `splice`, stable iterators (LRU cache) |
+| `set<T>`, `map<K,V>` | red-black tree, sorted | ordered keys, `lower_bound`, predecessor/successor |
+| `multiset<T>`, `multimap` | red-black tree with duplicates | sorted bags, sliding-window min/max |
+| `unordered_set`, `unordered_map` | hash table with chaining | average $O(1)$ lookups; unsafe on adversarial tests (@sec-lang-p7) |
+| `priority_queue<T>` | binary heap over a `vector` | **max**-heap by default; min-heap with `greater<>` |
+| `pair`, `tuple`, `array<T,N>` | fixed records | compared lexicographically, usable as `map` keys |
+
+### Binary search in sorted ranges
+
+- `lower_bound(first, last, x)`: first element `>= x`. `upper_bound`: first element `> x`. `equal_range` returns both. They return iterators; subtract `begin()` to get an index.
+- On a `set` or `map`, call the **member** function `s.lower_bound(x)`, which is $O(\log n)$. The free function `lower_bound(s.begin(), s.end(), x)` is $O(n)$ on tree iterators because it cannot jump to the middle.
+- "Largest element $\le x$" is `prev(s.upper_bound(x))`, after checking that `s.upper_bound(x) != s.begin()`.
+
+### Comparators and strict weak ordering
+
+`sort`, `set`, `map` and `priority_queue` accept a comparator `comp(a, b)` meaning "`a` goes before `b`". It must be a **strict weak ordering**:
+
+1. **Irreflexive:** `comp(a, a)` is false. So never use `<=` or `>=`.
+2. **Transitive:** `comp(a, b)` and `comp(b, c)` imply `comp(a, c)`.
+3. **Transitive incomparability:** if `a` and `b` are tied, and `b` and `c` are tied, then `a` and `c` are tied.
+
+Breaking these is undefined behaviour. `std::sort` with `<=` can read outside the array and crash on inputs with many equal elements; a `set` with a bad comparator silently loses or duplicates elements. Python's sort never crashes, but a broken comparator gives an arbitrary order.
+
+::: {.callout-note title="In plain words"}
+A comparator is just a yes/no answer to "does `a` go before `b`?". The three rules demand that answer be *consistent*: nothing goes before itself, the order has to chain (if `a` beats `b` and `b` beats `c`, then `a` beats `c`), and "these two tie" has to group things cleanly. Break them and C++ is allowed to do anything — usually crash or quietly drop elements. Python won't crash; it just hands you a meaningless order.
+:::
+
+`priority_queue<T, vector<T>, Comp>` puts on top the element that is **last** in the order `Comp`. With the default `less<T>`, that is the largest; with `greater<T>`, the smallest. This inversion is why a min-heap comparator uses `>`.
+
+### Iterator invalidation
+
+An iterator (or reference) into a container is a promise about *where* an element lives. Resizing or removing can move elements and silently break that promise — which is why "my loop crashes after an `erase`" is such a common bug. This table says which operations break it:
+
+| Container | Insert | Erase |
+|---|---|---|
+| `vector`, `string` | all iterators if it reallocates, else those at or after the point | those at or after the point |
+| `deque` | all iterators (references stay valid when inserting at either end) | at either end: only the erased; in the middle: all |
+| `list`, `set`, `map`, `multiset` | none | only the erased element |
+| `unordered_map`, `unordered_set` | all iterators if it rehashes | only the erased element |
+
+The safe erase loop uses the return value: `for (auto it = s.begin(); it != s.end(); ) it = cond(*it) ? s.erase(it) : next(it);`. Never keep a pointer or reference into a `vector` across a `push_back`.
+
+### Modern C++ conveniences
+
+```cpp
+map<string, int> cnt;
+for (auto& [word, c] : cnt) cout << word << ' ' << c << '\n';     // structured bindings (C++17)
+auto [lo, hi] = equal_range(a.begin(), a.end(), x);                  // a pair of iterators
+tuple<int, int, int> t{3, 1, 2};
+auto [p, q, r] = t;
+sort(v.begin(), v.end(), [](const auto& x, const auto& y) {         // sort by (second desc, first asc)
+    return tie(y.second, x.first) < tie(x.second, y.first);
+});
+priority_queue<pair<int, int>, vector<pair<int, int>>, greater<>> pq; // min-heap of pairs
+```
+
+### Python and C++ side by side
+
+| Need | Python | C++ |
+|---|---|---|
+| dynamic array / stack | `list` | `vector` |
+| queue / deque | `collections.deque` | `deque` (or `queue`) |
+| hash map / set | `dict` / `set` | `unordered_map` / `unordered_set` |
+| counting | `Counter` | `unordered_map<T,int>` or `map<T,int>` |
+| sorted set with order queries | none in the standard library (sorted list + `bisect`, or a DSU trick) | `set`, `multiset`, `map` |
+| min-heap | `heapq` on a list | `priority_queue<T, vector<T>, greater<>>` |
+| max-heap | `heapq` with negated keys | `priority_queue<T>` |
+| first index `>= x` / `> x` | `bisect_left` / `bisect_right` | `lower_bound` / `upper_bound` |
+| LRU order | `OrderedDict` | `list` + `unordered_map` of iterators |
+| memoisation | `@lru_cache(maxsize=None)` | array or `map` |
+| exact big integers | `int` | `__int128` (to about $1.7\cdot10^{38}$), otherwise hand-written |
+
+## The real cost of each operation {#sec-lang-costs}
+
+These are the tables you keep open while coding. @sec-cx-p6 already flagged the costs that hide inside loops; here is the full picture, so you can look up any operation in one place.
+
+::: {.callout-important title="Python costs (CPython)"}
+| Operation | Cost |
+|---|---|
+| `list`: `a[i]`, `a[i] = x`, `len`, `append`, `pop()` | $O(1)$ (append amortized) |
+| `list`: `pop(0)`, `insert(i, x)`, `del a[i]`, `remove(x)`, `index(x)`, `x in a`, `count` | $O(n)$ |
+| `list`: `a[i:j]`, `a + b`, `a * k`, `a[::-1]`, `copy`, `min`, `max`, `sum` | linear in the size of the result or input |
+| `list.sort()`, `sorted` | $O(n\log n)$, $O(n)$ if already sorted |
+| `dict`/`set`: `get`, `in`, `d[k] = v`, `del`, `add`, `discard` | $O(1)$ average, $O(n)$ worst |
+| `set`: union / intersection | $O(\text{len}(s) + \text{len}(t))$ / $O(\min(\text{len}(s), \text{len}(t)))$ |
+| `deque`: `append`, `appendleft`, `pop`, `popleft` | $O(1)$ |
+| `deque[i]` | $O(1)$ near the ends, $O(n)$ in the middle |
+| `heappush`, `heappop`, `heappushpop` / `heapify` | $O(\log n)$ / $O(n)$ |
+| `bisect_left`, `bisect_right` / `insort` | $O(\log n)$ / $O(n)$ |
+| `Counter(it)` / `most_common(k)` | $O(n)$ / $O(n\log k)$ |
+| `"".join(parts)` | $O(\text{total length})$ |
+| `str` slicing / `s.find(t)`, `t in s` | $O(\text{length})$ / $O(nm)$ worst case for search |
+| `x * y` on $d$-digit ints | about $O(d^{1.58})$ (Karatsuba) |
+:::
+
+::: {.callout-important title="C++ costs"}
+| Operation | Cost |
+|---|---|
+| `vector`: `[]`, `back`, `push_back`, `pop_back`, `size` | $O(1)$ (push amortized) |
+| `vector`: `insert`/`erase` in the middle or front, `find` | $O(n)$ |
+| `deque`: push/pop at both ends, `[]` | $O(1)$ |
+| `list`: `insert`, `erase`, `splice` at an iterator | $O(1)$ |
+| `set`/`map`: `insert`, `erase`, `find`, `count`, `lower_bound`, `upper_bound` | $O(\log n)$ |
+| `multiset::count(x)` | $O(\log n + k)$ where $k$ = copies of $x$ |
+| `multiset::erase(x)` (by value) | erases **all** copies |
+| `next`, `prev`, `distance` on tree iterators | $O(1)$ amortized per step; `distance` is $O(n)$ |
+| `unordered_map`: `find`, `[]`, `insert`, `erase` | $O(1)$ average, $O(n)$ worst (@sec-lang-p7) |
+| `priority_queue`: `push`, `pop` / `top` / build from range | $O(\log n)$ / $O(1)$ / $O(n)$ |
+| `sort` / `stable_sort` / `nth_element` | $O(n\log n)$ / $O(n\log n)$ / $O(n)$ average |
+| `string`: `+= c`, `push_back` / `s = s + t` / `substr(i, k)` | $O(1)$ amortized / $O(\text{len}(s) + \text{len}(t))$ / $O(k)$ |
+| passing a container **by value** | $O(n)$ copy; pass `const&` |
+| `endl` | writes `'\n'` **and flushes** |
+:::
+
+::: {#fig-lang-costs}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+COST_ROWS = [
+    ("a[i]", "O(1)", "O(1)"),
+    ("append / push_back", "O(1) amortized", "O(1) amortized"),
+    ("pop(0) / erase(begin())", "O(n)", "O(n)"),
+    ("deque: pop at either end", "O(1)", "O(1)"),
+    ("x in list / std::find", "O(n)", "O(n)"),
+    ("hash lookup", "O(1) average", "O(1) average"),
+    ("insert, keeping it sorted", "insort: O(n)", "set::insert: O(log n)"),
+    ("largest <= x", "bisect: O(log n)", "upper_bound: O(log n)"),
+    ("heap push / pop", "O(log n)", "O(log n)"),
+]
+
+def cost_colour(c):
+    return "red" if "O(n)" in c else ("amber" if "log" in c else "green")
+
+def draw(ax, p):
+    cells = [[py, cpp] for _, py, cpp in COST_ROWS]
+    colors = {(r, c): cost_colour(cells[r][c]) for r in range(len(cells)) for c in range(2)}
+    V.grid(ax, p, cells, row_labels=[r[0] for r in COST_ROWS], col_labels=["Python", "C++"],
+           colors=colors, cell_w=4.6, size=10)
+V.show(draw)
+```
+
+Cost of common operations in Python and C++: green is O(1), amber O(log n), red O(n).
+
+:::
+
+A constant-factor rule of thumb: CPython does about $10^7$ simple operations per second, C++ about $10^8$–$10^9$ (@sec-cx-budget). A dictionary operation in Python costs several times a simple arithmetic operation, and a `set`/`map` operation in C++ is many times slower than a `vector` access, because following tree pointers misses the cache.
+
+## Input, output and templates {#sec-lang-templates}
+
+Reading $10^6$ numbers with Python's `input()` takes about a second on its own; with `sys.stdin.buffer.read().split()` it takes a fraction of that. In C++, `cin` is synchronised with C's `stdio` by default, which makes it several times slower than it needs to be.
+
+::: {.callout-important title="Fast I/O rules"}
+**Python.** Read everything at once: `data = sys.stdin.buffer.read().split()` gives a list of `bytes` tokens; `int(token)` accepts bytes. For line-based input use `input = sys.stdin.readline` and strip the trailing newline from strings. Collect output in a list and write once: `sys.stdout.write("\n".join(map(str, out)) + "\n")`. Never `print` inside a loop of $10^5$ iterations.
+
+**C++.** Start `main` with `ios::sync_with_stdio(false); cin.tie(nullptr);`. The first line unties `cin`/`cout` from `scanf`/`printf` (after it, do not mix the two families). The second stops `cin` from flushing `cout` before each read. Print `'\n'`, not `endl`, which flushes on every line. In **interactive** problems you must flush after each query (`cout << flush` or `endl`).
+:::
+
+### A Python contest template
+
+```python
+import sys
+
+def main():
+    data = sys.stdin.buffer.read().split()
+    pos = 0
+    t = int(data[pos]); pos += 1
+    out = []
+    for _ in range(t):
+        n = int(data[pos]); pos += 1
+        a = list(map(int, data[pos:pos + n])); pos += n
+        out.append(solve(n, a))
+    sys.stdout.write("\n".join(map(str, out)) + "\n")
+
+def solve(n, a):
+    return sum(a)
+
+main()          # code inside a function runs faster: local names are array lookups, globals are dict lookups
+```
+
+### A C++ contest template
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+using ll = long long;
+
+void solve() {
+    int n; cin >> n;
+    vector<ll> a(n);
+    for (auto& x : a) cin >> x;
+    cout << accumulate(a.begin(), a.end(), 0LL) << '\n';
+}
+
+int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    int t = 1;
+    cin >> t;
+    while (t--) solve();
+}
+```
+
+Compile locally with warnings and sanitizers, which catch out-of-range indexing and signed overflow: `g++ -std=c++17 -O2 -Wall -Wextra -fsanitize=address,undefined -D_GLIBCXX_DEBUG sol.cpp`.
+
+### Recursion depth {#sec-lang-recursion}
+
+CPython stops at a recursion depth of 1000 by default and raises `RecursionError` (@sec-cx-p5-depth shows it). `sys.setrecursionlimit(10**6)` raises the limit, but not the size of the C stack underneath. Calls that go through C code (functions wrapped by `lru_cache`, calls made by `sort` or `map`, older CPython versions and PyPy) use C stack for each level, and when it runs out the process dies with a segmentation fault and no traceback. Three remedies, best first:
+
+1. **Write the loop yourself**: an explicit stack, or a BFS order processed in reverse (@sec-lang-p5-subordinates).
+2. **Generator recursion**: each recursive call becomes `yield`, and a driver loop keeps the generators on a heap-allocated stack (exercise 14).
+3. **A thread with a big stack**: `threading.stack_size(1 << 27)`, `sys.setrecursionlimit(1 << 25)`, then run `main` in a `threading.Thread`. It works on most judges, but is fragile.
+
+In C++ the stack on Codeforces is much larger than a desktop default (it is commonly reported to match the memory limit), while a default Linux shell typically allows 8 MB (`ulimit -s`) and a Windows executable 1 MB. A DFS of depth $10^6$ with a 100-byte frame needs 100 MB. On Windows with MinGW, link with `-Wl,--stack=268435456` to test locally.
+
+### When Python is too slow {#sec-lang-slow}
+
+Python is fine for most interview problems and for contest problems up to about $10^6$ simple operations per test. Beyond that:
+
+- **Submit with PyPy** when the judge offers it (Codeforces does). PyPy's JIT makes tight integer loops 5–20 times faster. It is slower than CPython at string-heavy and recursion-heavy code, and its `dict` of ints is attackable (@sec-lang-p7).
+- **Push loops into C**: `sort`, `sum`, `map`, `str.join`, `bytes.translate`, slicing, `collections.Counter`, `itertools.accumulate`, and `numpy` (where the judge has it) all run at C speed. A sieve with slice assignment `sieve[p*p::p] = bytes(len(range(p*p, n+1, p)))` is far faster than an inner loop.
+- **Avoid recursion and function calls in the hot loop**, avoid attribute lookups (`app = out.append`), use local variables inside `main`.
+- **Use flat lists instead of objects**: `left[v]`, `right[v]` arrays instead of `Node` instances; a list of lists for adjacency.
+- **Know when to switch.** If the intended complexity is $O(n\log n)$ with $n = 10^6$ and heavy constants (segment trees, many `dict` operations), write C++.
+
+```{python}
+#| label: lang-sieve
+def sieve_loop(n):
+    is_p = [True] * (n + 1)
+    is_p[: min(2, n + 1)] = [False] * min(2, n + 1)
+    for p in range(2, math.isqrt(n) + 1):
+        if is_p[p]:
+            for m in range(p * p, n + 1, p):
+                is_p[m] = False
+    return [i for i in range(n + 1) if is_p[i]]
+
+def sieve_slices(n):
+    is_p = bytearray([1]) * (n + 1)
+    is_p[: min(2, n + 1)] = bytes(min(2, n + 1))
+    for p in range(2, math.isqrt(n) + 1):
+        if is_p[p]:
+            is_p[p * p :: p] = bytes(len(range(p * p, n + 1, p)))   # one C-level write per prime
+    return [i for i in range(n + 1) if is_p[i]]
+
+def sieve_numpy(n):
+    is_p = np.ones(n + 1, dtype=bool)
+    is_p[:2] = False
+    for p in range(2, math.isqrt(n) + 1):
+        if is_p[p]:
+            is_p[p * p :: p] = False
+    return np.flatnonzero(is_p).tolist()
+
+for n in [0, 1, 2, 10, 97, 1000]:
+    assert sieve_loop(n) == sieve_slices(n) == sieve_numpy(n)
+N = 2 * 10**5
+assert sieve_loop(N) == sieve_slices(N) == sieve_numpy(N)
+assert len(sieve_slices(10**6)) == 78498
+```
+
+The three sieves do the same $O(n\log\log n)$ work. The slice and `numpy` versions move the inner loop into C and run many times faster on large $n$.
+
+## Pattern 1: choose the right container {#sec-lang-p1}
+
+**Where we are.** The lessons listed what each language gives you. The patterns use it in the order a solution meets it: pick the container (this pattern), keep the best element on top (Pattern 2), put things in the right order (Pattern 3), and search sorted data (Pattern 4). Then survive the judge: input, output and deep recursion (Pattern 5), numbers that overflow or round (Pattern 6), and hash tables an attacker can slow down (Pattern 7).
+
+**Recognise it.** The statement asks you to group, count, look up, remember the most recent, or keep a window. The algorithm is simple; the work is in picking a structure whose operations are all $O(1)$ or $O(\log n)$.
+
+::: {.callout-important title="Template"}
+1. List the operations the algorithm performs, and how many times each runs.
+2. For each container, look up the cost of those operations (@sec-lang-costs) and pick the one whose **most frequent** operation is cheapest.
+3. Typical choices: *count or group* → `Counter` / `defaultdict(list)` / `unordered_map`; *queue or both ends* → `deque`; *most recently used order* → `OrderedDict` / `list` + iterator map; *window max or min* → monotonic `deque`; *ordered queries* → `set`/`map` (@sec-lang-p4).
+4. Keys must be hashable (Python: tuples and strings, not lists) or comparable (C++ `map` keys need `<`).
+:::
+
+**Complexity.** (number of operations) × (cost per operation). The choice of container is often the difference between $O(n)$ and $O(n^2)$.
+
+::: {#fig-lang-p1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+CHOICES = [("count, group", "dict, Counter"), ("both ends", "deque"), ("recent-use order", "OrderedDict"),
+           ("window max / min", "monotonic deque"), ("order queries", "bisect / std::set")]
+
+def draw(ax, p):
+    nodes, edges = {}, []
+    for k, (need, tool) in enumerate(CHOICES):
+        nodes[f"n{k}"] = (0, -1.3 * k, need, "indigo")
+        nodes[f"t{k}"] = (5.6, -1.3 * k, tool, "green")
+        edges.append((f"n{k}", f"t{k}", ""))
+    V.flow(ax, p, nodes, edges, w=3.6, h=0.85)
+    V.text(ax, p, 0, 1.0, "operation", color="muted", size=10)
+    V.text(ax, p, 5.6, 1.0, "container", color="muted", size=10)
+V.show(draw)
+```
+
+From the operation the algorithm repeats most to the container that makes it cheap.
+
+:::
+
+{{< include ../problems/lc-0049-group-anagrams/problem.qmd >}}
+
+[**From one structure to two working together.** Group Anagrams needs only a dictionary. The LRU cache also needs an order of use in which any key can jump to the front, so a hash map and a linked list share the work.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0146-lru-cache/problem.qmd >}}
+
+[**From a map to the ends of a list.** The LRU cache finds keys through a map. Sliding Window Maximum only touches the ends: elements enter at the back and leave from the back (beaten) or the front (expired), so a `deque` alone is enough.]{.flow-bridge}
+
+
+::: {#fig-lang-anim-deque}
+
+```{python}
+#| echo: false
+sw_a, sw_k = [1, 3, -1, -3, 5, 3, 6, 7], 3
+sw_dq, sw_out, sw_frames, sw_caps = deque(), [], [], []
+for i, x in enumerate(sw_a):
+    beaten = []
+    while sw_dq and sw_a[sw_dq[-1]] <= x:
+        beaten.append(sw_dq.pop())
+    sw_dq.append(i)
+    expired = []
+    if sw_dq[0] <= i - sw_k:
+        expired.append(sw_dq.popleft())
+    if i >= sw_k - 1:
+        sw_out.append(sw_a[sw_dq[0]])
+    sw_frames.append((i, list(sw_dq)))
+    parts = [f"i = {i} ({x})"]
+    if beaten:
+        parts.append(f"drops beaten {', '.join(str(sw_a[j]) for j in beaten)} from the back")
+    if expired:
+        parts.append(f"drops expired index {expired[0]} from the front")
+    parts.append(f"max = {sw_a[sw_dq[0]]}" if i >= sw_k - 1 else "window not full yet")
+    sw_caps.append("; ".join(parts))
+assert sw_out == [3, 3, 5, 5, 6, 7]
+
+def sw_frame(ax, p, k):
+    i, dq = sw_frames[k]
+    lo = max(0, i - sw_k + 1)
+    colors = {j: "indigo" for j in dq}
+    colors[dq[0]] = "green"
+    V.array(ax, p, sw_a, regions=[(lo, i + 1, "cyan", "window")], colors=colors,
+            note="deque: [" + ", ".join(str(sw_a[j]) for j in dq) + "]")
+
+V.animate(sw_frame, len(sw_a), captions=sw_caps, interval=1100)
+del i, x, beaten, expired, parts                # keep the chapter's namespace clean
+```
+
+Sliding Window Maximum with $k = 3$. The deque (indigo cells) holds the candidates, decreasing from front to back; the front (green) is the window maximum. Elements leave from the back when a larger one arrives and from the front when they fall out of the window, which is why the container must be a `deque`.
+
+:::
+
+{{< include ../problems/lc-0239-sliding-window-maximum/problem.qmd >}}
+
+## Pattern 2: heaps and priority queues {#sec-lang-p2}
+
+**From any order to the best first.** The containers of Pattern 1 answer lookups. When the question is "repeatedly take the largest" or "the smallest of $k$ heads", you need a container that keeps its best element on top: a heap.
+
+**Recognise it.** "Repeatedly take the largest/smallest", "the $k$ best", "merge sorted streams", "next event in time", a greedy that always picks the cheapest available option, or Dijkstra.
+
+::: {.callout-important title="Template"}
+- **Python min-heap:** `heapq` on a list. `heappush(h, x)`, `heappop(h)`, `h[0]`.
+- **Python max-heap:** push `-x` and negate on the way out. For non-numeric keys, wrap them in a class whose `__lt__` is reversed.
+- **Entries with data:** push tuples `(priority, tiebreak, item)`. Tuples compare left to right, so if two priorities are equal Python compares the next field; a unique `tiebreak` (an index or counter) stops it from comparing `item`s that do not support `<`.
+- **C++:** `priority_queue<T>` is a max-heap; `priority_queue<T, vector<T>, greater<>>` is a min-heap; a lambda comparator needs `decltype(cmp)` and the lambda passed to the constructor.
+- **Lazy deletion:** neither heap supports "delete an arbitrary element". Instead leave stale entries in the heap, and when one reaches the top, recognise it as stale (compare with the true current value) and pop it.
+:::
+
+**Complexity.** $O(\log n)$ per push or pop, $O(1)$ for the top, $O(n)$ to build. With lazy deletion, every pushed entry is popped at most once, so the total stays $O((\text{pushes})\log(\text{pushes}))$.
+
+::: {#fig-lang-p2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+heap_demo = [5, 1, 4, 2, 8, 3]
+heapq.heapify(heap_demo)
+assert all(heap_demo[(i - 1) // 2] <= heap_demo[i] for i in range(1, len(heap_demo)))
+
+def heap_node(h, i):
+    kids = [heap_node(h, j) for j in (2 * i + 1, 2 * i + 2) if j < len(h)]
+    return V.Node(h[i], kids, color="green" if i == 0 else "indigo")
+
+def draw(ax, p):
+    V.tree(ax, p, heap_node(heap_demo, 0), x=0.6, y=0, dx=1.3, dy=1.5)
+    V.array(ax, p, heap_demo, x=0, y=-5.2, colors={0: "green"}, label="list")
+    V.text(ax, p, 6.6, -4.7, "h[0] is the minimum", ha="left", color="green", size=10)
+V.show(draw)
+```
+
+A binary heap after heapify([5, 1, 4, 2, 8, 3]): the list is the tree read level by level; the children of index i are 2i+1 and 2i+2, and every parent is <= its children.
+
+:::
+
+{{< include ../problems/lc-1046-last-stone-weight/problem.qmd >}}
+
+[**From numbers to streams.** Last Stone Weight pushes plain numbers. Merge k Sorted Lists pushes the current head of each list, and the tuple needs a tie-breaker because list nodes cannot be compared.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0023-merge-k-sorted-lists/problem.qmd >}}
+
+[**From push and pop to corrections.** Both heaps so far only changed at the top. Stock Price Fluctuation must change an old price, which a heap cannot do in the middle, so stale entries stay in the heap and are dropped when they reach the top.]{.flow-bridge}
+
+
+{{< include ../problems/lc-2034-stock-price-fluctuation/problem.qmd >}}
+
+## Pattern 3: sorting with keys and comparators {#sec-lang-p3}
+
+**From the best one to the whole order.** A heap only promises its top element. When the whole sequence must follow a rule, the work is to write that rule as a key or a comparator, and to check that it is consistent.
+
+**Recognise it.** "Arrange", "order by … then by …", "smallest/largest concatenation", or any greedy that first sorts by a rule. The algorithm is one sort; the work is the order.
+
+::: {.callout-important title="Template"}
+1. If each element has a **score**, sort by a key. Several criteria → a tuple key; descending numeric criteria → negate.
+2. If the order depends on **pairs** (which of $a, b$ goes first), write a comparator, and check that it is a strict weak ordering (@sec-lang-cpp). In Python wrap it with `cmp_to_key`; in C++ pass a lambda returning `bool` with a **strict** comparison.
+3. Prefer converting a pairwise rule into a key if you can prove the rule is "compare $f(a)$ with $f(b)$": it is faster and proves the ordering is valid.
+4. Need stability? Python always is; in C++ use `stable_sort`.
+:::
+
+**Complexity.** $O(n\log n)$ comparisons, each costing whatever the comparator costs (for strings, their length).
+
+::: {#fig-lang-p3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    nodes = {
+        "e": (0, 0, "element x", "indigo"), "k": (4, 0, "key f(x)", "indigo"), "s1": (8, 0, "sort by key", "green"),
+        "a": (0, -1.8, "pair (a, b)", "pink"), "c": (4, -1.8, "comp(a, b)", "pink"), "s2": (8, -1.8, "sort with comp", "green"),
+    }
+    edges = [("e", "k", ""), ("k", "s1", ""), ("a", "c", ""), ("c", "s2", "")]
+    V.flow(ax, p, nodes, edges, w=3.2, h=0.85)
+    V.text(ax, p, 4, -3.0, "comp must be a strict weak ordering: use <, never <=", color="pink", size=10)
+V.show(draw)
+```
+
+Two ways to define an order: a key computed from each element alone, or a comparator that looks at a pair.
+
+:::
+
+{{< include ../problems/lc-0179-largest-number/problem.qmd >}}
+
+[**From a comparator to a key.** Largest Number needs a comparator because the order depends on both items together ($a + b$ against $b + a$). Sort by Increasing Frequency needs only a tuple key per item, and stability gives a second way to write it.]{.flow-bridge}
+
+
+{{< include ../problems/lc-1636-sort-array-by-increasing-frequency/problem.qmd >}}
+
+## Pattern 4: sorted containers and binary search {#sec-lang-p4}
+
+**From sorting once to asking many times.** After one sort, every "how many are at most $x$" or "first at least $t$" question is a single binary search. This pattern keeps data sorted and answers many such queries.
+
+**Recognise it.** "How many are $\le x$", "the largest available $\le x$", "the first time $\ge t$", "the closest value", queries interleaved with deletions. The data is sorted (or can be), and each query is a boundary in it.
+
+::: {.callout-important title="Template"}
+- **Static sorted array:** `bisect_right(a, x)` = number of elements $\le x$; `bisect_left(a, x)` = number $< x$. C++: `upper_bound(...) - a.begin()` and `lower_bound(...) - a.begin()`.
+- **Largest element $\le x$:** index `bisect_right(a, x) - 1` (none if it is $-1$). C++: `prev(s.upper_bound(x))` after checking it is not `begin()`.
+- **With deletions (C++):** `multiset` and `s.erase(it)` (one copy), never `s.erase(value)` (all copies).
+- **With deletions (Python):** there is no balanced tree. Options: a sorted list with `bisect` + `del` ($O(n)$ per delete, but a fast `memmove`); a **"next free" DSU** over sorted positions when elements are only removed (@sec-lang-p4-tickets); a heap with lazy deletion when only the min or max is needed; a Fenwick tree over compressed values.
+:::
+
+**Complexity.** $O(\log n)$ per query on a sorted array or tree; the initial sort costs $O(n\log n)$.
+
+::: {#fig-lang-p4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+bis = [1, 3, 3, 3, 7, 9]
+
+def draw(ax, p):
+    V.array(ax, p, bis + [""], regions=[(1, 4, "amber", "the run of 3s")],
+            pointers=[(bisect_left(bis, 3), "left(3)", "green"), (bisect_right(bis, 3), "right(3)", "pink"),
+                      (bisect_left(bis, 8), "left(8)", "indigo", "top")], dim=(6,))
+    V.text(ax, p, 7.4, 0.5, "count of 3s = right - left = 3", ha="left", color="muted", size=10)
+V.show(draw)
+```
+
+bisect_left and bisect_right on a sorted list: the boundaries before and after the run of 3s, and the insertion point of a missing value.
+
+:::
+
+{{< include ../problems/cf-706b-interesting-drink/problem.qmd >}}
+
+[**From a fixed array to one that loses elements.** Interesting Drink never changes its prices. In Concert Tickets every answer removes a ticket, so the search must skip taken positions: a `multiset` in C++, a union–find over sorted positions in Python.]{.flow-bridge}
+
+
+{{< include ../problems/cses-1091-concert-tickets/problem.qmd >}}
+
+[**From one sorted list to one per key.** Concert Tickets searches one sorted array. The time-based store keeps a sorted list of timestamps for every key, sorted for free because timestamps only increase.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0981-time-based-key-value-store/problem.qmd >}}
+
+## Pattern 5: fast I/O, deep recursion and other TLE traps {#sec-lang-p5}
+
+**From the right algorithm to a program that passes.** Patterns 1–4 chose the operations. A correct and fast algorithm can still fail when the input is large: reading $10^5$ numbers one call at a time is slow, and recursing $10^5$ levels deep crashes.
+
+**Recognise it.** Large input or output ($\ge 10^5$ numbers), many test cases ($t$ up to $10^4$), or a tree or graph given as a parent array or edge list with $n \ge 10^5$ (so a recursive DFS can be $n$ levels deep).
+
+::: {.callout-important title="Template"}
+1. **Read once, write once.** Python: `sys.stdin.buffer.read().split()` and one `sys.stdout.write`. C++: `sync_with_stdio(false)`, `cin.tie(nullptr)`, `'\n'`.
+2. **Reset per test, not per element.** Allocate arrays of size $n$ per test; never `[0] * MAXN` per test when $t = 10^4$.
+3. **Replace recursion on deep structures** by an explicit stack or by processing a BFS/DFS order in reverse (children before parents).
+4. **Move work into the library**: sorting, `accumulate`, slicing, `join`.
+:::
+
+**Complexity.** The algorithm's complexity is unchanged; the constant factor drops, often by a factor of 5–10 for I/O-bound programs.
+
+::: {#fig-lang-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    labels = ["stdin.buffer.read()", "split() tokens", "int(tok[pos])", "out.append(ans)", "one write"]
+    nodes = {k: (3.4 * k, 0, lab, "green" if k in (0, 4) else "indigo") for k, lab in enumerate(labels)}
+    V.flow(ax, p, nodes, [(k, k + 1, "") for k in range(4)], w=3.0, h=0.85, size=9)
+    V.text(ax, p, 6.8, -1.1, "no input() or print() inside the loop", color="muted", size=10)
+V.show(draw)
+```
+
+Fast I/O in Python: one read, a position pointer through the tokens, one write.
+
+:::
+
+{{< include ../problems/cf-1676e-eating-queries/card.qmd >}}
+
+The binary search chapter solves this problem in full. Here it is the I/O-bound example: the algorithm is a sort, a prefix sum and one bisect per query, and none of that matters if you read $3\cdot10^5$ numbers with `input()` and answer them with `print()` one line at a time.
+
+[**From slow input to a deep stack.** Eating Queries is an input problem: the algorithm is a prefix sum and a binary search. Subordinates reads little but recurses as deep as the company chain, so the fix is an iterative order, not faster reading.]{.flow-bridge}
+
+
+{{< include ../problems/cses-1674-subordinates/problem.qmd >}}
+
+## Pattern 6: overflow, floating point and modular arithmetic {#sec-lang-p6}
+
+**From running time to the numbers themselves.** Pattern 5 was about what a program costs. This one is about its arithmetic: a value that leaves 32 bits, a remainder that comes out negative, a float that rounds the wrong way, a division modulo a prime.
+
+**Recognise it.** Values or answers above $2\cdot10^9$; products of two inputs; "print the answer modulo $10^9 + 7$"; square roots, slopes, angles, averages, or any division; negative numbers combined with `%`.
+
+::: {.callout-important title="Numeric facts to know"}
+**Integer ranges (C++).** `int`: $\pm 2.147\cdot10^9$. `long long`: $\pm 9.22\cdot10^{18}$. `unsigned long long`: up to $1.8\cdot10^{19}$. `__int128` (GCC): about $\pm 1.7\cdot10^{38}$, no `cin`/`cout` support. Signed overflow is **undefined behaviour**, not wrap-around.
+
+**Overflow traps.** `int a, b; long long c = a * b;` multiplies in `int` and overflows *before* widening; write `1LL * a * b`. `1 << 40` is `int`; write `1LL << 40`. `(lo + hi) / 2` overflows for large `int` bounds; write `lo + (hi - lo) / 2`. A product of two values $< 10^9 + 7$ fits in `long long`; a product of two values $< 10^{18}$ needs `__int128`.
+
+**Floating point.** A `double` has 53 bits of mantissa (about 15–16 decimal digits). Every integer up to $2^{53} \approx 9\cdot10^{15}$ is exact; beyond that, not even all integers are representable. `0.1 + 0.2 != 0.3`. Rules: compare with a tolerance, `abs(a - b) < eps`; better, **stay in integers**: compare $a/b < c/d$ as $ad < cb$ (with $b, d > 0$), compute $\lfloor\sqrt x\rfloor$ with `math.isqrt`, represent a slope as a reduced pair, or use `fractions.Fraction`.
+
+**Modular arithmetic.** $(a + b) \bmod m$, $(a - b) \bmod m$ and $ab \bmod m$ can be reduced after every step. Python's `%` always returns a value in $[0, m)$ for $m > 0$; C++'s `%` takes the **sign of the dividend**: `-7 % 3 == -1`. Normalise with `((x % m) + m) % m`. Division is multiplication by the inverse: for prime $p$ and $a \not\equiv 0$, $a^{-1} \equiv a^{p-2} \pmod p$ (Fermat), computed by `pow(a, p - 2, p)` in Python ($O(\log p)$) or a hand-written fast power in C++. Python 3.8+ also has `pow(a, -1, m)` for any $m$ coprime to $a$.
+:::
+
+**Complexity.** These are constant-factor concerns, except that exact arithmetic on huge numbers (big `int`, `Fraction`) costs $O(\text{digits})$ per operation or more.
+
+The next cell checks the two traps that bite most often in binary searches and roots: a 32-bit `mid * mid` that wraps around, and a floating-point square root that rounds the wrong way. The safe binary search keeps `lo*lo <= x < hi*hi` in 64-bit (or Python) integers; the safe root is `math.isqrt`, or `sqrtl` plus a correction loop in C++ (exercise 11).
+
+```{python}
+#| label: lang-numeric-traps
+def wrap32(v):                              # what a 32-bit signed int holds after overflow (in practice)
+    return (v + 2**31) % 2**32 - 2**31
+
+def isqrt_search(x):                        # invariant lo*lo <= x < hi*hi, in exact integers
+    lo, hi = 0, x + 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if mid * mid <= x:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+def isqrt_int32_bug(x):                     # the C++ version with `int mid` and `mid * mid`
+    lo, hi, ans = 0, x, 0
+    while lo <= hi:
+        mid = lo + (hi - lo) // 2
+        if wrap32(mid * mid) <= x:
+            ans, lo = mid, mid + 1
+        else:
+            hi = mid - 1
+    return ans
+
+for x in list(range(2000)) + [random.randint(0, 10**30) for _ in range(300)]:
+    assert isqrt_search(x) == math.isqrt(x)
+assert isqrt_search(2**31 - 1) == 46340 and isqrt_int32_bug(2**31 - 1) != 46340   # overflow: wrong answer
+assert int(math.sqrt(10**16 - 1)) == 10**8          # the float rounds 10^16 - 1 up to 10^16 ...
+assert math.isqrt(10**16 - 1) == 10**8 - 1          # ... but the true floor is 10^8 - 1
+assert 0.1 + 0.2 != 0.3 and abs((0.1 + 0.2) - 0.3) < 1e-12
+assert float(2**53 + 1) == float(2**53)             # not every integer above 2^53 is a double
+```
+
+::: {#fig-lang-p6}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def axes(ax, p):
+    x = 2.0 ** np.arange(0, 64)
+    ax.plot(x, np.spacing(x), color=p["indigo"], lw=2)
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log", base=2)
+    ax.axhline(1, color=p["pink"], ls="--", lw=1)
+    ax.axvline(2.0**53, color=p["pink"], ls=":", lw=1)
+    ax.axvline(2.0**31, color=p["amber"], ls=":", lw=1)
+    ax.text(2.0**31, 2.0**-30, " INT_MAX", color=p["amber"], fontsize=9)
+    ax.text(2.0**53, 2.0**-40, " 2^53", color=p["pink"], fontsize=9)
+    ax.set_xlabel("magnitude of the value")
+    ax.set_ylabel("gap to the next double")
+V.plot(axes, size=(6.4, 3.0))
+```
+
+Gap between consecutive doubles at each magnitude. Above 2^53 the gap exceeds 1, so not every integer is representable.
+
+:::
+
+### Subarray sums divisible by K: the negative remainder {#sec-lang-p6-divisible}
+
+{{< include ../problems/lc-0974-subarray-sums-divisible-by-k/card.qmd >}}
+
+The prefix-sums chapter solves this problem in full. Here it is the smallest program in which the two languages' `%` give **different answers**. The solution keys a counter by the running remainder $P \bmod k$. In Python that remainder always lies in $[0, k)$. In C++, `s % k` takes the sign of `s`, so a negative running sum gives a remainder in $(-k, 0)$: $-1$ and $k - 1$ land in different buckets although they are the same class, and with a `vector<int> cnt(k)` the index $-1$ is out of bounds. The fix is one line, `s = ((s + x) % k + k) % k`. The cell imitates C++'s `%` and shows the wrong count on the smallest input that needs a negative remainder.
+
+```{python}
+#| label: lang-divisible
+def c_mod(a, b):                             # C++ a % b for b > 0: the sign follows a
+    r = abs(a) % b
+    return r if a >= 0 else -r
+
+def count_div_by_k(a, k, mod):               # the remainder-counting loop, with a chosen % operator
+    cnt, s, total = Counter({0: 1}), 0, 0
+    for x in a:
+        s = mod(s + x, k)
+        total += cnt[s]
+        cnt[s] += 1
+    return total
+
+python_mod = lambda a, b: a % b              # always in [0, b)
+normalised = lambda a, b: (c_mod(a, b) + b) % b
+
+for _ in range(1000):
+    a = [random.randint(-10, 10) for _ in range(random.randint(1, 12))]
+    k = random.randint(2, 7)
+    brute = sum(sum(a[l:r]) % k == 0 for l in range(len(a)) for r in range(l + 1, len(a) + 1))
+    assert count_div_by_k(a, k, python_mod) == count_div_by_k(a, k, normalised) == brute
+
+assert (c_mod(-7, 3), -7 % 3) == (-1, 2)
+assert count_div_by_k([-1, 2], 2, python_mod) == 1        # prefixes 0, -1, 1: remainders 0, 1, 1 -> the subarray [2]
+assert count_div_by_k([-1, 2], 2, c_mod) == 0             # C++ remainders 0, -1, 1: the pair is missed
+```
+
+[**From remainders to slopes.** The remainder trap is fixed by one normalisation. Max Points on a Line meets the float trap: a slope stored as `dy/dx` rounds, so the direction is stored as a reduced integer pair.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0149-max-points-on-a-line/problem.qmd >}}
+
+[**From avoiding division to dividing modulo p.** Both problems so far stayed in exact integers. Binomial Coefficients must divide factorials modulo a prime, which works by multiplying with modular inverses.]{.flow-bridge}
+
+
+{{< include ../problems/cses-1079-binomial-coefficients/problem.qmd >}}
+
+## Pattern 7: safe hashing {#sec-lang-p7}
+
+**From the arithmetic to an adversary.** Every trap so far came from the size or the values of an honest input. On judges with hacks, the input can also be chosen to collide in your hash table, which turns expected $O(1)$ operations into $O(n)$.
+
+**Recognise it.** A hash map or set keyed by **input integers** on a judge where other contestants can add tests (Codeforces hacks, open hacking phases, uphacks after the contest). Also any hash map in an online service exposed to untrusted keys.
+
+### Why default hashes can be attacked
+
+In libstdc++ (GCC), `std::hash<long long>` is the identity, and `unordered_map` puts key $x$ into bucket $x \bmod B$, where $B$ is a prime from a fixed, public list of bucket counts. A test made of many multiples of $B$ puts every key into one bucket; each operation then scans a chain of length up to $n$, and $n$ insertions cost $\Theta(n^2)$. With $n = 2\cdot10^5$ that is $2\cdot10^{10}$ comparisons: a guaranteed TLE.
+
+CPython is attackable in a similar way: `hash(x) == x` for small non-negative ints (in general $x \bmod (2^{61} - 1)$, and `hash(-1) == -2`), and the probe sequence of a `dict` depends only on the hash. Inputs that collide can be generated, and such tests have been reported against Python and especially PyPy submissions on Codeforces. String hashes in CPython are randomised per process, int hashes are not.
+
+::: {.callout-important title="Template"}
+- **C++:** give `unordered_map` a hash that is (a) a good mixer, so structured keys spread out, and (b) seeded by a value the attacker cannot know, such as the clock at start-up. The standard choice is `splitmix64` (below). Call `reserve` to avoid rehashing. Or use `map` / sorting when $O(\log n)$ is affordable.
+- **Python:** XOR every key with a random 62-bit constant chosen at start-up, `key ^ RND`. XOR with a constant is a bijection, so equal keys stay equal and different keys stay different, and the attacker no longer controls the hashes. Alternatives: sort and use `bisect`, or use the integer as an index into a list when values are small.
+- **Avoid** hash maps entirely when the key range is small: a `list` / `vector` indexed by value is faster and immune.
+:::
+
+```cpp
+struct custom_hash {
+    static uint64_t splitmix64(uint64_t x) {
+        x += 0x9e3779b97f4a7c15;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111eb;
+        return x ^ (x >> 31);
+    }
+    size_t operator()(uint64_t x) const {
+        static const uint64_t FIXED_RANDOM = chrono::steady_clock::now().time_since_epoch().count();
+        return splitmix64(x + FIXED_RANDOM);
+    }
+};
+unordered_map<long long, int, custom_hash> cnt;    // also unordered_set<long long, custom_hash>
+```
+
+The next cell simulates a chained hash table with $B$ buckets: with the identity hash, multiples of $B$ all land in one bucket; with seeded `splitmix64` the largest bucket stays tiny.
+
+```{python}
+#| label: lang-hash-attack
+MASK64 = (1 << 64) - 1
+
+def splitmix64(x):
+    x = (x + 0x9E3779B97F4A7C15) & MASK64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & MASK64
+    return x ^ (x >> 31)
+
+assert splitmix64(0) == 0xE220A8397B1DCDAF        # the reference value of the generator
+
+def chained_cost(keys, B, h):
+    """Comparisons made by inserting keys into a chained table with B buckets."""
+    load, cost = Counter(), 0
+    for k in keys:
+        b = h(k) % B
+        cost += load[b]                           # scan the chain before inserting
+        load[b] += 1
+    return cost, max(load.values())
+
+B, n = 107897, 20_000
+attack = [B * i for i in range(1, n + 1)]
+FIXED_RANDOM = random.getrandbits(64)
+cost_id, worst_id = chained_cost(attack, B, lambda x: x)
+cost_mix, worst_mix = chained_cost(attack, B, lambda x: splitmix64((x + FIXED_RANDOM) & MASK64))
+print(f"identity hash: {cost_id:,} comparisons, largest bucket {worst_id}")
+print(f"splitmix64:    {cost_mix:,} comparisons, largest bucket {worst_mix}")
+assert worst_id == n and cost_id == n * (n - 1) // 2
+assert worst_mix <= 8 and cost_mix < 5 * n
+```
+
+::: {#fig-lang-p7}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+B_SMALL = 13
+small_keys = [B_SMALL * i for i in range(1, 27)]
+load_id = [sum(k % B_SMALL == b for k in small_keys) for b in range(B_SMALL)]
+load_mix = [sum(splitmix64((k + FIXED_RANDOM) & MASK64) % B_SMALL == b for k in small_keys) for b in range(B_SMALL)]
+assert load_id[0] == 26 and max(load_mix) < 26
+
+def draw(ax, p):
+    V.bars(ax, p, load_id, 0, 0, height=3.0, colors={0: "red"})
+    V.bars(ax, p, load_mix, 15, 0, height=3.0 * max(load_mix) / 26, colors={b: "green" for b in range(B_SMALL)})
+    V.text(ax, p, 6.5, -1.1, "identity hash", color="red", size=10)
+    V.text(ax, p, 21.5, -1.1, "seeded splitmix64", color="green", size=10)
+V.show(draw)
+```
+
+Bucket loads for 26 keys that are multiples of 13 in a table with 13 buckets: the identity hash puts them all in bucket 0; a seeded splitmix64 spreads them out.
+
+:::
+
+**Complexity.** With a randomised hash the expected cost is $O(1)$ per operation again, whatever the input.
+
+{{< include ../problems/cf-702b-powers-of-two/problem.qmd >}}
+
+[**From input values to derived keys.** Powers of Two looks up raw input values. In Same Differences the key $a_i - i$ is computed from the input; it can still be attacked, and its small range allows a counter with no hashing at all.]{.flow-bridge}
+
+
+### Same differences: a counter that cannot be attacked {#sec-lang-p7-same-differences}
+
+{{< include ../problems/cf-1520d-same-differences/card.qmd >}}
+
+The hashing chapter solves this problem in full. Its key, $b_i = a_i - i$, is derived from the input, so a plain `unordered_map<int, int>` keyed by $b_i$ is exactly what an anti-hash test targets. Two safe counters, both one pass:
+
+- **An array indexed by value.** Because $1 \le a_i \le n$, the key lies in $[1 - n, n - 1]$, so `cnt[b_i + n]` in a list of size $2n + 1$ needs no hashing at all. Allocate it **per test** with the current $n$; clearing one global array of size $2\cdot10^5$ for each of $10^4$ tests costs $2\cdot10^9$ steps.
+- **A randomised key.** `(a_i - i) ^ RND` in Python, or the seeded `custom_hash` in C++. XOR with a constant keeps equal keys equal and different keys different, and the attacker cannot predict the buckets.
+
+Both must count in 64 bits: an array of $n = 2\cdot10^5$ equal keys has $n(n-1)/2 \approx 2\cdot10^{10}$ pairs.
+
+```{python}
+#| label: lang-same-differences
+def same_differences_array(a):
+    n = len(a)
+    cnt, total = [0] * (2 * n + 1), 0          # sized per test
+    for i, x in enumerate(a, start=1):
+        k = x - i + n                          # b_i + n, in [1, 2n - 1]
+        total += cnt[k]
+        cnt[k] += 1
+    return total
+
+def same_differences_xor(a):
+    cnt, total = {}, 0
+    for i, x in enumerate(a, start=1):
+        k = (x - i) ^ RND                      # a bijection the attacker cannot predict
+        c = cnt.get(k, 0)
+        total += c
+        cnt[k] = c + 1
+    return total
+
+for _ in range(1000):
+    n = random.randint(1, 12)
+    a = [random.randint(1, n) for _ in range(n)]
+    brute = sum(a[j] - a[i] == j - i for i in range(n) for j in range(i + 1, n))
+    assert same_differences_array(a) == same_differences_xor(a) == brute
+
+n = 2 * 10**5
+assert same_differences_array(list(range(1, n + 1))) == n * (n - 1) // 2 > 2**31   # needs long long in C++
+```
+
+**Looking back.** All seven patterns are one habit: know what each operation of your language really does and what it costs. A container's operations, a heap's top, a sort's comparator, a binary search's boundary, the input and the stack, the width of a number, and the hash function are each a place where the same algorithm passes in one form and fails in another.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Group, count, "have we seen it" | Hash map / `Counter` / `defaultdict` | @sec-lang-p1-anagrams |
+| "Most recently used", evict the oldest | `OrderedDict`, `list` + iterator map | @sec-lang-p1-lru |
+| Max or min of every window | Monotonic `deque` | @sec-lang-p1-window-max |
+| Repeatedly take the largest / smallest | Heap (negate for max in Python) | @sec-lang-p2-stones |
+| Merge sorted streams, $k$ best | Heap of `(key, tiebreak, item)` | @sec-lang-p2-merge |
+| Delete from a heap, corrections | Lazy deletion | @sec-lang-p2-stock |
+| Order decided by pairs ("concatenate") | Comparator, check strict weak ordering | @sec-lang-p3-largest |
+| "Sort by …, then by …" | Tuple key, stable sort | @sec-lang-p3-frequency |
+| "How many $\le x$" over a static array | Sort + `bisect_right` / `upper_bound` | @sec-lang-p4-drink |
+| Largest available $\le x$, with removals | `multiset` / DSU over sorted positions | @sec-lang-p4-tickets |
+| Latest version at time $t$ | Append-only sorted lists + bisect | @sec-lang-p4-timemap |
+| $t \le 10^4$ tests, $10^5$+ numbers | Read all, write once | @sec-bst-p3-a |
+| Tree as a parent array, $n \ge 10^5$ | Iterative order instead of recursion | @sec-lang-p5-subordinates |
+| Values near $2^{31}$, squares, products | 64-bit / `__int128`, exact integer roots | @sec-lang-p6 |
+| Negative numbers with `%` | Normalise the remainder | @sec-lang-p6-divisible |
+| Slopes, ratios, geometry | Reduced integer pairs, cross products | @sec-lang-p6-points |
+| "Modulo $10^9+7$", combinations | Factorials and Fermat inverses | @sec-lang-p6-binomial |
+| Hash map on input integers (Codeforces) | `splitmix64` / XOR with a random key | @sec-lang-p7-powers |
+| Pairs with equal $a_i - i$, small key range | Array indexed by value, no hashing | @sec-lang-p7-same-differences |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **`list.pop(0)`, `x in list`, `insort`** inside a loop: each is $O(n)$. Use `deque`, `set`, or a tree.
+- **Reading a missing key of a `defaultdict`** (or `map::operator[]` in C++) inserts it, which changes `len` and iteration, and can blow up memory.
+- **Heap entries that tie** on the priority make Python compare the payload: add a unique tie-breaker.
+- **Min-heap comparator in C++ uses `>`**, and `priority_queue` puts the "largest" element under the comparator on top.
+- **Comparators with `<=`** are undefined behaviour in `std::sort`, `set` and `map`.
+- **`lower_bound(s.begin(), s.end(), x)` on a `set`** is $O(n)$; use `s.lower_bound(x)`.
+- **`multiset::erase(value)`** removes every copy; erase an iterator.
+- **Iterators kept across `push_back`, `insert` or rehash** may dangle.
+- **`endl` in a loop**, `print` in a loop, `input()` for $10^6$ numbers.
+- **Recursion on a path of $10^5$ nodes**: Python crashes, and raising the limit can segfault.
+- **`int * int` stored in `long long`** still overflows; cast first. `1 << 40` overflows; `1LL << 40`.
+- **Float equality and float square roots** on large integers; `int(math.sqrt(x))` is wrong for $x \ge 2^{52}$ or so.
+- **Negative `%` in C++**; normalise with `((x % m) + m) % m`.
+- **Default `unordered_map` on Codeforces**: hackable. Use a seeded `splitmix64`.
+- **`str(huge_int)`** above 4300 digits raises `ValueError` in Python 3.11+.
+:::
+
+## Exercises
+
+**1. [E]** What does this print, and how do you fix it?
+
+```python
+grid = [[0] * 3] * 3
+grid[0][0] = 1
+print(grid)
+```
+
+::: {.callout-note collapse="true" title="Solution"}
+`[[1, 0, 0], [1, 0, 0], [1, 0, 0]]`. `[row] * 3` copies the **reference** three times, so all rows are the same list. Build each row separately. In C++, `vector<vector<int>> g(3, vector<int>(3))` copies the inner vector, so it does not have this problem.
+
+```{python}
+grid = [[0] * 3] * 3
+grid[0][0] = 1
+assert grid == [[1, 0, 0]] * 3 and grid[0] is grid[2]
+grid = [[0] * 3 for _ in range(3)]
+grid[0][0] = 1
+assert grid == [[1, 0, 0], [0, 0, 0], [0, 0, 0]]
+```
+:::
+
+**2. [E]** In Python, `-7 // 2` and `-7 % 2`; in C++, `-7 / 2` and `-7 % 2`. Give all four values and the rule behind them.
+
+::: {.callout-note collapse="true" title="Solution"}
+Python floors: `-7 // 2 == -4`, `-7 % 2 == 1`. C++ truncates toward zero: `-7 / 2 == -3`, `-7 % 2 == -1`. Both satisfy `a == (a / b) * b + a % b` for their own division. To get floor division in C++ for $b > 0$: `a >= 0 ? a / b : -((-a + b - 1) / b)`.
+
+```{python}
+def c_div(a, b):
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b > 0) else -q
+
+assert (-7 // 2, -7 % 2) == (-4, 1)
+assert (c_div(-7, 2), -7 - 2 * c_div(-7, 2)) == (-3, -1)
+for a in range(-20, 21):
+    for b in [1, 2, 3, 7]:
+        assert a == c_div(a, b) * b + c_mod(a, b) and a == (a // b) * b + a % b
+```
+:::
+
+**3. [E]** You need a heap that pops the **highest** priority first and, among equal priorities, the lexicographically **largest** name. Negation does not work on strings. What do you push?
+
+::: {.callout-note collapse="true" title="Solution"}
+Wrap the name in a class whose `__lt__` is reversed, and push `(-priority, Rev(name))`. (For "highest priority, then smallest name", `(-priority, name)` suffices.) In C++, `priority_queue<pair<int,string>>` already pops the largest pair.
+
+```{python}
+class Rev:
+    __slots__ = ("s",)
+    def __init__(self, s):
+        self.s = s
+    def __lt__(self, other):
+        return self.s > other.s
+
+items = [(3, "bob"), (5, "amy"), (5, "zed"), (3, "cat")]
+h = [(-p, Rev(name)) for p, name in items]
+heapq.heapify(h)
+order = [heapq.heappop(h)[1].s for _ in range(len(items))]
+assert order == ["zed", "amy", "cat", "bob"]
+```
+:::
+
+**4. [E]** What is wrong with this C++ loop, and how do you fix it?
+
+```cpp
+// fragment
+for (auto it = s.begin(); it != s.end(); ++it)
+    if (*it % 2) s.erase(it);
+```
+
+::: {.callout-note collapse="true" title="Solution"}
+After `s.erase(it)`, `it` is invalidated, and `++it` is undefined behaviour. `erase` returns the iterator to the next element:
+
+```cpp
+// fragment
+for (auto it = s.begin(); it != s.end(); )
+    it = (*it % 2) ? s.erase(it) : next(it);
+```
+
+Since C++20 `erase_if(s, pred)` does it in one call. For a `vector`, use the erase–remove idiom: `v.erase(remove_if(v.begin(), v.end(), pred), v.end())`, which is $O(n)$ instead of $O(n^2)$.
+:::
+
+**5. [E]** Each line has an overflow bug for `int a = 100000, b = 100000;`. Explain and fix: (a) `long long c = a * b;` (b) `long long m = 1 << 40;` (c) `int mid = (lo + hi) / 2;` with `lo, hi` up to $2\cdot10^9$.
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) The product is computed in `int` and overflows before the conversion: `1LL * a * b`. (b) `1` is an `int`, and shifting it by 40 is undefined: `1LL << 40`. (c) `lo + hi` can reach $4\cdot10^9$: `lo + (hi - lo) / 2`, or use `long long`.
+
+```{python}
+assert wrap32(100000 * 100000) == 1410065408 != 10**10      # what (a) typically stores
+assert wrap32(2 * 10**9 + 2 * 10**9) < 0                     # (c): lo + hi becomes negative
+```
+:::
+
+**6. [E]** Your Python program prints a 10,000-digit number and crashes with `ValueError`. Why, and what is the fix?
+
+::: {.callout-note collapse="true" title="Solution"}
+Since Python 3.11, converting an `int` with more than 4300 decimal digits to `str` (and back) raises `ValueError`, to stop denial-of-service attacks (the conversion is quadratic). Call `sys.set_int_max_str_digits(0)` at the start, or print in hexadecimal if allowed.
+
+```{python}
+old = sys.get_int_max_str_digits()
+sys.set_int_max_str_digits(0)
+assert len(str(10**10000)) == 10001
+sys.set_int_max_str_digits(old)
+```
+:::
+
+**7. [M]** Implement a multiset in Python that supports `add(x)`, `remove(x)` (one copy, assumed present) and `min()`, each in $O(\log n)$ amortized, using only the standard library.
+
+::: {.callout-note collapse="true" title="Solution"}
+A heap for the order plus a `Counter` of live copies; `remove` only decrements the counter, and `min` pops heap entries whose live count is zero (lazy deletion). Each pushed entry is popped once.
+
+```{python}
+class MinMultiset:
+    def __init__(self):
+        self.h, self.live, self.size = [], Counter(), 0
+    def add(self, x):
+        heapq.heappush(self.h, x); self.live[x] += 1; self.size += 1
+    def remove(self, x):
+        self.live[x] -= 1; self.size -= 1
+    def min(self):
+        while self.live[self.h[0]] == 0:
+            heapq.heappop(self.h)
+        return self.h[0]
+
+for _ in range(300):
+    ms, ref = MinMultiset(), []
+    for _ in range(40):
+        if ref and random.random() < 0.4:
+            x = random.choice(ref); ref.remove(x); ms.remove(x)
+        else:
+            x = random.randint(0, 9); ref.append(x); ms.add(x)
+        if ref:
+            assert ms.min() == min(ref) and ms.size == len(ref)
+```
+
+The `Counter` lookups avoid hashing traps only if the keys are not adversarial; for contest input, XOR them with a random constant (@sec-lang-p7).
+:::
+
+**8. [M]** A teammate sorts with `sort(a.begin(), a.end(), [](int x, int y) { return x <= y; });` and it works on small tests but crashes on a test with $10^5$ equal values. Explain.
+
+::: {.callout-note collapse="true" title="Solution"}
+`x <= y` is not irreflexive (`comp(x, x)` is true), so it is not a strict weak ordering, and `std::sort`'s behaviour is undefined. In practice, libstdc++'s unguarded insertion sort and partition loops use the comparator as a sentinel: they scan "while `comp(a[i], pivot)`", and with all elements equal and `<=` the condition never fails, so the scan runs past the end of the array. Use `x < y`. If you need a descending order, use `x > y`, never `x >= y`.
+:::
+
+**9. [M]** Maintain the $k$-th largest element of a stream (`add(x)` returns the current $k$-th largest) in $O(\log k)$ per call.
+
+::: {.callout-note collapse="true" title="Solution"}
+Keep a **min**-heap of the $k$ largest values seen so far; its top is the $k$-th largest. On `add`, push if the heap has fewer than $k$ elements, otherwise `heappushpop` (push then pop the smallest, in one $O(\log k)$ step) if $x$ is larger than the top.
+
+```{python}
+class KthLargest:
+    def __init__(self, k, nums):
+        self.k, self.h = k, []
+        for x in nums:
+            self.add(x)
+    def add(self, x):
+        if len(self.h) < self.k:
+            heapq.heappush(self.h, x)
+        elif x > self.h[0]:
+            heapq.heapreplace(self.h, x)
+        return self.h[0]
+
+for _ in range(300):
+    k = random.randint(1, 5)
+    seen = [random.randint(0, 20) for _ in range(k)]
+    kl = KthLargest(k, seen)
+    for _ in range(20):
+        x = random.randint(0, 20)
+        seen.append(x)
+        assert kl.add(x) == sorted(seen, reverse=True)[k - 1]
+```
+:::
+
+**10. [M]** Compute $ab \bmod m$ for $a, b < m \le 10^{18}$ in C++ without `__int128`.
+
+::: {.callout-note collapse="true" title="Solution"}
+Binary multiplication ("Russian peasant"): add $a$ (doubled each step, mod $m$) for each set bit of $b$. All intermediate values are $< 2m \le 2\cdot10^{18} < 9.2\cdot10^{18}$, so they fit in `long long` (or use `unsigned long long`). $O(\log b)$ steps. With `__int128`: `(__int128)a * b % m`.
+
+```{python}
+def mulmod(a, b, m):
+    r = 0
+    a %= m
+    while b:
+        if b & 1:
+            r = (r + a) % m          # r, a < m, so r + a < 2m
+        a = (a + a) % m
+        b >>= 1
+    return r
+
+for _ in range(2000):
+    m = random.randint(1, 10**18)
+    a, b = random.randrange(m), random.randrange(m)
+    assert mulmod(a, b, m) == a * b % m
+```
+
+```cpp
+long long mulmod(long long a, long long b, long long m) {
+    long long r = 0;
+    a %= m;
+    for (; b > 0; b >>= 1, a = (a + a) % m)
+        if (b & 1) r = (r + a) % m;
+    return r;
+}
+```
+:::
+
+**11. [M]** Write an exact `isqrt` for $x \le 10^{18}$ in C++ that starts from `sqrtl` and fixes the result, and show why the fix is needed.
+
+::: {.callout-note collapse="true" title="Solution"}
+`sqrtl` (or `sqrt`) can be off by one either way for large $x$, because $x$ itself may not be representable, and the result is rounded. Adjust in both directions with integer comparisons; use `__int128` or division to avoid overflow in `(r + 1) * (r + 1)`.
+
+```cpp
+long long isqrt(long long x) {
+    long long r = sqrtl((long double)x);
+    while (r > 0 && r > x / r) --r;                  // r*r > x
+    while ((r + 1) <= x / (r + 1)) ++r;              // (r+1)^2 <= x
+    return r;
+}
+```
+
+```{python}
+def isqrt_fixed(x):
+    r = int(math.sqrt(x))
+    while r * r > x:
+        r -= 1
+    while (r + 1) * (r + 1) <= x:
+        r += 1
+    return r
+
+wrong = 0
+for _ in range(3000):
+    x = random.randint(1, 10**18)
+    if random.random() < 0.5:
+        x = random.randint(1, 10**9) ** 2 - 1        # just below a perfect square
+    assert isqrt_fixed(x) == math.isqrt(x)
+    wrong += int(math.sqrt(x)) != math.isqrt(x)
+assert wrong > 0
+```
+:::
+
+**12. [M]** Compute the inverses of $1, 2, \dots, n$ modulo a prime $p$ in $O(n)$ total.
+
+::: {.callout-note collapse="true" title="Solution"}
+Write $p = qi + r$ with $q = \lfloor p/i\rfloor$, $r = p \bmod i$. Then $0 \equiv qi + r$, so $i^{-1} \equiv -q\, r^{-1} \pmod p$, and $r < i$ was computed already: `inv[i] = (p - p // i) * inv[p % i] % p`.
+
+```{python}
+def inverses(n, p=MOD):
+    inv = [0, 1] + [0] * (n - 1)
+    for i in range(2, n + 1):
+        inv[i] = (p - p // i) * inv[p % i] % p
+    return inv
+
+inv = inverses(10**5)
+assert all(i * inv[i] % MOD == 1 for i in range(1, 10**5 + 1))
+assert inverses(10, 13)[1:] == [pow(i, 11, 13) for i in range(1, 11)]
+```
+:::
+
+**13. [M]** Compare $\frac ab$ and $\frac cd$ exactly for integers with $|a|, |c| \le 10^9$ and $0 < |b|, |d| \le 10^9$. Will your C++ version overflow?
+
+::: {.callout-note collapse="true" title="Solution"}
+First make the denominators positive (negate numerator and denominator together). Then $\frac ab < \frac cd \iff ad < cb$. The products are at most $10^{18} < 9.2\cdot10^{18}$, so `long long` is enough. With values up to $10^{18}$ the products need `__int128`.
+
+```{python}
+def cmp_frac(a, b, c, d):
+    if b < 0: a, b = -a, -b
+    if d < 0: c, d = -c, -d
+    l, r = a * d, c * b
+    return (l > r) - (l < r)
+
+for _ in range(5000):
+    a, c = random.randint(-10, 10), random.randint(-10, 10)
+    b, d = random.choice([i for i in range(-10, 11) if i]), random.choice([i for i in range(-10, 11) if i])
+    x, y = Fraction(a, b), Fraction(c, d)
+    assert cmp_frac(a, b, c, d) == (x > y) - (x < y)
+```
+:::
+
+**14. [H]** Run a deep recursive function in Python without recursion, by turning each recursive call into `yield` and driving the generators with an explicit stack. Test it on a path of $10^5$ nodes.
+
+::: {.callout-note collapse="true" title="Solution"}
+A generator function pauses at `yield f(child)` and hands the child generator to the driver. The driver keeps a stack of generators, runs the top one, pushes children, and sends each child's `return` value back into its parent. Only the driver's loop uses the C stack, so the depth is limited only by memory. This is the "bootstrap" trick common in Python contest code.
+
+```{python}
+def drive(gen):
+    stack, value = [gen], None
+    while stack:
+        try:
+            child = stack[-1].send(value)      # run the top generator until its next call
+            stack.append(child)
+            value = None
+        except StopIteration as stop:          # it returned
+            stack.pop()
+            value = stop.value
+    return value
+
+def height(children, v):
+    best = 0
+    for c in children[v]:
+        best = max(best, (yield height(children, c)))
+    return best + 1
+
+def height_iterative(children, root):
+    best, st = 0, [(root, 1)]
+    while st:
+        v, d = st.pop()
+        best = max(best, d)
+        st.extend((c, d + 1) for c in children[v])
+    return best
+
+n = 10**5
+path = [[i + 1] for i in range(n - 1)] + [[]]
+assert drive(height(path, 0)) == n
+for _ in range(200):
+    m = random.randint(1, 30)
+    ch = [[] for _ in range(m)]
+    for v in range(1, m):
+        ch[random.randrange(v)].append(v)
+    assert drive(height(ch, 0)) == height_iterative(ch, 0)
+```
+:::
+
+**15. [H]** Decide exactly whether $\sqrt a + \sqrt b < \sqrt c$, $=$, or $>$ for non-negative integers up to $10^9$, using only integer arithmetic.
+
+::: {.callout-note collapse="true" title="Solution"}
+Both sides are non-negative, so compare squares: $a + b + 2\sqrt{ab}$ versus $c$. Let $t = c - a - b$. If $t < 0$ the left side is larger. Otherwise compare $2\sqrt{ab}$ with $t$, again by squaring: $4ab$ versus $t^2$. All values fit in 64 bits for inputs up to $10^9$ ($4ab \le 4\cdot10^{18}$, $t^2 \le 10^{18}$). Floating point fails here because the two sides can differ by less than $10^{-9}$ relative.
+
+```{python}
+from decimal import Decimal, getcontext
+
+def cmp_sqrt(a, b, c):
+    """Sign of (sqrt a + sqrt b) - sqrt c."""
+    t = c - a - b
+    if t < 0:
+        return 1
+    l, r = 4 * a * b, t * t
+    return (l > r) - (l < r)
+
+getcontext().prec = 80
+for _ in range(3000):
+    a, b = random.randint(0, 50), random.randint(0, 50)
+    c = random.choice([random.randint(0, 200), (math.isqrt(a) + math.isqrt(b)) ** 2])
+    diff = Decimal(a).sqrt() + Decimal(b).sqrt() - Decimal(c).sqrt()
+    want = 0 if abs(diff) < Decimal(10) ** -60 else (1 if diff > 0 else -1)
+    assert cmp_sqrt(a, b, c) == want
+assert cmp_sqrt(1, 1, 4) == 0 and cmp_sqrt(2, 2, 8) == 0
+```
+:::
+
+**16. [H]** Count inversions with `bisect.insort` into a sorted list. What is the worst-case complexity, and why does it often pass anyway? Give the guaranteed $O(n\log n)$ alternative.
+
+::: {.callout-note collapse="true" title="Solution"}
+For each element $x$ from left to right, the number of earlier elements greater than $x$ is `len(s) - bisect_right(s, x)`; then `insort(s, x)`. The search is $O(\log n)$ but the insertion shifts up to $n$ references: $O(n^2)$ worst case. The shift is a single `memmove` of up to $8n$ bytes, which runs at many GB/s, so $n = 10^5$ takes a second or two, while a Python-level $O(n^2)$ loop would take tens of minutes. The guaranteed alternative is a Fenwick tree over compressed values (or merge sort), $O(n\log n)$.
+
+```{python}
+def inversions_insort(a):
+    s, inv = [], 0
+    for x in a:
+        inv += len(s) - bisect_right(s, x)
+        insort(s, x)
+    return inv
+
+def inversions_fenwick(a):
+    rank = {v: i + 1 for i, v in enumerate(sorted(set(a)))}
+    tree, inv = [0] * (len(rank) + 1), 0
+    for seen, x in enumerate(a):
+        i, le = rank[x], 0
+        while i:                                 # prefix count of values <= x
+            le += tree[i]; i -= i & -i
+        inv += seen - le
+        i = rank[x]
+        while i <= len(rank):
+            tree[i] += 1; i += i & -i
+    return inv
+
+for _ in range(500):
+    a = [random.randint(0, 9) for _ in range(random.randint(0, 20))]
+    brute = sum(a[i] > a[j] for i in range(len(a)) for j in range(i + 1, len(a)))
+    assert inversions_insort(a) == inversions_fenwick(a) == brute
+big = list(range(20_000, 0, -1))
+assert inversions_insort(big) == inversions_fenwick(big) == 20_000 * 19_999 // 2
+```
+:::
+
+**17. [M]** `@lru_cache` on `def ways(items, budget)` with `items` a list raises `TypeError`. Why? Also, why can a memoised solution give wrong answers on the second test case of a multi-test input?
+
+::: {.callout-note collapse="true" title="Solution"}
+The cache stores arguments as dictionary keys, so they must be hashable; pass a `tuple`, or better, pass an **index** into a global list (which also avoids hashing the whole tuple on every call). If the function reads data that changes between test cases (a global array), the cache returns results computed for the previous test: call `ways.cache_clear()` per test, or include the test data in the arguments.
+
+```{python}
+@lru_cache(maxsize=None)
+def count_sums(items, budget):
+    if budget == 0:
+        return 1
+    if not items or budget < 0:
+        return 0
+    return count_sums(items[1:], budget - items[0]) + count_sums(items[1:], budget)
+
+try:
+    count_sums([1, 2, 3], 3)
+    ok = True
+except TypeError:
+    ok = False
+assert not ok and count_sums((1, 2, 3), 3) == 2
+count_sums.cache_clear()
+assert count_sums.cache_info().currsize == 0
+```
+:::
+
+## Interview questions
+
+**1. Does a Python `dict` keep insertion order? Can you rely on it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Yes. Since Python 3.7 it is part of the language specification (CPython 3.6 already did it as an implementation detail). Iteration, `keys()`, `values()` and `popitem()` (which removes the **last** item) follow insertion order. Updating an existing key keeps its position; deleting and reinserting moves it to the end. `set` has no order guarantee.
+:::
+
+**2. How is a Python `list` implemented, and what are the costs of `append`, `insert(0, x)` and `pop(0)`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A dynamic array of pointers that over-allocates by about 12.5% when it grows. `append` is amortized $O(1)$ (@sec-cx-amortized); `insert(0, x)` and `pop(0)` shift every element, $O(n)$. For a queue use `collections.deque`, which is a doubly linked list of fixed-size blocks with $O(1)$ operations at both ends.
+:::
+
+**3. How do you get a max-heap in Python? What about a heap of objects?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`heapq` only provides a min-heap. For numbers, push `-x`. For objects, push tuples `(key, counter, obj)` where `counter` is a unique increasing integer (e.g. from `itertools.count()`), so ties never compare `obj`. For a max-heap with a non-numeric key, wrap the key in a class with a reversed `__lt__`. (Python 3.14 adds `heapq.heapify_max`, `heappush_max` and `heappop_max`, but judges usually run older versions.)
+:::
+
+**4. When do you choose `std::map` over `std::unordered_map`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When you need order: iteration in sorted order, `lower_bound`, predecessor/successor, the minimum or maximum key. Also when you need a guaranteed $O(\log n)$ worst case (no hash attacks, no rehash spikes), or when the key has no hash (pairs, vectors) and you do not want to write one. `unordered_map` is faster on average for plain lookups, especially with `reserve` and a good hash.
+:::
+
+**5. What is a strict weak ordering, and what happens if a comparator is not one?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A relation that is irreflexive (`!comp(a, a)`), transitive, and whose "neither is less" relation (equivalence) is transitive too. Sorting and ordered containers assume it. Violations are undefined behaviour: `std::sort` can loop out of bounds and crash, `set` can fail to find elements it contains. The common violations are `<=` instead of `<`, comparators with floating-point tolerance (`abs(a - b) < eps` is not transitive), and comparators that depend on mutable state.
+:::
+
+**6. When are `vector` iterators invalidated? What about `list` and `map`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`vector`: any insertion that reallocates invalidates all iterators, pointers and references; otherwise insertion invalidates those at or after the insertion point; `erase` invalidates those at or after the erased position. `list`, `set`, `map`: insertion invalidates nothing, erase invalidates only the erased element. `unordered_map`: rehashing invalidates iterators (but not references to elements); erase invalidates only the erased one.
+:::
+
+**7. Why is `lower_bound(s.begin(), s.end(), x)` slow on a `std::set`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The free function performs a binary search using `std::advance` on the iterators. Set iterators are bidirectional, not random-access, so each advance of $k$ steps costs $O(k)$, and the total is $O(n)$ (with $O(\log n)$ comparisons). The member function `s.lower_bound(x)` walks down the tree in $O(\log n)$.
+:::
+
+**8. Python integers never overflow. Does that mean you never think about integer size in Python?**
+
+::: {.callout-note collapse="true" title="Answer"}
+No. Large integers make each operation cost $O(\text{digits})$ or more, so a DP that grows numbers without reducing modulo $p$ can turn $O(n^2)$ operations into $O(n^3)$ work. Memory grows too: each int is an object of 28+ bytes. `str()` of an int beyond 4300 digits raises `ValueError` by default. And `numpy` arrays use fixed-width types (`int64`), which **do** overflow silently.
+:::
+
+**9. Why should you not compare floating-point numbers with `==`? What do you do instead?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Most decimal fractions are not representable in binary, and every operation rounds, so mathematically equal values can differ in the last bits (`0.1 + 0.2 != 0.3`). Options: compare with a tolerance `abs(a - b) < eps` with `eps` chosen from the magnitudes involved; better, avoid floats: cross-multiply fractions, use reduced integer pairs for slopes, `math.isqrt` for roots, `Fraction` for exact rationals, or scale to integers (cents instead of dollars).
+:::
+
+**10. How do you compute $(a - b) \bmod m$ correctly in C++?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`((a - b) % m + m) % m`, because C++'s `%` takes the sign of the left operand, so `a - b < 0` gives a negative remainder. If $a, b \in [0, m)$ already, `(a - b + m) % m` suffices. Python's `%` already returns a value in $[0, m)$ for $m > 0$.
+:::
+
+**11. What is an anti-hash test, and how do you defend against one?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A test whose keys all collide under a known, deterministic hash function, making each hash-table operation $O(n)$ and the whole solution $O(n^2)$. On Codeforces, libstdc++'s identity hash and fixed prime bucket counts make `unordered_map<int, …>` an easy target. Defences: a strong mixing hash with a random seed chosen at run time (`splitmix64` + clock), `reserve`, or a balanced tree (`map`) with guaranteed $O(\log n)$. In Python, XOR integer keys with a random constant, or avoid hashing (sort, or index a list by value).
+:::
+
+**12. Your Python DFS on a tree with $2\cdot10^5$ nodes crashes. What are your options?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The recursion depth exceeds the limit (1000 by default). `sys.setrecursionlimit` alone can lead to a segfault when the C stack runs out. Options: rewrite iteratively with an explicit stack (for post-order work, process a preorder in reverse, or push `(node, state)` pairs); use generator-based recursion with a driver loop; or run the recursive code in a thread with `threading.stack_size` set large. Iterative code is the most reliable.
+:::
+
+**13. What do `ios::sync_with_stdio(false)` and `cin.tie(nullptr)` do, and why is `endl` slow?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The first stops C++ streams from synchronising with C's `stdio` after every operation, so they can buffer independently (you must then not mix `cin`/`cout` with `scanf`/`printf`). The second stops `cin` from flushing `cout` before each input operation. `endl` writes `'\n'` and flushes the buffer, which is a system call per line; with $10^6$ lines that dominates the running time. Use `'\n'`, except in interactive problems, where you must flush.
+:::
+
+**14. Are Python's `sort` and C++'s `std::sort` stable? Why does it matter?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Python's Timsort is stable; `std::sort` (introsort) is not, `std::stable_sort` (merge sort) is. Stability lets you sort by several keys with several passes (least significant first), and keeps the input order among ties when the problem requires it ("if equal, keep the original order"). Without stability you must add the index as a final tie-breaker.
+:::
+
+**15. When is Python too slow for a problem, and what do you do about it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When the intended solution needs more than about $10^7$ Python-level operations in the time limit: $n \log n$ with $n = 10^6$, heavy data structures (segment trees with $10^6$ queries), or deep recursion. Remedies: submit with PyPy (5–20× faster on numeric loops), push loops into C (built-ins, slicing, `numpy`), avoid recursion and object-heavy designs, use fast I/O. If the constant is still too high, switch to C++.
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- Count / group: `Counter`, `defaultdict(list)`; C++ `unordered_map` with `custom_hash`.
+- LRU: `OrderedDict.move_to_end` + `popitem(last=False)`; C++ `list::splice` + map of iterators.
+- Window max: monotonic `deque` of indices.
+- Max-heap in Python: push `-x`; entries `(key, tiebreak, item)`; lazy deletion by comparing with the true value.
+- C++ min-heap: `priority_queue<T, vector<T>, greater<>>`; lambda comparators use `>` for a min-heap.
+- Sorting: tuple keys and stability in Python, strict `<` comparators in C++; `cmp_to_key` only when the order is pairwise.
+- `bisect_right(a, x)` = count of $\le x$; largest $\le x$ is index `bisect_right(a, x) - 1`; C++ `prev(s.upper_bound(x))`.
+- Fast I/O: `sys.stdin.buffer.read().split()` and one `write`; `sync_with_stdio(false)`, `cin.tie(nullptr)`, `'\n'`.
+- Integers: `1LL *`, `lo + (hi - lo) / 2`, `math.isqrt`, cross-multiplication, `((x % m) + m) % m`, `pow(a, p - 2, p)`.
+:::
+
+- Know the true cost of every operation you call; most TLEs in correct solutions come from one hidden $O(n)$ call.
+- Choose the container from the operations the algorithm performs most often.
+- Python has no balanced BST in the standard library; use sorted lists with `bisect`, heaps with lazy deletion, or a DSU over sorted positions.
+- A C++ comparator must be a strict weak ordering; never use `<=`.
+- Read all input at once and write output once in Python; untie and unsync streams in C++.
+- Do not recurse $10^5$ levels in Python; use an explicit stack or a reverse traversal order.
+- Prefer integers to floats; when you must use floats, compare with a tolerance and know where the error comes from.
+- Randomise hashing of integer keys on judges with hacks.
+
+## Practice ladder
+
+Ordered by idea, not by rating. Each problem exercises one of the language tools of this chapter.
+
+::: {.practice}
+- [CF 1722C · Word Game](https://codeforces.com/problemset/problem/1722/C){rating="800"}
+- [LC 460 · LFU Cache](https://leetcode.com/problems/lfu-cache/){difficulty="Hard"}
+- [CF 602B · Approximating a Constant Range](https://codeforces.com/problemset/problem/602/B){rating="1400"}
+- [LC 1438 · Longest Continuous Subarray With Absolute Diff Less Than or Equal to Limit](https://leetcode.com/problems/longest-continuous-subarray-with-absolute-diff-less-than-or-equal-to-limit/){difficulty="Medium"}
+- [LC 215 · Kth Largest Element in an Array](https://leetcode.com/problems/kth-largest-element-in-an-array/){difficulty="Medium"}
+- [CF 1526C1 · Potions (Easy Version)](https://codeforces.com/problemset/problem/1526/C1){rating="1500"}
+- [CF 1353D · Constructing the Array](https://codeforces.com/problemset/problem/1353/D){rating="1600"}
+- [LC 373 · Find K Pairs with Smallest Sums](https://leetcode.com/problems/find-k-pairs-with-smallest-sums/){difficulty="Medium"}
+- [CF 1526C2 · Potions (Hard Version)](https://codeforces.com/problemset/problem/1526/C2){rating="1600"}
+- [LC 480 · Sliding Window Median](https://leetcode.com/problems/sliding-window-median/){difficulty="Hard"}
+- [CF 632C · The Smallest String Concatenation](https://codeforces.com/problemset/problem/632/C){rating="1700"}
+- [LC 451 · Sort Characters By Frequency](https://leetcode.com/problems/sort-characters-by-frequency/){difficulty="Medium"}
+- [CF 1490F · Equalize the Array](https://codeforces.com/problemset/problem/1490/F){rating="1500"}
+- [CF 474B · Worms](https://codeforces.com/problemset/problem/474/B){rating="1200"}
+- [CF 1029C · Maximal Intersection](https://codeforces.com/problemset/problem/1029/C){rating="1600"}
+- [LC 1146 · Snapshot Array](https://leetcode.com/problems/snapshot-array/){difficulty="Medium"}
+- [CF 313B · Ilya and Queries](https://codeforces.com/problemset/problem/313/B){rating="1100"}
+- [CF 433B · Kuriyama Mirai's Stones](https://codeforces.com/problemset/problem/433/B){rating="1200"}
+- [CF 580C · Kefa and Park](https://codeforces.com/problemset/problem/580/C){rating="1500"}
+- [LC 69 · Sqrt(x)](https://leetcode.com/problems/sqrtx/){difficulty="Easy"}
+- [LC 367 · Valid Perfect Square](https://leetcode.com/problems/valid-perfect-square/){difficulty="Easy"}
+- [CF 1490C · Sum of Cubes](https://codeforces.com/problemset/problem/1490/C){rating="1100"}
+- [CF 1398C · Good Subarrays](https://codeforces.com/problemset/problem/1398/C){rating="1600"}
+- [LC 523 · Continuous Subarray Sum](https://leetcode.com/problems/continuous-subarray-sum/){difficulty="Medium"}
+- [LC 2280 · Minimum Lines to Represent a Line Chart](https://leetcode.com/problems/minimum-lines-to-represent-a-line-chart/){difficulty="Medium"}
+- [CF 300C · Beautiful Numbers](https://codeforces.com/problemset/problem/300/C){rating="1800"}
+- [LC 1 · Two Sum](https://leetcode.com/problems/two-sum/){difficulty="Easy"}
+- [LC 128 · Longest Consecutive Sequence](https://leetcode.com/problems/longest-consecutive-sequence/){difficulty="Medium"}
+- [CF 1676F · Longest Strike](https://codeforces.com/problemset/problem/1676/F){rating="1300"}
+- [CF 977F · Consecutive Subsequence](https://codeforces.com/problemset/problem/977/F){rating="1700"}
+:::
+
+| Problem | Idea it practises |
+|---|---|
+| 1722C | `Counter` of words across three players (@sec-lang-p1-anagrams) |
+| LC 460 | Frequency buckets of `OrderedDict`s, or `list`s with iterators (@sec-lang-p1-lru) |
+| 602B | Window min and max with two monotonic deques or a `multiset` (@sec-lang-p1-window-max) |
+| LC 1438 | Same, with a limit on max − min (@sec-lang-p1-window-max) |
+| LC 215 | Heap of size $k$, or `nth_element` (@sec-lang-p2-stones) |
+| 1526C1 | Greedy with a min-heap of chosen potions (@sec-lang-p2) |
+| 1353D | Heap of tuples `(-length, left)`: tuple ordering does the tie-break (@sec-lang-p2-merge) |
+| LC 373 | Heap of frontier pairs with index tie-breakers (@sec-lang-p2-merge) |
+| 1526C2 | Same greedy for $n = 2\cdot10^5$; `heapq` speed matters (@sec-lang-p2) |
+| LC 480 | Two heaps with lazy deletion (@sec-lang-p2-stock) |
+| 632C | Comparator $a + b < b + a$ (@sec-lang-p3-largest) |
+| LC 451 | `Counter` plus a sort key (@sec-lang-p3-frequency) |
+| 1490F | Frequencies sorted, then a scan (@sec-lang-p3-frequency) |
+| 474B | Prefix sums plus `bisect_left` (@sec-lang-p4-drink) |
+| 1029C | `multiset` of endpoints, erase one copy (@sec-lang-p4-tickets) |
+| LC 1146 | Per-index sorted history plus bisect (@sec-lang-p4-timemap) |
+| 313B | Prefix sums and fast I/O for $10^5$ queries (@sec-bst-p3-a) |
+| 433B | Two prefix-sum arrays, `long long` sums, fast I/O (@sec-bst-p3-a) |
+| 580C | Tree DFS of depth $10^5$, iteratively (@sec-lang-p5-subordinates) |
+| LC 69 | Binary search for $\lfloor\sqrt x\rfloor$ without overflow (@sec-lang-p6) |
+| LC 367 | Integer square root without overflow (@sec-lang-p6) |
+| 1490C | Exact integer cube roots of numbers up to $10^{12}$ (@sec-lang-p6) |
+| 1398C | Prefix sums of $a_i - 1$ in a hash map (@sec-lang-p6-divisible) |
+| LC 523 | Remainders of prefix sums with a minimum length (@sec-lang-p6-divisible) |
+| LC 2280 | Slopes compared by cross-multiplication; floats fail (@sec-lang-p6-points) |
+| 300C | Factorials and inverse factorials modulo $10^9+7$ (@sec-lang-p6-binomial) |
+| LC 1 | Complement lookup in a hash map (@sec-lang-p7-powers) |
+| LC 128 | Hash set; start runs only where $x - 1$ is absent, and iterate the set, not the array (@sec-lang-p7) |
+| 1676F | Counting plus sorted distinct values (@sec-lang-p7-same-differences) |
+| 977F | `dp[x] = dp[x-1] + 1` in a hash map (@sec-lang-p7-same-differences) |
+
+## Further reading
+
+- **Antti Laaksonen**, *[Competitive Programmer's Handbook](https://cses.fi/book/book.pdf)*, ch. 1 and ch. 4: C++ input/output, number types, and the standard-library data structures.
+- **Python documentation**: [`collections`](https://docs.python.org/3/library/collections.html), [`heapq`](https://docs.python.org/3/library/heapq.html), [`bisect`](https://docs.python.org/3/library/bisect.html), [`itertools`](https://docs.python.org/3/library/itertools.html), [`functools`](https://docs.python.org/3/library/functools.html), and the [Sorting HOWTO](https://docs.python.org/3/howto/sorting.html) (keys, stability, `cmp_to_key`).
+- **Python wiki**, [TimeComplexity](https://wiki.python.org/moin/TimeComplexity): the cost of every operation on `list`, `deque`, `dict` and `set` in CPython.
+- **[cppreference.com](https://en.cppreference.com/w/cpp/container)**: the container pages (their complexity and iterator-invalidation sections) and the [Compare named requirement](https://en.cppreference.com/w/cpp/named_req/Compare).
+- **neal**, ["Blowing up unordered_map, and how to stop getting hacked on it"](https://codeforces.com/blog/entry/61675): the anti-hash attack and the `splitmix64` defence.
+- **David Goldberg (1991)**, ["What every computer scientist should know about floating-point arithmetic"](https://doi.org/10.1145/103162.103163): the classic on rounding, overflow, and why `0.1 + 0.2 != 0.3`.
+- **CP-Algorithms**: [binary exponentiation](https://cp-algorithms.com/algebra/binary-exp.html) and [modular inverse](https://cp-algorithms.com/algebra/module-inverse.html) (including the linear-time table).
+- **PyRival** ([GitHub](https://github.com/cheran-senthil/PyRival)): a library of Python contest templates, including fast I/O and generator-based recursion.

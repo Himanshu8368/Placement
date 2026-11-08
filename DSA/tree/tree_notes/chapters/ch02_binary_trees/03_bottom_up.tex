@@ -1,296 +1,1242 @@
 % !TEX root = ../../tree_notes.tex
 % =====================================================================
-%  2.3  Bottom-Up Recursion: returning values up          sec:c02-bottomup
-%  Exports: def:c02-bottomup  prop:c02-aggregate  lst:c02-bottomup-tmpl
-%           prob:c02-tilt  prob:c02-prune  prob:c02-univalue
+%  2.3  Bottom-Up: Returning Values Up                   sec:c02-bottomup
+%  Exports: def:c02-return  def:c02-agg-answer  def:c02-twochannel
+%           thm:c02-postorder  thm:c02-twochannel-sum
+%           lst:c02-bu-skeleton  lst:c02-rob  ex:c02-bu-sum
+%           prob:c02-tilt  prob:c02-prune  prob:c02-rob  prob:c02-coins
+%           prob:c02-deepest  prob:c02-zigzag
 % =====================================================================
-\section{Bottom-Up Recursion: Returning Values Up}\label{sec:c02-bottomup}
+\section{Bottom-Up: Returning Values Up}\label{sec:c02-bottomup}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Which line of the top-down skeleton guarantees sibling isolation, and
+        what goes wrong without it? (\secref{c02-topdown})
+  \item On $R$, what root-path sum $S$ did node $6$ carry, and why did that let
+        \probref{c02-path-sum-iii} answer at internal nodes? (\probref{c02-sum-numbers})
+  \item In \probref{c02-path-sum-iii}, which two entries must the shared hashmap
+        hold \emph{exactly} during a call (and so must be undone on return)?
+        (\secref{c02-topdown})
+\end{enumerate}
+\end{previouslybox}
 
 \begin{topicintro}
-In a \term{bottom-up} recursion each node asks its children for an answer, combines the
-two, and \emph{returns} the result to its own parent -- the return value is a subtree
-aggregate. The height and size recurrences of \thmref{c01-height-recursion} were already
-bottom-up; here we generalise them and add the one idiom that unlocks the hardest tree
-mediums: a function that \emph{returns} one quantity (so the parent can use it) while
-\emph{silently updating a global best} (the real answer). That is exactly how diameter,
-tilt and longest-path problems collapse into a single DFS.
+Flip the arrow. When what a node needs to know lies \emph{below} it -- the size,
+sum, height, or best-choice of each subtree -- the recursion carries no parameter
+and instead \emph{returns} a value \emph{up} the call stack: children answer
+first, the parent combines. This is the pattern behind every ``subtree'' and
+``balance'' question and behind the hardest structural optimizations, where the
+clean way to answer is to have each node report \emph{two} numbers and let its
+parent decide. Sections \secref{c02-model} gave the machine and
+\secref{c02-topdown} its down-channel; the up-channel completed here is the one
+tree DP (\chref{c10}) runs on.
 
-\textbf{Prerequisites.} \secref{c02-model} (structural recursion) and
-\thmref{c01-height-recursion} (return-and-combine).
+\textbf{Prerequisites.} \secref{c02-model} (skeleton, \code{BASE}), the height
+recurrence \thmref{c01-height-recursion}, and the copy-vs-share cost analysis of
+\thmref{c02-topdown-cost} (now applied in reverse).
 
 \textbf{After this section you can}
 \begin{itemize}[nosep]
-  \item tell a bottom-up problem instantly: the answer at a node is a function of its two
-        subtrees alone;
-  \item return a subtree aggregate (sum, height, pruned pointer, chain length) and combine
-        it correctly;
-  \item use the "return one value, update a second global answer" split for
-        diameter/tilt/longest-path;
-  \item solve binary tree tilt, prune tree, and longest univalue path in one pass each.
+  \item separate the \emph{aggregate} a call returns from the \emph{answer} it
+        records, and pick each one's type on purpose;
+  \item return two (or more) summaries from one call -- the two-channel trick --
+        and prove the parent's greedy/exact decision correct;
+  \item turn an $\bigO{n^2}$ ``ask the child again'' combine into $\bigO{n}$ by
+        threading the child's value up once;
+  \item recognise a bottom-up problem in the wild, including the ones (prune,
+        distribute coins) where the returned value \emph{drives a rewrite}.
 \end{itemize}
 \end{topicintro}
 
-\usedin{Chapter 9 (diameter and centroid), Chapter 10 (tree DP) and Chapter 20 (advanced
-tree DP)}{tree DP \emph{is} bottom-up recursion with a richer returned state; mastering the
-return-plus-global split now is literally the first lesson of every DP-on-trees chapter.}
+\begin{recognitionbox}[Pattern card -- bottom-up return]
+\reckey{``sum / size / count / max over each \emph{subtree}'', ``is the tree
+balanced / a mirror / tilt'', ``distribute / prune / rob'', ``the deepest
+nodes'', ``longest path \emph{through} a node'' -- the answer at $v$ is built
+from the answers \emph{under} $v$.}
+\recuse{
+  \item the quantity at $v$ is a function of the same quantity on $\subtree(v)$'s
+        children (sum, height, count): return it -- \probref{c02-tilt},
+        \probref{c02-prune};
+  \item a global optimum whose best candidate \emph{bends at} $v$ (diameter, max
+        path sum, rob): return a per-subtree summary, update the answer at $v$ --
+        \probref{c02-rob};
+  \item the decision at $v$ needs \emph{two} incompatible summaries (rob / not
+        rob; depth / which node): return a pair -- \probref{c02-deepest},
+        \probref{c02-zigzag}.
+}
+\recnotuse{
+  \item the node's answer depends on its \emph{ancestors} (depth, root-path, the
+        nearest larger value) -- carry it down, \secref{c02-topdown};
+  \item a pure \emph{visit ordering} task (print inorder, level order) --
+        \chref{c03};
+  \item you find yourself re-invoking the recursion on a child inside the combine
+        to read a second fact -- that is the exponential tell (\probref{c02-rob},
+        rung 1); fold both facts into the return type instead.
+}
+One-line test: \emph{draw the information arrow -- if it points \emph{toward} the
+root (a child's fact becomes a parent's input), return it up; this is your pattern.}
+\end{recognitionbox}
 
 \subsection{Intuition}
 
-\begin{analogybox}[An org chart reporting up]
-A VP does not decide the company total herself: she waits for both directors under her to
-report their numbers, adds them to her own, and passes one total up to the CEO. The value
-travels from the bottom (leaves) to the top (root) -- the opposite direction to
-\secref{c02-topdown}. Sometimes, though, a manager also shouts "biggest team so far!" to a
-whiteboard on the wall: that side note is the global-best update made during the upward pass.
-\end{analogybox}
-
-Take subtree sums. To know the sum at a node you must already know the sums of both
-children, so the information is forced to flow upward. We draw the returns on the tree.
+The Same-Tree check of \secref{c01-what-is-tree} was already bottom-up in spirit:
+a node's verdict is \texttt{and} of its children's verdicts. The general shape is
+\textbf{post-order} -- recurse left, recurse right, \emph{then} combine, so every
+call sees finished answers beneath it.
 
 \begin{figure}[H]
 \centering
-\begin{tikzpicture}[diagram]
+\begin{tikzpicture}[diagram, scale=0.92, transform shape]
   \node[troot] (r) at (0,0) {$1$};
-  \node[tnode] (l) at (-1.8,-1.4) {$2$};
-  \node[tnode] (c) at (1.8,-1.4) {$3$};
-  \node[tleaf] (a) at (-2.6,-2.8) {$4$};
-  \node[tleaf] (b) at (-1.0,-2.8) {$5$};
-  \node[tleaf] (d) at (1.8,-2.8) {$6$};
-  \draw[tedge] (r) -- (l); \draw[tedge] (r) -- (c);
-  \draw[tedge] (l) -- (a); \draw[tedge] (l) -- (b); \draw[tedge] (c) -- (d);
-  \node[annot, text=successgreen] at (-2.9,-3.3) {$4$};
-  \node[annot, text=successgreen] at (-1.0,-3.3) {$5$};
-  \node[annot, text=successgreen] at (-2.3,-1.9) {$11$};
-  \node[annot, text=successgreen] at (1.8,-3.3) {$6$};
-  \node[annot, text=successgreen] at (2.4,-1.9) {$9$};
-  \node[annot, text=successgreen] at (0.2,0.7) {$21$};
+  \node[tnode] (a) at (-1.7,-1.5) {$2$};
+  \node[tnode] (b) at (1.7,-1.5) {$3$};
+  \node[tleaf] (c) at (-2.6,-3) {$4$};
+  \node[tleaf] (d) at (-0.8,-3) {$5$};
+  \node[tnode] (e) at (1.7,-3) {$6$};
+  \draw[tedgehl] (r) -- (a); \draw[tedgehl] (r) -- (b);
+  \draw[tedgehl] (a) -- (c); \draw[tedgehl] (a) -- (d);
+  \draw[tedgehl] (b) -- (e);
+  \node[annot, font=\scriptsize, anchor=east] at (-2.9,-3) {$4{\to}4$};
+  \node[annot, font=\scriptsize, anchor=north] at (-0.8,-3.2) {$5{\to}5$};
+  \node[annot, font=\scriptsize, anchor=east] at (-1.9,-1.5) {$2{\to}11$};
+  \node[annot, font=\scriptsize, anchor=west] at (2.0,-3) {$6{\to}6$};
+  \node[annot, font=\scriptsize, anchor=west] at (1.95,-1.5) {$3{\to}9$};
+  \node[annot, font=\scriptsize, anchor=south] at (0,0.2) {$1{\to}21$};
+  \node[annot, align=left, font=\scriptsize] at (4.7,-1.5)
+    {\emph{arrows point up}: each\\node \textbf{returns} $\Sigma=$\\subtree sum to
+    its parent;\\the parent adds $+1$ of\\its own and $L{+}R$.};
 \end{tikzpicture}
-\caption{Subtree sums returned upward (green): leaves return their own value, node $2$
-returns $2{+}4{+}5=11$, node $3$ returns $3{+}6=9$, the root returns $1{+}11{+}9=21$. The
-parent cannot be computed before the children -- the definition of bottom-up.}\label{fig:c02-bottomup}
+\caption{The up-channel on $R$: subtree sums $\Sigma$ \emph{returned} to the
+parent (compare \figref{c02-carry}, where the same numbers were \emph{sent
+down}). $\Sigma(2){=}11$ is ready before node $1$ combines; the leaves answer
+first. This is \exref{c02-bu-sum} and the return half of \probref{c02-tilt}.}\label{fig:c02-up}
 \end{figure}
 
-\subsection{Definition and the Aggregate Property}
+The one design decision is \emph{what a call returns}. Choose too little and the
+parent recomputes (or the combine is impossible); choose the right summary --
+sometimes several at once -- and the whole problem collapses to one post-order
+pass. That is the difference between the single-value \probref{c02-tilt} and the
+two-channel \probref{c02-rob}.
 
-\begin{definition}{Bottom-up recursion}{c02-bottomup}
-A recursion whose \emph{return value} is a function of the return values of the children
-plus the node itself: $g(v)=\phi\big(v,\ g(v_{\text{left}}),\ g(v_{\text{right}})\big)$
-with a base value at \nil. The answer to the whole problem is either $g(\text{root})$ or a
-quantity recorded while computing the $g$'s.
+\subsection{Definitions and Notation}
+
+\begin{definition}{Return contract}{c02-return}
+A bottom-up recursion assigns each call a \term{return value} $f(v)$ computed
+from $v\to\mathit{val}$ and the children's return values $f(\mathit{left})$,
+$f(\mathit{right})$, with a fixed \term{null identity} $f(\nil)$. The post-order
+schedule (left call, right call, then combine) guarantees $f$ is defined on
+strictly smaller subtrees when it is used.
 \end{definition}
 
-\begin{proposition}{Bottom-up well-definedness}{c02-aggregate}
-Because a tree has no cycles (\defref{c01-tree}) every recursion path ends at a \nil{}
-base case, so the combination $\phi$ is applied over a finite, acyclic call graph and $g(v)$
-depends only on the strict subtree $\subtree(v)$ -- the aggregate is always defined.
-\end{proposition}
+\noindent\textbf{In plain words.} ``What do I hand back to my parent?'' is the
+\emph{whole} design. The parent must be able to finish its own job using exactly
+what you hand up -- nothing more (else you recompute) and nothing less (else the
+parent guesses). The null identity is the value an absent child contributes: $0$
+for sums, $-1$ for edge-heights, $\infty$/$0$ for min/max -- the choice was
+Trap 1 of \secref{c02-model}.
+
+\begin{definition}{Aggregate vs.\ answer}{c02-agg-answer}
+Many problems need two different quantities: the \term{aggregate} $f(v)$ that
+must travel \emph{up} for the parent's combine, and the \term{answer} the
+problem finally asks for, which may live anywhere. \term{Decoupling} them --
+return $f$, record the answer in a reference/global as an aside -- is the
+standard bottom-up structure.
+\end{definition}
+
+\noindent\textbf{In plain words.} ``Return what your \emph{parent} needs; report
+what the \emph{judge} needs.'' In \probref{c02-tilt} the parent needs the subtree
+\emph{sum} but the answer is the total \emph{tilt}; in a diameter they need the
+arm \emph{length} but the answer is the best \emph{bend}. Two different animals --
+do not stuff both into one return slot.
+
+\begin{definition}{Two-channel return}{c02-twochannel}
+A \term{two-channel} (multi-valued) recursion returns a small tuple -- typically
+a \code{struct}/\code{pair} -- carrying several independent summaries of
+$\subtree(v)$ (e.g.\ \{best if $v$ taken, best if $v$ not taken\}), so the
+parent can make a choice that depends on \emph{both}.
+\end{definition}
+
+\noindent\textbf{In plain words.} When the parent's decision depends on facts
+that no single number captures, hand up \emph{both} numbers and let the parent
+pick. It is the tree analogue of adding a second DP state; the payoff is that the
+parent never has to re-descend to reconstruct a fact the child already knew.
+
+\subsection{Correctness and Cost}
+
+\begin{theorem}{Post-Order Aggregation}{c02-postorder}
+If $f(\nil)$ is correct and, whenever the children's returns are correct,
+$\mathit{combine}(v\to\mathit{val},f(L),f(R))$ equals the true value of the
+summary on $\subtree(v)$, then every call returns the true summary of its subtree,
+and the walk is $\bigO{n}$ (with $\bigO{1}$ combine).
+\end{theorem}
 \begin{proofbox}
-$\subtree(v)$ is finite and, excluding $v$, consists of the strict subtrees of $v$'s
-children, which are strictly smaller. Induction on $\size(v)$ (\thmref{c01-height-recursion}
-is exactly this for $\height$): the children's $g$ are defined by the hypothesis (smaller
-subtrees), and $\phi$ combines finitely many of them with $v$. The \nil{} base terminates
-the recursion.
+Correctness is structural induction (\thmref{c02-recursive-shape}) on $\size$:
+the base $\nil$ returns $f(\nil)$, correct by hypothesis; an internal $v$ invokes
+the children first, whose subtrees are strictly smaller, so the inductive
+hypothesis makes $f(L),f(R)$ correct and the combine is correct by the second
+assumption. Cost is \lemref{c02-visit-count}: $2n+1$ calls, $\bigO{1}$ each.
+\end{proofbox}
+\begin{insightbox}
+Read the theorem as a checklist, not a formula: (i) fix the null identity,
+(ii) write the combine assuming the children already answered, (iii) name the
+summary in one sentence. Do those three and correctness is structural; the hard
+part of a bottom-up problem is almost always choosing $f$, not proving it.
+\end{insightbox}
+
+\begin{theorem}{Two-Channel Sufficiency}{c02-twochannel-sum}
+Suppose the optimal value on $\subtree(v)$ for each of a constant set of
+\emph{boundary states} $\sigma$ (e.g.\ $v$ taken / free) is a function
+$g_\sigma(v\to\mathit{val}, \{f_{\sigma'}(\mathit{child})\})$ of the children's
+values over the same state set. Returning the vector $(f_\sigma(v))_\sigma$
+lets a single post-order pass compute the global optimum in $\bigO{n\cdot
+|\sigma|^{O(1)}}$.
+\end{theorem}
+\begin{proofbox}
+Simultaneous induction on $\size$ over the finite state set: assume the children
+return the full, correct vector $(f_{\sigma'}(\mathit{child}))$ for all states
+$\sigma'$; each $g_\sigma$ is then evaluated from those vectors, so $v$'s vector
+is correct. Because $|\sigma|$ is constant, per-node work is constant and
+\lemref{c02-visit-count} gives linearity. Keeping \emph{all} states in the vector
+is what stops the parent from re-descending to recover an omitted one -- the
+recompute the vector was designed to avoid.
 \end{proofbox}
 
-\subsection{The Template and the Global-Best Split}
+\subsection{The Skeleton}
 
-\begin{lstlisting}[caption={Bottom-up skeleton: return the aggregate the parent needs, and separately update the answer that lives "through" the current node}, label={lst:c02-bottomup-tmpl}]
-// g(r) = the aggregate a parent can reuse (height, sum, chain length, pruned pointer).
-// best = the real answer, which may pass THROUGH r and so cannot be a single-child return.
-Aggregate dfs(TreeNode* r, Best& best) {
-    if (r == nullptr) return IDENTITY;        // 0 for sums, 0/-1 for heights, ...
-    Aggregate L = dfs(r->left,  best);
-    Aggregate R = dfs(r->right, best);
-    best = std::max(best, combine(L, R, r));  // answer using BOTH sides at r
-    return fold(L, R, r);                    // single aggregate sent UP
+\begin{lstlisting}[caption={The bottom-up skeleton: SLOT 1 (return type) and SLOT 3 (combine) are the design; SLOT 2 is usually empty.}, label={lst:c02-bu-skeleton}]
+Ret dfs(TreeNode* v) {                 // Ret = the AGGREGATE the parent needs
+    if (!v) return IDENTITY;           // null's contribution (sum 0, height -1, ...)
+    Ret L = dfs(v->left);              // trust these (thm:c02-postorder): post-order
+    Ret R = dfs(v->right);
+    // record the ANSWER here if it is a per-node/ global quantity:
+    ans = better(ans, cross(L, R, v)); // <-- decoupled answer (\defref{c02-agg-answer})
+    return combine(v->val, L, R);      // <-- the aggregate travels up
+}                                       // (Ret = pair/struct => two-channel)
+\end{lstlisting}
+
+\begin{complexitybox}
+$\bigO{n}$ time, $\bigO{h}$ stack by \thmref{c02-postorder}. The recurring cost
+\emph{bug} is reading a child's second fact by calling \code{dfs} again inside
+\code{combine} -- that is $T(n)=2T(n/2)+\bigO{h}$ (exponential on balanced
+trees) or worse; the fix is always to widen \code{Ret} into a tuple
+(\defref{c02-twochannel}), never to re-recurse.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{All three returns on $R$}{c02-bu-sum}
+One post-order pass, three different \code{Ret} choices on $R$:
+(i) \code{Ret}$=$\code{long long} sum, \code{IDENTITY}$=0$: returns
+$\Sigma=(4,5,11,6,9,21)$ (as in \figref{c02-up});
+(ii) \code{Ret}$=$height in edges, \code{IDENTITY}$=-1$:
+$\height=(0,0,1,0,1,2)$ at $(4,5,2,6,3,1)$;
+(iii) \code{Ret}$=$pair (aggregate $=$ sum, answer recorded separately) gives the
+tilt of \probref{c02-tilt} below. Same walk, only \code{Ret} and the combine differ.
+\end{example}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item Return \code{bool}/\code{int} that \emph{drives a pointer rewrite}: the
+        prune (\probref{c02-prune}) -- a bottom-up decision, a structural effect.
+        \hfill\lv{3}
+  \item Return net surplus, charge $|\text{surplus}|$ as you go: the flow
+        trick in \probref{c02-coins}.                                \hfill\lv{4}
+  \item Return \{depth, witness\} to find the smallest subtree with a property:
+        \probref{c02-deepest}.                                        \hfill\lv{4}
+  \item Return per-direction arms and take the max over \emph{all} nodes:
+        zigzag (\probref{c02-zigzag}), diameter, max-path-sum
+        (\chref{c10}).                                               \hfill\lv{4}--\lv{5}
+  \item Widen the state vector to $\ge 3$ (e.g.\ camera: covered / has-camera /
+        needs-coverage): full tree DP, \chref{c10}; the chapter-end Summit
+        (968 Binary Tree Cameras) is the two-state warm-up of exactly this.  \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c02-bu-pitfalls}
+
+\begin{warningbox}[Pitfall 1 -- returning the answer instead of the aggregate]
+If the parent needs the subtree sum but you return the running tilt (or vice
+versa), the combine is wrong above the leaves and only the small tests pass.
+Separate the two channels (\defref{c02-agg-answer}).
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: returns tilt; parent then adds tilts as if they were sums}, language=C++, basicstyle=\ttfamily\small]
+int tilt(TreeNode* r) {                       // LC 563
+    if (!r) return 0;
+    return abs(tilt(r->left) - tilt(r->right))// returns a TILT...
+         + abs(...);                          // ...but the caller wants a SUM
+}
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: return the SUM up, record the tilt-answer aside}, language=C++, basicstyle=\ttfamily\small]
+int sumUp(TreeNode* r, int& ans) {             // returns subtree sum (aggregate)
+    if (!r) return 0;
+    int L = sumUp(r->left,  ans);              // each edge walked once
+    int R = sumUp(r->right, ans);
+    ans += abs(L - R);                         // answer recorded here, not returned
+    return r->val + L + R;                     // SUM travels up
 }
 \end{lstlisting}
 
-\begin{notebox}[Why the split is necessary]
-A recursion returns \emph{one} value, but the best path/tilt/answer at $r$ may use both
-children at once (a path bending through $r$). If you tried to return that, the parent would
-double-count. So you return the extendable part (one side) and record the through-part in a
-global -- the exact move behind diameter (\chref{c09}) and \probref{c02-univalue} below.
-\end{notebox}
-
-\begin{complexitybox}
-One DFS, $\bigO{n}$ time, $\bigO{h}$ stack. The whole point of bottom-up is that each
-child's aggregate is computed once and reused by the parent, so an $\bigO{n}$-per-node
-naive recomputation (like the $O(n^2)$ balanced-check warned about in \probref{c01-balanced})
-drops to $\bigO{n}$.
-\end{complexitybox}
-
-\subsection{Worked Examples}
-
-\begin{example}{Reading returns off \figref{c02-bottomup}}{c02-bu-ex}
-The returned sums are $4,5$ at $2$'s children, so node $2$ returns $11$; $3$ returns $9$;
-the root returns $21$. If instead we wanted the max subtree sum, we would update a global
-with each return and read $\max(4,5,11,6,9,21)=21$.
-\end{example}
-
-\begin{tracebox}
-\code{dfs} for tilt visits $4,5$ then $2$: at $2$ the tilt is $|5-4|=1$, returns sum $11$;
-at $3$ tilt $|6-0|=6$, returns $9$; at the root tilt $|9-11|=2$. Total tilt $1+6+2=9$.
-\end{tracebox}
-
-\subsection{Common Pitfalls}
-
-\begin{warningbox}[Returning the answer instead of the aggregate]
-For path-through-node problems, returning $\text{combine}(L,R,r)$ (the through value)
-poisoning the parent is the most common error. Return only what a parent can extend -- the
-better of the two children -- and keep the through value in the global.
+\begin{warningbox}[Pitfall 2 -- re-recursing inside the combine]
+Calling the child's recursion a second time to fetch another fact is the single
+most common way to turn $\bigO{n}$ into exponential. Bind each child's result to
+a variable once (\coderef{c02-rob} shows the correct two-variable pattern) or
+return a tuple (\defref{c02-twochannel}).
 \end{warningbox}
-
-\begin{warningbox}[Wrong identity for the null base case]
-Sums return $0$, node-heights return $0$, edge-heights return $-1$, "contains a $1$" returns
-\code{nullptr}/\code{false}. Using $-1$ where $0$ is the identity makes every subtree off by
-one -- the same off-by-one flagged in \secref{c01-anatomy}.
-\end{warningbox}
-
-\subsection{Solved Problems}
-
-\solvedproblem{c02-tilt}{Binary Tree Tilt}{LeetCode 563}
-  {https://leetcode.com/problems/binary-tree-tilt/}{LC Easy}
-  {bottom-up subtree sum, global accumulator}
-
-\begin{problemstatement}[Binary Tree Tilt]
-The tilt of a node is $|\text{sum}(\text{left})-\text{sum}(\text{right})|$. Return the sum
-of the tilts of all nodes.
-\end{problemstatement}
-
-\solstep{Understanding the Problem}
-Tilt needs each subtree's \emph{sum}, which is a clean bottom-up aggregate; the total tilt
-is a value living at each node, so we return the sum and add the tilt into a global --
-exactly the split in \coderef{c02-bottomup-tmpl}.
-
-\solstep{Implementation}
-\begin{lstlisting}[caption={Binary Tree Tilt (LeetCode 563)}, label={lst:c02-tilt}]
-class Solution {
-    int total = 0;
-    int sum(TreeNode* r) {
-        if (!r) return 0;                       // null contributes sum 0
-        int L = sum(r->left), R = sum(r->right);
-        total += abs(L - R);                    // tilt recorded on the way up
-        return r->val + L + R;                  // return the subtree sum
-    }
-public:
-    int findTilt(TreeNode* root) { sum(root); return total; }
-};
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: recomputes each child's summary inside the combine}, language=C++, basicstyle=\ttfamily\small]
+int rob(TreeNode* r) {                          // LC 337 naive
+    if (!r) return 0;
+    int with = r->val + rob(r->left->left)  + rob(r->left->right)   // RECURSES DEEP,
+             +         rob(r->right->left) + rob(r->right->right);  // 4x per level:
+    return max(with, rob(r->left) + rob(r->right));                 // O(2^n)-ish
+}                                         // (also null-derefs r->left->left!)
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: each child reports a pair once}, language=C++, basicstyle=\ttfamily\small]
+pair<int,int> rob(TreeNode* r) {            // {with r, without r}
+    if (!r) return {0, 0};
+    auto L = rob(r->left), R = rob(r->right);  // computed ONCE each
+    return { r->val + L.second + R.second,       // take r: children must not
+             max(L.first,L.second) + max(R.first,R.first) }; // skip r: children free
+}
 \end{lstlisting}
 
-\solstep{Complexity}
-\begin{complexitybox}
-Time $\bigO{n}$, memory $\bigO{h}$. Note the two distinct roles: \code{sum} returns the
-subtree total, \code{total} accumulates the answer -- folding them into one return would
-lose the per-node tilt.
-\end{complexitybox}
+\begin{warningbox}[Pitfall 3 -- null identity mismatch on a skewed node]
+A one-child node feeds \code{f(nil)} into the combine; if that identity is
+inconsistent with the aggregate (height with $0$ instead of $-1$, min that lets
+the null win) the skewed answers are off by a constant -- exactly Trap 1 of
+\secref{c02-model}, now on the return channel. Re-derive \code{IDENTITY} from
+the definition, never by eye.
+\end{warningbox}
 
-\solvedproblem{c02-prune}{Binary Tree Pruning}{LeetCode 814}
-  {https://leetcode.com/problems/binary-tree-pruning/}{LC Medium}
-  {bottom-up decision, return subtree pointer}
+\subsection{Problem Lab (fully solved)}
 
-\begin{problemstatement}[Binary Tree Pruning]
-The tree holds only $0$ and $1$. Remove every subtree that does not contain a $1$, and
-return the root of the pruned tree.
+Up the ladder from a single-channel aggregate (\probref{c02-tilt}) through a
+return-that-rewires (\probref{c02-prune}) and the flagship two-channel
+(\probref{c02-rob}), a flow argument (\probref{c02-coins}), a
+\{depth, witness\} pair (\probref{c02-deepest}), to the $\lv5$ stretch where the
+return is a directed pair (\probref{c02-zigzag}).
+
+\solvedproblem{c02-tilt}{Binary Tree Tilt}{LeetCode 563}
+  {https://leetcode.com/problems/binary-tree-tilt/}{LC Easy L2}
+  {bottom-up aggregate, decoupled answer, Pitfall 1}
+
+\begin{problemstatement}[Binary Tree Tilt]
+The \emph{tilt} of a node is $|\Sigma(\mathit{left}) - \Sigma(\mathit{right})|$
+(null subtree sums $0$). Return the sum of all tilts. $n \le 10^4$,
+values $\in[-1000,1000]$.
 \end{problemstatement}
 
 \solstep{Understanding the Problem}
-Whether to keep a node depends only on its subtree: keep $r$ iff $r$\texttt{->val}$=1$ or
-one of its (already-pruned) children survived. That is a bottom-up predicate, so we recurse
-first, then decide, returning \code{nullptr} to delete a whole branch.
+Every parent needs its children's subtree \emph{sums}; the \emph{answer} is a sum
+of tilts accumulated over all nodes. Classic aggregate/answer split
+(\defref{c02-agg-answer}): return the sum, record the tilt. The naive ``compute
+each node's tilt by summing its subtrees'' is Pitfall 3 of \secref{c02-model}
+(the $\bigO{n^2}$ recompute); this is its cure.
 
 \solstep{Key Observations}
 \begin{observation}
-After pruning the children, $r$ must go iff $\text{val}=0$ \emph{and} both children are now
-\nil.
+$\Sigma(v) = v\to\mathit{val} + \Sigma(L) + \Sigma(R)$ is the aggregate to
+return up; the tilt $|\Sigma(L)-\Sigma(R)|$ needs the two child sums \emph{in
+hand}, which the post-order already provides.
 \end{observation}
 \begin{observation}
-A $1$ always survives even if both children are pruned away.
+With negatives the subtree sum can be negative, so tilt uses
+\code{abs}; the running answer reaches $\bigO{10^{4}\cdot 2\cdot10^{3}\cdot 2}
+\approx 4\cdot10^{7}$ -- fits \code{int} but a \code{long long} is free insurance.
 \end{observation}
+
+\solstep{Solution}
+One post-order returning \code{long long} sums and writing the tilt total into an
+out-parameter (\coderef{c02-tilt}); equivalently return a \code{pair<sum,tilt>}
+to stay purely functional.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\thmref{c02-postorder} with summary $f=\Sigma$, \code{IDENTITY}$=0$: base
+$\Sigma(\nil)=0$ correct, combine adds the children sums and node value. At each
+internal node the two children sums are the returned values, so
+$|\Sigma(L)-\Sigma(R)|$ is exactly that node's tilt, added once; summing over
+the $n$ calls (each visited once) yields the required total.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Binary Tree Tilt (LeetCode 563)}, label={lst:c02-tilt}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    long long ans = 0;
+    int sumUp(TreeNode* r) {                    // returns subtree sum; records tilt
+        if (!r) return 0;                       // null identity for a sum
+        int L = sumUp(r->left);
+        int R = sumUp(r->right);
+        ans += abs(L - R);                      // this node's tilt -> global answer
+        return r->val + L + R;
+    }
+public:
+    int findTilt(TreeNode* root) { sumUp(root); return (int)ans; }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$: \texttt{sumUp} returns and tilt recorded]
+$\Sigma(4){=}4$(tilt0),$\Sigma(5){=}5$(0),$\Sigma(2){=}11$(tilt $|4{-}5|{=}1$),
+$\Sigma(6){=}6$(0),$\Sigma(3){=}9$(tilt $|0{-}6|{=}6$),$\Sigma(1){=}21$
+(tilt $|11{-}9|{=}2$). Total tilt $=1+6+2=\mathbf{9}$.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, stack $\bigO{h}$ (\bigO{n} on a chain -- LC's $n\le10^{4}$ is
+safe for recursion; a chain of $10^{5}$ would need the iterative post-order).
+Versus rung 1: computing $\Sigma$ at each node from scratch is $\bigO{nh}$,
+$\bigO{n^2}$ on a chain -- the whole point of returning the sum is to make it
+$\bigO{n}$.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Returning the tilt (\coderef{c02-tilt}'s WRONG cousin, Pitfall 1) gives the
+right \emph{leaf} tilts and a garbage total. Variants: maximum tilt node, or
+``sum of nodes whose left/right subtrees are equal'' -- same skeleton, different
+aside.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Aggregate up, answer aside: name both before coding.
+  \item The null identity ($0$ for sums) is a real choice; re-derive it.
+  \item ``Parent needs a child's number'' always means \emph{return} it, never
+        \emph{recompute} it -- this single habit is the $\bigO{n^2}\to\bigO{n}$
+        jump.
+\end{enumerate}
+\end{insightbox}
+
+\solvedproblem{c02-prune}{Binary Tree Pruning}{LeetCode 814}
+  {https://leetcode.com/problems/binary-tree-pruning/}{LC Medium L3}
+  {bottom-up boolean that drives a rewrite}
+
+\begin{problemstatement}[Binary Tree Pruning]
+A binary tree of $0$s and $1$s. Remove every subtree that contains no $1$;
+return the (possibly new) root. $1 \le n \le 100$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, 12 minutes]
+A fair attempt: decide for each node whether to keep it -- but in what order?
+\peek{can you know whether to cut a child before you have pruned its whole
+subtree?}
+\nudge{let the recursion \emph{return} ``does this subtree contain a $1$?'' and
+cut the pointer if the answer is no.}
+\fullhint{post-order: \code{keep = (v==1) | prune(left) | prune(right)}; if a
+child reports \code{false}, set that pointer to \code{nullptr}; return
+\code{keep}. Build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The keep/cut decision on a child depends entirely on whether \emph{its} subtree
+has a $1$ -- a fact only a bottom-up pass can supply. Pruning is thus a
+bottom-up \emph{boolean aggregate} whose return value triggers a structural
+write (a preview of \secref{c02-transform}).
+
+\solstep{Key Observations}
+\begin{observation}
+$\mathit{has1}(v) = (v\to\mathit{val}{=}1)\ \lor\ \mathit{has1}(L)\ \lor\
+\mathit{has1}(R)$, with $\mathit{has1}(\nil)=\texttt{false}$.
+\end{observation}
+\begin{observation}
+A child with $\mathit{has1}=\texttt{false}$ is exactly a pruneable subtree -- so
+the boolean \emph{is} the cut instruction; set the pointer to \code{nullptr} on
+\code{false}.
+\end{observation}
+\begin{observation}
+Decide \emph{after} both children return (post-order), else you cut a $0$-node
+that still had a $1$ grandchild.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Pre-order: if $v=0$, delete its subtree.}{A $0$ node may sit above a $1$
+(descendant keeps it alive); deleting at $v$ loses that $1$. Order is the whole
+problem.}
+\aha{the value to keep $\subtree(v)$ alive is a \emph{boolean OR up the tree}:
+$\mathit{has1}(v)$; prune a child iff its \emph{return} is \code{false}.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} prune top-down & cut at each $0$ node & $O(n)$ & \textcolor{warningred}{\ding{55}\ \textbf{WA}} \\
+2 & \lv{2} repeat passes & re-scan until stable & $O(n^2)$ & \ac \\
+3 & \lv{3} post-order boolean & return $\mathit{has1}$, cut on \code{false} & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 is the tempting wrong order; rung 3 is the solution.
+
+\solstep{Solution}
+\code{prune(v)} returns \code{v != nullptr}; recurse both children \emph{first}
+and null out any that returned \code{false}; return whether $v$ itself or either
+survivor has a $1$.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Induction: the child calls return \code{true} iff their (already-pruned) subtree
+contains a $1$ (hypothesis). Then $v$ has a $1$-containing subtree iff
+$v\to\mathit{val}{=}1$ or a surviving child returned \code{true}; the returned
+\code{keep} encodes exactly this, and the pointers are nulled precisely on the
+$\neg\mathit{has1}$ children, which is the required deletion set -- each such
+subtree has no $1$, every kept subtree does, and no $1$ is lost (they are
+retained by their nearest $1$-bearing ancestor's chain).
+\end{proofbox}
 
 \solstep{Implementation}
 \begin{lstlisting}[caption={Binary Tree Pruning (LeetCode 814)}, label={lst:c02-prune}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
 class Solution {
 public:
     TreeNode* pruneTree(TreeNode* r) {
         if (!r) return nullptr;
-        r->left  = pruneTree(r->left);    // prune below first
+        r->left  = pruneTree(r->left);    // prune BELOW first (post-order)
         r->right = pruneTree(r->right);
-        if (r->val == 0 && !r->left && !r->right) return nullptr;  // dead branch
+        if (r->val == 0 && !r->left && !r->right) return nullptr; // now a 0-leaf: cut
         return r;
     }
 };
 \end{lstlisting}
+(The two-line boolean form returning \code{bool has1} and nulling on
+\code{false} is equivalent; this \emph{return-the-node} variant already speaks
+\secref{c02-transform}'s dialect.)
+
+\solstep{Trace}
+\begin{tracebox}[On LC's zero/one shapes: $R$'s values are not $0/1$, so a dedicated tree is used]
+Input $[1,0,1,0,0,0,1]$: prune reaches the four $0$-leaves and returns \code{nullptr}
+for each, so the left $0$ (a $0$-leaf after its own children vanish) is cut,
+leaving the root $1$ with a right child $1$ and that child's right $1$ -- output
+$[1,*,1,*,1]$. The \emph{order} (children first) is why an all-zero branch
+collapses leaf-up correctly.
+\end{tracebox}
 
 \solstep{Complexity}
 \begin{complexitybox}
-Time $\bigO{n}$, memory $\bigO{h}$. The returned pointer doubles as the aggregate (survives
-or not) and the rebuilt child link -- a bottom-up recursion that mutates the tree in place.
-\end{complexitybox}
-
-\solvedproblem{c02-univalue}{Longest Univalue Path}{LeetCode 687}
-  {https://leetcode.com/problems/longest-univalue-path/}{LC Easy}
-  {bottom-up chain length, global best, path-through-node}
-
-\begin{problemstatement}[Longest Univalue Path]
-Return the number of \emph{edges} on the longest path whose nodes all share one value. The
-path need not pass the root and may bend at any node.
-\end{problemstatement}
-
-\solstep{Understanding the Problem}
-Mirror the diameter idea (\probref{c01-balanced}'s cousin in \secref{c01-anatomy}): \code{dfs}
-returns the longest univalue \emph{chain} going straight down from $r$ (extendable by $r$'s
-parent), while the global answer takes the best path \emph{through} $r$, which can join the
-left and right chains when they match $r$\texttt{->val}. This is the through-vs-return split
-of \coderef{c02-bottomup-tmpl} verbatim.
-
-\solstep{Implementation}
-\begin{lstlisting}[caption={Longest Univalue Path (LeetCode 687)}, label={lst:c02-univalue}]
-class Solution {
-    int best = 0;
-    int chain(TreeNode* r) {
-        if (!r) return 0;
-        int L = chain(r->left), R = chain(r->right);
-        int leftExt = 0, rightExt = 0;
-        if (r->left  && r->left->val  == r->val) leftExt  = L + 1;   // extendable chains
-        if (r->right && r->right->val == r->val) rightExt = R + 1;
-        best = std::max(best, leftExt + rightExt);                   // path through r
-        return std::max(leftExt, rightExt);                          // return one side up
-    }
-public:
-    int longestUnivaluePath(TreeNode* root) { chain(root); return best; }
-};
-\end{lstlisting}
-
-\solstep{Complexity}
-\begin{complexitybox}
-Time $\bigO{n}$, memory $\bigO{h}$. Returning $\max(\text{leftExt},\text{rightExt})$ but
-scoring $\text{leftExt}+\text{rightExt}$ in the global is the whole trick -- returning the
-sum would let the parent count a path that bends twice.
+Time $\bigO{n}$, one post-order visit; space $\bigO{h}$. Rung 2's repeated passes
+are needless: the single boolean return carries the whole decision.
 \end{complexitybox}
 
 \solstep{Pitfalls and Variants}
-\begin{warningbox}[Counting edges, not nodes]
-The answer is edges; a chain of $k$ matching nodes scores $k-1$. Adding $1$ only when we
-\emph{extend} to a child (as above) keeps the count in edges automatically.
+\begin{warningbox}
+Pre-order pruning (rung 1) is the death of this problem; \textbf{prune below
+before deciding}. Variants: ``remove all leaf $0$s, repeat'' needs a leaf test
+not a subtree test (a different boolean); the general ``return a decision, let
+the parent rewrite'' shape reappears throughout \secref{c02-transform}.
 \end{warningbox}
-Variant: \emph{Diameter of Binary Tree} is the same code with lengths in place of value
-matching; the general tree version is \chref{c09}.
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A bottom-up return can \emph{command} a pointer change -- the bridge from
+        aggregation to transformation.
+  \item Order is correctness here: decide only after the children have returned
+        (post-order), never on the way in.
+  \item ``$\mathit{has1} = \mathit{self} \lor L \lor R$'' is an existential
+        aggregate: its null identity is \code{false}, its combine is \code{||}.
+\end{enumerate}
+\end{insightbox}
+
+
+\solvedproblem{c02-rob}{House Robber III}{LeetCode 337}
+  {https://leetcode.com/problems/house-robber-iii/}{LC Medium L4}
+  {two-channel return, maximum-weight independent set on a tree}
+
+\begin{problemstatement}[House Robber III]
+Each node holds a non-negative amount; robbing two \emph{directly linked} nodes
+(parent--child) triggers an alarm. Maximise the total robbed over an
+\emph{independent set} of nodes. $1 \le n \le 10^{4}$, amounts $\le 10^{4}$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, 25 minutes]
+Fair attempt: at each node choose $\max(\text{rob it},\ \text{skip it})$ -- but
+``rob it'' needs grandchildren's answers and ``skip it'' needs children's, and
+naively recursing for each is exponential.
+\peek{what two numbers, handed up by a child, let the parent finish both choices
+without descending again?}
+\nudge{return \{best if this node is taken, best if it is not\}; the parent's two
+options are cheap combinations of the children's pairs.}
+\fullhint{\code{dfs(v)} $\to$ pair \code{\{with, without\}};
+\code{with}=v+\texttt{L.second}+\texttt{R.second};
+\code{without}=$\max(L)+\max(R)$. This is \defref{c02-twochannel} in its purest
+form. Full build, proof and trace below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+This is maximum-weight independent set on a tree. The choice at $v$
+(\emph{take} or \emph{leave}) constrains the children's choices, so a single
+number cannot summarise $\subtree(v)$ -- the parent needs \emph{both} ``best with
+$v$ taken'' and ``best with $v$ free.'' Two-channel return (\defref{c02-twochannel})
+carries both, and each node is visited once.
+
+\solstep{Key Observations}
+\begin{observation}
+Two states per node suffice: $T(v)$ = best robbery of $\subtree(v)$ \emph{given
+$v$ is taken}; $F(v)$ = best \emph{given $v$ is free}.
+\end{observation}
+\begin{observation}
+$T(v) = v\to\mathit{val} + F(L) + F(R)$ (children must be free);
+$F(v) = \max(T,L\,F) + \max(T,R\,F)$ (children independently best).
+\end{observation}
+\begin{observation}
+Answer is $\max(T(\mathit{root}), F(\mathit{root}))$; base
+$T(\nil)=F(\nil)=0$. The naive $\max$-with-grandchildren recurrence is Pitfall 2
+-- four re-descents per node -- which the pair eliminates.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{$\mathit{rob}(v)=\max\big(v + \sum_{g}\mathit{rob}(g),\ \mathit{rob}(L)+
+\mathit{rob}(R)\big)$ over grandchildren $g$.}{Correct recurrence, but
+$\mathit{rob}$ is called on the same subtree exponentially often (Pitfall 2,
+\coderef{c02-rob}'s WRONG twin): $T(n) = 4T(n/2)$ on a balanced tree.}
+\deadend{Carry a boolean ``parent robbed'' down the tree.}{Top-down cannot know
+the best \emph{subtree} totals -- it would need to branch over all $2^{n}$
+rob/skip assignments; the state is on the \emph{up} side.}
+\aha{return \emph{both} numbers a parent could want -- \{best-with-$v$,
+best-without-$v$\} -- so every parent combines in $\bigO{1}$ and each node is
+touched once.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} recurse on grandchildren & correct recurrence, re-descend & $O(2^{n})$ & \tle \\
+2 & \lv{3} memo by node & cache $\mathit{rob}(v)$ per subtree root & $O(n)$ & \ac \\
+3 & \lv{4} two-channel pair & return \{with, without\}, combine $\bigO{1}$ & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 (memo the single-value recurrence) already works, but rung 3 removes the
+hashmap and the fourth recursive calls: the natural state is a \emph{pair}, not a
+cached scalar.
+
+\solstep{Solution}
+Post-order \code{dfs(v)} returning the pair \code{\{with, without\}}. With
+$L=\mathit{dfs}(\mathit{left})$ and $R=\mathit{dfs}(\mathit{right})$ at $v$:
+\code{with} $= v + L.\mathit{without} + R.\mathit{without}$, and
+\code{without} $= \max(L) + \max(R)$, where $\max(\cdot)$ abbreviates
+$\max(\mathit{with},\mathit{without})$ for that child. The answer is $\max$ of the
+root's pair (\coderef{c02-rob}).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\thmref{c02-twochannel-sum} with states $\sigma\in\{\text{taken},\text{free}\}$.
+Base: $\mathit{dfs}(\nil)=\{0,0\}$, the empty subtree's true optima. Step:
+assume $\mathit{dfs}(L)=\{T(L),F(L)\}$ and $\mathit{dfs}(R)=\{T(R),F(R)\}$ are
+correct. Any independent set of $\subtree(v)$ either contains $v$ -- then it
+contains neither child, so its best is $v\to\mathit{val}+F(L)+F(R)$ (children
+\emph{free}, their subtrees optimised under that constraint, exactly the
+hypothesis) -- or excludes $v$ -- then each child is independently taken or free,
+best $\max(T,F)$ each, giving \code{without}. These two cases partition all
+feasible sets, so $\mathit{dfs}(v)$ is correct for both states, and
+$\max$ at the root (no constraint on it) is the global optimum.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={House Robber III (LeetCode 337) -- two-channel return}, label={lst:c02-rob}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    // returns {best with this node robbed, best with it free}
+    pair<int,int> dfs(TreeNode* v) {
+        if (!v) return {0, 0};
+        auto L = dfs(v->left);                  // computed ONCE each (Pitfall 2 gone)
+        auto R = dfs(v->right);
+        int with    = v->val + L.second + R.second;               // children free
+        int without = max(L.first, L.second) + max(R.first, R.second); // children free to choose
+        return {with, without};
+    }
+public:
+    int rob(TreeNode* root) {
+        auto [with, without] = dfs(root);
+        return max(with, without);
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$ (amounts $1,2,3,4,5,6$ at $1,2,3,4,5,6$)]
+\begin{tabular}[t]{@{}lcc@{}}
+\textbf{node} & \textbf{\{with, without\}} & \textbf{choice} \\
+$4$ & $\{4,0\}$ & take \\
+$5$ & $\{5,0\}$ & take \\
+$6$ & $\{6,0\}$ & take \\
+$2$ & $\{2{+}0{+}0,\ \max(4,0){+}\max(5,0)\}{=}\{2,9\}$ & free wins \\
+$3$ & $\{3{+}0,\ 0{+}\max(6,0)\}{=}\{3,6\}$ & free wins \\
+$1$ & $\{1{+}9{+}6,\ \max(2,9){+}\max(3,6)\}{=}\{16,15\}$ & \textbf{take} \\
+\end{tabular}\\
+Answer $\max(16,15)=\mathbf{16}$: rob nodes $\{1,4,5,6\}$ (the root and all
+three leaves -- a valid independent set, and no pair among $4,5,6$ is
+adjacent). Note how node $1$'s \code{with} reuses $2$'s and $3$'s
+\code{without} ($9,6$): that is exactly the state the pair preserved.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, one post-order; each child's pair is bound once (contrast the
+WRONG box's four re-descents $\Rightarrow$ exponential). Space $\bigO{h}$ stack
+$+\bigO{1}$ per frame. At $n=10^{4}$ recursion is fine; a $10^{5}$-chain would
+need the explicit-stack post-order (\probref{c02-sum-numbers}' hardening recipe,
+here the pair threads through the ``second visit'' of each frame).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Single node & $\{v,0\}$, answer $v$ \\
+Two-node chain & $\{root:\{v{+}0,\,child\}\}$, answer $\max(v, child)$ \\
+All zero & answer $0$ \\
+Star (root $+$ many leaves) & \code{with} takes root $+$ all leaves' \code{without}
+  $=0$; \code{without} sums leaves -- picks the bigger \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+\textbf{Do not} sum \code{L.first+R.first} in \code{without}: when $v$ is free
+its children are \emph{free to choose}, so each contributes
+$\max(\mathit{first},\mathit{second})$, not the taken value. Forcing children to
+be robbed is the off-by-one-state WA. Variants: ``maximum sum with no two
+adjacent'' on a general tree is identical (children loop); ``minimum vertex
+cover'' reuses the same two states with min and complementary recurrences -- the
+gateway to full tree DP (\chref{c10}).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item When a node's decision \emph{constrains} its children, that is the tell
+        for a two-channel return: encode the constraint as states in the tuple.
+  \item $\bigO{1}$ combine over a returned pair replaces an exponential
+        re-descent -- the pair \emph{is} the memo, with no hashmap.
+  \item State-count is a design dial: two here (robbed/free); cameras use three;
+        the moment you need more, you are doing tree DP (\chref{c10}).
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item $n\to10^{5}$ skewed: \textbf{RE}. Iterative post-order: push frames
+        \code{\{node, stage\}}; compute \code{with/without} only when both
+        children are done (stage 1), reading their pairs from a map keyed by node
+        (or by stack slot). The state vector transfers verbatim.
+  \item Amounts $\le 10^{4}$, $n\le10^{4}$: total $\le 10^{8}$ fits \code{int};
+        if the statement lifts either, move the pair to \code{long long}.
+  \item Same shape solves LC 124 / 543 if you swap the states for
+        \{best-down-arm, best-anywhere\} -- the ``answer $\ne$ return'' split of
+        \probref{c02-tilt} \emph{inside} a two-channel return; practise reading
+        those problems as this one.
+\end{itemize}
+\end{hardeningbox}
+
+\solvedproblem{c02-coins}{Distribute Coins in Binary Tree}{LeetCode 979}
+  {https://leetcode.com/problems/distribute-coins-in-binary-tree/}{LC Medium L4}
+  {bottom-up surplus flow, $\bigO{1}$ combine with abs}
+
+\begin{problemstatement}[Distribute Coins]
+$n$ nodes, $n$ coins total, each node starts with $0$, $1$ or more. In one move a
+coin moves between adjacent nodes. Return the \emph{minimum} moves so every node
+has exactly one coin. $1 \le n \le 100$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, 25 minutes]
+Fair attempt: forget the coins being distinct; only \emph{net} flow across each
+edge matters.
+\peek{how many coins must cross the edge from $v$ to its parent, given
+$\subtree(v)$?}
+\nudge{it is $|\text{(coins in }\subtree(v)\text{)} - |\subtree(v)||$: the
+subtree's surplus (or deficit) forced across that single edge.}
+\fullhint{post-order returning $\Delta(v) = \Sigma_{\text{coins}}(v) - \size(v)$
+(net coins $\subtree(v)$ must export); add $|\Delta|$ for every edge as you go
+up. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Each edge to a parent is the \emph{only} door of $\subtree(v)$, so the number of
+coins crossing it is forced: exactly the subtree's surplus over its node count.
+Summing $|\text{surplus}|$ over all edges gives the minimum moves (any feasible
+plan crosses each edge at least that many times, and a greedy local plan achieves
+it). This is a bottom-up count with an \code{abs} answer -- but the answer is
+\emph{accumulated on the way up}, not the returned value.
+
+\solstep{Key Observations}
+\begin{observation}
+Define $\Delta(v) = (\text{coins in }\subtree(v)) - \size(v)$, positive $=$ export,
+negative $=$ import. Recurrence: $\Delta(v) = (c_v - 1) + \Delta(L) + \Delta(R)$
+with $\Delta(\nil)=0$.
+\end{observation}
+\begin{observation}
+The edge from $v$ up to its parent carries exactly $|\Delta(v)|$ coins, so the
+answer is $\sum_{v \ne \mathit{root}} |\Delta(v)|$.
+\end{observation}
+\begin{observation}
+Total coins $=n$ guarantees $\Delta(\mathit{root})=0$ -- the root exports nothing,
+consistent with excluding its parent edge.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Match surplus nodes to deficit nodes by their distance and sum.}
+{That is a transportation problem -- $\bigO{n^2}$ pairs, and it double-counts:
+coins share edges, so independent pair-distances are not moves.}
+\deadend{BFS pushing coins from extras to empties.}{Hard to make minimal across a
+branching tree; ordering of pushes is a nightmare to prove optimal.}
+\aha{each edge's traffic is \emph{forced} by the subtree behind it: count
+$|\Delta(v)|$ per edge, once, bottom-up. Local optimality is global here because
+no coin ever needs to cross an edge twice.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} match surpluses by distance & pair extras to deficits & $O(n^2)$ & \textcolor{warningred}{\ding{55}\ \textbf{WA}} \\
+2 & \lv{4} per-edge forced flow & return $\Delta(v)$, add $|\Delta|$ & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 over-counts shared edges; rung 2 prices each edge exactly once.
+
+\solstep{Solution}
+Post-order \code{flow(v)} returns $\Delta(v)=(c_v-1)+\Delta(L)+\Delta(R)$ and
+adds $|\Delta(L)|+|\Delta(R)|$ to the global answer (the two child edges); the
+root's own $\Delta$ is $0$ and its parent edge is excluded, so the child-edge
+accumulation already counts every real edge.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Induction: $\Delta(L),\Delta(R)$ correct (hypothesis). $\subtree(v)$ holds
+$\sum c$ coins across $\size(v)=1+\size(L)+\size(R)$ nodes, so its surplus over
+its own needs is $(c_v-1)+\Delta(L)+\Delta(R)=\Delta(v)$ -- and since the parent
+edge is $\subtree(v)$'s only boundary, $|\Delta(v)|$ coins \emph{must} cross it
+in any solution (lower bound). Summing over edges is thus a lower bound on
+moves. \emph{Achievability}: process edges bottom-up, moving exactly
+$|\Delta(v)|$ coins across $v$'s parent edge in the direction of the sign; after
+this $\subtree(v)$ is internally balanced with $0$ surplus, so no coin crosses
+any edge twice and the bound is met. The returned $\Delta(\mathit{root})=0$
+(total coins $=n$) closes the accounting.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Distribute Coins (LeetCode 979) -- per-edge forced flow}, label={lst:c02-coins}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    int moves = 0;
+    int flow(TreeNode* v) {                 // returns surplus of subtree(v)
+        if (!v) return 0;                   // Delta(nil) = 0
+        int L = flow(v->left);
+        int R = flow(v->right);
+        moves += abs(L) + abs(R);           // coins crossing the two child edges
+        return (v->val - 1) + L + R;        // v's own surplus + children's
+    }
+public:
+    int distributeCoins(TreeNode* root) { flow(root); return moves; }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On LC's own three-node sample (root $a{=}3$, left $b{=}0$,
+right $c{=}0$; $R$ carries no coin counts, so the judge's tree is used)]
+On the level-order input $[3,0,0]$: $\Delta(b)=(0{-}1)=-1$ and $\Delta(c)=(0{-}1)=-1$ (both leaves). At $a$:
+\code{moves +=} $|\Delta(b)|+|\Delta(c)|=1+1=2$, then
+$\Delta(a)=(3{-}1)+(-1)+(-1)=\mathbf{0}$ -- the root exports nothing, exactly as
+the ``$n$ coins for $n$ nodes'' promise forces. Answer $=\mathbf{2}$: slide one
+coin $a\to b$ and one $a\to c$. \ac\quad\emph{Check:} each child edge is priced
+by $|\Delta|$ exactly once; a non-zero $\Delta(\mathit{root})$ at the end would
+flag a mis-counted edge.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, one post-order; space $\bigO{h}$. At $n\le100$ no stack risk;
+the flow value is in $[-n,n]$ so \code{int} is provably safe (\thmref{c02-postorder}
+audit habit).
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Add $|\Delta|$ for \emph{child edges} (as the code does), not for the node's own
+return -- counting $\Delta(\mathit{root})$ too is harmless ($0$) but counting a
+node's surplus before the children is the wrong edge-set. And the coins being
+indistinguishable is the \emph{point}: never track individual coins. Variants:
+``minimum moves to make all equal'' generalises $-1$ to $-\bar c$; on a
+\emph{general} tree (edge list) the same $\Delta$ works with the parent guard of
+\secref{c01-anatomy}.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Forced flow across the only door of a subtree'' is a recurring
+        bottom-up idea -- same shape as subtree sums, but the returned value is a
+        \emph{net}, and $|\cdot|$ prices the edge.
+  \item Proving lower-bound $+$ greedy-achievability is easier than simulating
+        moves; look for an edge/subtree invariant before modelling the process.
+  \item The two-channel \probref{c02-rob} and this one are both ``return a
+        summary, read the answer per-node'' -- the summary type is the only real
+        difference.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Guarantee $\Delta(\mathit{root}){=}0$ is the correctness alarm: if your
+        iterative port ends with a non-zero root surplus, either the input
+        promised $n$ coins (assert it) or an edge was double-counted.
+  \item General tree / large $n$: parent-guard DFS; $\Delta$ still $\bigO{1}$
+        combine, answer in \code{long long} if $n>10^{5}$ (sum of $|\Delta|$
+        over edges is $\bigO{n^2}$ in the worst chain).
+\end{itemize}
+\end{hardeningbox}
+
+
+\solvedproblem{c02-deepest}{Smallest Subtree with all the Deepest Nodes}{LeetCode 865}
+  {https://leetcode.com/problems/smallest-subtree-with-all-the-deepest-nodes/}{LC Medium L4}
+  {bottom-up \{depth, witness\} pair, LCA-in-disguise}
+
+\begin{problemstatement}[Smallest Deepest Subtree]
+Return the root of the \emph{smallest} subtree that contains all the deepest
+leaves. $1 \le n \le 500$.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+The deepest leaves have some maximum depth $D$; the smallest subtree holding them
+all is rooted at their lowest common ancestor. A node \emph{is} that LCA when both
+its children reach depth $D$ (it spans them), or when exactly one child already
+carries all the depth-$D$ leaves. A single post-order returning the pair
+\{deepest depth below, LCA witness\} resolves it (\defref{c02-twochannel}).
+
+\solstep{Key Observations}
+\begin{observation}
+Return $(\depth_{\max}\text{ within }\subtree(v),\ w)$ where $w$ is the current
+smallest-subtree root covering all leaves at $\depth_{\max}$.
+\end{observation}
+\begin{observation}
+If the two children report equal max-depth, $v$ covers leaves in both $\Rightarrow$
+witness is $v$ at depth $1+\text{child}$. If unequal, inherit the deeper child's
+witness at $1+$ its depth.
+\end{observation}
+\begin{observation}
+This is the LCA of all deepest nodes; \chref{c11} does pairwise LCA with lifting,
+but here one bottom-up pass beats any explicit LCA machinery.
+\end{observation}
+
+\solstep{Solution}
+Post-order: leaf reports $(0,\text{self})$; a node compares its children's depths
+and picks the witness per Observation 2; return $(\mathit{root}.depth, w)$.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Induction: children return correct (depth, witness). The deepest leaves of
+$\subtree(v)$ lie under the deeper child, or split across both when the depths tie.
+Tie $\Rightarrow$ no proper descendant subtree contains them all, so $v$ is the
+minimal witness at depth $1+\text{child}$. Strict $\Rightarrow$ all depth-$D$
+leaves of $\subtree(v)$ are in that one child, whose witness already covers them,
+so inheriting is minimal. Every case yields the smallest covering subtree.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Smallest Deepest Subtree (LeetCode 865)}, label={lst:c02-deepest}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    pair<int, TreeNode*> dfs(TreeNode* v) {    // {max depth below, covering root}
+        if (!v) return {-1, nullptr};
+        auto L = dfs(v->left), R = dfs(v->right);
+        if (L.first > R.first) return {L.first + 1, L.second};   // deeper side wins
+        if (R.first > L.first) return {R.first + 1, R.second};
+        return {L.first + 1, v};               // tie: v is the lowest cover
+    }
+public:
+    TreeNode* subtreeWithAllDeepest(TreeNode* root) { return dfs(root).second; }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$]
+Leaves $4,5,6$ report $(0,\cdot)$. Node $2$: children tie at $0$ $\Rightarrow$
+$(1,2)$. Node $3$: one child $\Rightarrow$ $(1,3)$. Root $1$: children tie at $1$
+$\Rightarrow (2,\mathbf{1})$ -- the whole tree, since the three deepest leaves
+$\{4,5,6\}$ sit under both branches, so their LCA is the root. A leaner case: if
+$6$ were absent, $3$ would report $(-1\to$ none$)$ and the answer would collapse
+to node $2$ -- tie-vs-strict is the whole behaviour.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, space $\bigO{h}$. The pair return replaces the two-pass
+``find depth $D$, then hunt LCA'' $\bigO{n^2}$-ish approach with one walk.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Reporting the deepest \emph{leaf} instead of the deepest leaves' \emph{cover}
+returns a leaf, not an internal LCA. The tie branch (witness $=v$) is the entire
+insight -- do not propagate a child's witness through a tie. Variant: LC 865's
+twin ``Deepest Leaves Sum'' (LC 1302, in the chapter-end set) keeps
+only the depth channel.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A \{scalar, witness\} return is a bottom-up LCA: the merge condition is
+        the ``both sides reach the goal'' test.
+  \item Equal-depth tie is the informative case, not an edge -- it is where the
+        answer node is chosen.
+  \item Many ``smallest subtree with property'' problems are this pair with a
+        different predicate.
+\end{enumerate}
+\end{insightbox}
+
+\solvedproblem{c02-zigzag}{Longest ZigZag Path in a Binary Tree}{LeetCode 1372}
+  {https://leetcode.com/problems/longest-zigzag-path-in-a-binary-tree/}{LC Medium L5}
+  {two-channel direction pair, answer-max over all nodes}
+
+\begin{problemstatement}[Longest ZigZag Path]
+A zigzag path alternates left/right at each step; its length is the number of
+edges. Return the longest zigzag over all downward paths. $1 \le n \le 5\cdot10^{4}$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, 25 minutes]
+Fair attempt: you saw the top-down version in \secref{c02-topdown}'s practice.
+Do it bottom-up and compare what each returns.
+\peek{what two numbers must a child hand up so the parent can extend a zigzag in
+either direction without knowing which way it came from?}
+\nudge{return \{best zigzag starting by going LEFT, ... by going RIGHT\} from $v$;
+the answer is the max over all nodes of the pair sum.}
+\fullhint{\code{dfs(v)} $\to$ \{down-left arm, down-right arm\};
+at $v$: $\mathit{ans}=\max(\mathit{ans}, L.\mathit{right}, R.\mathit{left})$
+style extension. Full two-variant build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+A zigzag is defined by the \emph{direction of each step}, so what a parent needs
+from a child is ``how long a zigzag can I keep going if my first step into that
+child is left vs.\ right.'' That is a two-channel return keyed on direction; the
+global answer is the best single-arm length seen at any node (a zigzag need not
+bend at the node -- it just passes through in one direction).
+
+\solstep{Key Observations}
+\begin{observation}
+Let $L(v)=$ longest zigzag starting at $v$ whose first edge goes left;
+$R(v)$ likewise right. Then $L(v)=1+R(\mathit{lc}(v))$ and
+$R(v)=1+L(\mathit{rc}(v))$ (the next step must flip direction), with $-1$ at a
+null child so that a step onto a missing edge measures $0$.
+\end{observation}
+\begin{observation}
+The answer is $\max$ of $L(v),R(v)$ over all $v$ -- an aggregate returned up, an
+answer recorded per node (\defref{c02-agg-answer}).
+\end{observation}
+\begin{observation}
+Compare with the top-down carry (\secref{c02-topdown} practice): there the state
+was ``length so far + last direction'' pushed down and voted at every node, also
+$\bigO{n}$. The two are dual; the bottom-up form needs no global and reads as a
+pure recurrence.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{One number per node (longest zigzag in the subtree).}{A parent extending
+through $v$ must know the direction of $v$'s \emph{first} edge to keep the
+alternation -- one number cannot say which way it leaves $v$.}
+\aha{return a \emph{direction pair} $\{L(v),R(v)\}$; the flip is then the
+substitution $L(v)=1+R(\text{left child})$.}
+\end{thinkbox}
+
+\solstep{Solution}
+Post-order returning \code{\{L,R\}}; combine as in Observation 1 with null
+$\{-1,-1\}$; push $\max(L,R)$ into the global answer at each node.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Structural induction. Base: \code{dfs(nil)}$=\{-1,-1\}$, so a leaf — whose
+children are null — returns $\{0,0\}$, correctly recording zero usable zigzag
+edges. Step: a longest left-first zigzag from $v$ takes edge $v\to\mathit{lc}$ then
+must continue right-first from the child, i.e.\ $1+R(\mathit{lc})$ -- exactly the
+recurrence, correct by hypothesis; symmetrically for $R(v)$. Since every
+downward zigzag has a unique top node and a first direction, it is captured by
+some $L(v)$ or $R(v)$; taking $\max$ over all nodes yields the global longest.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Longest ZigZag Path (LeetCode 1372) -- bottom-up direction pair}, label={lst:c02-zigzag}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    int ans = 0;
+    pair<int,int> dfs(TreeNode* v) {           // {go-left-first, go-right-first}
+        if (!v) return {-1, -1};               // null: a step here measures 0
+        auto L = dfs(v->left);
+        auto R = dfs(v->right);
+        int goLeft  = 1 + L.second;            // step left, then continue RIGHT
+        int goRight = 1 + R.first;             // step right, then continue LEFT
+        ans = max({ans, goLeft, goRight});
+        return {goLeft, goRight};
+    }
+public:
+    int longestZigZag(TreeNode* root) { dfs(root); return ans; }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$ (answer $=2$, the path $1\to2\to5$)]
+$\mathit{dfs}(\nil)=\{-1,-1\}$. Leaves $4,5,6$ each see two null children:
+$\mathit{goLeft}=1+(-1)=0$, $\mathit{goRight}=1+(-1)=0$, so they return
+$\{0,0\}$ and $\mathit{ans}$ stays $0$. Node $2$ (children $4\{0,0\}$,
+$5\{0,0\}$): $\mathit{goLeft}=1+4.\mathit{second}=1$, $\mathit{goRight}=
+1+5.\mathit{first}=1$, returns $\{1,1\}$, $\mathit{ans}=1$. Node $3$ (left
+null, right $6\{0,0\}$): $\mathit{goLeft}=1+(-1)=0$ (no left edge),
+$\mathit{goRight}=1+6.\mathit{first}=1$, returns $\{0,1\}$. Root $1$
+(children $2\{1,1\}$, $3\{0,1\}$): $\mathit{goLeft}=1+2.\mathit{second}=2$,
+$\mathit{goRight}=1+3.\mathit{first}=1$, returns $\{2,1\}$, $\mathit{ans}=2$.
+The winning arm $\mathit{goLeft}=2$ at the root is $1\!\to\!2$ (left) then
+$2\!\to\!5$ (right): exactly two edges, one bend. \ac
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$, stack $\bigO{h}$ -- at $n = 5\cdot10^{4}$ a chain risks
+\textbf{RE}: convert to iterative post-order or the top-down carry with an
+explicit stack. Same recurrence, direction pair is the memo.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Forgetting the direction \emph{flip} ($L$ uses the child's $R$, not its $L$)
+counts straight runs, not zigzags. And a step onto a missing child must be $0$,
+not $1$: either guard the combine on child existence, or lean on
+\code{dfs(nil)}$=\{-1,-1\}$ so the $+1$ cancels to $0$ across a null. Variant: ``longest zigzag that may start anywhere and is
+measured in \emph{nodes}'' adds one; ``consecutive increasing zigzag'' layers a
+value test on the flip.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item When a path's continuation depends on how you \emph{arrived}, put the
+        arrival direction into the returned state -- the pair is a two-state DP.
+  \item The same problem is legitimately top-down or bottom-up; the returned-pair
+        form is usually the cleaner proof, the carried form the shorter code.
+  \item Direction pairs generalise to $k$-way ``no two adjacent equal'' path
+        problems -- the state is ``last choice'', not ``last value''.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item $n=5\cdot10^{4}$ chain: recursion \textbf{RE}. Iterative post-order with
+        $\{v,\text{stage}\}$ frames, reading both children's pairs before
+        combining (identical state, explicit stack).
+  \item The $-1$ null identity is load-bearing: it is what makes a leaf return
+        $\{0,0\}$ instead of a phantom $\{1,1\}$. If you inline the child access
+        for speed, test the pointer first (a missing child must contribute $-1$
+        to the $+1$ flip) or length-1 arms appear on every leaf and skewed node.
+\end{itemize}
+\end{hardeningbox}
 
 \subsection{Practice Problems}
 
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Have you written, in one sentence, \emph{what the call returns}? If the
+        sentence needs ``and'' twice, you want a tuple (\defref{c02-twochannel}).
+  \item Is the answer the return value, or something you \emph{record} while
+        combining? (The \defref{c02-agg-answer} split; \probref{c02-tilt}.)
+  \item Does a decision at $v$ need a grandchild? Then a child's single number is
+        insufficient -- add a state (rob, zigzag), never re-recurse.
+  \item Is the null identity consistent with the aggregate ($0$ sum, $-1$ edge
+        height, $\{0,0\}$ pair)? Re-derive it, do not eyeball.
+  \item Does the tree's input type ($0/1$ nodes, coin counts, values) match your
+        trace data -- or did you trace the wrong tree?
+\end{itemize}
+\end{stuckbox}
+
 \begin{practiceset}
-  \practice{Distribute Coins in Binary Tree}{LeetCode 979}
-    {https://leetcode.com/problems/distribute-coins-in-binary-tree/}{LC Medium}
-    {bottom-up: return the net surplus/deficit a subtree must move through its parent edge; add its absolute value to the answer.}
-  \practice{House Robber III}{LeetCode 337}
-    {https://leetcode.com/problems/house-robber-iii/}{LC Medium}
-    {return a pair (rob this node, skip this node) per subtree; combine the two children's pairs.}
-  \practice{Delete Nodes And Return Forest}{LeetCode 1110}
-    {https://leetcode.com/problems/delete-nodes-and-return-forest/}{LC Medium}
-    {post-order; when a child is deleted, its subtree roots become new trees -- collect them.}
-  \practicehh{Path Sum III}{LeetCode 437}
-    {https://leetcode.com/problems/path-sum-iii/}{LC Medium}
-    {count downward paths (any start/end) summing to target; brute force is two DFSs.}
-    {prefix sums on the root-to-node path: carry a hash map of running-sum counts down, and for each node add how many earlier prefixes equal current$-$target. A top-down map plus a bottom-up count.}
+  \practice{Find Leaves of Binary Tree}{LeetCode 366}
+    {https://leetcode.com/problems/find-leaves-of-binary-tree/}{LC Medium L3}
+    {bottom-up return the \emph{height} of each node and bucket nodes by it: all
+    leaves (height $0$) form the first group, their parents the next -- the
+    aggregate of \probref{c02-tilt}'s skeleton repurposed as a grouping key.}
+  \practice{Binary Tree Longest Consecutive Sequence II}{LeetCode 549}
+    {https://leetcode.com/problems/binary-tree-longest-consecutive-sequence-ii/}{LC Medium L4}
+    {two-channel return \{longest increasing arm, longest decreasing arm\} up
+    through $v$; combine bends ascending-left/descending-right (or the mirror)
+    at $v$ -- exactly the directed-arm shape of \probref{c02-zigzag}.}
+  \practice{Smallest String Starting From Leaf}{LeetCode 988}
+    {https://leetcode.com/problems/smallest-string-starting-from-leaf/}{LC Medium L4}
+    {bottom-up return the smallest leaf-to-node string of each subtree (as the
+    \emph{aggregate}); the combine prepends $v$'s char to the lexicographically
+    smaller child string -- decoupling the returned string from the recorded
+    answer of \defref{c02-agg-answer}.}
 \end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 2.3 Bottom-up return]
+Return what the \emph{parent} needs (aggregate up); record what the \emph{judge}
+needs (answer aside). When one number is not enough, return a tuple: rob
+\{take,skip\}, deepest \{depth,witness\}, zigzag \{left,right\}. Post-order,
+$\bigO{1}$ combine, never re-recurse inside it.
+\selftest{
+  \item State the aggregate/answer split and give one problem from this lab that
+        uses each channel.
+  \item Write \probref{c02-rob}'s two recurrences for \{with, without\} from
+        memory.
+  \item Why does re-recursing inside the combine go exponential, and what is the
+        fix (\defref{c02-twochannel})?
+  \item On $R$: the subtree sums $\Sigma$ and the total tilt (recompute both).
+  \item Write the bottom-up skeleton (\coderef{c02-bu-skeleton}) from memory,
+        including the null identity comment and the answer-recording line.
+}
+\end{recallbox}

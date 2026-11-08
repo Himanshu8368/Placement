@@ -1,0 +1,1008 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  4.2  Rooting an Unrooted Tree                          sec:c04-rooting
+%  Exports: def:c04-root  thm:c04-dfs-orient  prop:c04-reroot
+%           lst:c04-root  ex:c04-root-run
+%           prob:c04-reorder-routes  prob:c04-subtree-label
+%           prob:c04-min-height      prob:c04-highest-score
+%           lst:c04-reorder-routes   lst:c04-subtree-label
+%           lst:c04-min-height       lst:c04-highest-score
+% =====================================================================
+\section{Rooting an Unrooted Tree}\label{sec:c04-rooting}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item On an \emph{undirected} adjacency list, why must a DFS carry the node it came
+        from, and what goes wrong if it does not? (\secref{c04-reps}, Trap~1)
+  \item What single loop turns a \code{parent[]} array into \code{children[]} lists?
+        (\coderef{c04-reps}, block C)
+  \item For $G$ (\figref{c04-running-g}), name $\parent$ and $\size$ when the root is $0$.
+  \item Why is a rooted node's child count $\degop - 1$, not $\degop$? (Trap~3 of \secref{c04-reps})
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+An adjacency list (\coderef{c04-reps}, model B) is \emph{symmetric}: it knows $u$ touches
+$v$ but not who is ``above'' whom. Almost every tree algorithm -- subtree sums, depths,
+parent-indexed DP -- needs a \term{root}: one node declared the top, with every edge
+re-oriented away from it. This section shows that rooting is not a property of the tree
+but a \emph{choice you make in one DFS}, and that the choice is free to change. You will
+compute $\parent$, $\depth$, $\size$ and $\height$ for every node in a single traversal,
+meet the \term{centroid} (the root that minimises height), and preview the \term{reroot}
+identity that answers ``what if the root were every node?'' in $O(n)$ total.
+\textbf{Prerequisites.} \secref{c04-reps} (adjacency, the parent guard, building children
+lists); \chref{c03}'s DFS; the bottom-up aggregation pattern \secref{c02-bottomup}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item root an undirected edge list with one parent-guarded DFS/BFS;              \hfill\lv{2}
+  \item compute $\parent$, $\depth$, per-node $\size$ and $\height$ in the same pass;\hfill\lv{3}
+  \item count aggregate information over $\subtree(v)$ for every $v$ (labels, apples);\hfill\lv{3}
+  \item find the minimum-height root(s) -- the tree centroid -- in $O(n)$;         \hfill\lv{4}
+  \item shift an answer across an edge in $O(1)$ and reroot over the whole tree in $O(n)$.\hfill\lv{4}--\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- turning edges into a rooted tree]
+\reckey{the input is $n{-}1$ \emph{undirected edges} (or a \code{parent[]} array) and the
+question is about \emph{subtrees}, \emph{depths}, ``rooted at $x$'', ``distance from $0$'',
+or ``the answer if we re-rooted'' -- the moment you need a notion of above/below.}
+\recuse{
+  \item a ``subtree of $v$'' quantity (sum, count, label tally) -- needs a root and a
+        bottom-up return value (\secref{c02-bottomup});
+  \item ``reorient edges so everything reaches node $0$'' / ``cost from the root'' --
+        root it and classify each edge by direction;
+  \item ``minimise the height'' / ``best root'' -- the centroid, peel leaves;
+  \item ``answer for \emph{every} node as root'' -- reroot, one $O(n)$ sweep.
+}
+\recnotuse{
+  \item a pointer \code{TreeNode} already rooted and you merely visit it -- Chapter~3;
+  \item you need the subtree as a \emph{contiguous array range} for range queries --
+        that is the Euler tour, \chref{c24};
+  \item the tree is a \emph{heap}/PQ keyed by value -- \chref{c07}.
+}
+One-line test: \emph{does the question need ``above/below'' that the input did not
+already give me? If yes, I must root it -- this section.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Take $G$ as the judge hands it -- seven nodes, six \emph{unoriented} edges, no root
+anywhere in sight. Now declare node $0$ the top and pour a DFS out of it: the first time
+the walk reaches a node, the edge it arrived on becomes that node's \emph{parent edge},
+and every not-yet-seen neighbour becomes a \emph{child}. That single pass silently
+manufactures $\parent$, $\depth$, and (on the way back up) $\size$ for all seven nodes.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,>=Stealth]
+  % left: undirected
+  \node[troot] (a0) at (0,0) {$0$};
+  \node[tnode] (a1) at (-1.8,-1.4) {$1$};
+  \node[tnode] (a2) at (0,-1.4) {$2$};
+  \node[tnode] (a3) at (1.8,-1.4) {$3$};
+  \node[tleaf] (a4) at (-2.5,-2.8) {$4$};
+  \node[tleaf] (a5) at (-1.1,-2.8) {$5$};
+  \node[tleaf] (a6) at (1.8,-2.8) {$6$};
+  \foreach \x/\y in {a0/a1,a0/a2,a0/a3,a1/a4,a1/a5,a3/a6} \draw[tedge] (\x)--(\y);
+  \node[annot, align=center, font=\scriptsize] at (0,-3.7) {undirected edges\\(no root)};
+  % arrow
+  \draw[->, line width=1.2pt, accentorange] (3.0,-1.4) -- (4.1,-1.4)
+     node[midway, above, align=center, font=\scriptsize, text=accentorange] {root at 0\\+ DFS};
+  % right: rooted (arrows parent->child)
+  \node[troot] (b0) at (5.9,0) {$0$};
+  \node[tnode] (b1) at (4.1,-1.4) {$1$};
+  \node[tnode] (b2) at (5.9,-1.4) {$2$};
+  \node[tnode] (b3) at (7.7,-1.4) {$3$};
+  \node[tleaf] (b4) at (3.4,-2.8) {$4$};
+  \node[tleaf] (b5) at (4.8,-2.8) {$5$};
+  \node[tleaf] (b6) at (7.7,-2.8) {$6$};
+  \foreach \x/\y in {b0/b1,b0/b2,b0/b3,b1/b4,b1/b5,b3/b6} \draw[tedgehl,->] (\x)--(\y);
+  \node[annot, align=left, font=\scriptsize] at (9.0,-1.0) {$\parent=[-1,0,0,0,1,1,3]$\\
+    $\depth=[0,1,1,1,2,2,2]$\\$\size=[7,3,1,2,1,1,1]$};
+  \node[annot, align=center, font=\scriptsize] at (5.9,-3.7) {oriented away from $0$\\(a rooted tree)};
+\end{tikzpicture}
+\caption{Rooting \emph{is} orientation. The same six edges, poured from node $0$ by a
+parent-guarded DFS, become six parent$\to$child arrows, and the arrays $\parent$,
+$\depth$ (top-down) and $\size$ (bottom-up) fall out of one traversal. Pick a different
+root and all three change.}\label{fig:c04-orient}
+\end{figure}
+
+The deep point, and the whole reason rerooting works: the rooted tree is \emph{not} new
+data, it is a \emph{view}. Rooting at $0$ costs $O(n)$; naively rooting at all $n$ nodes
+costs $O(n^2)$. But moving the root across a single edge only changes the answer for the
+nodes on one side of that edge, and that change has a closed form (Proposition
+\ref{prop:c04-reroot}) -- which is why ``answer for every root'' is an $O(n)$ problem
+disguised as an $O(n^2)$ one.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Rooting; parent, depth, size}{c04-root}
+A \term{rooting} of an undirected tree at node $r$ orients every edge away from $r$: for
+each node $v \neq r$, $\parent(v)$ is the unique neighbour of $v$ on the (unique) path to
+$r$, and the \term{children} of $u$ are $\{v : \parent(v)=u\}$. $\depth(v)$ is the number
+of edges on $v$'s path to $r$; $\size[v]$ (the \term{subtree size}) is the number of
+nodes whose path to $r$ passes through $v$, i.e.\ $|\subtree(v)|$, so $\size[r]=n$.
+\end{definition}
+
+\noindent\textbf{In plain words.} Rooting just says ``$r$ is the top, and your parent is
+the neighbour closer to $r$. '' Once that is fixed, everything else -- who is whose
+child, how deep, how big a subtree -- is forced, and one DFS can read them all off.
+
+\begin{theorem}{One parent-guarded DFS is a correct rooting}{c04-dfs-orient}
+Run DFS from $r$ carrying the parent parameter (skip the neighbour equal to the parent).
+Then (i) every node is visited exactly once, (ii) each visited node $v \neq r$ is assigned
+exactly one parent $\parent(v)$, the node it was reached from, and the resulting
+parent-pointers form a rooted tree on all $n$ nodes.
+\end{theorem}
+\begin{proofbox}
+A tree is connected, so DFS from $r$ reaches every node -- existence. The parent guard
+removes the only edge that could send the walk back where it came, so from any node the
+search only proceeds into \emph{unvisited} neighbours; since a tree has \emph{no} cycle,
+there is no second path into an already-reached node, hence no node is entered twice
+(uniqueness, and no node is skipped). The edge that first reaches $v$ is recorded as
+$\parent(v)$: exactly one such edge exists, so $\parent$ is a well-defined function with
+$\parent(r)=\text{nil}$ and every other node one parent. These $n-1$ parent edges connect
+all nodes to $r$ and are acyclic (each node points strictly toward the root), so they form
+a rooted tree. Uniqueness of the tree-path to $r$ guarantees this rooting is the one the
+undirected edges encode -- DFS order affects only the \emph{sequence}, not the resulting
+$\parent$ assignment.
+\end{proofbox}
+\begin{insightbox}
+Note what is \emph{not} in the proof: DFS vs BFS, left-first vs right-first. The parent
+array is \textbf{order-independent} -- a property we lean on constantly. (The Euler-tour
+\emph{timestamps} \code{tin}/\code{tout} \emph{are} order-dependent; those are
+\chref{c24}, not this section.)
+\end{insightbox}
+
+\begin{proposition}{Reroot across one edge -- the $O(1)$ shift}{c04-reroot}
+Let $f(u)=\sum_{x} \dist(u,x)$ be the sum of distances from $u$ to all $n$ nodes. For an
+edge between parent $p$ and child $c$ (rooted at $p$), with $s=\size[c]$ nodes in
+$\subtree(c)$:
+\[
+   f(c) \;=\; f(p) \;+\; (n - 2s).
+\]
+\end{proposition}
+\begin{proofbox}
+Re-root from $p$ to $c$: the $s$ nodes inside $\subtree(c)$ each get \emph{one edge
+closer} to the root ($-1$ to their distance), and the remaining $n-s$ nodes outside get
+\emph{one edge farther} ($+1$). Nothing else changes. Hence
+$f(c) = f(p) - s + (n-s) = f(p) + (n - 2s)$.
+\end{proofbox}
+\begin{notebox}[Why this is the chapter's money move]
+Two DFS passes give $f(r)$ for \emph{one} root (the Summit, \probref{c04-summit}, is LC 834).
+The shift above then propagates $f$ to every other node in a single further DFS -- $O(n)$
+total instead of $O(n^2)$. This preview is fully developed in the Rerooting chapter
+(\chref{c20}); here we only need to \emph{see} that a root change is a local edit.
+\end{notebox}
+
+\subsection{The Algorithm: root, then read off \texorpdfstring{$\parent/\depth/\size$}{parent/depth/size}}
+
+\begin{lstlisting}[caption={Root an undirected adjacency list; parent/depth (top-down), size/height (bottom-up)}, label={lst:c04-root}]
+#include <bits/stdc++.h>
+using namespace std;
+
+vector<vector<int>> adj;
+vector<int> par_, dep_, sz_, hgt_;
+
+// top-down pass: assign parent and depth while orienting away from the root
+void dfsDown(int u, int p) {
+    par_[u] = p;
+    dep_[u] = (p == -1 ? 0 : dep_[p] + 1);       // root is at depth 0
+    for (int v : adj[u]) if (v != p)             // THE parent guard (Trap 1)
+        dfsDown(v, u);
+}
+
+// bottom-up pass: subtree size and height, combining children on the way back
+int dfsUp(int u, int p) {
+    sz_[u] = 1; hgt_[u] = 0;                     // self counts; leaf has height 0
+    for (int v : adj[u]) if (v != p) {
+        int cs = dfsUp(v, u);                    // recurse child
+        sz_[u]  += cs;                            // size adds child subtree
+        hgt_[u]  = max(hgt_[u], hgt_[v] + 1);     // height is deepest child + 1
+    }
+    return sz_[u];
+}
+
+void rootTree(int n, int r) {
+    par_.assign(n, -1); dep_.assign(n, 0); sz_.assign(n, 0); hgt_.assign(n, 0);
+    dfsDown(r, -1);                               // orient + depth
+    dfsUp(r, -1);                                 // size + height
+    // height of whole tree = hgt_[r]; n-1 = number of undirected edges = n-1 arrows
+}
+\end{lstlisting}
+\begin{complexitybox}
+Time $\bigO{n}$ per pass, two passes $\bigO{n}$ total. Space $\bigO{n}$ for the arrays
+plus the $\bigO{h}$ recursion. On a chain ($\height = n$) the recursion risks RE --
+run \code{dfsDown} iteratively with an explicit stack, and compute $\size$ by processing
+nodes in \emph{reverse BFS order} so children precede parents (see the hardening notes on
+\probref{c04-subtree-label}). The parent guard appears in \emph{both} passes -- omitting it
+in either double-counts or loops forever.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Rooting $G$ at $0$}{c04-root-run}
+$G$: undirected edges $\{0\text{--}1,0\text{--}2,0\text{--}3,1\text{--}4,1\text{--}5,3\text{--}6\}$.
+\textbf{Top-down} from $0$: children of $0$ are $1,2,3$ (parent $0$); of $1$: $4,5$
+(parent $1$); of $3$: $6$ (parent $3$); $2$ has none. So
+\[
+  \parent=[-1,0,0,0,1,1,3],\qquad \depth=[0,1,1,1,2,2,2].
+\]
+\textbf{Bottom-up} sizes: leaves $2,4,5,6$ have $\size=1$; $\size[1]=1{+}\size[4]{+}\size[5]=3$;
+$\size[3]=1{+}\size[6]=2$; $\size[0]=1{+}\size[1]{+}\size[2]{+}\size[3]=1{+}3{+}1{+}2=7$.
+\[
+  \size=[7,3,1,2,1,1,1],\qquad \height=\depth_{\max}=2 \text{ (edges)} .
+\]
+\end{example}
+\begin{tracebox}[Bottom-up return values, visit order $0,1,4,5,2,3,6$]
+Leaves return $\size=1$ each ($4,5,2,6$). At $1$: $1 + \text{return}(4) + \text{return}(5) = 3$.
+At $3$: $1 + \text{return}(6) = 2$. At $0$: $1 + 3 + 1 + 2 = 7$. Heights: $1\!\to\!1$,
+$3\!\to\!1$, $0\!\to\!\max(1,1,1){+}1?$ no -- $0$'s children heights are $\height[1]{=}1,
+\height[2]{=}0, \height[3]{=}1$, so $\height[0]=\max(1,0,1)+1=2$. \checkmark\ \figref{c04-orient}.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Root given by the input}: LeetCode gives an \code{edges[]} list and says
+        ``rooted at $0$''; a $1$-indexed CF problem roots at $1$ -- the guard is the same. \hfill\lv{2}
+  \item \textbf{Two roots at once} (a ``distance from $u$ to $v$'' query batch): root once,
+        answer with $\depth$ and an LCA -- \chref{c11}.                     \hfill\lv{4}
+  \item \textbf{Centroid}: the root minimising height / max subtree -- peel leaves.
+        \probref{c04-min-height}.                                            \hfill\lv{4}
+  \item \textbf{Reroot DP}: an aggregate over every subtree \emph{and} its complement --
+        the shift of \propref{c04-reroot}, full form in \chref{c20}.         \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c04-rooting-pitfalls}
+
+\begin{warningbox}[Trap 1 -- no parent guard, or a guard on the wrong array]
+On an \emph{undirected} \code{adj}, omitting \code{if (v == p) continue} sends the DFS
+straight back up the edge it came down -- infinite recursion and a blown stack.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: walks back to the parent}, language=C++, basicstyle=\ttfamily\small]
+void dfs(int u) {
+    for (int v : adj[u]) { par_[v] = u; dfs(v); }   // immediately re-visits u's parent
+}
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: skip the node we came from}, language=C++, basicstyle=\ttfamily\small]
+void dfs(int u, int p) {
+    for (int v : adj[u]) if (v != p) { par_[v] = u; dfs(v, u); }
+}
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- counting the subtree size without the node itself]
+$\size[u]$ includes $u$; a leaf has $\size=1$, not $0$. Initialising $\size[u]=0$ and only
+adding children yields every size one too small and breaks \probref{c04-highest-score}'s
+component products.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: leaf size 0, all sizes off by one}, language=C++, basicstyle=\ttfamily\small]
+sz_[u] = 0; for (int v : adj[u]) if (v!=p) sz_[u] += sz_[v];   // forgot +1 for u
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: start at 1 (count yourself)}, language=C++, basicstyle=\ttfamily\small]
+sz_[u] = 1; for (int v : adj[u]) if (v!=p) sz_[u] += sz_[v];   // subtree includes u
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- recursion depth on a chain-shaped tree]
+Rooting a $2\cdot10^5$-node path by recursion is $\bigO{n}$ deep -- a stack overflow that
+\emph{looks} like a wrong answer. Root iteratively, or compute sizes in reverse BFS order.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: recursion on a chain -> RE}, language=C++, basicstyle=\ttfamily\small]
+dfsDown(leaf, prev);   // depth ~ n on a path; blows the ~1e5-frame default stack
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: explicit stack, or BFS order then reverse}, language=C++, basicstyle=\ttfamily\small]
+// BFS to get an order; process the order REVERSED to accumulate size bottom-up, no recursion
+\end{lstlisting}
+
+\subsection{Problem Lab}
+
+Four roots of the same idea. LC 1466 and LC 1519 root an edge list and read a
+per-subtree quantity (a flip count, a label tally). LC 310 asks \emph{which} root is best
+(the centroid). LC 2049 removes each node in turn and scores the components \emph{above}
+and \emph{below} -- a rooted-size computation on a parent array.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-reorder-routes}{Reorder Routes to Make All Paths Lead to the City Zero}{LeetCode 1466}
+  {https://leetcode.com/problems/reorder-routes-to-make-all-paths-lead-to-the-city-zero/}{LC Medium L3}
+  {undirected rooting, edge-direction tagging, DFS/BFS from 0}
+
+\begin{problemstatement}[Reorder Routes so All Paths Lead to 0]
+$n$ cities labelled $0\dots n-1$ and $n-1$ \emph{directed} roads \code{connections[i] =
+[a,b]} meaning traffic can currently go $a \to b$. Underlying, the cities form a tree
+(each connected to $0$ by a unique path). Re-orient the \emph{minimum} number of roads so
+that \textbf{every} city has a path \emph{to} city $0$. Return that minimum.
+$2 \le n \le 5\cdot10^4$.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+``Every city reaches $0$'' means every edge must point \emph{toward} node $0$ along each
+city's unique path -- i.e.\ in the tree rooted at $0$, every edge goes child $\to$ parent.
+The roads arrive \emph{directed}, but the underlying connectivity is an undirected tree,
+so the task is: root at $0$, and for each edge, check whether its given direction already
+points toward $0$. Count the edges that point the wrong way. This is pure rooting plus an
+edge classification.
+
+\solstep{Key Observations}
+\begin{observation}
+There is exactly one path from each city to $0$, so re-orienting is forced per edge --
+no choices, just a count. The minimum equals ``number of edges that, when the tree is
+rooted at $0$, are directed away from $0$.''
+\end{observation}
+\begin{observation}
+To walk the tree \emph{outward} from $0$ over an undirected adjacency, tag each stored
+edge with whether it agrees with the original direction: adding $a\to b$ store
+\code{adj[a] += \{b, cost 1\}} (using it outward matches the wrong orientation, needs a
+flip) and \code{adj[b] += \{a, cost 0\}} (travelling $b$ to $a$ goes against the arrow, i.e.\
+already points toward $0$). Sum the costs of the outward traversal.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Treat it as a shortest-path / Dijkstra and ``pay'' to reverse edges.}{The graph is
+a \emph{tree} -- exactly one path between any two nodes, so there is no alternative route to
+optimise over; a single DFS already uses every edge once. Dijkstra is $\bigO{n\log n}$
+machinery for a $\bigO{n}$ count.}
+\deadend{Count roads whose tail is not $0$.}{Direction is relative to the \emph{rooted
+tree}, not to the literal city $0$: a road $3\to6$ is fine to keep if $6$ is the parent of
+$3$ (points toward $0$) -- you cannot judge an edge in isolation, only after rooting.}
+\aha{Root at $0$ by DFS over a tagged adjacency; sum the tag (1 if the outward step
+against the arrow) along the way -- one traversal, one count.}
+\end{thinkbox}
+
+\solstep{Solution}
+Build a tagged undirected adjacency. DFS/BFS from $0$; each time you cross an edge to an
+unvisited node, add that edge's cost tag ($1$ when the original arrow pointed
+parent$\to$child, i.e.\ away from $0$). The accumulated sum is the answer.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Root the tree at $0$ (\thmref{c04-dfs-orient}). For each non-root node $v$ with parent $p$,
+the unique $v$-to-$0$ path must traverse $p$; hence the edge $\{p,v\}$ must be directed
+$v \to p$ for $v$ to reach $0$. The tag we attached when crossing $p\to v$ outward is $1$
+exactly when the input had $p \to v$ (wrong way, needs a flip) and $0$ when the input had
+$v \to p$ (right way). The traversal visits every node $v\neq0$ once and adds precisely
+$\mathbb{1}[\text{edge needs flipping}]$, so the sum equals the number of edges directed
+away from $0$ -- which is the forced, minimal re-orientation count (each such edge must
+flip, and flipping it suffices; independent across edges).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Reorder Routes to City Zero (LeetCode 1466)}, label={lst:c04-reorder-routes}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+public:
+    int minReorder(int n, vector<vector<int>>& connections) {
+        vector<vector<pair<int,int>>> adj(n);     // (neighbour, cost-if-traversed-outward)
+        for (auto& e : connections) {
+            int a = e[0], b = e[1];               // original road a -> b
+            adj[a].push_back({b, 1});             // going a->b outward = wrong way, flip
+            adj[b].push_back({a, 0});             // going b->a outward = toward 0, free
+        }
+        int ans = 0;
+        vector<char> vis(n, 0);
+        stack<int> st; st.push(0); vis[0] = 1;
+        while (!st.empty()) {
+            int u = st.top(); st.pop();
+            for (auto [v, cost] : adj[u]) if (!vis[v]) {
+                ans += cost;                      // pay only for edges pointing away from 0
+                vis[v] = 1; st.push(v);
+            }
+        }
+        return ans;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$G$ with roads oriented $0\!\to\!1,\ 2\!\to\!0,\ 0\!\to\!3,\ 1\!\to\!4,\ 5\!\to\!1,\ 6\!\to\!3$]
+Root at $0$; outward DFS. Tags: $0\!\to\!1$ cost $1$; $0\!\leftarrow\!2$ (road $2\to0$) cost $0$;
+$0\!\to\!3$ cost $1$; from $1$: $1\!\to\!4$ cost $1$, $1\!\leftarrow\!5$ (road $5\to1$) cost $0$;
+from $3$: $3\!\leftarrow\!6$ (road $6\to3$) cost $0$. Sum $=1{+}0{+}1{+}1{+}0{+}0=\mathbf{3}$.
+Flip the three edges pointing away from $0$ ($0\to1,0\to3,1\to4$). \checkmark\ \probref{c04-reorder-routes}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (each of the $2(n-1)$ stored arcs touched once), space $\bigO{n}$.
+Iterative stack, so no depth RE on a chain. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Using a \code{set} of edges and testing membership instead of tagging is correct but
+$O(n\log n)$ and verbose; the \emph{pair}-tag is the whole trick. And do not forget the
+parent/visited guard -- without it the outward DFS walks back and forth. Variant: the same
+tagging answers ``min reversals to make $0$ reachable'' and, with a different tag, ``min
+reversals so all reach a \emph{different} chosen root'' -- reroot the count in $O(1)$.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item When the underlying graph is a tree, ``reorient so all reach $r$'' is a per-edge
+        classification after rooting -- there are no path choices to optimise.
+  \item Tagging each directed edge with a traversal cost turns a direction problem into a
+        single weighted DFS.
+  \item Root $=0$ here is \emph{given}; recognising that is half the solution.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item $n=5\cdot10^4$ and possibly a chain -- keep the \emph{iterative} DFS (done above);
+        a recursive one is fine here but flips to RE if a judge pushes depth to $\sim10^6$.
+  \item Store the adjacency as \code{vector<vector<pair<int,int>>>}; a \code{map}-of-edges
+        version is $\bigO{n\log n}$ and can MLE at scale.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-subtree-label}{Number of Nodes in the Sub-Tree With the Same Label}{LeetCode 1519}
+  {https://leetcode.com/problems/number-of-nodes-in-the-sub-tree-with-the-same-label/}{LC Medium L3}
+  {undirected rooting, bottom-up 26-count merge, per-subtree aggregate}
+
+\begin{problemstatement}[Nodes in Sub-Tree With Same Label]
+$n$ nodes $0\dots n-1$ forming a tree rooted at $0$, given by undirected \code{edges}. A
+string \code{labels} of length $n$ gives each node a lowercase letter. Return an array
+\code{ans} where \code{ans[i]} is the number of nodes in $\subtree(i)$ whose label equals
+\code{labels[i]}. $1 \le n \le 10^5$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+A fair first attempt: root at $0$ and think about what each subtree should hand back to
+its parent.
+\peek{what single piece of per-subtree information would let node $u$ compute $\subtree(u)$'s
+label tally from its children's tallies?}
+\nudge{have each \code{dfs(u)} return an array of $26$ counts; merge children by addition.
+Where do you read off $\code{ans}[u]$?}
+\fullhint{DFS returns a 26-slot histogram of the subtree; $\code{ans}[u]$ is the entry for
+$\code{labels}[u]$ right after the merge. Bottom-up, one pass. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+This is the canonical ``aggregate over every subtree'' rooting problem
+(\secref{c02-bottomup} on a general, undirected tree). Root at $0$, and for each node
+collect the label multiset of its subtree. The only subtlety is \emph{representation of the
+aggregate}: carrying a sorted list is wasteful; a fixed $26$-count histogram merges in
+$O(26)$.
+
+\solstep{Key Observations}
+\begin{observation}
+$\subtree(u)$'s histogram $=$ node $u$'s own label plus the pointwise sum of its children's
+histograms -- so a bottom-up DFS returns $\texttt{int}[26]$ per node.
+\end{observation}
+\begin{observation}
+$\code{ans}[u]$ is read off \emph{after} merging children, as the $u$-label entry -- at that
+instant $u$'s histogram already includes the whole subtree.
+\end{observation}
+\begin{observation}
+Total cost is $\bigO{26n}$ -- the $26$ is a constant, so $\bigO{n}$ -- because each edge
+carries one $26$-element addition, no more.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{For each node, DFS its whole subtree counting matching labels.}{Re-walks every
+descendant for every ancestor -- $\bigO{n^2}$ (worst $n=10^5$, a chain: TLE). The subtree
+of a parent \emph{contains} the subtrees of its children; re-deriving them discards work
+already done.}
+\deadend{Store a $\mathit{map}\langle\text{char},\text{int}\rangle$ per node.}{Correct
+merging but heavy: a hash map per node for a fixed alphabet of $26$ wastes memory and time;
+a plain array is faster and $\bigO{1}$-indexable.}
+\aha{One bottom-up DFS; each node \emph{returns} a 26-slot histogram formed by summing
+children, then answers from it -- every node's work is $O(26)$, total $O(n)$.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} per-node subtree DFS & recount descendants for each node & $O(n^2)$ & \tle \\
+2 & \lv{3} bottom-up 26-histogram & merge children histograms once & $O(26n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Solution}
+Build \code{adj}. DFS($u,p$): start a $26$-array with $\code{labels}[u]$; for each child
+$v \neq p$, recurse and add $v$'s array in; set $\code{ans}[u]$ to the
+$\code{labels}[u]$ entry; return the array.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Induction on subtree height]
+\emph{Claim:} the array returned by $\code{dfs}(u,p)$ counts, per letter, the nodes of
+$\subtree(u)$ (rooted at $0$, parent $p$). \emph{Base:} leaf -- its array is one at its own
+label, correct. \emph{Step:} $u$'s subtree is $\{u\}$ union its children's
+subtrees, disjoint; the code initialises with $u$ and adds each child subtree's count by
+the induction hypothesis, so the sum is exactly $\subtree(u)$'s histogram. Reading the
+$\code{labels}[u]$ slot counts nodes in $\subtree(u)$ sharing $u$'s label $=$
+$\code{ans}[u]$. All nodes are covered because the DFS visits each once (\thmref{c04-dfs-orient}).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Nodes in Sub-Tree With the Same Label (LeetCode 1519)}, label={lst:c04-subtree-label}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+public:
+    vector<int> countSubTrees(int n, vector<vector<int>>& edges, string labels) {
+        vector<vector<int>> adj(n);
+        for (auto& e : edges) { adj[e[0]].push_back(e[1]); adj[e[1]].push_back(e[0]); }
+        vector<int> ans(n, 0);
+        // returns a 26-count histogram of subtree(u)
+        function<vector<int>(int,int)> dfs = [&](int u, int p) {
+            vector<int> cnt(26, 0);
+            cnt[labels[u] - 'a'] = 1;                     // count u itself (Trap 2)
+            for (int v : adj[u]) if (v != p) {
+                vector<int> c = dfs(v, u);                // child subtree histogram
+                for (int k = 0; k < 26; ++k) cnt[k] += c[k];
+            }
+            ans[u] = cnt[labels[u] - 'a'];                // read off after merge
+            return cnt;
+        };
+        dfs(0, -1);
+        return ans;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$G$ rooted at $0$, $\code{labels}=$ \texttt{"abacaba"} (nodes $0..6$)]
+Leaves: $2$('a'), $4$('a'), $5$('b'), $6$('a') each return a 1 at their letter.
+Node $1$ (b): self b + child4(a) + child5(b) $\Rightarrow$ \{a:1,b:2\}, $\code{ans}[1]=2$.
+Node $3$ (c): self c + child6(a) $\Rightarrow$ \{a:1,c:1\}, $\code{ans}[3]=1$.
+Node $0$ (a): self a + $1$\{a1,b2\} + $2$\{a1\} + $3$\{a1,c1\} $\Rightarrow$ \{a:4,b:2,c:1\}, $\code{ans}[0]=4$.
+Result $\code{ans}=[4,2,1,1,1,1,1]$. \checkmark\ \probref{c04-subtree-label}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{26n}=\bigO{n}$; space $\bigO{n}$ adjacency plus $\bigO{26h}$ call stack.
+Recursion depth is $O(h)$ -- on a $10^5$ chain this is a real RE risk: the histogram-merge
+has an \emph{iterative} form (process nodes in reverse BFS order so children precede
+parents, keeping one \code{vector<array<int,26>>}). Verdict: \ac (mind the depth).
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Forgetting to count $u$ itself ($\text{cnt}[\code{labels}[u]]=1$ at the top) makes every
+$\code{ans}$ one too small on the label match. Returning the array \emph{by value} is fine
+for $26$ ints but if the alphabet were large, prefer a global array indexed by node or
+small-to-large merging (DSU on tree, \chref{c28}). Variant: swap the histogram for any
+per-subtree multiset statistic (max label, distinct count) -- same bottom-up skeleton.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Count over \textbf{every} subtree'' $=$ root once, return a per-node aggregate
+        bottom-up; the return type (here a 26-array) is the design decision.
+  \item A fixed-size histogram beats a hash map when the alphabet is bounded -- representation
+        of the \emph{aggregate} is as important as the tree's.
+  \item Read $\code{ans}[u]$ only \emph{after} children are merged; before the merge you have
+        counted only $u$.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Depth}: $n=10^5$ on a path makes the recursion $\bigO{n}$ deep -- switch to
+        reverse-BFS-order merging (still $\bigO{26n}$, zero recursion).
+  \item \textbf{Big alphabet}: if labels were up to $10^5$ distinct values, the per-node array
+        is too fat; use ``DSU on tree'' (\chref{c28}) or small-to-large set merging to keep
+        it $\bigO{n\log n}$.
+\end{itemize}
+\end{hardeningbox}
+
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-min-height}{Minimum Height Trees}{LeetCode 310}
+  {https://leetcode.com/problems/minimum-height-trees/}{LC Medium L4}
+  {centroid, iterative leaf peeling, topological trimming}
+
+\begin{problemstatement}[Minimum Height Trees]
+A tree of $n$ nodes $0\dots n-1$ given by undirected \code{edges}. A \term{rooted} tree's
+height is the number of edges on the longest root-to-leaf path. Choose roots so the rooted
+tree has \textbf{minimum} height -- return \emph{all} such roots (there are one or two).
+$1 \le n \le 4\cdot10^4$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 25 minutes]
+A fair first attempt: root at a few nodes, compute heights, keep the best -- then realise
+why that is too slow and what the \emph{best} root must look like.
+\peek{if you root at a leaf, the height is essentially the tree's \emph{diameter}; where is
+the root that makes the longest path as short as possible?}
+\peek{what do you delete, repeatedly, so that what remains is ``the middle'' of the tree?}
+\nudge{peel all current leaves in one round, remove them, repeat; when $\le 2$ nodes remain,
+why are exactly those the answer?}
+\fullhint{Iterative leaf-peeling: repeatedly strip all degree-$1$ nodes at once; the last
+$1$ or $2$ survivors are the tree \emph{centroid(s)} -- the minimum-height roots. Full build
+below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Rooting at a node and measuring height is the naive route -- $O(n)$ per root, $O(n^2)$ total
+at $n=4\cdot10^4$. But \emph{which} node minimises the maximum distance to any other? The
+tree's \term{centre}: the midpoint of its longest path (diameter). A tree has one centre or
+two adjacent centres, and rooting there halves the diameter into the smallest possible
+height. We find the centre without computing the diameter explicitly by \term{peeling leaves}.
+
+\solstep{Key Observations}
+\begin{observation}
+The farthest node from any root is an endpoint of the diameter, so the height of a rooting
+is minimised at a node that is as central as possible -- the diameter's middle.
+\end{observation}
+\begin{observation}
+Removing all leaves shrinks the diameter by exactly $2$ (one endpoint each side) and cannot
+remove the centre. Repeating until $1$ or $2$ nodes remain exposes the centre: the last
+survivors are equidistant from everything stripped.
+\end{observation}
+\begin{observation}
+A tree's centre is never two non-adjacent nodes: peeling stops at $1$ node (odd diameter) or
+$2$ adjacent nodes (even diameter), so the answer set has size $1$ or $2$.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{DFS heights for every root and take the min.}{Correct answer, $\bigO{n^2}$ -- at
+$n=4\cdot10^4$ that is $1.6\cdot10^9$ node-visits, a TLE. We are recomputing almost the same
+DFS $n$ times.}
+\deadend{Find the diameter, then walk to its midpoint.}{Right idea, but a diameter midpoint
+requires the actual path and a distance map -- more code than needed. Leaf-peeling reaches
+the \emph{same} centre (there can be two!) without ever naming the diameter.}
+\aha{Peel: strip all current leaves in lock-step, repeat; the $1$--$2$ survivors are the
+minimum-height roots. Each node is removed once, so it is $\bigO{n}$.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} root-everywhere DFS & height per candidate root & $O(n^2)$ & \tle \\
+2 & \lv{3} diameter midpoint & longest path, walk to middle & $O(n)$ & \ac \\
+3 & \lv{4} iterative leaf peel & strip leaves in rounds until $\le2$ left & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rungs 2 and 3 are both $\bigO{n}$; peeling (3) is chosen because it yields \emph{both}
+centres naturally and needs no path reconstruction.
+
+\solstep{Solution}
+Maintain adjacency and a degree per node; seed a frontier with all degree-$1$ nodes (leaves).
+While more than $2$ nodes remain unpruned: remove the whole frontier at once (decrement the
+neighbours' degrees, collecting those that \emph{become} leaves). The final frontier is the
+answer.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\emph{Invariant:} before each round, the current graph is the original tree with all nodes of
+distance $<k$ from some original leaf removed ($k$ rounds done), and it is still a tree (or
+empty). Removing a leaf never disconnects the rest and can only shrink the diameter by $2$
+(both endpoints are, or become, leaves). The centre of the original tree is at distance
+$\lfloor D/2\rfloor$ from every leaf, so it is \emph{never} among the removed leaves while
+$\ge3$ nodes remain. When $\le2$ nodes remain they are the last non-removed, i.e.\ the centre
+(1 node if $D$ even, 2 adjacent if $D$ odd). Those minimise the maximum distance to any node,
+so rooting there minimises height (\thmref{c01-unique-path} gives the unique paths whose
+lengths the height measures). Conversely any node outside the centre is strictly farther from
+some leaf endpoint, giving a larger height. Hence the survivors are exactly the minimum-height
+roots.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Minimum Height Trees via leaf peeling (LeetCode 310)}, label={lst:c04-min-height}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+public:
+    vector<int> findMinHeightTrees(int n, vector<vector<int>>& edges) {
+        if (n == 1) return {0};                      // single node is its own root
+        vector<unordered_set<int>> adj(n);
+        for (auto& e : edges) { adj[e[0]].insert(e[1]); adj[e[1]].insert(e[0]); }
+
+        vector<int> leaves;                          // seed: all degree-1 nodes
+        for (int i = 0; i < n; ++i) if (adj[i].size() == 1) leaves.push_back(i);
+
+        int remaining = n;
+        while (remaining > 2) {
+            remaining -= (int)leaves.size();         // strip this whole round at once
+            vector<int> nextLeaves;
+            for (int u : leaves) {
+                for (int v : adj[u]) {               // u has exactly one live neighbour v
+                    adj[v].erase(u);                 // remove edge u-v
+                    if (adj[v].size() == 1) nextLeaves.push_back(v);   // v just became a leaf
+                }
+            }
+            leaves = nextLeaves;
+        }
+        return leaves;                               // the centroid(s): 1 or 2 nodes
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Peeling $G$, round by round]
+Degrees $=[3,3,1,2,1,1,1]$.
+Round 0 leaves (deg $1$): $2,4,5,6$; remaining $7>2$ $\to$ $7{-}4=3$.
+Strip: remove $2$ from $0$; $4,5$ from $1$; $6$ from $3$. Now $1$ (adj $\{0\}$) and $3$
+(adj $\{0\}$) become leaves; $0$'s adj $\{1,3\}$ not yet. Next leaves $=\{1,3\}$.
+Round 1: remaining $3>2$ $\to$ $3{-}2=1$. Strip $1,3$: $0$ loses both, dropping to degree
+$0$ via $\to$ it entered the set when it hit degree $1$. Survivors $=\{0\}$. remaining $1\le2$
+$\Rightarrow$ answer $\{0\}$ -- root $0$ gives height $2$, the minimum (cf.\ \figref{c04-orient}).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$: each node is a leaf in exactly one round and each edge is erased once.
+Space $\bigO{n}$ adjacency (the \code{unordered\_set} costs a little constant; a
+\code{vector<\_}\code{deque} with a degree array is leaner -- see hardening).
+No recursion, so no depth RE. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+$n=1$, no edges & early return $\{0\}$ (no degree-$1$ node would exist) \\
+$n=2$, one edge & both degree $1$, seeds $\{0,1\}$, while skipped $\Rightarrow$ $\{0,1\}$ \\
+chain of $4$ ($0\text{-}1\text{-}2\text{-}3$) & peel $\{0,3\}$, then $\{1,2\}$ remain $\Rightarrow$ two centres \\
+star & all leaves peeled at once, centre $=$ hub \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Peeling leaves \emph{one at a time} (rather than in lock-step rounds) does not track the
+centre correctly -- you must strip the whole current frontier before advancing. And the
+$n=1$ special case is load-bearing: with no edges, no node has degree $1$, so the loop would
+return an empty set. Variant: same peeling finds the centroid used in ``centroid
+decomposition'' (\chref{c09}).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item The ``best root'' of a tree is its \textbf{centre} -- one node or two adjacent ones --
+        found by peeling leaves in rounds.
+  \item ``Minimise height over all roots'' is a $\bigO{n}$ topological trim, not an
+        $\bigO{n^2}$ search -- recognise the \emph{process} (repeated leaf removal).
+  \item Stripping a whole frontier \emph{at once} is what keeps the survivors centred.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Constant factor}: $n\sim10^5$ with \code{vector<unordered\_set<int>>} is fine
+        but heavy; a \code{vector<vector<int>>} with an explicit \code{deg[]} array and a
+        ``remove $u$ by pushing its neighbour when \code{deg} hits $1$'' avoids hash overhead.
+  \item \textbf{Multiple test cases}: rebuild the adjacency fresh each case; a leaked
+        \code{adj} across cases is a silent wrong answer.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c04-highest-score}{Count Nodes With the Highest Score}{LeetCode 2049}
+  {https://leetcode.com/problems/count-nodes-with-the-highest-score/}{LC Medium L4}
+  {parent array $\to$ children, subtree sizes, removal-score product}
+
+\begin{problemstatement}[Count Nodes With the Highest Score]
+A \textbf{binary} tree of $n$ nodes $0\dots n-1$ given by array \code{parents}, where
+\code{parents[i]} is the parent of $i$ and \code{parents[root] = -1}. \emph{Removing} node
+$u$ deletes it and its two incident edges, splitting the tree into components: one per child
+subtree, plus the ``above'' part. The \term{score} of $u$ is the \textbf{product} of the
+sizes of those components. Return how many nodes achieve the maximum score.
+$1 \le n \le 10^5$; each node has $\le 2$ children.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 25 minutes]
+A fair first attempt: root the tree, get every subtree size, then work out which components
+survive a removal.
+\peek{when you delete $u$, one component is everything \emph{not} in $\subtree(u)$ -- how big
+is that, in terms of $\size[u]$ and $n$?}
+\nudge{score$(u) = (n-\size[u]) \cdot \prod_{c\,\text{child}} \size[c]$, treating a $0$-sized
+or absent component as $1$. Which two quantities do you need per node?}
+\fullhint{Build children lists from \code{parents[]}; one DFS yields $\size[u]$; then
+score$(u) = (n{-}\size[u])$ (skip if $0$) times each child subtree size (skip absent
+children); take the max and count it. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Deletion splits by \emph{rooted structure}: the children of $u$ keep their subtrees intact,
+and everything else -- $u$'s parent side -- becomes a single component of size
+$n - \size[u]$. So the score is a product over $u$'s children plus the
+`above' block. The whole difficulty reduces to having accurate $\size[u]$ for every node,
+which is exactly \secref{c04-rooting}'s bottom-up pass. Inputs arrive as a \textbf{parent
+array}, so step one is the model-C rebuild.
+
+\solstep{Key Observations}
+\begin{observation}
+Removing $u$ yields components of sizes $\{\size[c] : c \in \children(u)\} \cup \{n - \size[u]\}$
+(the last being the part above $u$). Score is their product.
+\end{observation}
+\begin{observation}
+A component of size $0$ must not zero the product: if $u$ is the root, $n-\size[u]=0$ (no
+`above' block) and that factor is treated as the multiplicative identity $1$; a missing child
+contributes nothing.
+\end{observation}
+\begin{observation}
+Products reach $\sim n^{3}$ in the worst split, so the score needs \code{long long} at
+$n=10^5$ -- a plain \code{int} overflows and corrupts the maximum.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{For each node, actually delete it and BFS to count components.}{$O(n^2)$ -- a full
+traversal per node. We already can get every component size from the $\size$ array in $O(1)$
+per child, so deleting is pure waste.}
+\deadend{score$(u) = (n-\size[u]) \cdot \size[\text{left}] \cdot \size[\text{right}]$ with
+absent children as $\size=0$.}{A node with \emph{one} child would get a factor of $0$ from the
+missing side, making its score $0$ -- but the real component set simply omits the absent child.
+The missing/above factor must be $1$, not $0$; this is the classic off-by-component bug.}
+\aha{Compute $\size[u]$ once; score $=(n{-}\size[u])$ (skip when $0$) times each \emph{existing}
+child's $\size$; take the max and count. All in $\bigO{n}$.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} delete + BFS per node & recount components & $O(n^2)$ & \tle \\
+2 & \lv{3} sizes, but $0$-factor bug & multiply child sizes incl.\ absent & $O(n)$ & \textbf{WA} \\
+3 & \lv{4} sizes + identity for empty & skip $0$-size / absent components & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 is the seductive wrong answer (turns `no above block' / `no second child' into a
+zero); rung 3's identity handling is the crux.
+
+\solstep{Solution}
+Rebuild \code{children[]} from \code{parents[]} (find root where parent $=-1$). One DFS sets
+$\size[u]=1+\sum_c\size[c]$. Then for each $u$: $\mathit{prod}=1$; if $n-\size[u]>0$ multiply
+it; for each child $c$ multiply $\size[c]$; that is the score. Track the max and its count.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By \thmref{c04-dfs-orient} the children lists root the tree correctly, and the bottom-up DFS
+gives the exact $\size[u]=|\subtree(u)|$ (proved as in \secref{c04-rooting}). Fix $u$.
+$u$'s removal cuts exactly the edges to its children and to its parent. The
+child subtrees $\subtree(c)$ are untouched and disjoint, sizes $\size[c]$. The remaining
+nodes -- those \emph{not} in $\subtree(u)$ -- form one connected component (a tree minus a
+subtree stays connected through the parent side) of size $n-\size[u]$, present iff $u$ is not
+the root ($n-\size[u]>0$). These are all the components, they partition $V\setminus\{u\}$,
+so the score is their product, and the algorithm's skip-if-zero rule includes exactly the
+nonempty ones. Scanning all $u$, tracking the max and its multiplicity returns the number of
+highest-scoring nodes.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Count Nodes With the Highest Score (LeetCode 2049)}, label={lst:c04-highest-score}]
+#include <bits/stdc++.h>
+using namespace std;
+
+class Solution {
+public:
+    long long countHighestScoreNodes(int n, vector<int>& parents) {
+        vector<vector<int>> children(n);
+        int root = -1;
+        for (int i = 0; i < n; ++i)
+            if (parents[i] == -1) root = i; else children[parents[i]].push_back(i);
+
+        vector<int> sz(n, 0);
+        function<void(int)> dfs = [&](int u) {
+            sz[u] = 1;                              // count yourself (Trap 2)
+            for (int c : children[u]) { dfs(c); sz[u] += sz[c]; }
+        };
+        dfs(root);
+
+        long long best = -1, count = 0;
+        for (int u = 0; u < n; ++u) {
+            long long score = 1;
+            if (n - sz[u] > 0) score *= (n - sz[u]);        // "above" block, skip if root
+            for (int c : children[u]) score *= sz[c];        // each existing child subtree
+            if (score > best) { best = score; count = 1; }
+            else if (score == best) ++count;
+        }
+        return count;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ re-indexed $0..5$]
+$\code{parents}=[-1,0,0,1,1,2]$, $\size=[6,3,2,1,1,1]$.
+$\children$: $0\!\to\!\{1,2\}$, $1\!\to\!\{3,4\}$, $2\!\to\!\{5\}$. Scores (product of
+$n{-}\size[u]$ when $>0$ and child sizes):
+$u{=}0$: above $0$ (skip), $\size[1]{\cdot}\size[2]=3{\cdot}2=6$.
+$u{=}1$: above $6{-}3{=}3$, $\size[3]\size[4]=1{\cdot}1$, score $3$.
+$u{=}2$: above $6{-}2{=}4$, $\size[5]=1$, score $4$.
+$u{=}3,4,5$: above $6{-}1{=}5$, no children, score $5$ each.
+Max $=6$ at $u=0$ only $\Rightarrow$ answer $\mathbf{1}$. \checkmark\ \probref{c04-highest-score}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (build $+$ one DFS $+$ one scan), space $\bigO{n}$. Recursion is $\bigO{h}$
+-- on a $10^5$ skewed ``binary'' chain this REs; convert to an iterative post-order or
+reverse-BFS size accumulation. The \code{long long} product is essential (rung 2's int
+overflows). Verdict: \ac (mind depth).
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+The three killers: (i) treating a missing child or the root's absent `above' block as a
+$0$ factor (score collapses to $0$); (ii) \code{int} overflow on the product; (iii) forgetting
+$\size[u]$ includes $u$. Variant: if the input were a \emph{general} tree (not binary) the
+same score formula holds over \emph{all} children -- only the child count is unbounded.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Remove $u$, product of the parts'' is answered entirely by $\size[u]$ and its
+        children's $\size$ -- a rooted-size computation, not an actual deletion.
+  \item A parent array must be turned into \code{children[]} before any top-down reasoning;
+        the score is a purely \emph{rooted} statement.
+  \item Empty components are multiplicative \textbf{identity} ($1$), never $0$.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Depth}: recursion on a chain $\sim10^5$ overflows -- use an explicit stack for
+        the size DFS (still $\bigO{n}$). This is the exact iterative variant named in the
+        complexity box.
+  \item \textbf{Overflow}: with $n=10^5$ a $2$--$3$-way split gives products up to
+        $\sim 2.5\cdot10^{14}$ -- \code{long long} throughout (return type is \code{long long}
+        for this reason).
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Have you rooted the undirected input (parent guard) \emph{before} computing any
+        per-subtree quantity? (\thmref{c04-dfs-orient})
+  \item Does your subtree size count the node itself ($\size=1$ at a leaf)? (Trap 2.)
+  \item Is the ``above the node'' component $n - \size[u]$, and did you skip it when it is
+        $0$ (a root)? (\probref{c04-highest-score})
+  \item On a chain, is your rooting \emph{iterative} (or reverse-BFS) rather than $\bigO{n}$
+        recursion? (Trap 3.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Most Frequent Subtree Sum}{LeetCode 508}
+    {https://leetcode.com/problems/most-frequent-subtree-sum/}{LC Medium L3}
+    {Root is given (a pointer tree). One post-order DFS \emph{returns} each node's subtree sum
+    (\secref{c02-bottomup}); drop every sum in a \code{unordered\_map<int,int>} and return the
+    keys with the top frequency (ties included).}
+  \practice{Longest Path With Different Adjacent Characters}{LeetCode 2246}
+    {https://leetcode.com/problems/longest-path-with-different-adjacent-characters/}{LC Hard L5}
+    {Build \code{children[]} from the \code{parent} array, root at the $-1$ node. A bottom-up
+    DFS returns the longest \emph{downward} chain from $u$; a full path through $u$ uses the
+    two best child chains whose labels differ from $\code{s}[u]$ -- answer $=\max(1{+}\text{best}
+    {+}\text{second})$. Iterative (reverse BFS order) to survive $n=10^5$ depth.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 4.2 Rooting an Unrooted Tree]
+An adjacency list is symmetric; \emph{rooting} orients it by one parent-guarded DFS
+(\thmref{c04-dfs-orient}) -- the same walk assigns $\parent,\depth$ (top-down) and
+$\size,\height$ (bottom-up). Best root $=$ the \emph{centre} (peel leaves, LC 310). A root
+change across edge $p$--$c$ shifts a distance-sum by $n-2\size[c]$ (\propref{c04-reroot}).
+\selftest{
+  \item Write the parent-guarded DFS that assigns $\parent$ and $\depth$ from memory
+        (\coderef{c04-root}).
+  \item Why is the resulting $\parent$ array independent of the DFS order, but \code{tin}/
+        \code{tout} is not? (\chref{c24})
+  \item State the reroot shift $f(c)=f(p)+(n-2\size[c])$ and re-derive it on the $p$--$c$ edge
+        of $G$.
+  \item On $G$, give $\size$ and $\height$ when rooted at $0$, and name the centroid.
+  \item Explain why a ``remove-node product'' score uses $n-\size[u]$ and skips a $0$ factor.
+}
+\end{recallbox}

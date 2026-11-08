@@ -1,0 +1,467 @@
+% =====================================================================
+%  Chapter 20 opener -- "Chapter at a Glance", three reading paths + the
+%  ladder staircase, THE running examples (the 16-slot array A shared with
+%  Ch.18/Ch.19, folded into the SAME sum segment tree and then given ONE
+%  hand-computed lazy range-add so the pending tags cross-check against
+%  Ch.19's point-update tree -- only the leaves and the root sum are common,
+%  the internal nodes are interval aggregates -- plus the 10-node tree T of
+%  Ch.12-17 with its Ch.16 preorder tin/tout for the 20.4 subtree-flatten),
+%  the pending-tag / push / compose picture, the tag taxonomy, the
+%  who-owns-what comparison (Ch.19 owns the plain tree; Ch.18 owns the BIT
+%  and the difference trick; Ch.5 owns flattening; Ch.22 owns HLD; Ch.23
+%  owns beats; Ch.21 owns merge-sort/persistent/sparse-table; THIS chapter
+%  owns the pending tag), recognition guide, constraint->tool table,
+%  notation.
+%  Exports fig:c15-tree and fig:c15-taxonomy.
+%  Hand-computed values the whole chapter re-uses (verified once here).
+%  Running array (16 slots, shared with Ch.18/Ch.19):
+%    A = (3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2),  sum A = 49.
+%  Sum segment tree, recursive heap layout (root t[1], children t[2v],
+%  t[2v+1]; n=16 is a power of two so the tree is complete, 31 nodes, and
+%  the leaves t[16..31] = A[1..16]).  The base internal grid t[1..15]:
+%    node:   t1   t2   t3   t4  t5  t6  t7  t8 t9 t10 t11 t12 t13 t14 t15
+%    intvl: 1-16 1-8  9-16 1-4 5-8 9-12 13-16 1-2 3-4 5-6 7-8 9-10 11-12 13-14 15-16
+%    SUM:   49   24   25   14  10  13  12   5  9   2   8   7   6   7   5
+%  LAZY overlay (the one hand-applied update the whole chapter reuses):
+%  range-add [2..5] += 3.  rupdate stops at the covered node t9 [3..4] and
+%  leaves a PENDING +3 there (children t18,t19 keep their old leaf values);
+%  it descends to the two partial ends, updating leaves t17 (A2: 2->5) and
+%  t20 (A5: 1->4) directly, and pulls the four ancestors on the two paths:
+%    t8=8, t4=23, t10=5, t5=13, t2=36, t1=61  (61 = 49 + 3*4, cross-check).
+%    pending tag: lazy[t9]=+3 (node value already folded: t9 = 9 + 3*2 = 15).
+%  Read-backs on the updated tree:
+%    range-sum [3..6] = 20  (folds covered t9=15 and t10=5; no push needed).
+%    range-sum [4..6] = 13  (partially overlaps t9, so PUSH t9's +3 down to
+%                            t18:4->7 and t19:5->8, clear lazy[t9]; then fold
+%                            t19=8 and t10=5 -- the push-in-query, traced).
+%  Shared tree T of Ch.12-17 (edges 1-2,1-3,2-4,2-5,3-6,3-7,5-8,7-9,9-10),
+%  Ch.16 preorder tin=(1,2,6,3,4,7,8,5,9,10), INCLUSIVE tout=(10,5,10,3,5,
+%  7,10,5,10,10): subtree(2)=[2,5]={2,4,5,8}, subtree(7)=[8,10]={7,9,10}.
+%  Every overlay below is hand-computed; every later section re-uses exactly
+%  these numbers -- if a section disagrees with this opener, the OPENER is
+%  authoritative: fix the section, never the other way.
+% =====================================================================
+
+\begin{chaptertheorybox}{Chapter at a Glance}
+Chapter~19 ended holding the whole interval tree and answering any range
+\emph{read} in \(\bigO{\log n}\) -- but it could only \emph{write} one leaf at a
+time, and Chapter~18's difference Fenwick tree could add to a whole range only
+because addition is invertible.  This chapter is the third case neither of them
+could finish: \emph{update a whole range, and still query a range}, where the
+update is not invertible -- add, yes, but also \emph{assign}, \emph{invert},
+\emph{xor}.  The trick is a \term{lazy tag}: when an update covers a node whole,
+fold the update into that node's stored aggregate and \emph{remember} it in a
+pending tag instead of touching the leaves below; only when a later operation is
+\emph{forced to walk into those children} do you \term{push} the remembered
+update down.  A range update then costs \(\bigO{\log n}\), not \(\bigO{n}\), and
+the whole machinery is three verbs -- \code{apply}, \code{push}, \code{pull} --
+bolted onto the tree you can already build cold.
+
+\textbf{You will learn to}
+\begin{itemize}[nosep]
+  \item keep one pending tag per node and write \code{apply}/\code{push}/
+        \code{pull}, updating a range and reading a range both in
+        \(\bigO{\log n}\); \hfill\lv{2}--\lv{3}
+  \item \emph{compose} two updates that land on one node before a push --
+        assign overrides add, the affine multiply-then-add pair, the identity
+        tag -- and get the order right (\(\secref{c15-compose}\)); \hfill\lv{4}
+  \item treat range \term{assign} (paint) as its own tag, answer "sum / count /
+        max after setting \([l,r]\) to \(v\)", and detect a uniform node
+        (\(\secref{c15-assign}\)); \hfill\lv{3}--\lv{4}
+  \item run lazy on a \emph{flattened subtree}: Ch.5's \(\tin/\tout\) turn
+        "update \(v\)'s subtree" into one range update on the Euler array
+        (\(\secref{c15-trees}\), CF~620E); \hfill\lv{4}
+  \item recognise the boundary where a single tag \emph{cannot} hold the update
+        (range modulo, range \(\mathit{chmin}\)) and know that is segment-tree
+        beats (Ch.~\(\secref{c15-strains}\) forward-cites Ch.23). \hfill\lv{5}
+\end{itemize}
+
+\textbf{Prerequisites.} Chapter~19 (\chref{c13}) is assumed, not re-taught: this
+chapter layers a tag on the build/point-update/range-query tree you already
+write from memory.  Chapter~18 (\chref{c14}) for the \emph{contrast} -- the
+difference BIT does range-add/range-sum cheaply and \emph{hands off} exactly the
+non-invertible updates this chapter picks up (the hand-off is discharged in
+\(\secref{c15-compose}\)).  Chapter~5 (\chref{c24}) for \(\tin/\tout\) by label.
+\end{chaptertheorybox}
+
+% ---------------- Reading paths + ladder position ----------------
+\begin{chaptertheorybox}{How to Read This Chapter (three paths)}
+Level badges \(\lv2\)--\(\lv5\): \(\lv2\) is reading a pending tag off a drawn
+tree and pushing it by hand; \(\lv3\) is a working range-add / range-sum lazy
+tree on a real input (CF~295A is exactly this); \(\lv4\) is \emph{composing}
+two tags at one node (assign beats add, the affine pair) and keeping the order
+straight, or flattening a subtree; \(\lv5\) is knowing the expressiveness wall --
+when no single tag can hold the update and you must switch to beats (Ch.23) or a
+static structure (Ch.21).
+
+\textbf{Ground-up path (\(\lv2\)--\(\lv4\), ``I can build a segment tree but
+never made one lazy'').} \secref{c15-core} in full: the pending value, the
+\code{apply}/\code{push}/\code{pull} trio, and the hand trace of one range-add
+and one range-sum on \(A\) that cross-checks against Ch.19's point-update tree.
+Then \secref{c15-assign}: range \emph{set} as its own tag -- the operation a
+difference BIT structurally cannot do.
+
+\textbf{Composition path (\(\lv4\)--\(\lv5\), ``two updates hit the same
+node'').} \secref{c15-core} for the mechanics, then \secref{c15-compose}: how
+add, assign, and the affine pair COMPOSE into a single pending tag, the identity
+tag, and why order matters when the pair is not commutative (CF~817F's
+set/invert is the clean case study).  Finish at \secref{c15-strains} -- the wall
+where composition breaks and beats begin.
+
+\textbf{On-trees path (\(\lv3\)--\(\lv4\), ``the ranges live on a tree'').}
+\secref{c15-core} for the engine, then \secref{c15-trees}: reuse Ch.5's
+\(\tin/\tout\) to update a whole \emph{subtree} as one range (CF~620E), and the
+prose hand-offs from Ch.18's difference-BIT tasks (383C, 877E).  Path updates on
+a tree are the Ch.22 HLD boundary -- forward-cited, no chain code here.
+\end{chaptertheorybox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, x=9mm, y=7mm]
+  \foreach \st/\lab in {1/lv1,2/lv2,3/lv3,4/lv4,5/lv5,6/lv6} {
+    \fill[\lab!22, draw=\lab, line width=0.8pt] (\st-1,0) rectangle (\st,\st*0.52);
+    \node[font=\scriptsize\bfseries, text=\lab] at (\st-0.5,\st*0.52-0.42) {L\st};}
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (0.05,0.62) {20.1 the pending tag; apply / push / pull; one range-add};
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (1.05,1.14) {20.1 build / range-update / range-query in O(log n); solved CF 295A};
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (2.05,1.66) {20.2 composing tags: assign beats add, the affine pair (CF 817F)};
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (3.05,2.18) {20.3 range assign / paint; uniform node; sum = len*val (CF 915E)};
+  \node[annot, anchor=south west, font=\scriptsize, text=lv5]
+    at (4.05,2.70) {20.4 lazy on flattened subtrees via Ch.5 tin/tout (CF 620E)};
+  \node[annot, anchor=south west, font=\scriptsize, text=lv6]
+    at (5.05,3.22) {20.5 where lazy strains: modulo / chmin -> beats (Ch.23); Summit};
+\end{tikzpicture}
+\caption*{Chapter~20 on the six-step ladder: reading a pending tag and pushing it
+is \(\lv2\)--\(\lv3\); composing two tags (assign vs add, affine) and range
+assign are \(\lv4\); flattening a subtree onto the tree is \(\lv4\); honouring
+the expressiveness wall -- when a single tag cannot hold the update -- is
+\(\lv5\); composing with the Summit is step~6.  Ground-up path \(=\) steps 2--4;
+full contest path runs to~6.}
+\end{figure}
+
+% ---------------- The running examples ----------------
+\subsection*{The Running Example: One Array, Now Made Lazy}
+
+\emph{One} array carries the whole chapter -- the same 16-slot \(A\) as
+Chapters~18 and~19, folded into the \emph{same} sum segment tree so that the
+base grid below is byte-for-byte the grid Ch.19's opener fixed
+(\figref{c13-tree}):
+\[
+  A=(\,3,2,4,5,1,1,5,3,\;7,0,2,4,1,6,3,2\,),\qquad \textstyle\sum A = 49 .
+\]
+Chapter~19 read a range off this tree and \emph{wrote one leaf at a time}.  This
+chapter performs its first genuinely lazy act on the very same object: add
+\(3\) to the whole range \([2,5]\) in one \(\bigO{\log n}\) walk and watch a
+\term{pending tag} appear at the node the update fully covered.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.46, transform shape]
+  % ---- leaf row A[1..16] AFTER the update (touched leaves green, stale leaves orange) ----
+  \foreach \i/\vv in {1/3,6/1,7/5,8/3,9/7,10/0,11/2,12/4,13/1,14/6,15/3,16/2} {
+    \draw[primaryblue, line width=0.6pt, fill=primaryblue!6] (\i-0.5,-0.3) rectangle (\i+0.5,0.5);
+    \node[font=\scriptsize\ttfamily] at (\i,0.1) {\vv};
+    \node[font=\tiny\ttfamily, text=darkgray] at (\i,-0.55) {\i};}
+  \foreach \i/\vv in {2/5,5/4} {
+    \draw[successgreen, line width=0.6pt, fill=successgreen!14] (\i-0.5,-0.3) rectangle (\i+0.5,0.5);
+    \node[font=\scriptsize\ttfamily] at (\i,0.1) {\vv};
+    \node[font=\tiny\ttfamily, text=darkgray] at (\i,-0.55) {\i};}
+  \foreach \i/\vv in {3/4,4/5} {
+    \draw[difforange, line width=0.6pt, fill=difforange!16] (\i-0.5,-0.3) rectangle (\i+0.5,0.5);
+    \node[font=\scriptsize\ttfamily] at (\i,0.1) {\vv};
+    \node[font=\tiny\ttfamily, text=darkgray] at (\i,-0.55) {\i};}
+  % ---- internal nodes t8..t15: box labelled t_i=newvalue, interval below; t9 pending (orange) ----
+  \foreach \n/\x/\s/\iv in {
+      8/1.5/8/{1\text{--}2}, 10/5.5/5/{5\text{--}6}, 11/7.5/8/{7\text{--}8},
+      12/9.5/7/{9\text{--}10}, 13/11.5/6/{11\text{--}12}, 14/13.5/7/{13\text{--}14}, 15/15.5/5/{15\text{--}16}} {
+    \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t\n) at (\x,1.4) {\(t_{\n}{=}\s\)};
+    \node[font=\tiny\ttfamily, text=green!45!black, anchor=north] at (\x,1.02) {\iv};}
+  \node[boxnode, difforange, minimum size=8mm, font=\scriptsize, fill=difforange!12] (t9) at (3.5,1.4) {\(t_{9}{=}15\)};
+  \node[font=\tiny\ttfamily, text=green!45!black, anchor=north] at (3.5,1.02) {\(3\text{--}4\)};
+  \node[font=\scriptsize\bfseries, text=difforange, anchor=south] at (4.6,1.72) {\(\mathbf{+3}\) pending};
+  \node[boxnode, successgreen, minimum size=8mm, font=\scriptsize, fill=successgreen!12] (t4) at (2.5,2.8) {\(t_{4}{=}23\)};
+  \node[boxnode, successgreen, minimum size=8mm, font=\scriptsize, fill=successgreen!12] (t5) at (6.5,2.8) {\(t_{5}{=}13\)};
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t6) at (10.5,2.8) {\(t_{6}{=}13\)};
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t7) at (14.5,2.8) {\(t_{7}{=}12\)};
+  \node[boxnode, successgreen, minimum size=8mm, font=\scriptsize, fill=successgreen!12] (t2) at (4.5,4.2) {\(t_{2}{=}36\)};
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (t3) at (12.5,4.2) {\(t_{3}{=}25\)};
+  \node[boxnode, successgreen, minimum size=9mm, line width=1pt, fill=successgreen!18, font=\scriptsize] (t1) at (8.5,5.6) {\(t_{1}{=}61\)};
+  % ---- edges ----
+  \draw[flow] (t1) -- (t2); \draw[flow] (t1) -- (t3);
+  \draw[flow] (t2) -- (t4); \draw[flow] (t2) -- (t5);
+  \draw[flow] (t3) -- (t6); \draw[flow] (t3) -- (t7);
+  \draw[flow] (t4) -- (t8); \draw[flow] (t4) -- (t9);
+  \draw[flow] (t5) -- (t10); \draw[flow] (t5) -- (t11);
+  \draw[flow] (t6) -- (t12); \draw[flow] (t6) -- (t13);
+  \draw[flow] (t7) -- (t14); \draw[flow] (t7) -- (t15);
+  \draw[flow] (t8) -- (1,-0.3); \draw[flow] (t8) -- (2,-0.3);
+  \draw[flow] (t9) -- (3,-0.3); \draw[flow] (t9) -- (4,-0.3);
+  \draw[flow] (t10) -- (5,-0.3); \draw[flow] (t10) -- (6,-0.3);
+  \draw[flow] (t11) -- (7,-0.3); \draw[flow] (t11) -- (8,-0.3);
+  \draw[flow] (t12) -- (9,-0.3); \draw[flow] (t12) -- (10,-0.3);
+  \draw[flow] (t13) -- (11,-0.3); \draw[flow] (t13) -- (12,-0.3);
+  \draw[flow] (t14) -- (13,-0.3); \draw[flow] (t14) -- (14,-0.3);
+  \draw[flow] (t15) -- (15,-0.3); \draw[flow] (t15) -- (16,-0.3);
+  \node[font=\scriptsize, text=darkgray, anchor=east] at (-0.2,0.1) {leaves \(A\)};
+  \node[font=\scriptsize, text=darkgray, anchor=east] at (-0.2,5.6) {root};
+\end{tikzpicture}
+\caption{The sum segment tree over \(A\) \emph{after} the one lazy act
+\(\text{range-add }[2..5]\mathrel{+}= 3\).  Green nodes are the two root-paths the
+walk touched on its way down and pulled on its way up; the orange box \(t_9\) is
+the \term{pending tag} -- its interval \([3,4]\) was fully covered, so the update
+was folded into its aggregate (\(9\to15\)) and \emph{stashed} as \(+3\) without
+descending.  The two orange leaves \(A_3,A_4\) still read their OLD values \(4,5\):
+they are stale by exactly \(+3\), the difference now parked in \(t_9\)'s tag, to be
+pushed only if someone later descends into \(t_9\).  Cross-check: the root
+\(t_1=61 = 49 + 3\cdot 4\) (four slots, three each), while \(t_3=25\) and every
+node off the touched paths is \emph{unchanged} from Ch.19's grid.  The leaves
+\(t_{16..31}\) equal \(A\) and the untouched structure matches
+\figref{c13-tree} -- only the internal nodes on the update paths differ, because
+they are interval aggregates carrying the deferred work.}
+\label{fig:c15-tree}
+\end{figure}
+
+The base grid (before the update) is exactly Ch.19's; every later section re-uses
+these numbers and never recomputes them:
+
+\begin{center}
+\scriptsize
+\renewcommand{\arraystretch}{1.1}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}l|cccc|cccc|ccccccc@{}}
+\toprule
+\textbf{node} & \(t_1\)&\(t_2\)&\(t_3\)&\(t_4\) & \(t_5\)&\(t_6\)&\(t_7\)&\(t_8\) & \(t_9\)&\(t_{10}\)&\(t_{11}\)&\(t_{12}\)&\(t_{13}\)&\(t_{14}\)&\(t_{15}\)\\
+\midrule
+\textbf{interval} & 1--16&1--8&9--16&1--4 & 5--8&9--12&13--16&1--2 & 3--4&5--6&7--8&9--10&11--12&13--14&15--16\\
+\(\sum\) (base) & 49&24&25&14 & 10&13&12&5 & 9&2&8&7&6&7&5\\
+\(\sum\) (\([2..5]{+}=3\)) & \textbf{61}&\textbf{36}&25&\textbf{23} & \textbf{13}&13&12&\textbf{8} & \textbf{15$^{+3}$}&\textbf{5}&8&7&6&7&5\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent{\footnotesize Bold cells changed on the update paths; \(15^{+3}\) marks
+\(t_9\)'s folded aggregate with a pending \(+3\) tag.}
+
+\begin{tracebox}[The lazy act in full: build, then a range-add of \(+3\) on \(2..5\), then two range-sums]
+\textbf{Build} folds the leaves to Ch.19's grid (\(t_1=49\)).\\
+\textbf{range-add \([2,5]\mathrel{+}=3\)} walks \(\coderef{c15-rupdate}\): at the root
+\([1..16]\) the request is neither disjoint nor a cover, so it first \emph{pushes}
+(no tag yet) and then descends.  It \emph{covers} \(t_9[3..4]\) whole \(\Rightarrow\)
+\code{apply}: \(t_9{=}9{+}3{\cdot}2{=}15\), \(\mathit{tag}[9]{+}=3\), \textbf{stop
+-- do not descend}.  It descends to the two \emph{partial} ends only: leaf
+\(t_{17}[2..2]\) \(2{\to}5\) and leaf \(t_{20}[5..5]\) \(1{\to}4\), then
+\emph{pulls} the ancestors back up: \(t_8{=}8,\;t_4{=}23,\;t_{10}{=}5,\;t_5{=}13,\;
+t_2{=}36,\;t_1{=}61\).  Six nodes re-folded out of \(31\); the leaves \(A_3,A_4\)
+were never touched -- their \(+3\) lives, whole, in \(t_9\)'s tag.\\
+\textbf{range-sum \([3,6]\)}: folds the canonical cover \(t_9\,(=15)\) and
+\(t_{10}\,(=5)\), both fully inside \([3,6]\); \(15+5=\boxed{20}\).  No push
+needed -- \(t_9\)'s aggregate already includes its pending tag.\\
+\textbf{range-sum \([4,6]\)}: overlaps \(t_9[3..4]\) \emph{partially}, so the
+recursion is \textbf{forced into \(t_9\)'s children} and must first
+\emph{push} \(t_9\)'s \(+3\) down: \(t_{18}:4{\to}7,\;t_{19}:5{\to}8,\;
+\mathit{tag}[9]{\to}0\).  Now it folds \(t_{19}(=8)\) and \(t_{10}(=5)\):
+\(8+5=\boxed{13}\).  That push is the whole point -- deferred work is paid only
+when a later operation can no longer avoid it.
+\end{tracebox}
+
+The second running object is the tree \(T\) Chapters~12--17 have been sharing
+-- nodes \(1..10\), root~1, edges
+\[
+  1\!-\!2,\; 1\!-\!3,\; 2\!-\!4,\; 2\!-\!5,\; 3\!-\!6,\;
+  3\!-\!7,\; 5\!-\!8,\; 7\!-\!9,\; 9\!-\!10 ,
+\]
+with the Ch.16 preorder (\emph{inclusive}):
+\[
+  \tin=(1,2,6,3,4,7,8,5,9,10),\qquad
+  \tout=(10,5,10,3,5,7,10,5,10,10).
+\]
+So \(\subtree(2)=[2,5]\) holds \(\{2,4,5,8\}\) and \(\subtree(7)=[8,10]\)
+holds \(\{7,9,10\}\).  \secref{c15-trees} will recolor a whole subtree with one
+lazy range update precisely because Ch.5 proved ``a subtree is one interval''
+(\thmref{c24-range}) -- this chapter only supplies the range \emph{update} engine
+on that flat array.
+
+Three angles, three hand-computed overlays -- each lives in the section named on
+its row and never changes:
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.22\linewidth} p{0.52\linewidth} l@{}}
+\toprule
+\textbf{Angle} & \textbf{What comes out} & \textbf{Traced in} \\
+\midrule
+one range-add & \([2..5]\mathrel{+}=3\) stops at covered \(t_9\), leaves a pending tag; root \(49\to61\) & \secref{c15-core} \\
+push-on-read & query \([4..6]\) descends into \(t_9\), pushes its \(+3\) to \(t_{18},t_{19}\), answers \(13\) & \secref{c15-core} \\
+subtree flatten & recolor \(\subtree(2)=[2,5]\) of \(T\) is \emph{one} range update on the Euler array & \secref{c15-trees} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------- Which tag, cost chart ----------------
+\subsection*{Which Tag? (the update chart)}
+
+Every lazy tree is the \emph{same} skeleton as Ch.19's; the only things that
+change are what a node stores, what the pending tag is, and how two tags
+\emph{compose}.  That choice is forced by the update shape -- and, decisively, by
+whether the update is even something a difference BIT could do.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.20\linewidth} p{0.18\linewidth} p{0.30\linewidth}@{}}
+\toprule
+\textbf{Update} & \textbf{Tag stores} & \textbf{Compose rule} & \textbf{Why a lazy segtree (not a BIT)} \\
+\midrule
+range add & one pending \(\Delta\) & \(\Delta_1{+}\Delta_2\) (commutative) & BIT \emph{can} do add+sum via difference -- segtree for uniformity or non-sum aggregates \\
+range add \(m,a\) (affine) & \((\mathit{mul},\mathit{add})\) & \(m{\cdot}m',\;m{\cdot}a'{+}a\) (order matters) & two scalars per node; not one invertible number \\
+range assign / paint & one value \(v\) or a flag & later set \textbf{overrides} earlier & \textbf{BIT cannot} -- assignment is not invertible \\
+range invert / xor & a bit (flip) & \(\mathit{flip}^2=\mathrm{id}\) & BIT cannot -- xor-update + sum-read has no prefix inverse \\
+subtree / range + record & tag + a mask/record & depends on tag pair & Ch.18 solved the invertible subtree tasks; this picks up assign/invert \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{insightbox}[One skeleton; the whole game is ``what is a pending update, and how do two of them merge'']
+Rows 1--4 of the table are the \emph{same} \code{apply}/\code{push}/\code{pull}
+skeleton; what changes is the type of the tag and its \emph{composition} law.
+When a lazy problem feels hard, you are choosing a tag and making sure two tags
+landing on one node fold into a single correct tag -- not inventing a new
+traversal.  If the update is a plain add and the read is a plain sum, ask first
+whether Chapter~18's difference BIT already fits; this chapter earns its keep on
+the \emph{non-invertible} rows.
+\end{insightbox}
+
+% ---------------- Taxonomy chart ----------------
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.95, transform shape,
+    mnode/.style={circle, draw=#1, line width=0.9pt, fill=#1!8, minimum size=7mm,
+                  font=\scriptsize\bfseries, text=#1!60!black}]
+  \node[mnode=primaryblue] (a) at (0,0)     {pending};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.5cm, align=left] at (1.35,0) {an update that covers a node whole is folded into its aggregate and stashed as a tag; the children are untouched (20.1)};
+  \node[mnode=successgreen] (b) at (0,-1)  {push};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.5cm, align=left] at (1.35,-1) {before descending into children, hand the stash down via apply, clear your own tag; only pay when forced (20.1)};
+  \node[mnode=difforange]   (c) at (0,-2)  {compose};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.5cm, align=left] at (1.35,-2) {two tags on one node fold to one: assign overrides add, the affine mul/add pair, invert squared is identity (20.2)};
+  \node[mnode=warningred]   (d) at (0,-3)  {assign};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.5cm, align=left] at (1.35,-3) {range paint: sum = len*val, a uniform flag, a colour bitmask OR-merged; set is not invertible so no BIT (20.3)};
+  \node[mnode=softpurple]   (e) at (0,-4)  {flatten};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.5cm, align=left] at (1.35,-4) {Ch.5 tin/tout turn a subtree into one range update; path updates decompose via HLD, Ch.22 (20.4)};
+  \node[mnode=deepblue]     (f) at (0,-5)  {boundary};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.5cm, align=left] at (1.35,-5) {modulo / chmin do NOT compose into one tag -> segment-tree beats, Ch.23; static RMQ -> sparse table, Ch.21 (20.5)};
+\end{tikzpicture}
+\caption{The chapter's six-state taxonomy, read top to bottom as an escalation.
+Rows~1--2 are the machine (the pending tag, push-on-demand); row~3 is the
+\emph{composition law} -- what happens when two updates meet at one node; row~4
+is the update that made a BIT give up (assignment); row~5 moves the whole
+mechanism onto a tree's Euler array; row~6 is the \emph{boundary} -- the updates
+that no single tag can represent, which belong to segment-tree beats (Ch.23) or,
+if the array never changes, to the sparse table (Ch.21).  Every solved problem
+sits on exactly one row: CF~295A on rows~1--2, CF~817F on row~3, CF~915E on
+row~4, CF~620E on row~5, and the Summit spanning rows~3--4 (a tag you compose
+while walking the operations in reverse).}
+\label{fig:c15-taxonomy}
+\end{figure}
+
+% ---------------- Who owns what ----------------
+\subsection*{Who Owns What (so nothing is learned twice)}
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.30\linewidth} p{0.34\linewidth}@{}}
+\toprule
+\textbf{Idea} & \textbf{Owner} & \textbf{This chapter's share} \\
+\midrule
+build / point update / range query / arbitrary combine, iterative \(2n\) tree & Ch.~19 (\chref{c13}) & the plain tree is ASSUMED; the pending tag is layered on -- no re-teach of the non-lazy engine \\
+Fenwick tree, difference trick, invertible range-add/sum, subtree-BIT (383C, 877E) & Ch.~18 (\chref{c14}) & 20.2 contrasts difference-BIT vs lazy and DISCHARGES the non-invertible hand-off; 383C/877E re-treated in prose only, never re-linked \\
+Euler tour, \(\tin/\tout\), ``subtree \(=\) interval'' & Ch.~5 (\chref{c24}) & cited by label; 20.4 supplies the range \emph{update} engine on the flat array \\
+heavy-light path queries & Ch.~22 (\chref{c16}) & a lazy segtree \emph{on} heavy chains lives there; 20.4 mentions path updates by prose only \\
+segment-tree beats (chmin/chmax/modulo), Li Chao & Ch.~23 (\chref{c29}) & 20.5 forward-cites the non-composable boundary; no beats code is built here \\
+merge-sort tree, persistent tree, sparse-table RMQ & Ch.~21 (\chref{c19}) & static-RMQ ``there is a faster structure'' note is forward-cited; neither engine is built here \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------- Recognition guide ----------------
+\begin{recognitionbox}[Pattern card -- ``modify a whole range, read back a range, and the modify is not invertible'']
+\reckey{``add / assign / set / invert / xor \emph{every} element of \([l,r]\)'',
+interleaved with ``then give me the sum / max / count / distinct of \([a,b]\)'';
+``repaint the subtree of \(v\), count the colours in the subtree of \(w\)''; the
+phrase ``\(q\) queries, some of which change a \emph{range}''; any brute force
+that re-walks \(r-l+1\) positions per update -- and, decisively, an update with
+\emph{no inverse} (assign, invert, xor) where Ch.18's difference trick cannot be
+run backwards.}
+\recuse{
+  \item range add + range sum/max with the pending tag, \secref{c15-core}
+        (CF~295A) -- the ``range updates done right'' hello-world;
+  \item two updates landing on one node before a push -- the \emph{composition}
+        law, \secref{c15-compose} (CF~817F set/invert);
+  \item set-to-a-value over a range (paint) -- \secref{c15-assign} (CF~915E);
+  \item the ranges are tree \emph{subtrees} -- flatten with Ch.5 and update the
+        Euler array, \secref{c15-trees} (CF~620E).
+}
+\recnotuse{
+  \item the update is a plain add and the read a plain sum and the array is
+        1-indexed and online -- Ch.~18's difference BIT (\chref{c14}) does it in
+        less code; reach here when the update is not invertible or the aggregate
+        needs a tuple;
+  \item only \emph{point} writes ever happen -- that is Ch.~19's plain tree; no
+        tag is needed;
+  \item the update does not compose into a single pending value (range
+        \(\bmod\), range \(\mathit{chmin/chmax}\)) -- that is segment-tree beats,
+        Ch.~23 (\chref{c29});
+  \item the array never changes and you only ask range min/max -- a sparse table
+        (Ch.~21, \chref{c19}) answers in \(O(1)\).
+}
+One-line test: \emph{a whole range is modified, a range is read back, and the
+modification is not a plain invertible sum -- then the pending tag below is what
+turns an \(\bigO{n}\) update into an \(\bigO{\log n}\) one.}
+\end{recognitionbox}
+
+% ---------------- Constraint -> tool ----------------
+\subsection*{Reading the Constraints (which form the limits want)}
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.32\linewidth} p{0.40\linewidth} p{0.22\linewidth}@{}}
+\toprule
+\textbf{Constraint signature} & \textbf{What it rules in/out} & \textbf{Tool} \\
+\midrule
+\(n,q\le2\cdot10^5\), range add + range sum/max & difference BIT works for add/sum; the lazy tree is needed the moment the read is non-sum or the update non-add & \secref{c15-core} \\
+assign / set a range, then count or sum & assignment has no inverse -- BIT dead; lazy assign tag, sum \(=\) len\(\cdot\)val & \secref{c15-assign} (CF 915E) \\
+add \emph{and} multiply a range, read a sum & two numbers per node; compose affine \(m,a\) in order & \secref{c15-compose} (worked) \\
+\(n\) up to \(10^{9}\) / \(10^{18}\), few queries, endpoints matter & compress coordinates (CF 915E, 817F) or grow an implicit tree & \secref{c15-compose}, \secref{c15-assign} \\
+\(n\le4\cdot10^5\) subtree repaint + distinct colours & Euler-flatten; tag = assign, node = 60-bit colour mask, OR merge & \secref{c15-trees} (CF 620E) \\
+range \(\bmod\)/\(\mathit{chmin}\), or the array is fully static & not lazily composable -- beats (Ch.23) or sparse table (Ch.21) & \secref{c15-strains} boundary \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------- Notation ----------------
+\subsection*{Notation Used Only Here}
+
+A node is named by its heap index \(t_v\) (root \(t_1\)) and \emph{owns} a closed
+interval \([l_v,r_v]\); \(\mathit{mid}=\lfloor(l_v{+}r_v)/2\rfloor\) splits it into
+children \(2v,2v{+}1\).  Beside each \(t_v\) we keep a second array
+\(\mathit{tag}_v\) -- the \term{pending lazy value}: an update folded into \(t_v\)
+but \emph{not yet} pushed to its children.  \term{Apply} \(\code{apply}(v,\tau)\)
+folds a tag \(\tau\) into node \(v\)'s aggregate (for a sum, \(t_v\mathrel{+}=
+\tau\cdot(r_v-l_v{+}1)\)) and merges \(\tau\) into \(\mathit{tag}_v\); \term{push}
+\(\code{push}(v)\) applies \(\mathit{tag}_v\) to both children and zeroes it;
+\term{pull} re-folds \(t_v\) from its two children on the way back up.  Two tags
+\term{compose} when a second update lands before a push: \(\tau\circ\tau'\) is the
+single tag equivalent to doing \(\tau'\) then \(\tau\); assignment
+\emph{overrides} everything older, the affine pair \((\mathit{mul},\mathit{add})\)
+composes as \((\mathit{mul}\cdot\mathit{mul}',\;\mathit{mul}\cdot\mathit{add}'
++\mathit{add})\), and the \term{identity tag} (add \(0\), mul \(1\), assign
+``none'', flip \emph{off}\(\)) leaves a node unchanged.  The Euler symbols
+\(\tin/\tout/\subtree(\cdot)\) are Ch.~5's, used in \secref{c15-trees} by
+reference only.  Every section runs on \(A\) and \(T\) above: if a table here and
+a trace there disagree, this opener is authoritative -- fix the section, never the
+other way.

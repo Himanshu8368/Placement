@@ -1,0 +1,236 @@
+### Problem: Restore Permutation {#sec-coord-p3-restore}
+
+::: {.p-statement}
+Polycarp wrote a permutation $p$ of $1 \ldots n$ ($1 \le n \le 2 \cdot 10^5$). For every position $i$ he computed $s_i$ — the **sum of all $p_j$ with $j < i$ and $p_j < p_i$** (the earlier elements that are smaller than $p_i$; empty sum $=0$). The permutation was lost; given $s_1, \ldots, s_n$, recover $p$. It is guaranteed a solution exists, and the $s_i$ come from exactly one permutation.
+
+Source: [CF 1208D · Restore Permutation](https://codeforces.com/problemset/problem/1208/D){.solved rating="1900"}
+
+Example — $p = [5, 1, 2, 4, 3]$ yields $s = [0, 0, 1, 3, 3]$: position 2's value $1$ has no smaller earlier element; position 3's value $2$ sees only the earlier $1$ ($s_3 = 1$); position 4's value $4$ sees $1 + 2 = 3$; position 5's value $3$ sees $1 + 2 = 3$. The reconstruction $\mathit{restore\_perm}([0,0,1,3,3]) = [5,1,2,4,3]$ is asserted below, and a checker re-derives every $s_i$ from the output.
+
+The witness above shows why the *forward* direction is hostile: $s_i$ depends on which smaller values happened to sit *earlier*, and choosing $p_i$ now constrains everything after. The numbers $s_i$ reach $n(n-1)/2 \cdot n \approx 2 \cdot 10^{10}$ before any correction — the reads must be 64-bit.
+:::
+
+::: {.p-intuition}
+Read the timeline **backwards** (@sec-coord-a5 again, this time with no array to delete — what gets undone is *commitment*). When positions $i{+}1 \ldots n$ have been assigned, every value not yet used sits at position $\le i$. If we now commit $p_i = v$, then the earlier positions hold exactly the unused values other than $v$, and $s_i$ demands: *the unused values strictly below $v$ must sum to $s_i$* — because all of them will lie earlier, and none of the others count. So $v$ is pinned: it is the smallest unused value whose "sum of unused below" equals $s_i$ — equivalently, run the **prefix sums over the unused pool** (a Fenwick tree over values $1..n$ holding each unused value at its own rank — the domain is already dense, the compression here is *conceptual*) and find the last prefix with sum $\le s_i$ by A2-style binary lifting; the next survivor after that prefix is $v$. Two trees do the job: a **sum tree** to lift on, a **count tree** to step "one survivor to the right" in $O(\log n)$. Uniqueness of the answer makes every local pin globally forced — no search, no backtracking.
+:::
+
+::: {.p-approach}
+1. **Try every permutation.** Enumerate $n!$ permutations, compute each $s$-vector, compare. $O(n! \cdot n^2)$; oracle only ($n \le 8$), and only for $n$ where the stress loop can afford it.
+2. **Right-to-left pinning with two Fenwick trees.** Seed a count tree (1 per value) and a sum tree (value $v$ at rank $v$). For $i = n \ldots 1$: binary-lift the sum tree to the largest rank $x$ whose unused prefix sum is $\le s_i$; answer $p_i :=$ the $(\mathit{count}(x) {+} 1)$-th survivor (the smallest unused value $> x$) via the count tree's `kth`; remove $p_i$ from both trees. $O(n \log n)$.
+
+**Invariant.** Before step $i$, the two trees describe exactly the values not yet assigned to positions $i{+}1 \ldots n$, and $s_1 \ldots s_i$ are still consistent with *some* completion of positions $1 \ldots i$.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Try every permutation
+
+::: {.form-next}
+Generate permutations of $1..n$ in lexicographic order, derive the $s$-vector from each, and stop at the match (which is unique by the guarantee). Exponential — the definition of the reconstruction target and the stress oracle.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+from itertools import permutations
+
+
+def restore_brute(s):
+    n = len(s)
+    for p in permutations(range(1, n + 1)):
+        ok = True
+        for i in range(n):
+            if sum(p[j] for j in range(i) if p[j] < p[i]) != s[i]:
+                ok = False
+                break
+        if ok:
+            return list(p)
+    raise AssertionError("no permutation matches (bad generator)")
+
+
+assert restore_brute([0, 0, 1, 3, 3]) == [5, 1, 2, 4, 3]
+assert restore_brute([0, 0, 1]) == [3, 1, 2]
+```
+
+##### C++
+
+```cpp
+// try every permutation with next_permutation; oracle only, n <= 9
+// fragment: brute force, not for submission
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+
+vector<ll> restoreBrute(const vector<ll>& s) {
+    int n = (int)s.size();
+    vector<int> p(n);
+    iota(p.begin(), p.end(), 1);
+    do {
+        bool ok = true;
+        for (int i = 0; i < n && ok; ++i) {
+            ll t = 0;
+            for (int j = 0; j < i; ++j) if (p[j] < p[i]) t += p[j];
+            if (t != s[i]) ok = false;
+        }
+        if (ok) { vector<ll> out(n); for (int i = 0; i < n; ++i) out[i] = p[i]; return out; }
+    } while (next_permutation(p.begin(), p.end()));
+    return vector<ll>();
+}
+```
+:::
+
+**Reading it line by line.** The inner sum is the statement copied verbatim; the outer `do/while(next_permutation)` is the only possible general solver when you refuse the backward insight. It earns its keep at $n \le 8$: $40\,320$ permutations times a quadratic check is still only $2.5 \cdot 10^6$ operations per draw.
+
+#### Right-to-left pinning with two Fenwick trees
+
+::: {.form-next}
+Seed count and sum trees over $1..n$. Walk $i$ from $n$ down to $1$: lift the sum tree for the largest rank $x$ with (unused values $\le x$) $\le s_i$; the pinned value is the *next survivor* — the $(\mathit{bc}(x){+}1)$-th smallest unused — found by the count tree's `kth`; delete it from both trees and write $p_i$. One $O(\log n)$ lift plus two descents per position.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+rp_steps = [
+    {"i": "5", "s_i": "3", "x": "2", "pin": "3", "left": "1,2,4,5"},
+    {"i": "4", "s_i": "3", "x": "2", "pin": "4", "left": "1,2,5"},
+    {"i": "3", "s_i": "1", "x": "1", "pin": "2", "left": "1,5"},
+    {"i": "2", "s_i": "0", "x": "0", "pin": "1", "left": "5"},
+    {"i": "1", "s_i": "0", "x": "0", "pin": "5", "left": "(empty)"},
+]
+# pools read left-to-right as *after* the pin: {1..5}\{3}, {1,2,4,5}\{4}, {1,2,5}\{2}, {1,5}\{1}, {5}\{5}
+
+
+def draw(ax, p):
+    rows = [[st["i"], st["s_i"], st["x"], st["pin"], st["left"]] for st in rp_steps]
+    V.grid(ax, p, rows,
+           row_labels=[f"position {st['i']}" for st in rp_steps],
+           col_labels=["i", "s_i", "lift x", "p_i", "unused after"],
+           colors={(ri, 3): "indigo" for ri in range(5)}, cell_w=1.7)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-coord-p3-restore-sol
+def restore_perm(s):
+    n = len(s)
+    bc = BIT(n)      # survivors per rank
+    bs = BIT(n)      # their value-sum per rank
+    for v in range(1, n + 1):
+        bc.add(v, 1)
+        bs.add(v, v)
+
+    def lift_sum(target):
+        """largest x with bs.sum(x) <= target (0 if even x=1 overshoots)."""
+        x, acc, step = 0, target, 1 << (n.bit_length() - 1)
+        while step:
+            j = x + step
+            if j <= n and bs.t[j] <= acc:
+                x, acc = j, acc - bs.t[j]
+            step //= 2
+        return x
+
+    p = [0] * n
+    for i in range(n - 1, -1, -1):
+        x = lift_sum(s[i])               # all unused values <= x sum to <= s_i ...
+        v = bc.kth(bc.sum(x) + 1)        # ... and the next survivor is the pinned value
+        p[i] = v
+        bc.add(v, -1)
+        bs.add(v, -v)
+    return p
+
+
+def restore_check(p, s):
+    n = len(p)
+    for i in range(n):
+        assert sum(p[j] for j in range(i) if p[j] < p[i]) == s[i], (p, s, i)
+
+
+got = restore_perm([0, 0, 1, 3, 3])
+assert got == [5, 1, 2, 4, 3]
+restore_check(got, [0, 0, 1, 3, 3])
+got = restore_perm([0, 0, 1])
+assert got == [3, 1, 2]
+restore_check(got, [0, 0, 1])
+
+for _ in range(150):
+    n = random.randint(1, 9)
+    p0 = list(range(1, n + 1))
+    random.shuffle(p0)
+    sv = [sum(p0[j] for j in range(i) if p0[j] < p0[i]) for i in range(n)]
+    assert restore_perm(sv) == restore_brute(sv) == p0, (sv,)
+```
+
+##### C++
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+
+int bc_[200005];
+ll bs_[200005];
+int n_;
+
+void addT(int i, int dc, ll ds) {
+    for (; i <= n_; i += i & -i) { bc_[i] += dc; bs_[i] += ds; }
+}
+ll sumC(int i) { ll s = 0; for (; i > 0; i -= i & -i) s += bc_[i]; return s; }
+int kthC(int k) {                       // k-th survivor via the count tree
+    int i = 0;
+    for (int step = 1 << (__lg(n_)); step; step >>= 1) {
+        int j = i + step;
+        if (j <= n_ && bc_[j] < k) { i = j; k -= bc_[j]; }
+    }
+    return i + 1;
+}
+
+int main() {
+    if (scanf("%d", &n_) != 1) return 0;
+    vector<ll> s(n_);
+    for (int i = 0; i < n_; ++i) scanf("%lld", &s[i]);
+    for (int v = 1; v <= n_; ++v) addT(v, 1, v);
+    vector<int> p(n_);
+    for (int i = n_ - 1; i >= 0; --i) {
+        // lift the SUM tree: largest x with unused prefix sum <= s[i]
+        int x = 0;
+        ll acc = s[i];
+        for (int step = 1 << (__lg(n_)); step; step >>= 1) {
+            int j = x + step;
+            if (j <= n_ && bs_[j] <= acc) { x = j; acc -= bs_[j]; }
+        }
+        int v = kthC((int)sumC(x) + 1); // smallest unused value greater than x
+        p[i] = v;
+        addT(v, -1, -v);
+    }
+    for (int i = 0; i < n_; ++i) printf("%d ", p[i]);
+    printf("\n");
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** The lift condition is `<=` (`bs.t[j] <= acc`), unlike A2's `kth` which uses `<` — here we *want* the prefix that soaks up the target exactly, because equality means "the next survivor contributes nothing new to the sum", i.e. it is the value whose smaller-sum is precisely $s_i$. Then one uniform rule covers both outcomes: whichever way the lift lands, the answer is *the next survivor after $x$*, obtained by counting survivors up to $x$ (`bc.sum(x)`) and stepping one further (`bc.kth(... + 1)`) — no case split for "prefix sum exactly hit" versus "stopped early". `s[i]` may exceed every remaining prefix sum only for an invalid input (guaranteed away); the code would then pin the largest survivor, and a checker like `restore_check` would catch the lie. Removing $v$ from **both** trees is two lines that must stay adjacent — forgetting the sum tree poisons later lifts silently, which no assertion at $i$ itself would ever see (@sec-coord-pit's multi-tree warning).
+
+:::
+
+::: {.p-complexity}
+**Permutation search:** $O(n! \cdot n^2)$ — oracle only, $n \le 9$. **Two-tree pinning:** $O(n \log n)$ time ($n$ lifts + $2n$ descents/updates), $O(n)$ memory. No compression step is needed — the value domain $1..n$ is already the rank domain — but *recognising* that is the compression reflex pointed the right way (@sec-coord-a1's "table indexed by value"). $s_i$ reach $2 \cdot 10^{10}$: `long long` for the sum tree and the lifts.
+:::
+
+::: {.p-edge}
+- $s_1$ is always $0$ (no earlier positions); the algorithm never consults position 1's constraints until the last step, where one survivor is all that remains — forced, no lift needed (though the lift still runs correctly on a one-element pool).
+- All-zero $s$: forces $p = [n, n{-}1, \ldots, 1]$ descending — each pin lands on the largest survivor because every prefix "overshoots" $0$ except the empty one.
+- $s_i$ equal to the sum of *all* remaining survivors below the maximum: the lift reaches $x = n$, `count(x)` is the full pool, and the $+1$-th survivor does not exist — unreachable for valid input, because then no choice of $p_i$ could leave a value above the sum; the existence guarantee covers it, and the round-trip assert confirms the near-miss cases land on the largest survivor correctly.
+- Ascending $p = [1..n]$: $s_i = i(i-1)/2$; the sum tree walks down as values pin from the right.
+:::
+
+::: {.practice}
+- [CF 1156C · Match Points](https://codeforces.com/problemset/problem/1156/C){rating="2000"} — greedy pairing with a sorted cursor: another "order forces the answer" reconstruction
+- [CF 864D · Make a Permutation!](https://codeforces.com/problemset/problem/864/D){rating="1500"} — repair-a-permutation with value-indexed bookkeeping
+:::

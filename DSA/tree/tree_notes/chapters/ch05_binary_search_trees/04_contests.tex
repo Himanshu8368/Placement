@@ -1,0 +1,557 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  7.4  BSTs in Contests (std::set / std::map)  sec:c05-contests
+%  Exports: def:c05-oset  prop:c05-logn  thm:c05-interval
+%           lst:c05-setkit  lst:c05-range  ex:c05-contest-run
+%           prob:c05-range  lst:c05-range  (practice: LC 729)
+% =====================================================================
+\section{BSTs in Contests: the Ordered Containers}\label{sec:c05-contests}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \code{std::set} hands you \code{lower\_bound}/\code{upper\_bound} for free -- which chapter-7
+        descent is that the container version of? (\propref{c05-search}, \defref{c05-succ})
+  \item What makes a BST operation cost $\bigO{h}$, and what has to be true of $h$ for that to be
+        $\bigO{\log n}$? (\secref{c05-property}; the guarantee is \chref{c06})
+  \item To answer ``is $[L,R)$ fully tracked?'' over a set of disjoint intervals, which \emph{one}
+        interval can possibly contain $L$? Why does an ordered map find it instantly?
+  \item If keys are dense integers and you need ranks \emph{by index}, why might a Fenwick tree beat
+        a pointer container? (\chref{c14})
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Everything so far \emph{hand-rolled} a BST. In contests you almost never do: the standard library
+ships one. \code{std::set} and \code{std::map} \emph{are} binary search trees -- specifically
+self-balancing red-black trees -- so every descent you learned costs a guaranteed $\bigO{\log n}$,
+and the whole chapter's vocabulary (find, successor, insert, delete, count-in-range) maps onto a
+five-function API. This section makes that mapping explicit, then attacks the contest idiom the
+ordered map owns: \textbf{maintaining a set of disjoint intervals} under add/query/remove. The
+solved problem, LC 715 \emph{Range Module}, is a Hard not because the BST is hard but because you
+must see that an ordered map keyed by interval \emph{start} turns ``which intervals overlap
+$[L,R)$?'' into two \code{upper\_bound} calls. We close by naming the cliffhanger this chapter has
+circled all along -- the container is fast \emph{because} it balances, and proving that (and doing it
+yourself when the library does not fit) is Chapter~8 -- and the sibling engines (Fenwick, segment
+tree) that beat a pointer BST when keys are dense integers.
+\textbf{Prerequisites.} The whole of \secref{c05-property}--\secref{c05-queries}: this section is the
+library front-end to those ideas. \chref{c02} for the \code{map}/\code{set} types and iterators.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item translate BST operations onto \code{set}/\code{map}'s \code{lower\_bound}/\code{upper\_bound} kit; \hfill\lv{2}--\lv{3}
+  \item state why the containers cost $\bigO{\log n}$ and what balances them (\propref{c05-logn} \chref{c06}); \hfill\lv{3}
+  \item manage disjoint intervals (union, coverage query, difference) with an ordered map
+        (\thmref{c05-interval}, \probref{c05-range}); \hfill\lv{4}--\lv{5}
+  \item choose between an ordered container, a Fenwick tree and a segment tree for a rank/range task. \hfill\lv{3}--\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- online, ordered, editable keys]
+\reckey{keys arrive and leave \emph{over time} (online), you must keep them \emph{sorted}, and answer
+nearest/largest-smaller/count-in-range questions between edits -- or you are merging and querying
+\emph{intervals}.}
+\recuse{
+  \item ``add / remove / does an element in $[L,R]$ exist?'' -- \code{set::lower\_bound} (\defref{c05-oset});
+  \item ``nearest free seat'', ``largest key $\le x$'', ``next event after $t$'' -- \code{lower\_bound}
+        then step; the successor \defref{c05-succ} as a library call;
+  \item ``add interval, is $[L,R)$ covered, remove interval'' -- ordered \code{map} of disjoint
+        intervals (\thmref{c05-interval}, \probref{c05-range});
+  \item ``book $[start,end)$, reject if it overlaps'' -- My Calendar (LC 729 practice), interval map again.
+}
+\recnotuse{
+  \item all data known up-front, static -- sort once and use \code{binary\_search}, no container needed;
+  \item keys are dense small integers and you need prefix counts/ranks -- Fenwick \chref{c14} (lower constant);
+  \item you need range \emph{updates} plus range \emph{sums} over an array -- segment tree \chref{c13};
+  \item you must beat the library's constant factor or store extra aggregate per node -- build your
+        own, \chref{c06} (and the Summit \probref{c05-summit}).
+}
+One-line test: \emph{do keys change \emph{and} must I keep them ordered \emph{and} ask neighbour/range
+questions? Reach for \code{set}/\code{map} -- an off-the-shelf, self-balancing BST.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+A \code{std::set<int> s} is a BST holding distinct keys; a \code{std::map<int,V>} is a BST keyed by
+\code{int} with a payload per node. The library already did \secref{c05-insert-delete} (balanced
+insert/delete) and \secref{c05-property} (ordered search) for you, so the two functions that matter
+most are the ones that \emph{are} a descent:
+
+\begin{itemize}[nosep]
+  \item \code{s.lower\_bound(x)} $\to$ the first key $\ge x$ (\code{s.end()} if none) -- this is the
+        \term{ceiling} you would find by descending for $x$ and remembering the last $\ge$;
+  \item \code{s.upper\_bound(x)} $\to$ the first key $> x$ -- the strict successor, \defref{c05-succ}.
+\end{itemize}
+
+From those, ``largest key $\le x$'' (the \term{floor}) is one step back from \code{upper\_bound};
+``count of keys in $[L,R)$'' is the run of \code{lower\_bound(L)} up to \code{lower\_bound(R)}
+(linear in how many sit inside, or $\bigO{\log n}$ with the GNU \code{pb\_ds} order-statistics
+extension). Everything is ``compare and
+go one way'' -- \propref{c05-search} wearing an iterator.
+
+\textbf{Intervals as an ordered map.} Keep the tracked set as a map from each maximal interval's
+\emph{start} to its \emph{end}, with intervals disjoint and stored in increasing start order -- which
+\code{map} does for free. Then to touch $[L,R)$, \emph{at most} one pre-existing interval can start
+before $L$ (find it with \code{upper\_bound(L)} then step back), and the rest that can overlap start in
+$[L,R)$ -- a contiguous \code{map} range you walk with \code{upper\_bound(R)} as the stop. The
+structure of \thmref{c05-interval} is entirely the observation that ordered keys let you \emph{localise}
+the few intervals that interact, exactly the discard-a-subtree power of \propref{c05-search}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, x=13mm]
+  % number line with tracked intervals [10,20) and [25,30)
+  \draw[->] (-0.4,0) -- (9.2,0) node[right, font=\scriptsize] {$x$};
+  \foreach \p/\lab in {1/10,2/14,3/20,5/25,7/30,8/34} {
+    \draw (\p,0.12) -- (\p,-0.12) node[below, font=\scriptsize] {\lab};
+  }
+  \fill[successgreen!40] (1,0.25) rectangle (3,0.55);
+  \fill[successgreen!40] (5,0.25) rectangle (7,0.55);
+  \node[font=\scriptsize, text=successgreen] at (2,0.9) {\code{[10,20)}};
+  \node[font=\scriptsize, text=successgreen] at (6,0.9) {\code{[25,30)}};
+  \draw[warningred, line width=1.1pt] (2,-0.55) -- (4,-0.55) node[midway,below,font=\scriptsize,text=warningred] {query $[14,28)$: partly covered};
+  \node[annot, align=left, font=\scriptsize] at (9.0,0.6)
+    {map keys:\\ \code{10->20}\\ \code{25->30}};
+\end{tikzpicture}
+\caption{Tracked intervals as an ordered \code{map} start$\to$end. Querying $[14,28)$ touches at most
+one interval starting before $14$ (found by \code{upper\_bound(14)} then step-back, giving
+\code{10->20}) plus the run of intervals starting inside $[14,28)$ (\code{25->30}). Coverage and unions
+are decided on these $\bigO{\log n + k}$ locals -- the map never scans all intervals.}\label{fig:c05-interval}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{The ordered-set / ordered-map API}{c05-oset}
+\code{std::set<K>} is a BST of distinct keys sorted by $K$; \code{std::map<K,V>} adds a value per key.
+The ordered navigation primitives are \code{lower\_bound(x)} (first key $\ge x$), \code{upper\_bound(x)}
+(first key $> x$), and bidirectional iterators so \code{std::prev(it)} yields the largest key $<x$ (or
+$\le x$ from \code{upper\_bound}). \code{insert}/\code{erase} take a key and return/update an iterator;
+\code{count(x)} is $0$/$1$. Everything is \emph{sorted by construction}: iterating from \code{begin()}
+is the inorder walk (\thmref{c05-inorder}) without a tree in sight.
+\end{definition}
+
+\noindent\textbf{In plain words.} Treat \code{set}/\code{map} as a BST whose descent you invoke by name
+(\code{lower\_bound}) instead of writing. You get search, successor, predecessor, floor, ceiling,
+insert, delete, and ``the sorted list'' for free -- all logarithmic, all guaranteed balanced.
+
+\begin{proposition}{Every ordered-container operation is $\bigO{\log n}$}{c05-logn}
+Insert, erase, \code{find}, \code{lower\_bound}, \code{upper\_bound}, successor and predecessor on a
+\code{set}/\code{map} of $n$ elements each cost $\bigO{\log n}$ worst case, because the implementation
+is a \term{red-black tree} -- a self-balancing BST whose height is provably $\le 2\log_2(n+1)$
+(\chref{c06} proves the bound). Iterating a range of $k$ elements costs $\bigO{k}$ extra (successive
+\code{++}), since each step is amortised $\bigO{1}$ along the inorder spine.
+\end{proposition}
+\begin{proofbox}
+Every listed operation is ``one search descent'' plus $\bigO{1}$ pointer work. On a hand-built BST a
+descent costs $\bigO{h}$ and $h$ can reach $n$ (\secref{c05-property}'s rot warning); the red-black
+invariant (\chref{c06}) keeps $h\le 2\log_2(n+1)$, so the same descent is $\bigO{\log n}$ regardless of
+insertion order. Successor/predecessor are at most two such descents (\defref{c05-succ}); walking $k$
+sorted neighbours reuses the parent/child pointers, costing $\bigO{1}$ per step after the initial
+$\bigO{\log n}$ landing. \end{proofbox}
+
+\begin{theorem}{Interval management by an ordered map}{c05-interval}
+Maintain a set of tracked half-open intervals as an \code{map<int,int>} from each maximal (disjoint,
+merged) interval's start to its end. Then \emph{add}, \emph{coverage-query} and \emph{remove} of any
+$[L,R)$ run in $\bigO{\log n + k}$ where $k$ is the number of stored intervals that overlap $[L,R)$:
+in each case those intervals are exactly the one predecessor of $L$ (if it reaches $\ge L$) together
+with the contiguous map range $[\text{upper\_bound}(L),\ \text{upper\_bound}(R))$, found by two
+\code{upper\_bound} descents.
+\end{theorem}
+\begin{proofbox}
+Because stored intervals are disjoint with increasing starts, an interval $[a,b)$ overlaps $[L,R)$
+iff $a<R$ and $b>L$. The condition $a<R$ confines candidates to keys $<R$, i.e.\ the map prefix ending
+at \code{upper\_bound(R)}; among those, any with $a\ge L$ lie in the contiguous block starting at
+\code{upper\_bound(L)}, and \emph{at most one} with $a<L$ can reach into $[L,R)$ -- the immediate
+predecessor of $L$ (all earlier starts have $b\le a_{\text{pred}}\le L$ by disjointness). So the two
+descents \code{upper\_bound(L)}, \code{upper\_bound(R)} plus one step-back list \emph{all} interacting
+intervals and nothing else. Merge/split edits touch only this $\bigO{k}$ block, and inserting the
+resulting (at most one, for add) merged key is one $\bigO{\log n}$ map insert. \end{proofbox}
+\begin{insightbox}
+The theorem is just \propref{c05-search}'s power ``discard irrelevant subtrees'' applied to intervals:
+you never scan all stored intervals, only the $k$ that geometrically must interact. This is why a
+Hard interval problem has a $\bigO{\log n}$-per-op solution -- the ordered map \emph{is} the search
+structure.
+\end{insightbox}
+
+\subsection{The algorithm: the container kit, then the interval map}
+
+\begin{lstlisting}[caption={The set/map navigation kit -- each line is a chapter-7 descent by name}, label={lst:c05-setkit}]
+#include <set>
+#include <map>
+using namespace std;
+
+set<int> s;                       // distinct keys, sorted; map<int,V> mp is the same with payloads
+s.insert(x);                      // O(log n) balanced insert (Ch8 keeps h small)
+s.erase(x);                       // O(log n) delete: the three cases happen inside the library
+auto c = s.lower_bound(x);        // ceiling: first key >= x  (s.end() if none)
+auto u = s.upper_bound(x);        // strict successor: first key > x
+auto f = (u == s.begin()) ? s.end() : prev(u);  // floor: largest key <= x  (step back once)
+
+// count keys in [L, R): span the range (linear in how many), or use pb_ds for O(log n)
+int inRange = distance(s.lower_bound(L), s.lower_bound(R));
+
+// smallest key >= x that is FREE, the "nearest seat" idiom:
+//   keep occupied seats in s; auto it = s.lower_bound(x); skip runs of consecutive keys.
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Range Module -- disjoint intervals as an ordered map start->end (LeetCode 715)}, label={lst:c05-range}]
+class RangeModule {
+    map<int,int> m;                    // start -> end, half-open [start,end), disjoint & merged
+public:
+    void addRange(int left, int right) {
+        auto l = m.upper_bound(left), r = m.upper_bound(right);
+        if (l != m.begin()) {                       // does the predecessor of `left` already reach in?
+            auto p = prev(l);
+            if (p->second >= left) l = p;           // merge starting from the predecessor
+        }
+        while (l != r) {                             // swallow every interval inside [left,right)
+            left  = min(left,  l->first);
+            right = max(right, l->second);
+            l = m.erase(l);                          // erase returns next; interval absorbed
+        }
+        m[left] = right;                             // the merged maximal interval
+    }
+    bool queryRange(int left, int right) {
+        auto it = m.upper_bound(left);               // first interval starting AFTER left
+        if (it == m.begin()) return false;
+        --it;                                        // the only interval that can start <= left
+        return it->second >= right;                  // covers [left,right) wholly?
+    }
+    void removeRange(int left, int right) {
+        auto l = m.upper_bound(left), r = m.upper_bound(right);
+        if (l != m.begin()) {
+            auto p = prev(l);
+            if (p->second > left) l = p;             // predecessor is cut, not skipped
+        }
+        while (l != r) {
+            int a = l->first, b = l->second;
+            l = m.erase(l);
+            if (a < left)  m[a]    = left;           // keep the untouched left tail [a,left)
+            if (b > right) m[right]= b;              // keep the untouched right tail [right,b)
+        }
+    }
+};
+\end{lstlisting}
+\begin{complexitybox}
+Container kit: $\bigO{\log n}$ per find/insert/erase/lower/upper-bound (\propref{c05-logn}). Range
+Module: each op is two \code{upper\_bound} descents ($\bigO{\log n}$) plus work proportional to the
+$k$ intervals merged/split, and an add creates $\le 1$ new map key -- so $\bigO{\log n + k}$ amortised
+and $\bigO{\log n}$ when $k$ is small. Space $\bigO{m}$ for $m$ maximal intervals.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{The Range Module official script on the interval map}{c05-contest-run}
+Start empty. \emph{\code{addRange(10,20)}}: no intervals, so the while loop is empty; \code{m[10]=20}
+-- now $[10,20)$ is tracked. \emph{\code{removeRange(10,14)}}: \code{upper\_bound(10)=end}, predecessor
+\code{10->20} has $20>10$ so $l$ starts there; erase it ($a{=}10,b{=}20$); $a<10$? no; $b>14$? yes, so
+\code{m[14]=20}. Map $\{14\!\to\!20\}$, tracking $[14,20)$. \emph{\code{addRange(10,14)}}:
+\code{upper\_bound(10)} lands on \code{14->20}, which starts $\ge$ the new left and its start $14\le$
+right $=14$, so it is absorbed ($l{=}r$ boundary gives $[10,14)$ merged with nothing to the left):
+left$\to$min$(10,14){=}10$, right$\to$max$(14,20){=}20$, erase, then \code{m[10]=20}. Map back to
+$\{10\!\to\!20\}$. \emph{\code{queryRange(14,16)}}: \code{upper\_bound(14)=end}, step back to
+\code{10->20}, $20\ge16$ \checkmark true. \emph{\code{queryRange(10,14)}}: predecessor-of-$14$? we take
+\code{upper\_bound(10)}=end, step back to \code{10->20}, $20\ge14$ true. \emph{\code{queryRange(16,17)}}:
+\code{10->20}, $20\ge17$ true. All three coverage answers agree with the reference. \checkmark
+\end{example}
+\begin{tracebox}[Why \code{queryRange} only ever needs one interval]
+To cover $[L,R)$ some single stored interval must contain all of it, because stored intervals are
+\emph{disjoint and merged} -- a query crossing two intervals would mean a gap between them, i.e.\ the
+left part beyond the first's end is \emph{untracked}, so the answer is already false. Hence the only
+candidate is the interval with the greatest start $\le L$ (\code{upper\_bound(L)} then step back);
+the query is true iff that one interval's end $\ge R$. One descent decides coverage -- this is
+\thmref{c05-interval} at its sharpest.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Closest/seat problems}: keep the occupied seats in a \code{set}; on request $x$,
+        compare \code{lower\_bound(x)} and its predecessor for the nearest free one -- the
+        ``minimum spacing'' scheduling idiom (an LC 719-family task). \hfill\lv{3}
+  \item \textbf{Calendar / no double-booking}: store booked $[\text{start},\text{end})$; a new booking
+        is legal iff \code{upper\_bound(start)}'s predecessor ends $\le$ start \emph{and} the next
+        interval starts $\ge$ end. LC 729 (practice), LC 731, LC 732. \hfill\lv{3}--\lv{4}
+  \item \textbf{Ordered statistics in a contest}: the GNU policy-based \code{pb\_ds} tree adds one
+        method, \code{find\_by\_order(k)}: a ready BST carrying the subtree-size augmentation that
+        \probref{c05-summit} otherwise hand-builds. \hfill\lv{4}
+  \item \textbf{Sliding window by value}: \code{multiset} of the current window supports ``kth smallest
+        in every window'' by keeping it ordered and \code{advance(begin, k-1)} -- merge-intervals/
+        heap tasks that need value-order rather than index-order. \hfill\lv{4}
+  \item \textbf{When \emph{not} a container}: dense integer keys with many prefix-count queries --
+        Fenwick \chref{c14} answers rank in $\bigO{\log U}$ with tiny constants and array locality;
+        range add + range sum -- segment tree \chref{c13}. \hfill\lv{3}--\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c05-contests-pitfalls}
+
+\begin{warningbox}[Trap 1 -- \code{set::insert} for a key you then mutate]
+\code{set}s store \emph{const} keys; to change a key you must \code{erase} then \code{insert} (an
+in-place edit can silently break the sorted invariant). For \code{map}, mutating the \emph{value} is
+fine -- the \code{key} is what orders the tree. Confusing the two is a classic ``works in the sample,
+WA on hidden data'' bug.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: editing a key in place breaks ordering}, language=C++, basicstyle=\ttfamily\small]
+*s.find(5) = 7;      // ill-formed: set elements are const; cannot re-key
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: erase then re-insert}, language=C++, basicstyle=\ttfamily\small]
+auto it = s.find(5); if (it != s.end()) { s.erase(it); s.insert(7); }
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- off-by-one on half-open vs closed intervals]
+LC 715 uses \textbf{half-open} $[\text{left},\text{right})$: \code{addRange(10,14)} tracks
+$10,11,12,13$, not $14$. Mixing this with closed-interval habits (``$\le$'' where you need ``$<$'') in
+the \code{upper\_bound} boundaries is the single most common failure on the problem. Decide open/closed
+\emph{once} and let \code{upper\_bound} vs \code{lower\_bound} encode it consistently.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- assuming the library keeps \emph{your} invariants]
+\code{set} keeps keys sorted and distinct and \emph{balanced}; it does \emph{not} keep your intervals
+\emph{merged} -- that is your algorithm's job (\coderef{c05-range}'s add absorbs and rewrites). If you
+forget to merge, overlapping map entries accumulate and \code{queryRange}'s ``one interval suffices''
+(\thmref{c05-interval}) silently breaks. The container guarantees order; \emph{you} guarantee the
+domain invariant.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's capstone -- and the chapter's graded Hard before the Summit -- is LC 715 \emph{Range
+Module}. It is a BST problem wearing an interval-problem coat: the entire difficulty is realising that
+an \code{ordered map} keyed by interval start localises every add/query/remove to $\bigO{\log n + k}$
+interacting entries (\thmref{c05-interval}). No new traversal, no rotation -- just the descent you
+already own, aimed at the right objects.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c05-range}{Range Module}{LeetCode 715}
+  {https://leetcode.com/problems/range-module/}{LC Hard L4}
+  {ordered map, disjoint-interval union/difference, coverage query, upper-bound localisation}
+
+\begin{problemstatement}[Range Module]
+Design a \code{RangeModule} tracking real number ranges $[0, 10^{9})$. Implement:
+\textbf{\code{addRange(left,right)}} -- add the half-open interval $[\text{left},\text{right})$ to the
+tracked set; \textbf{\code{queryRange(left,right)}} -- return \code{true} iff \emph{every} number in
+$[\text{left},\text{right})$ is currently tracked; \textbf{\code{removeRange(left,right)}} -- remove all
+tracked numbers in $[\text{left},\text{right})$. Up to $10^{4}$ calls total, $0\le \text{left}<\text{right}\le 10^{9}$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 40 minutes]
+The trap is treating this as a segment tree over $10^{9}$ units -- you cannot allocate that. Think
+\emph{sparsely}, as intervals.
+\peek{Store only the maximal tracked intervals, sorted by start, in a \code{map}. For a query
+$[L,R)$, how many stored intervals could possibly matter? Which one must contain $L$ if the answer is
+\code{true}?}
+\nudge{For \code{queryRange}: the only interval that can cover $L$ is the one with the greatest start
+$\le L$ -- get it with \code{upper\_bound(L)} then step back; answer is whether its end $\ge R$. For
+\code{addRange}: find all intervals intersecting $[L,R)$ (a contiguous map range plus maybe the
+predecessor), merge them into one, store the merged $[\min,\max)$. \code{removeRange}: split the same
+localised set and keep the outside tails.}
+\fullhint{Use \code{upper\_bound(left)} and \code{upper\_bound(right)} to bracket the affected
+intervals. Add: extend left/right to absorbed intervals, \code{erase} them, reinsert merged. Query: one
+step-back check. Remove: re-add only the $[\text{start},\text{left})$ and $[\text{right},\text{end})$
+tails of cut intervals. Full code \coderef{c05-range}. The whole solution is \thmref{c05-interval}.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Three operations over a mutable subset of a $10^{9}$-sized line, but with only $\le 10^{4}$ calls, so
+the tracked set is a \emph{sparse} union of few intervals -- never touch individual units. The key
+realisation: keep the tracked regions as maximal \emph{disjoint, merged} half-open intervals in an
+\code{map<int,int>} start$\to$end. Then every operation only interacts with the intervals that
+geometrically overlap its $[L,R)$, and the map's ordering localises those to a contiguous span plus a
+single predecessor (\thmref{c05-interval}). Coverage becomes a one-interval test; add becomes a local
+merge; remove a local split.
+
+\solstep{Key Observations}
+\begin{observation}
+Intervals are stored \emph{disjoint and merged} with increasing starts. Therefore, at most one stored
+interval starts before $L$ and reaches into $[L,R)$ -- the immediate predecessor of $L$; every other
+interacting interval starts inside $[L,R)$.
+\end{observation}
+\begin{observation}
+\code{queryRange(L,R)} is true iff \emph{a single} interval covers $[L,R)$ wholly; if $R$ crosses into
+a second interval there is an untracked gap in between, forcing \code{false}. So one descent
+(\code{upper\_bound(L)}, step back) answers it.
+\end{observation}
+\begin{observation}
+\code{addRange} can \emph{only increase} coverage, and its result is one merged interval spanning the
+absorbed ones; \code{removeRange} \emph{only decreases} it, splitting touched intervals into at most two
+outer tails each. Both edit the same localised $\bigO{k}$ block.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Use a boolean array / segment tree over the $10^{9}$ unit line.}
+{Memory blows up and the numbers are reals, not integers -- you cannot index them. The tracked set is
+sparse (few intervals), so store \emph{intervals}, not positions. This is the standard ``large
+coordinate domain, few operations $\Rightarrow$ keep the pieces'' move.}
+\deadend{Keep a plain vector of intervals and linearly scan for overlaps each call.}
+{Correct and passes $n\le10^{4}$, but is $\bigO{n}$ per op and you reinvent what an ordered map gives
+free: the overlapping intervals are a \emph{contiguous}, directly-addressable range found by two
+\code{upper\_bound} descents -- no scan, and merges/splits become erase-and-reinsert of a slice.}
+\aha{Ordered map keyed by start. Localise the interacting intervals with \code{upper\_bound(left)} and
+\code{upper\_bound(right)} plus one predecessor step-back, then edit just that block: absorb-and-merge
+(add), one-interval containment test (query), keep-outer-tails (remove). $\bigO{\log n + k}$ per op.}
+\end{thinkbox}
+
+\solstep{Solution}
+Maintain \code{map<int,int> m} (start$\to$end, disjoint merged). \emph{add}: set $l=$\code{upper\_bound(left)},
+$r=$\code{upper\_bound(right)}; if $l\ne$ begin and the predecessor's end $\ge$ left, pull $l$ back to
+that predecessor; while $l\ne r$, widen $[\text{left},\text{right})$ to include $l$'s interval and erase
+$l$; finally \code{m[left]=right}. \emph{query}: take \code{upper\_bound(left)}, step back (if begin,
+false), return whether its end $\ge$ right. \emph{remove}: same bracket as add; for each touched
+interval $[a,b)$, erase it and re-add $[a,\text{left})$ when $a<\text{left}$ and $[\text{right},b)$ when
+$b>\text{right}$. Each op touches only the localised block, so the invariant ``disjoint \& merged''
+is restored every time (Trap 3).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+We prove the three ops preserve the invariant (tracked set $=$ union of \code{m}, stored intervals
+disjoint with strictly increasing starts/ends) and are correct.
+\emph{Invariant:} after add, all intervals overlapping $[\text{left},\text{right})$ are erased and
+replaced by their union with $[\text{left},\text{right})$, one interval; neighbours it does not overlap
+have end $\le$ left or start $\ge$ right, so disjointness holds. After remove, each touched interval
+$[a,b)$ is replaced by its (disjoint) outer tails $[a,\text{left})$, $[\text{right},b)$, none of which
+intersect $[\text{left},\text{right})$, and untouched intervals are unchanged -- union equals the old
+set minus $[\text{left},\text{right})$. \emph{Add correctness:} by \thmref{c05-interval} the erased
+block $=$ exactly the intervals intersecting $[\text{left},\text{right})$, so the stored union gains
+precisely $[\text{left},\text{right})$. \emph{Query correctness:} coverage holds iff a single stored
+interval contains $[\text{left},\text{right})$ (Observation 2); the sole candidate is the greatest
+start $\le$ left, located by \code{upper\_bound(left)} then step-back, and it covers iff its end
+$\ge$ right -- so the returned boolean is exact. \emph{Remove correctness:} the same block is every
+interval intersecting $[\text{left},\text{right})$; re-adding only their outside tails deletes exactly
+the numbers in $[\text{left},\text{right})$. Hence each op is correct and the invariant is maintained
+by induction over the call sequence. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Range Module -- submittable ordered-map interval manager (LeetCode 715)}, label={lst:c05-range-soln}]
+class RangeModule {
+    map<int,int> m;                         // maximal tracked [start,end), disjoint & merged
+public:
+    void addRange(int left, int right) {
+        auto l = m.upper_bound(left), r = m.upper_bound(right);
+        if (l != m.begin()) { auto p = prev(l); if (p->second >= left) l = p; }
+        while (l != r) {
+            left  = min(left,  l->first);
+            right = max(right, l->second);
+            l = m.erase(l);
+        }
+        m[left] = right;                    // one merged interval replaces all absorbed ones
+    }
+    bool queryRange(int left, int right) {
+        auto it = m.upper_bound(left);
+        if (it == m.begin()) return false;  // no stored interval starts <= left
+        return (--it)->second >= right;      // that predecessor must alone cover [left,right)
+    }
+    void removeRange(int left, int right) {
+        auto l = m.upper_bound(left), r = m.upper_bound(right);
+        if (l != m.begin()) { auto p = prev(l); if (p->second > left) l = p; }
+        while (l != r) {
+            int a = l->first, b = l->second;
+            l = m.erase(l);
+            if (a < left)  m[a]     = left;  // keep left tail
+            if (b > right) m[right] = b;     // keep right tail
+        }
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[The full LC 715 example walk]
+\code{add(10,20)} $\Rightarrow$ $m=\{10\!\to\!20\}$.
+\code{remove(10,14)}: bracket $l=$\code{upper\_bound(10)=end}, predecessor \code{10->20} has
+$20>10$ so edit it; erase, $a=10<b$: $a<10$? no; $b>14$? yes $\to$ \code{m[14]=20}. $m=\{14\!\to\!20\}$ \checkmark.
+\code{add(10,14)}: $l=r=$\code{upper\_bound} bracket absorbs \code{14->20}? its start $14\le$ right so
+it is $<r$? $r=$\code{upper\_bound(14)=end}; the loop merges $[10,14)$ with $[14,20)$ (adjacent: $l$'s
+start $14\le$ right $=14$) $\Rightarrow$ left$=10$,right$=20$, erase, \code{m[10]=20}. $m=\{10\!\to\!20\}$.
+\code{query(14,16)}: \code{upper\_bound(14)=end}, step back to \code{10->20}, $20\ge16$ so true.
+\code{query(10,14)}: predecessor \code{10->20}, $20\ge14$ true. \code{query(16,17)}: $20\ge17$ true.
+All outputs match the reference \checkmark. Verdict: \ac.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{\log n + k}$ per operation ($n=$ map size, $k=$ intervals overlapping the query): two
+\code{upper\_bound} descents plus one erase/insert per absorbed interval, and an add inserts $\le 1$
+merged key. Over all $10^{4}$ calls the map size stays small (bounded by call count), so this is
+comfortably within limits -- where a $\bigO{10^{9}}$ boolean array is impossible and a $\bigO{n}$
+vector scan is the ``brute that still passes but misses the point'' version. Space $\bigO{m}$ for the
+maximal intervals. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+The three ways to fail LC 715: (i) half-open/closed mismatch (Trap 2) -- use \code{upper\_bound} for
+the right bracket and keep the merge condition $p->\text{second} \ge$ left for add but $>$ left for
+remove (an interval \emph{ending exactly at} left does not overlap, so remove must not pull it in).
+(ii) Forgetting to merge, breaking the query's one-interval assumption (Trap 3). (iii) Iterating a
+\code{map} while erasing without using the \code{erase}-returns-next idiom -- invalidated iterators.
+\emph{Variants:} the same skeleton with \code{set<pair<int,int>>} (intervals as keys) works but the
+\code{map} keyed by start reads cleaner; and LC 732 \emph{My Calendar III} upgrades this to a
+\emph{multiset of boundary events} to report peak overlap (max concurrent bookings).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \textbf{The library \emph{is} the BST.} \code{lower/upper\_bound} are \propref{c05-search} and
+        \defref{c05-succ} as calls, guaranteed $\bigO{\log n}$ because the tree balances itself
+        (\propref{c05-logn}).
+  \item \textbf{Sparse domains $\Rightarrow$ store intervals, not cells.} The map-keyed-by-start turns a
+        $10^{9}$ line into a handful of ordered entries -- the localisation of \thmref{c05-interval}.
+  \item \textbf{Order buys discard.} The chapter's theme -- ``one comparison eliminates a subtree'' --
+        becomes ``two \code{upper\_bound}s eliminate all-but-$k$ intervals.'' Same power, library syntax.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Coordinates too large but operations few}: the interval-map here is the general recipe;
+        a segment tree with \emph{dynamic nodes} (\chref{c13}) is the other, paying memory only for
+        touched ranges.
+  \item \textbf{Need rank/select, not coverage}: the GNU \code{pb\_ds} order-statistic tree is a
+        red-black BST with per-node subtree sizes -- \probref{c05-summit}'s augmentation, off the shelf.
+  \item \textbf{Dense small keys, many prefix queries}: swap the pointer BST for a Fenwick tree
+        (\chref{c14}) -- $\bigO{\log U}$ with array constants; the ordered map wins when keys are
+        \emph{sparse} or you need neighbour \emph{identity}, not counts.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you store \emph{intervals}, not unit cells? (Think It Through, dead-end 1.)
+  \item Did \code{queryRange} check \emph{one} interval (the predecessor of \code{left})? (Trap 3, \thmref{c05-interval}.)
+  \item Are your boundaries half-open and consistent (\code{upper\_bound} vs \code{lower\_bound})? (Trap 2.)
+  \item For the practice, did you realise a booking is an interval and ``no overlap'' is a coverage test?
+        (nearest-neighbor via \code{lower\_bound}, \defref{c05-oset}.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{My Calendar I}{LeetCode 729}
+    {https://leetcode.com/problems/my-calendar-i/}{LC Medium L3}
+    {Book $[\text{start},\text{end})$ only if it does not \emph{overlap any existing} booking; return
+    whether the booking succeeded. This is \coderef{c05-range}'s machinery minus merging: keep booked
+    intervals in a \code{map} keyed by start. A new event overlaps iff the interval with the greatest
+    start $\le$ \code{start} ends after \code{start} (\code{upper\_bound} step-back) \emph{or} the next
+    interval starts before \code{end}. Check those two neighbours in $\bigO{\log n}$ and insert if free
+    -- the same ``only a localised few intervals can interact'' fact as \thmref{c05-interval}. Half-open
+    convention again decides $\le$ vs $<$.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 7.4 BSTs in Contests (std::set/map)]
+\code{set}/\code{map} \emph{are} self-balancing BSTs, so \code{lower\_bound} (ceiling),
+\code{upper\_bound} (successor), \code{prev} (floor/predecessor), insert and erase all cost
+$\bigO{\log n}$ -- \defref{c05-oset}, \propref{c05-logn} (\chref{c06} proves balance). Manage disjoint
+intervals as a \code{map} start$\to$end: \code{upper\_bound(L)}, \code{upper\_bound(R)} and one
+step-back localise every interval that can interact (\thmref{c05-interval}), giving add/query/remove
+in $\bigO{\log n + k}$ -- LC 715 Range Module (\coderef{c05-range}, \probref{c05-range}); My Calendar
+(LC 729) is the same with overlap-only checks. Keep the \emph{domain} invariant (merged, half-open)
+yourself; the library only guarantees order. Dense small keys + counts $\Rightarrow$ Fenwick \chref{c14}.
+\selftest{
+  \item Which two container calls localise every interval overlapping $[L,R)$, and why is a
+        predecessor step-back needed? (\thmref{c05-interval}.)
+  \item State the $\bigO{\log n}$ guarantee of \propref{c05-logn} and what chapter proves it.
+  \item For a coverage query, why must a \emph{single} interval contain all of $[L,R)$?
+  \item Give the \code{set} expression for the floor (largest $\le x$) of $x$ and its null case.
+  \item Name one task where a Fenwick tree beats the ordered map and say why (\chref{c14}).
+}
+\end{recallbox}

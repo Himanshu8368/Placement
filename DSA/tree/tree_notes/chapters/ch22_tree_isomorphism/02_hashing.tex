@@ -1,0 +1,407 @@
+% =====================================================================
+%  28.2  Tree hashing: order-free shape hashes, order-sensitive string
+%  hashes, and the collision ledger.
+%  Exports: sec:c22-hash  def:c22-shapehash  def:c22-strhash
+%  thm:c22-collision  lst:c22-shapehash  lst:c22-organic
+%  prob:c22-organic  fig:c22-organic
+%  Solved CF 601D "Acyclic Organic Compounds" (2400, L5), live-verified
+%  against the CF problem page + problemset API (name, rating 2400, tags
+%  data structures/dfs/dsu/hashing/strings/trees; both official samples:
+%  51/3 and 6/2).  This section owns BOTH hash families and the collision
+%  ledger; 28.3 and the Summit only reference them by label.
+% =====================================================================
+\section{Tree Hashing: \(O(1)\) Compares, Priced in Collisions}\label{sec:c22-hash}
+
+\begin{previouslybox}[28.1 gave names you can compare -- but names cost a map]
+The interned-id labeller (\(\secref{c22-ahu}\)) is exact: two shapes are equal iff
+\(\mathrm{cl}\)-values are equal.  Its price is bookkeeping -- a
+\texttt{map<vector<int>,int>} shared by everything you compare, rebuilt per test
+case, and a labelling pass before the very first compare.  When you only need a
+\emph{probabilistic} yes/no (and you nearly always do, in contest), you can replace
+the interned name by a random \(64\)-bit number computed with a local recurrence:
+no table, no shared counter, \(O(1)\) per compare, and the map disappears.  What
+you gain in speed you pay in a \emph{collision ledger} -- this section prices that
+deal honestly, and then spends it on CF 601D.
+\end{previouslybox}
+
+\begin{topicintro}
+There are two different hashing jobs on trees and conflating them is the classic
+error.  A \term{shape hash} must be \emph{order-free}: children are an unordered
+set, so the combine has to be commutative (sum or XOR of per-child random values,
+\(\defref{c22-shapehash}\)).  A \term{path-string hash} must be
+\emph{order-sensitive}: the string read down a path cares which letter came first,
+so positional powers of a base are what you want (\(\defref{c22-strhash}\)).  Both
+are randomized polynomial hashes, and both inherit the same guarantee
+(\(\thmref{c22-collision}\)): two genuinely different objects collide with
+probability at most \(\bigO{\text{degree}/2^{64}}\) per pair -- so a hash says NO
+with certainty and YES with overwhelming probability, and the fix when YES must be
+trusted is one explicit bijection check.
+
+\textbf{Prerequisites.} \(\secref{c22-ahu}\) for what a canonical name is (the hash
+replaces the interned map, not the recurrence order).  Polynomial rolling hashes
+from the string chapters are \emph{not} assumed -- \(\defref{c22-strhash}\) builds
+the positional scheme from scratch in tree language.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item write an order-free subtree hash and explain why XOR/sum is mandatory there; \hfill\lv{4}
+  \item encode every downward string of a node as one integer with NO per-level rework (the depth-weighted trick); \hfill\lv{5}
+  \item merge per-node hash sets small-to-large and bound the total work; \hfill\lv{5}
+  \item state the collision ledger of a \(64\)-bit scheme and when to double it; \hfill\lv{4}
+  \item solve CF 601D -- distinct downward strings per node, argmax by \(c_v\). \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{Two combines: order-free and order-sensitive}
+% ---------------------------------------------------------------
+
+\begin{definition}{Order-free (shape) hash}{c22-shapehash}
+Let \(\rho(d, x)\) be a random \(64\)-bit value keyed by depth \(d\) and child hash
+\(x\) (a table, or a mixing function of the pair).  Define
+\[
+   h(u) \;=\; 1 \;+\!\! \sum_{v \in \children(u)}\!\!\bigl(\rho(\depth(v),\, h(v)) \bmod 2^{64}\bigr) .
+\]
+Sum (or XOR) is \emph{commutative}, so permuting the children leaves \(h(u)\)
+unchanged: \(h(u)=h(w)\) is a YES-answer to "\(\subtree(u)\cong\subtree(w)\)?" up
+to collision.  The depth-seeding of \(\rho\) is what stops the degenerate
+"chain of length 4 vs.\ star of size 4" family of accidental equalities that a
+bare \(\sum h(v)\) suffers from.
+\end{definition}
+
+\begin{definition}{Order-sensitive (path-string) hash}{c22-strhash}
+Fix a random odd base \(B\).  For the string read down the path
+\(v=x_0,x_1,\dots,x_k\), store the \emph{depth-weighted} value
+\[
+   G(v\!\to\!x_k)\;=\;\sum_{i=1}^{k} \!\!\mathit{val}(x_i)\, B^{\depth(x_i)}
+   \qquad(\text{the start letter } x_0 \text{ is excluded}).
+\]
+Because \(\depth(x_i)-\depth(v)=i\), multiplying by \(B^{-\depth(v)}\) turns \(G\)
+into the ordinary positional hash of the string read from \(v\): the factor is the
+\emph{same for every string starting at \(v\)}, so within one node's collection
+\(G\)-equality and string-equality coincide -- and \(G\) never has to be rewritten
+when a string is extended downward.  That is the trick that makes 28.2's solved
+problem linear-ish instead of quadratic.
+\end{definition}
+
+\begin{theorem}{Collision ledger}{c22-collision}
+Two distinct objects whose hash is a degree-\(\le D\) polynomial in the random
+base (over \(2^{64}\): roughly \(D\le\max\depth\); over a prime modulus: exactly)
+collide with probability at most \(D/2^{64}\) per pair.  With \(n=3\cdot10^{5}\)
+subtrees the union bound over all \(\binom{n}{2}\) compares is heuristic, not a
+proof: a \(64\)-bit overflow ring is hackable in principle, so (i) a NO from a hash
+compare is \emph{certain}, (ii) a YES is \emph{almost certainly right}, and (iii)
+when (ii) must be made certain, re-run the deterministic check of
+\(\secref{c22-ahu}\) or an explicit bijection DFS -- on the handful of YES pairs
+only.
+\end{theorem}
+
+\begin{lstlisting}[caption={Order-free shape hash: one DFS, O(1) compares afterwards. rho is a splitmix64 mix of (depth, child hash); sum makes it commutative. ASCII only, identifiers without underscores}, label={lst:c22-shapehash}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef unsigned long long ull;
+const int MAXN=200005;
+int n; vector<int> adj[MAXN], kids[MAXN]; ull h[MAXN], dep[MAXN];
+ull mix(ull x){                       // splitmix64 finalizer
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+ull rho(int d, ull x){ return mix(x + 0x51ULL * d + 7); }
+void dfs(int u){                      // kids[] already rooted by build()
+    h[u]=1;
+    for(int v: kids[u]){ dfs(v); h[u] += rho((int)dep[v], h[v]); }
+}
+void build(int u, int p, int d){
+    dep[u]=d; kids[u].clear();
+    for(int v: adj[u]) if(v!=p){ kids[u].push_back(v); build(v,u,d+1); }
+}
+// same shape test: h[u]==h[w]  (YES up to collision, NO certain)
+\end{lstlisting}
+
+\begin{insightbox}[Why the sum and not the product, and why depth-seed at all]
+Products overflow into zero-collisions with structured trees, and plain
+\(\sum h(v)\) makes a chain and a small star interchangeable (both can reach the
+same total).  Seeding each child by its \emph{depth} before mixing means the
+combine sees \((\text{child shape}, \text{height above the floor})\) -- two trees
+with the same multiset of child shapes at different heights become distinguishable,
+while child \emph{order} still cannot matter because addition is commutative.  Order
+must be invisible here and fully visible in \(\defref{c22-strhash}\): same tool,
+two opposite requirements, which is why this chapter keeps two definitions instead
+of one.
+\end{insightbox}
+
+\begin{complexitybox}[Both families]
+Shape hashing: \(\bigO{n}\) DFS, \(O(1)\) per compare, \(\bigO{n}\) space.  The
+depth-weighted string scheme: \(\bigO{n}\) to precompute \(B^{\depth(\cdot)}\),
+then the 601D merge is \(\bigO{n\log n}\) expected (small-to-large).  Versus
+AHU: no map, no per-testcase re-interning, \(O(1)\) compares \emph{identically},
+but the answer is probabilistic -- budget one extra verification pass if the judge
+is adversarial or the problem is graded on correctness, not acceptance.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 601D Acyclic Organic Compounds -- distinct downward strings}
+% ---------------------------------------------------------------
+
+\solvedproblem{c22-organic}{Acyclic Organic Compounds}{CF 601D}
+  {https://codeforces.com/problemset/problem/601/D}{CF 2400 L5}
+  {depth-weighted path-string hashing (\(\defref{c22-strhash}\)) so no hash is ever rewritten; per-node sets of distinct downward strings merged small-to-large (Ch.17); argmax of \(f(v)+c_v\)}
+
+\begin{problemstatement}[Acyclic Organic Compounds (statement, constraints and both samples verified against the live CF page)]
+A tree \(T\) on \(n\) vertices (\(1\le n\le 300\,000\)), rooted at \(1\), with a
+lowercase letter in each vertex, and an integer \(c_v\) in each vertex
+(\(0\le c_v\le 10^{9}\)).  For a vertex \(v\), read the string along every simple
+path that starts at \(v\) and ends at some vertex of the subtree \(T_v\) (possibly
+\(v\) itself); let \(f(v)\) be the number of \emph{distinct} strings so readable.
+Compute and print two lines: the maximum of \(f(v)+c_v\) over all \(v\), and the
+number of vertices attaining that maximum.
+
+\textbf{Sample 1.} \(n{=}10\); \(c=(1,2,7,20,20,30,40,50,50,50)\);
+\(s=\) \texttt{cacabbcddd}; edges \(1\!-\!2, 6\!-\!8, 7\!-\!2, 6\!-\!2, 5\!-\!4,
+5\!-\!9, 3\!-\!10, 2\!-\!5, 2\!-\!3\) \(\to\) \texttt{51} \texttt{3}.
+\textbf{Sample 2.} \(n{=}6\); \(c=(0,2,4,1,1,1)\); \(s=\) \texttt{raaaba}; edges
+\(1\!-\!2, 2\!-\!3, 2\!-\!4, 2\!-\!5, 3\!-\!6\) \(\to\) \texttt{6} \texttt{2}.
+\end{problemstatement}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.92, transform shape,
+   tnode/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.7pt,
+                 minimum size=7mm, font=\scriptsize\bfseries, inner sep=1pt},
+   ltr/.style={font=\tiny, text=warningred}]
+  \node[tnode] (v1) at (0,0) {1};
+  \node[tnode] (v2) at (0,-1.6) {2};
+  \node[tnode] (v3) at (-2.6,-3.0) {3};
+  \node[tnode] (v5) at (0.9,-3.0) {5};
+  \node[tnode] (v6) at (2.9,-3.0) {6};
+  \node[tnode] (v7) at (-1.3,-1.6) {7};
+  \node[tnode] (v4) at (-0.4,-4.5) {4};
+  \node[tnode] (v9) at (2.0,-4.5) {9};
+  \node[tnode] (v8) at (2.9,-4.5) {8};
+  \node[tnode] (v10) at (-3.4,-4.5) {10};
+  \draw (v1)--(v2) (v2)--(v3) (v2)--(v5) (v2)--(v6) (v2)--(v7) (v3)--(v10) (v5)--(v4) (v5)--(v9) (v6)--(v8);
+  \node[ltr] at (0.45,0.3) {\tt c};   \node[ltr] at (0.45,-1.3) {\tt a};
+  \node[ltr] at (-2.15,-2.7) {\tt c}; \node[ltr] at (1.35,-2.7) {\tt b};
+  \node[ltr] at (3.35,-2.7) {\tt b};  \node[ltr] at (-1.7,-1.3) {\tt c};
+  \node[ltr] at (-0.0,-4.2) {\tt a};  \node[ltr] at (2.45,-4.2) {\tt d};
+  \node[ltr] at (3.35,-4.2) {\tt d};  \node[ltr] at (-3.0,-4.2) {\tt d};
+\end{tikzpicture}
+\caption{Sample 1 of CF 601D, rooted at 1 (letters in red).  The three argmax
+vertices are the leaves \(8,9,10\) with \(f=1\), \(c=50\): \(f+c=51\).  The
+\(f\)-values needed for the trace: \(f(5)=3\) (\texttt{b,ba,bd}),
+\(f(6)=2\), \(f(3)=2\), \(f(2)=9\), \(f(1)=10\) -- all derived in the tracebox.}
+\label{fig:c22-organic}
+\end{figure}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 45 minutes]
+If you literally stored the strings, what would the total length be, and which
+shape of tree makes it worst?
+\peek{A chain on \(n\) nodes makes \(\Theta(n^2)\) characters across all the
+strings from the root's descendants.  So store each string as a NUMBER instead --
+but a plain positional hash from \(v\) changes when you move up to \(v\)'s parent
+(you would have to prepend a letter to every string in the set).}
+\nudge{Use \(\defref{c22-strhash}\): weight letter \(x\) by \(B^{\depth(x)}\)
+instead of by its offset from the start.  Then a string from \(v\) and the same
+string seen from \(v\)'s parent differ by exactly one added term
+\(\mathit{val}(v)B^{\depth(v)}\), constant across the whole set -- so equality
+within a node's collection needs no normalization, and going up costs \emph{zero}
+rewrites.}
+\fullhint{Define \(T(v)=\{G(v\!\to\!u): u\in\subtree(v)\}\), i.e.\ the
+depth-weighted tail sums, where \(G(v\!\to\!v)=0\).  Then
+\[ T(v)=\{0\}\ \cup\ \bigcup_{w\in\children(v)}\bigl(T(w)\cup\{\mathit{val}(w)B^{\depth(w)}\}\bigr), \]
+so \(f(v)=|T(v)|\) and \textbf{no element is ever modified} -- the sets are merged
+with small-to-large (Ch.~17, \chref{c28}) and each element moves \(O(\log n)\)
+times: \(\bigO{n\log n}\) expected with hash sets.  Iterate the tree in an
+\emph{iterative} postorder (\(n=3\cdot10^{5}\) will overflow the recursion stack);
+use \texttt{long long} for \(f+c\); insert the single extra element
+\(\mathit{val}(w)B^{\depth(w)}\) per child \emph{after} adopting the biggest child
+set as your own.  Finally take \(\max_v (f(v)+c_v)\) and count the argmax.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The object counted is a set of \emph{strings}, but strings are only ever compared
+at one fixed starting vertex.  That locality is exactly what the depth-weighted
+encoding exploits: within \(T(v)\), two paths give the same \(G\) iff they read the
+same string (up to collision), and moving the viewpoint from a child up to \(v\)
+adds one global constant -- which is invisible to equality tests inside a set.  So
+the recursion for \(T(v)\) is a pure union, and unions of sets with dedup are the
+small-to-large job of Ch.~17, not a new idea.
+
+\solstep{Key Observations}
+\begin{observation}
+\(G(v\!\to\!u)=\sum_{x \in \mathrm{path}(v,u),\, x\ne v}\!\!\mathit{val}(x)B^{\depth(x)}\)
+satisfies \(G(v\!\to\!u)=G(w\!\to\!u)+\mathit{val}(w)B^{\depth(w)}\) for a child
+\(w\) of \(v\): the parent's strings are the child's strings plus one constant, so
+the child's stored set is reusable \emph{as is}, with one fresh element
+\(\mathit{val}(w)B^{\depth(w)}\) for the path that ends at \(w\).
+\end{observation}
+\begin{observation}
+Distinct strings \(\Rightarrow\) distinct \(G\)-values except with probability
+\(\le \max\depth/2^{64}\) per pair (\(\thmref{c22-collision}\)): the difference of
+two unequal \(G\)'s is a nonzero polynomial in \(B\) of degree \(\le n\) with
+coefficients in \([-26,26]\).  Nothing here needs the strings to be the same
+\emph{length} -- a proper prefix differs from its extension because the extra term
+has a letter coefficient \(\ge 1\).
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.26\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ store real strings & \texttt{set<string>} per node, copied upward & \(\bigO{n^2\log n}\) & \mle \\
+2 & \lv{3}\ positional hash from each root & prepend \(v\)'s letter to all of \(v\)'s set & \(\bigO{n^2}\) & \tle \\
+3 & \lv{4}\ shared trie of downward strings & dedupe by trie node, keep one global map & \(\bigO{n^{1.5}}\)--\(\bigO{n^2}\) & \textbf{WA} \\
+4 & \lv{5}\ \textbf{depth-weighted + small-to-large} & sets never rewritten; union only & \(\bigO{n\log n}\) expected & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is the natural first hash and fails on the chain: \(O(n)\) strings each
+rewritten per level.  Rung~3 (a shared trie with one node per distinct string)
+is what \emph{some} accepted solutions do, but per vertex you must then count the
+trie nodes visible from \(v\) -- a subtree-of-a-trie query that costs more than it
+saves unless you add persistent structures.  Rung~4 removes the rewrite entirely
+-- the only real innovation needed.
+
+\solstep{Solution}
+Root at \(1\) iteratively, compute \(\depth\) and \(B^{\depth(\cdot)}\).  Process
+vertices in postorder: adopt the largest child's set as \(T(v)\), insert \(0\) and
+each child's single element \(\mathit{val}(w)B^{\depth(w)}\), then pour the smaller
+children's elements in (moving, never copying the biggest).  Record
+\(f(v)=|T(v)|\).  Scan \(f(v)+c_v\) for the maximum and its count.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 601D. Depth-weighted string hashes + small-to-large set merge. Iterative postorder (n=3e5). ASCII only, identifiers without underscores}, label={lst:c22-organic}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+typedef unsigned long long ull;
+const int MAXN=300005;
+int n; ll c[MAXN]; char s[MAXN];
+vector<int> adj[MAXN], kids[MAXN], post, stk;
+ull B=13154239117332111ULL, pw[MAXN], base[MAXN];
+unordered_set<ull> *bag[MAXN];
+int main(){
+  scanf("%d",&n);
+  for(int i=1;i<=n;i++) scanf("%lld",&c[i]);
+  scanf("%s",s+1);
+  for(int i=1;i<n;i++){ int u,v; scanf("%d%d",&u,&v); adj[u].push_back(v); adj[v].push_back(u); }
+  // iterative rootify: stack order has every parent before its children
+  stk.push_back(1); vector<int> seen(n+1,0); seen[1]=1;
+  while(!stk.empty()){
+    int u=stk.back(); stk.pop_back(); post.push_back(u);
+    for(int v: adj[u]) if(!seen[v]){ seen[v]=1; kids[u].push_back(v); stk.push_back(v); }
+  }
+  pw[0]=1; for(int i=1;i<=n;i++) pw[i]=pw[i-1]*B;
+  // depths: 'post' is a preorder-style list, so parents are already final here
+  vector<int> dep(n+1,0);
+  for(int u: post) for(int v: kids[u]) dep[v]=dep[u]+1;
+  for(int u=1;u<=n;u++) base[u]=(ull)(s[u]-'a'+1)*pw[dep[u]];
+  // process in REVERSE preorder = postorder (children before parents)
+  ll best=-1; ll cnt=0;
+  for(int idx=(int)post.size()-1; idx>=0; idx--){
+    int u=post[idx]; int big=-1;
+    for(int v: kids[u]) if(big==-1 || bag[v]->size() > bag[big]->size()) big=v;
+    if(big==-1) bag[u]=new unordered_set<ull>(); else bag[u]=bag[big];
+    bag[u]->insert(0ULL);                    // the string consisting of u alone
+    for(int v: kids[u]) if(v!=big){
+        bag[u]->insert(base[v]);             // path u -> v
+        for(const ull &e : *bag[v]) bag[u]->insert(e);
+        delete bag[v]; bag[v]=nullptr;
+    }
+    ll val = (ll)bag[u]->size() + c[u];
+    if(val>best){ best=val; cnt=1; } else if(val==best) cnt++;
+  }
+  printf("%lld\n%lld\n",best,cnt);
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Sample 2 in full, then Sample 1's argmax]
+\textbf{Sample 2.} \(c=(0,2,4,1,1,1)\), \(s=\texttt{raaaba}\) (so
+\(s_1{=}\texttt r, s_2{=}s_3{=}s_4{=}s_6{=}\texttt a, s_5{=}\texttt b\)), edges
+\(1\!-\!2,2\!-\!3,2\!-\!4,2\!-\!5,3\!-\!6\); root \(1\) gives children
+\(1\!:\!\{2\}\), \(2\!:\!\{3,4,5\}\), \(3\!:\!\{6\}\), and depths
+\(0,1,2,2,2,3\).  With \(\mathit{val}(\texttt a){=}1,\ \mathit{val}(\texttt b){=}2\):
+\(\mathit{base}_2{=}B,\ \mathit{base}_3{=}\mathit{base}_4{=}B^{2},
+\mathit{base}_5{=}2B^{2},\ \mathit{base}_6{=}B^{3}\).  Note
+\(\mathit{base}_3{=}\mathit{base}_4\) \emph{by design}: same letter at same depth,
+and the path \(2\!-\!3\) reads the same string \texttt{aa} as the path \(2\!-\!4\).
+Leaves: \(T(4)=T(5)=T(6)=\{0\}\), \(f=1\) each.  Vertex 3 adopts \(T(6)\), inserts
+\(0,\mathit{base}_6\): \(T(3)=\{0,B^{3}\}\), \(f(3)=2\) (\texttt{a}, \texttt{aa}).
+Vertex 2 adopts the biggest child set \(T(3)\), inserts \(0\), then per smaller
+child \(4,5\) the elements \(\{\mathit{base}_4\}\cup T(4)\) and
+\(\{\mathit{base}_5\}\cup T(5)\):
+\[ T(2)=\{0,\,B^{2},\,2B^{2},\,B^{3}\},\qquad f(2)=4
+\quad(\texttt{a},\texttt{aa},\texttt{ab},\texttt{aaa}), \]
+where the \(0\) from \(T(4)\) and \(T(5)\) is absorbed (already present) and
+\(\mathit{base}_4\) coincides with \(\mathit{base}_3\) already inside \(T(3)\) --
+\(B^{2}\) counted once, exactly as the two identical strings demand.  Vertex 1
+adopts \(T(2)\), inserts \(0,\mathit{base}_2\): \(T(1)=\{0,B,B^{2},2B^{2},B^{3}\}\),
+\(f(1)=5\).  Scores \(f+c=(5,6,6,2,2,2)\Rightarrow\boxed{6,\ 2}\) ✓, the official
+output.
+
+\textbf{Sample 1.} Enumerating strings directly (the hash gives the same sets):
+\(f=(10,9,2,1,3,2,1,1,1,1)\).  The two interesting ones:
+\(f(5)=3\) (\texttt{b,ba,bd}) and \(f(2)=9\) --
+\(\{\)\texttt{a, ac, ab, abd, bb, bba, bbd, cc, ccd}\(\}\) -- the string
+\texttt{a} itself plus eight longer ones, spread over the four children
+\(7,6,5,3\) (\(\texttt{abd}\) lives under child 6, \(\texttt{bba,bbd}\) under
+child 5).  Then \(f(1)=10\) is \(f(2)\)'s
+nine strings each prefixed by \texttt{c}, plus \texttt{c} itself.  Scores
+\(f+c=(11,11,9,21,23,32,41,51,51,51)\Rightarrow\boxed{51,\ 3}\) ✓ -- the three
+leaves \(8,9,10\) with \(c=50\).  \(\Box\)
+\end{tracebox}
+
+\begin{warningbox}[Three ways this goes wrong]
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{Rewriting hashes when moving up (rung 2).} If you weight by
+        offset-from-start instead of absolute depth, every parent must multiply and
+        add across its child's whole set: \(\bigO{n^2}\) on a chain.  The
+        depth-weighted form of \(\defref{c22-strhash}\) is the whole trick.
+  \item \textbf{Forgetting the \(\mathit{base}(w)\) element for a child.} \(T(w)\)
+        deliberately excludes \(w\)'s own letter, so the path \(v\!\to\!w\) (string
+        of length 2 counting \(v\)) is not in any child set -- insert it per child
+        or \(f(v)\) is short by exactly the children with unique letters.
+  \item \textbf{Recursive DFS / \texttt{int} overflow.} \(n=3\cdot10^{5}\) kills the
+        default stack; and \(f+c\) reaches \(10^{9}+n\) -- \texttt{long long}.
+        Symptom: segfault on the chain test, or a wrong max on the big-\(c\) tests.
+\end{enumerate}
+\end{warningbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Seed \(B\) randomly (odd, 60-bit) and mix letters as
+        \(\texttt{val}-\texttt{'a'}+1\).} A fixed public base is a hacking target;
+        letter \(0\) would make \texttt{"a"} and \texttt{"aa"}-style prefixes
+        collide trivially, hence the \(+1\).
+  \item \textbf{\texttt{unordered\_set} is the constant-factor trap.} Reserve buckets
+        (\texttt{reserve}/\texttt{max\_bucket\_count}) or use a custom hash;
+        a hacked \texttt{unordered\_map} is \(\bigO{n}\) per insert and the merge
+        degrades to \(\bigO{n^2}\).
+  \item \textbf{Deterministic alternative.} Replace hashes by interned ids
+        (\(\secref{c22-ahu}\)-style tuples of the \emph{ordered} child ids -- a
+        string is an ordered object) and merge \texttt{set<int>} instead: same
+        small-to-large bound, no collision ledger at all.  Prefer it when the judge
+        has anti-hash tests; prefer hashes when the constants matter.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[28.2 in one breath]
+\emph{Two combines, one ledger: shape equality needs a \textbf{commutative}
+combine (\(\defref{c22-shapehash}\), \(\coderef{c22-shapehash}\)); path strings need
+a \textbf{positional} one -- and weighting each letter by \(B^{\depth(\cdot)}\)
+instead of by offset makes the viewpoint shift a constant, so sets are merged with
+zero rewrites (\(\defref{c22-strhash}\)).  Small-to-large turns that into
+\(\bigO{n\log n}\) for CF 601D: \(T(v)=\{0\}\cup\bigl(\bigcup_w T(w)\cup\{\mathit{base}_w\}\bigr)\),
+traced to \(51,3\) and \(6,2\) (\(\probref{c22-organic}\)).  NO is certain, YES is
+\(1-\bigO{\depth/2^{64}}\); when YES must be trusted, verify with
+\(\secref{c22-ahu}\) (\(\thmref{c22-collision}\)).}
+\selftest{
+  \item Why can't the shape hash use the positional string scheme? \emph{(Positional hashing makes child order significant; shape must be order-free, hence sum/XOR of depth-seeded child values.)}
+  \item What exactly is the one element a parent must add for each child? \emph{(\(\mathit{base}(w)=\mathit{val}(w)B^{\depth(w)}\) -- the path that stops at \(w\).)}
+  \item Give the collision guarantee in one sentence. \emph{(Degree-\(\le\max\depth\) polynomial in a random 64-bit base: NO certain, YES wrong with probability \(\le \depth/2^{64}\) per pair; double or verify if it must be certain. \(\thmref{c22-collision}\).)}
+}
+\end{recallbox}

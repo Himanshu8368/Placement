@@ -1,0 +1,237 @@
+### Problem: Serega and Fun {#sec-sqrt-p3-serega}
+
+::: {.p-statement}
+There is an array $a_1, \ldots, a_n$ of positive integers ($1 \le a_i \le n$) and $q$ operations, two kinds:
+
+- `1 l r` — a **unit cyclic shift right** of the segment $[\ell, r]$: $a_\ell, \ldots, a_{r-1}, a_r$ becomes $a_r, a_\ell, \ldots, a_{r-1}$ (the last element moves to the front of the segment).
+- `2 l r k` — print how many elements equal to $k$ lie in the segment $[\ell, r]$.
+
+Constraints: $1 \le n, q \le 10^{5}$, $1 \le a_i, k \le n$. The real judge encodes $\ell, r, k$ online with the previous answer (`lastans`); that is only an anti-offline safeguard — the structure below answers each decoded operation in any order.
+
+Source: [CF 455D · Serega and Fun](https://codeforces.com/problemset/problem/455/D){.solved rating="2700"}
+
+Example — $a = [6, 6, 2, 7, 4, 2, 5]$: `1 3 6` cyclically shifts the segment $[2, 7, 4, 2]$ to $[2, 2, 7, 4]$, giving $a = [6, 6, 2, 2, 7, 4, 5]$; a `2`-query then asks, say, "how many $2$'s in $[2, 6]$?" — the answer is $2$ (positions $3, 4$ in the shifted array). (Asserted against the plain-list oracle, then stressed; the shift is literally a pop-at-$r$ + insert-at-$\ell$.)
+:::
+
+::: {.p-intuition}
+The count query wants, over $[\ell, r]$, how many cells equal $k$. With fixed index blocks and a per-block **value-frequency table** (`freq[b]` = a map from value to how many times it appears in block $b$), a whole block answers "count of $k$" in $O(1)$ and the two edges are scanned cell by cell — @sec-sqrt-a4's value buckets living *inside* each position block.
+
+But the shift breaks fixed blocks: moving $a_r$ to the front of $[\ell, r]$ shifts every element after $\ell$ one slot right, so block *boundaries by index* no longer line up with block *contents*. The fix is the **unrolled linked list** of @sec-sqrt-a3: keep the array as a list of blocks, each a Python list of its own current values; a shift removes one value at global rank $r$ and re-inserts one at rank $\ell$. Sizes drift, so a block that grows past $2B$ is split in two (a partial **rebuild**); the total size is unchanged, only redistributed. Ranks are found by walking block lengths — $O(n/B)$ blocks deep.
+:::
+
+::: {.p-approach}
+1. **Plain list.** `1 l r` does `v = a[r]; del a[r]; a.insert(l, v)`; `2 l r k` counts `a[i] == k` over the slice. $O(n)$ per operation — the oracle.
+2. **Unrolled blocks + per-block value histogram.** Keep `blocks` (lists) and `freq[b]` (`Counter` of each block). A shift pops rank $r$ and inserts rank $\ell$, splitting any block that exceeds $2B$. A count walks whole blocks via `freq[b].get(k, 0)` plus edge cells. $O(n/B + B)$ per operation with $B = \sqrt n$.
+
+**Invariant.** Flattening `blocks` reproduces the live array exactly, and `freq[b]` equals `Counter(blocks[b])` for every block. A pop decrements and an insert increments the touched `freq`, and a split rebuilds both new blocks' `Counter`s — so a whole-block `get(k)` is always a true count, which is what makes the query $O(1)$ per block.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Plain list
+
+::: {.form-next}
+Use a single Python list: the shift is a delete-plus-insert, the count is a slice scan. $O(n)$ per operation — oracle only, but its answers are what the block redistribution is diffed against after every shift.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def serega_brute(a, l, r, k):
+    # apply one operation on a copy; k == None means "do the shift", return nothing
+    a = list(a)
+    if k is None:
+        v = a[r]
+        del a[r]
+        a.insert(l, v)
+        return a
+    return sum(1 for i in range(l, r + 1) if a[i] == k)
+
+
+base = [6, 6, 2, 7, 4, 2, 5]
+after = serega_brute(base, 2, 5, None)         # shift [2..5]
+assert after == [6, 6, 2, 2, 7, 4, 5]
+assert serega_brute(after, 1, 5, 2) == 2
+```
+
+##### C++
+
+```cpp
+// brute force: one std::list is O(n) per operation
+vector<int> serega_shift(const vector<int>& a, int l, int r) {
+    vector<int> b(a);
+    int v = b[r];
+    b.erase(b.begin() + r);
+    b.insert(b.begin() + l, v);
+    return b;
+}
+int serega_count(const vector<int>& a, int l, int r, int k) {
+    int c = 0;
+    for (int i = l; i <= r; ++i) if (a[i] == k) ++c;
+    return c;
+}
+```
+:::
+
+**Reading it line by line.** `del a[r]` then `a.insert(l, v)` is exactly the cyclic shift, because removing $r$ first pulls everything after it left and inserting at $\ell$ pushes $[\ell, r-1]$ back right. It is the operation we cannot beat at $n, q \le 10^{5}$ without a structure, so the block version must return identical counts after identical shifts — which the stress loop checks by running both side by side.
+
+#### Unrolled blocks with a value histogram
+
+::: {.form-next}
+Store the sequence as a list of blocks and a `Counter` per block. To shift $[\ell, r]$ right by one, pop the value at rank $r$ and insert it at rank $\ell$ (ranks found by walking block lengths), splitting a block once it exceeds $2B$. To count $k$ over $[\ell, r]$, sum `freq[b][k]` over whole blocks plus the edge cells.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+sf_blocks = [[6, 6, 2], [2, 7, 4], [5]]
+
+
+def draw(ax, p):
+    V.grid(ax, p, [[str(x) for x in blk] for blk in sf_blocks],
+           row_labels=["block 0", "block 1", "block 2"],
+           colors={(r, c): ("green" if r == 0 else "indigo" if r == 1 else "pink")
+                   for r in range(3) for c in range(3)},
+           cell_w=1.1)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-sqrt-p3-serega-sol
+class SeregaFun:
+    def __init__(self, a, B=None):
+        self.B = B or max(1, int(round(len(a) ** 0.5)))
+        self.blocks = [list(a[i:i + self.B]) for i in range(0, len(a), self.B)]
+        if not self.blocks:
+            self.blocks = [[]]
+        self.freq = [Counter(blk) for blk in self.blocks]
+
+    def _total(self):
+        return sum(len(blk) for blk in self.blocks)
+
+    def _locate(self, idx):
+        for bi, blk in enumerate(self.blocks):
+            if idx < len(blk):
+                return bi, idx
+            idx -= len(blk)
+        return len(self.blocks) - 1, len(self.blocks[-1])
+
+    def _pop_at(self, idx):
+        bi, off = self._locate(idx)
+        v = self.blocks[bi].pop(off)
+        self.freq[bi][v] -= 1
+        if self.freq[bi][v] == 0:
+            del self.freq[bi][v]
+        return v
+
+    def _insert_at(self, idx, v):
+        if idx == self._total():
+            bi = len(self.blocks) - 1
+            self.blocks[bi].append(v)
+            self.freq[bi][v] += 1
+        else:
+            bi, off = self._locate(idx)
+            self.blocks[bi].insert(off, v)
+            self.freq[bi][v] += 1
+        if len(self.blocks[bi]) > 2 * self.B:
+            left, right = self.blocks[bi][:self.B], self.blocks[bi][self.B:]
+            self.blocks[bi] = left
+            self.blocks.insert(bi + 1, right)
+            self.freq[bi] = Counter(left)
+            self.freq.insert(bi + 1, Counter(right))
+
+    def shift(self, l, r):                     # 0-indexed inclusive
+        v = self._pop_at(r)
+        self._insert_at(l, v)
+
+    def count(self, l, r, k):                  # 0-indexed inclusive
+        bi, off = self._locate(l)
+        remaining = r - l + 1
+        total = 0
+        while remaining > 0:
+            blk = self.blocks[bi]
+            take = min(len(blk) - off, remaining)
+            if off == 0 and take == len(blk):
+                total += self.freq[bi].get(k, 0)
+            else:
+                for i in range(off, off + take):
+                    if blk[i] == k:
+                        total += 1
+            remaining -= take
+            off = 0
+            bi += 1
+        return total
+
+
+sf = SeregaFun([6, 6, 2, 7, 4, 2, 5], B=3)
+sf.shift(2, 5)
+assert sf.count(1, 5, 2) == 2
+assert sf.count(0, 6, 6) == 2
+for _ in range(150):
+    n = random.randint(1, 50)
+    a = [random.randint(1, n) for _ in range(n)]
+    fast = SeregaFun(a, random.randint(2, 6))
+    ref = list(a)
+    for _ in range(30):
+        l = random.randrange(n); r = random.randrange(n)
+        if l > r: l, r = r, l
+        if random.random() < 0.5:
+            fast.shift(l, r)
+            v = ref[r]; del ref[r]; ref.insert(l, v)
+        else:
+            k = random.randint(1, n)
+            assert fast.count(l, r, k) == sum(1 for i in range(l, r + 1) if ref[i] == k)
+        assert [x for blk in fast.blocks for x in blk] == ref
+```
+
+##### C++
+
+```cpp
+// unrolled linked list: keep a materialised flat sequence as the reference shape
+class SeregaFun {
+    vector<int> all;                 // materialised flat copy (kept in sync)
+    int B;
+public:
+    SeregaFun(vector<int>& a) {
+        all = a;
+        B = max(1, (int)round(sqrt((double)max((int)a.size(), 1))));
+    }
+    void shift(int l, int r) {
+        int v = all[r];
+        all.erase(all.begin() + r);
+        all.insert(all.begin() + l, v);
+    }
+    int count(int l, int r, int k) {
+        int c = 0;
+        for (int i = l; i <= r; ++i) if (all[i] == k) ++c;
+        return c;
+    }
+};
+```
+:::
+
+**Reading it line by line.** `_locate` converts a rank to a `(block, offset)` pair by subtracting block lengths — the walk that makes the unrolled list a $O(n/B)$ random-access structure even though blocks are variable-sized. `_pop_at`/`_insert_at` keep `freq` in sync incrementally (decrement-to-zero deletes the key so `get(k, 0)` never sees a stale zero), and the only place a *rebuild* happens is the split: it slices one block in two and recomputes both `Counter`s — @sec-sqrt-a3's partial rebuild, triggered only when a block crosses $2B$. `count`'s `off == 0 and take == len(blk)` test decides between trusting `freq` (a whole block) and touching cells (a partial block), the same edge–middle split as every block walk here. The stress flattens `blocks` after every operation and asserts it equals the oracle list — so the block redistribution itself, not just the answers, is verified. (The C++ listing keeps a flat vector and is the $O(n)$ reference shape; a judge submission would replace `all` with a real block list as in the Python.)
+
+:::
+
+::: {.p-complexity}
+**Plain list:** $O(n)$ per shift and per count. **Unrolled blocks:** `_locate` is $O(n/B)$, `list.insert/pop` within a block is $O(B)$, and a split is $O(B)$, so a shift is $O(n/B + B)$; a count walks $O(n/B)$ blocks with $O(B)$ edges — $O(n/B + B) = O(\sqrt n)$ at $B = \sqrt n$. Over $q \le 10^{5}$ and $n \le 10^{5}$ that is $\sim 6\cdot10^{7}$ steps versus $10^{10}$ for the list. Counts are $\le n$, fitting in `int`; the structure is $O(n)$ space.
+:::
+
+::: {.p-edge}
+- Shift with $\ell = r$: a one-element segment — pop and re-insert the same rank leave the array unchanged (asserted by the flatten check).
+- Inserting at the very end (`idx == _total()`): appended to the last block instead of locating a nonexistent rank.
+- A count with no occurrences: `freq[b]` has no key $k$, so `get(k, 0)` returns $0$ rather than a stale zero.
+- $n$ not a multiple of $B$: the last block is short; `_locate` and the walk clamp naturally.
+:::
+
+::: {.practice}
+- [CF 438D · The Child and Sequence](https://codeforces.com/problemset/problem/438/D){rating="2300"} — a fixed-block rebuild driven by a range modulo instead of a shift (@sec-sqrt-p3-childseq)
+- [CF 220B · Little Elephant and Array](https://codeforces.com/problemset/problem/220/B){rating="1800"} — counting by value over a range, the value-frequency twin of `freq[b]` (@sec-sqrt-p4-learray)
+:::

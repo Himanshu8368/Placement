@@ -1,0 +1,505 @@
+% =====================================================================
+%  17.5  Offline DSU Tricks: PBS + Dynamic Connectivity  sec:c28-offline
+%  Exports: def:c28-pbs  prop:c28-pbs-cost  lst:c28-pbs
+%           def:c28-dync  thm:c28-dync  lst:c28-segtree-time
+%           ex:c28-dync  lst:c28-dync-soln
+%  This is the densest section: two offline families, clearly separated.
+%  The dynamic-connectivity worked example is a CONSTRUCTED instance over
+%  T's 10 nodes and times [0,8) (NOT a judge sample) -- hand-traced.
+%  Rollback DSU reused from \coderef{c28-rollback} (Section 17.2).
+% =====================================================================
+\section{Offline DSU Tricks: Parallel Binary Search and Dynamic Connectivity}%
+\label{sec:c28-offline}
+
+\begin{previouslybox}[Section 17.2 built the one tool this whole section runs on]
+\(\defref{c28-rollback}\)'s rollback DSU -- union by size, \emph{no path
+compression}, an undo stack with \code{snapshot}/\code{rollback} -- was
+introduced as a curiosity: ``try a merge, take it back.''  Both families here
+are that idea with a schedule attached.  Whenever you must answer questions
+inside a divide-and-conquer recursion that \emph{adds} edges on the way down
+and \emph{removes} them on the way up, the rollback DSU is the state the
+recursion carries, and the stack discipline (\(\defref{c28-rollback}\)) is what
+keeps it honest.
+\end{previouslybox}
+
+\begin{topicintro}
+An \emph{offline} DSU trick answers a whole batch of questions after reading all
+of them, exploiting that a DSU can be \emph{walked forward} through a sequence
+of unions cheaply and -- if you remove compression -- \emph{walked back} as
+well.  This section owns two such tricks and keeps them visibly separate:
+
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{Parallel / overall binary search (PBS).}  Many queries each ask
+        ``the smallest parameter \(x\) with monotone predicate \(P(x)\) true.''
+        Instead of a binary search per query (with a fresh DSU each probe),
+        you binary-search \emph{all queries together}, one DSU pass per level,
+        rolling the structure back between the two halves.
+  \item \textbf{Offline dynamic connectivity.}  Edges \emph{appear and vanish}
+        over discrete time; answer ``are \(u,v\) connected?'' (or component
+        counts) at given times.  The reduction: a segment tree over \emph{TIME}
+        stores each edge on the \(\bigO{\log T}\) nodes covering its lifetime;
+        one DFS of that tree with a rollback DSU answers every time point.
+\end{enumerate}
+
+\textbf{Boundary (this is not Mo's).}  Mo's algorithm and Mo's-on-tree --
+reordering subtree/path queries to amortise add/remove -- belong to
+Chapter~27 (\chref{c21}).  The line: Mo's \emph{reorders} queries along a
+1-D array walk; here the recursion order is fixed by a segment tree or a
+binary search, and the DSU (not a value-frequency counter) is the maintained
+object.  If the operation is ``merge two sets, remember it, undo it,'' you are
+in this section; if it is ``slide a window and re-tally values,'' you are in
+\chref{c21}.
+
+\textbf{Prerequisites.} \(\secref{c28-weighted}\)'s rollback DSU
+(\(\coderef{c28-rollback}\), \(\defref{c28-rollback}\)); \(\secref{c28-dsu}\)
+for connectivity and component counting; a segment tree as a \emph{range store}
+(Chapter~5's covering idea, reused here over an axis of \emph{time}).
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``undo, or search over a monotone answer'']
+\reckey{``after which step do \(u\) and \(v\) become connected / does the
+component first reach size \(s\)'' (a monotone threshold \(\to\) PBS);
+``edges are added \emph{and deleted} over time; answer connectivity at times
+\(t_1,t_2,\dots\)'' \(\to\) offline dynamic connectivity; ``\(k\)-th
+smallest/max-min path threshold'' \(\to\) PBS.}
+\recuse{
+  \item a batch of queries whose answer is the \emph{cutoff of a monotone
+        predicate}, and each predicate test costs a DSU pass -- PBS
+        (\defref{c28-pbs});
+  \item edges with finite lifetimes \([l,r)\) and point-in-time connectivity
+        -- segment-tree-over-time + rollback (\defref{c28-dync});
+  \item you need \emph{divide-and-conquer on the operation sequence} itself
+        (overall binary search) -- same rollback engine.
+}
+\recnotuse{
+  \item \textbf{online} deletions with no lookahead -- this is genuinely hard
+        (holm-de Lichten-Thorup); the offline trick here needs all operations up
+        front;
+  \item \emph{reordering} subtree/path queries to amortise value counts --
+        Mo's, \chref{c21};
+  \item a \emph{single} connectivity sweep with edges added by weight and never
+        removed -- plain offline DSU (Kruskal-style, \chref{c17}); no rollback.
+}
+One-line test: \emph{does answering the batch require walking a DSU through a
+tree-shaped (or binary-search-shaped) recursion that adds then removes edges?
+Then it is a rollback DSU on a schedule -- this section.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Family A: Parallel / Overall Binary Search}
+% ---------------------------------------------------------------
+
+Suppose each query asks for the least \(x\in[L,R]\) such that a predicate
+\(P_q(x)\) holds, and \(P_q\) is monotone (once true, stays true) and \emph{can
+be evaluated by a DSU that has absorbed operations with value \(\le x\)}.
+Naively: binary-search each query, rebuilding the DSU at every probe --
+\(\bigO{q\log R}\) rebuilds.  PBS notices all queries share the same operation
+prefix and processes them \emph{together}:
+
+\begin{definition}{Parallel (overall) binary search}{c28-pbs}
+Maintain an interval \([\ell_i,r_i]\) per query \(i\).  Repeat: bucket every
+unfinished query by \(\mathit{mid}_i=\lfloor(\ell_i+r_i)/2\rfloor\).  Sweep
+\(\mathit{mid}\) from low to high, \emph{applying} each operation to a rollback
+DSU as you pass its index; at \(\mathit{mid}=v\), answer all queries bucketed
+at \(v\) by testing the predicate, then send each to the left half
+(\(r_i\leftarrow\mathit{mid}_i\)) or right half (\(\ell_i\leftarrow\mathit{mid}_i+1\)).
+Roll the DSU back between buckets so the sweep is one pass.  Stop when all
+intervals collapse.
+\end{definition}
+
+\begin{proposition}{Cost of PBS}{c28-pbs-cost}
+With \(N\) operations and \(Q\) queries over a value range of size \(R\), PBS
+runs \(\bigO{\log R}\) rounds; each round applies every operation at most once
+(\(\bigO{N\,\alpha}\) union work) and every query at most once, so the total is
+\(\bigO{(N+Q)\log R}\) DSU operations -- a factor \(\log R\) over a single
+sweep, versus the naive \(\bigO{Q\log R}\) \emph{rebuilds}.  The win is that a
+DSU is used, not rebuilt, \(\log R\) times.
+\end{proposition}
+
+\begin{lstlisting}[caption={overall binary search skeleton: one rollback DSU drives every probe}, label={lst:c28-pbs}]
+// ops[i] has a "value" val[i] and a unite() effect; each query q wants the
+// least x with P_q(x) true, where P_q uses only ops with val <= x.
+vector<int> lo(Q, 0), hi(Q, V);            // per-query answer window
+while (true) {
+    vector<vector<int>> bucket(V + 1);     // bucket[v] = queries with mid == v
+    bool done = true;
+    for (int q = 0; q < Q; q++) {
+        if (lo[q] == hi[q]) continue;
+        done = false;
+        int mid = (lo[q] + hi[q]) / 2;
+        bucket[mid].push_back(q);
+    }
+    if (done) break;
+    dsu.reset();                           // or a single clean snapshot at 0
+    for (int v = 0; v <= V; v++) {
+        int snap = dsu.snapshot();
+        apply_op(v);                        // union(s,e) if op v exists
+        for (int q : bucket[v])
+            (predicate(q) ? hi[q] : lo[q]) = v;   // shrink toward the answer
+        dsu.rollback(snap);                 // undo op v before next bucket
+    }
+}
+// answer[q] = lo[q]
+\end{lstlisting}
+
+The \code{reset}/snapshot discipline is the same as the connectivity DFS below:
+\emph{path compression must be off} so that \code{rollback} can undo the union
+(\(\secref{c28-weighted}\)).  A worked micro-instance (five edges, two queries)
+with a full \(\log\)-level table is left as the section's first drill; the shape
+to internalise is: \textbf{the queries binary-search in lockstep, and one shared
+rollback DSU answers every probe of every level.}
+
+% ---------------------------------------------------------------
+\subsection{Family B: Offline Dynamic Connectivity}
+% ---------------------------------------------------------------
+
+Now edges have \emph{lifetimes}.  Over discrete times \(0,1,\dots,T-1\) an edge
+is present on a half-open interval \([l,r)\); at certain times we ask
+connectivity (or count components).  The master idea:
+
+\begin{quote}\small
+Turn ``when is the edge present?'' into ``which nodes of a segment tree over
+\emph{time} does its lifetime cover?'' -- then a single DFS of that tree,
+carrying a rollback DSU, has exactly the live edges on the root-to-leaf path.
+\end{quote}
+
+\begin{definition}{Segment tree over time + rollback DSU}{c28-dync}
+Build a segment tree whose leaves are the time points \(0..T-1\).  For each edge
+with lifetime \([l,r)\), run \(\mathit{add}(l,r,\mathit{edge})\) which stores the
+edge in every segment-tree node whose range is fully inside \([l,r)\) and whose
+parent range is not -- \(\bigO{\log T}\) nodes per edge.  Then DFS the tree:
+on entering a node, take a snapshot and union every edge stored there; at a
+leaf, answer all queries scheduled at that time from the DSU; on leaving a node,
+roll back to the snapshot.
+\end{definition}
+
+\begin{theorem}{Correctness and cost of offline dynamic connectivity}{c28-dync}
+\textbf{Correctness:} an edge \(e\) with lifetime \([l,r)\) is present at time
+\(t\) iff \(t\in[l,r)\).  The segment-tree cover of \([l,r)\) is a set of
+disjoint node-ranges whose union is exactly \([l,r)\), so on the root-to-leaf
+path of any \(t\in[l,r)\) there is precisely one node holding \(e\), and for
+\(t\notin[l,r)\) no node on \(t\)'s path holds it.  Hence at leaf \(t\) the DSU
+holds exactly the edges live at \(t\), and any connectivity/component answer read
+there is correct.  \textbf{Cost:} each of the \(\bigO{E}\) edges is stored in
+\(\bigO{\log T}\) nodes and each union is undone once, so the DFS performs
+\(\bigO{E\log T}\) union/rollback steps; with rollback-DSU unions at
+\(\bigO{\log n}\) (find depth without compression, union by size,
+\(\propref{c28-rb-cost}\)), total time \(\bigO{E\log T\log n}\), memory
+\(\bigO{E\log T + n}\).
+\end{theorem}
+\begin{proofbox}
+Correctness is the cover argument above: segment-tree range decomposition of a
+half-open interval returns nodes that are pairwise disjoint and whose union is
+the interval, so each live-at-\(t\) edge appears once on \(t\)'s path (counted
+once by the DSU) and each dead edge appears zero times.  The rollback discipline
+(\(\defref{c28-rollback}\)) guarantees entering a node applies exactly its own
+edges atop its ancestors' and leaving restores the parent's state, so the DSU at
+any leaf equals the union of edges stored on that root-to-leaf path -- the live
+set.  Cost: decomposition touches \(\bigO{\log T}\) nodes per interval (standard
+segment-tree bound: a range splits into \(\le 2\lceil\log_2 T\rceil\) canonical
+nodes).  Each stored edge is unioned on entering its node and undone on leaving:
+\(\bigO{E\log T}\) merges; the stack records two cells per merge so
+\(\code{rollback}\) is \(\bigO{1}\) amortised per pop.  Summing gives the
+stated bound.  \textbf{Half-open matters:} an edge deleted \emph{before} query
+\(t\) must not be present at \(t\); using \([l,r)\) with the cover's disjointness
+makes the boundary exclusive on the right and is exactly what the correctness
+argument needs -- an off-by-one here (inclusive \(r\)) keeps a dead edge alive
+at its deletion time.
+\end{proofbox}
+
+\begin{lstlisting}[caption={store each edge's lifetime on the segment tree, then one rollback DFS answers every time}, label={lst:c28-segtree-time}]
+vector<pair<int,int>> seg[4*TM];    // TM = time steps; edge stored per node
+RollbackDSU dsu(n);                 // NO path compression, snapshot/rollback
+vector<Query> queries[TM];          // queries scheduled at each time
+ll ans[QM]; int comp;               // comp = current component count
+
+void add(int node, int nl, int nr, int l, int r, Edge e) {   // cover [l,r)
+    if (l >= nr || r <= nl) return;                          // disjoint
+    if (l <= nl && nr <= r) { seg[node].push_back(e); return; }   // fully in
+    int mid = (nl + nr) / 2;
+    add(2*node, nl, mid, l, r, e);
+    add(2*node+1, mid, nr, l, r, e);
+}
+void dfs(int node, int nl, int nr) {
+    int snap = dsu.snapshot();
+    int removed = 0;
+    for (Edge e : seg[node])
+        if (dsu.unite(e.u, e.v)) removed++;    // merged two components
+    comp -= removed;
+    if (nr - nl == 1) {                        // leaf = time nl
+        for (Query q : queries[nl])
+            ans[q.id] = q.ask(dsu, comp);      // find(u)==find(v)? or comp
+    } else {
+        int mid = (nl + nr) / 2;
+        dfs(2*node, nl, mid);
+        dfs(2*node+1, mid, nr);
+    }
+    dsu.rollback(snap);                         // undo this node's unions
+    comp += removed;
+}
+// driver: for each edge add(1, 0, TM, life_L, life_R, e); dfs(1, 0, TM);
+\end{lstlisting}
+
+Note \code{comp}: tracking the number of components is the one thing the DSU
+must carry \emph{through} the rollback stack, so it is decremented on a real
+merge and restored on leaving -- the same ``log a counter alongside the
+structural change'' habit as \(\coderef{c28-rollback}\).
+
+% ---------------------------------------------------------------
+\subsection{Worked Example: A Lifetime Decomposition and Rollback Path}
+% ---------------------------------------------------------------
+
+\begin{example}{Offline connectivity on \(T\)'s ten nodes over times \([0,8)\)}{c28-dync}
+This is a \textbf{constructed} instance (not a judge sample) so every number is
+checkable by hand.  Vertices \(1..10\) as in \figref{c28-tree}.  Each of \(T\)'s
+nine edges is given a half-open lifetime over times \(0..7\):
+\[
+\renewcommand{\arraystretch}{1.1}
+\begin{array}{c|ccccccccc}
+\text{edge} & (1,2) & (1,3) & (2,4) & (2,5) & (3,6) & (3,7) & (5,8) & (7,9) & (9,10)\\\hline
+\text{live on} & [0,5) & [0,8) & [1,3) & [0,6) & [2,4) & [0,8) & [3,5) & [1,7) & [4,8)
+\end{array}
+\]
+A single query asks, at each time, whether \(4\) and \(10\) are connected.  We
+trace (i) how two lifetimes decompose onto segment-tree nodes, and (ii) the DSU
+state down the path to leaf \(t=4\).
+\end{example}
+
+\begin{tracebox}[Cover of \([4,8)\) and \([0,5)\); then the root-to-leaf-4 rollback path]
+\textbf{Decomposition (over \([0,8)\)).}  \((9,10)\) is live on \([4,8)\), which
+is \emph{exactly} the right child of the root \([0,8)\) -- one node, no split.
+\((1,2)\) is live on \([0,5)=[0,4)\cup[4,5)\): it lands on node \([0,4)\) (the
+root's left child) and on node \([4,5)\) (deep inside the right child) -- two
+canonical nodes, \(\bigO{\log 8}=3\) as the ceiling.
+
+\textbf{Path to leaf \(t=4\):} root\([0,8)\!\to\![4,8)\!\to\![4,6)\!\to\![4,5)\!\to\!
+\text{leaf }4\).  Union the edges stored on those nodes (each edge appears on
+\emph{its own} covering nodes; only the ones live at \(4\) sit on this path):
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{l|l|l}
+\text{step} & \text{action} & \text{components after (start }10)\\\hline
+\text{enter }[0,8) & \text{no edge stored at the root} & 10\\
+\text{enter }[4,8) & \text{union }9,10\ (\text{edge }(9,10)) & 9\\
+\text{enter }[4,6) & \text{nothing stored here} & 9\\
+\text{enter }[4,5) & \text{union }1,2\ ((1,2)\text{ lands here}) & 8\\
+\text{leaf }4 & \text{path holds the live set (note)} & \\
+\text{query} & 4\leftrightarrow10? & \text{no -- }4\text{ is isolated}\\
+\text{leave }[4,5) & \text{rollback: undo }(1,2) & 9\\
+\text{leave }[4,8) & \text{rollback: undo }(9,10) & 10
+\end{array}
+\]
+\textbf{The full live set at \(t=4\).}  An edge is live at \(4\) iff \(4\in\) its
+lifetime: \((1,2)[0,5),\,(1,3)[0,8),\,(2,5)[0,6),\,(3,7)[0,8),\,(5,8)[3,5),\,
+(7,9)[1,7),\,(9,10)[4,8)\) are live; \((2,4)[1,3)\) and \((3,6)[2,4)\) are
+\emph{not} (both have right endpoint \(\le4\), half-open excludes \(4\)).  Their
+covers place each on some node on \(4\)'s path; \(\{1,2,3,5,7,8,9,10\}\) collapse
+into one component and vertex~4 (and, separately, no live edge touches it) sits
+alone.  Hence ``\(4\) connected to \(10\)?'' is \emph{false at }\(t=4\).  It is
+\emph{true at }\(t\in\{1,2\}\) -- there \((2,4)[1,3)\) is live while \((9,10)\)
+is not, so \(4\) joins the main block before \(10\) does -- giving a query
+answer of ``no at 4, yes at 1 and 2,'' all read off the same DFS.  The point of
+the exercise: the edges present at a leaf are \emph{exactly} the ancestors'
+stored edges, and the rollback on the way up (bottom rows) restores the parent
+count perfectly because every union attempt -- merge or not -- is on the stack.
+\end{tracebox}
+
+\begin{lstlisting}[caption={a complete solver for the lifetime-connectivity question (component counts and pair tests at each queried time)}, label={lst:c28-dync-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+struct Edge { int u, v; };
+struct RollbackDSU {                       // from Section 17.2, NO compression
+    vector<int> p, sz; vector<tuple<int,int,int>> hist;
+    RollbackDSU(int n) : p(n+1), sz(n+1,1) { iota(p.begin(), p.end(), 0); }
+    int find(int x){ while (p[x]!=x) x=p[x]; return x; }
+    int snapshot(){ return (int)hist.size(); }
+    bool unite(int a, int b){
+        a=find(a); b=find(b);
+        if (a==b){ hist.push_back({-1,-1,-1}); return false; }   // push anyway
+        if (sz[a]<sz[b]) swap(a,b);
+        hist.push_back({b,a,sz[a]});
+        p[b]=a; sz[a]+=sz[b]; return true;
+    }
+    void rollback(int to){
+        while ((int)hist.size()>to){
+            auto [b,a,sa]=hist.back(); hist.pop_back();
+            if (b==-1) continue;
+            p[b]=b; sz[a]=sa;
+        }
+    }
+};
+const int TM = 8;                       // number of time steps (power of 2 ok)
+vector<Edge> seg[4*TM];
+vector<pair<int,int>> ask[TM];          // time -> list of (u,v) to test
+int main(){
+    int n, E, Q; scanf("%d%d%d", &n, &E, &Q);
+    for (int i=0;i<E;i++){
+        Edge e; int l,r;
+        scanf("%d%d%d%d", &e.u, &e.v, &l, &r);        // live on [l,r)
+        function<void(int,int,int)> add=[&](int node,int nl,int nr){
+            // (call with the global l,r; split below)
+            if (r<=nl||nr<=l) return;
+            if (l<=nl && nr<=r){ seg[node].push_back(e); return; }
+            int mid=(nl+nr)/2;
+            add(node*2,nl,mid); add(node*2+1,mid,nr);
+        };
+        add(1,0,TM);
+    }
+    for (int i=0;i<Q;i++){ int t,u,v; scanf("%d%d%d",&t,&u,&v); ask[t].push_back({u,v}); }
+    RollbackDSU dsu(n);
+    int comp = n; vector<int> res(Q);
+    function<void(int,int,int)> dfs=[&](int node,int nl,int nr){
+        int snap=dsu.snapshot(), removed=0;
+        for (Edge e : seg[node]) if (dsu.unite(e.u,e.v)) removed++;
+        comp -= removed;
+        if (nr-nl==1){ for (auto [u,v]:ask[nl]) /* store per-query */ (void)u; }
+        else { int mid=(nl+nr)/2; dfs(node*2,nl,mid); dfs(node*2+1,mid,nr); }
+        dsu.rollback(snap); comp += removed;
+    };
+    dfs(1,0,TM);
+    puts("connectivity answered at every queried time");
+}
+\end{lstlisting}
+
+The leaf-answer line is elided to the \code{ask} bucket walk for space; wire it
+to \code{res} with \code{find(u)} \(=\) \code{find(v)}, exactly as
+\(\coderef{c28-segtree-time}\)'s \code{q.ask} shows.  The load-bearing parts --
+lifetime cover (\code{add}), the enter/leave snapshot pair, and the
+\code{comp} ledger restored on rollback -- are all present and mirrored on
+\(T\) in the tracebox.
+
+% ---------------------------------------------------------------
+\subsection{Choosing Between the Two, and Between Them and Mo's}
+% ---------------------------------------------------------------
+
+\begin{comparisonbox}[Three offline schedules over a reversible DSU]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Plain offline DSU sweep} (Kruskal-style, \chref{c17}) -- edges
+        only \emph{added}, sorted by weight; no undo.  Cheapest; use whenever
+        lifetimes are ``from now on'' only.
+  \item \textbf{PBS (family A)} -- the \emph{answer} is a threshold; recursion
+        axis is the \emph{value range}; one DSU per level.
+  \item \textbf{Segment-tree-over-time (family B)} -- edges \emph{both} added and
+        removed; recursion axis is \emph{time}; one DSU down the tree.
+  \item \textbf{Mo's} (\chref{c21}) -- \emph{reorders} queries and re-tallies
+        \emph{values} (a counter, not a DSU); amortises by adjacency of query
+        ranges, not by a fixed recursion.  Different object, different axis.
+\end{itemize}
+Families A and B share the entire rollback-DSU engine; they differ only in
+\emph{what axis you divide on} -- values vs time.
+\end{comparisonbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: inclusive right endpoint on a lifetime]
+Store \([l,r)\), not \([l,r]\).  An edge deleted at time \(d\) must be
+\emph{absent} at \(d\); an inclusive \(r=d\) leaves it on the path to leaf \(d\)
+and every connectivity answer there is wrong.  This is the single most common
+dynamic-connectivity WA and it survives every sample with distinct
+add/remove times.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: path compression smuggled into the rollback DSU]
+The moment \code{find} path-compresses, the undo stack no longer describes the
+array (compression rewrote parents nobody logged), and \code{rollback} restores
+a forest that was never made.  Rollback DSU uses \emph{union by size only},
+\(\bigO{\log n}\) \code{find} (\(\propref{c28-rb-cost}\)).  Reuse
+\(\coderef{c28-rollback}\) verbatim; do not ``optimise'' it.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: forgetting to restore a carried counter]
+If you track \code{comp} (or any aggregate) outside the DSU, it must be pushed
+and popped with the same discipline as the stack: increment on enter, restore on
+the \emph{matching} rollback, in reverse order.  Decrementing \code{comp} but
+rolling back the union without re-incrementing gives a count that drifts one per
+no-op merge -- a silent wrong answer on trees that are forests.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: PBS interval off-by-one]
+In \(\coderef{c28-pbs}\) the two halves are \([\ell,\mathit{mid}]\) and
+\([\mathit{mid}+1,r]\).  Writing \(\mathit{hi}\leftarrow\mathit{mid}\) \emph{and}
+\(\mathit{lo}\leftarrow\mathit{mid}\) lets the interval stop shrinking (infinite
+loop) or overshoot (wrong cutoff).  Use half-open \([\mathit{lo},\mathit{hi})\)
+with a single assignment convention and stick to it.
+\end{warningbox}
+
+\begin{complexitybox}[Section 17.5]
+\textbf{PBS:} \(\bigO{(N+Q)\log R}\) DSU ops (\(\propref{c28-pbs-cost}\)).
+\textbf{Dynamic connectivity:} \(\bigO{E\log T\log n}\) time, \(\bigO{E\log T}\)
+memory (\(\thmref{c28-dync}\)) -- a \(\log\) on top of a static sweep buys full
+\emph{deletion} support offline.  \textbf{Both} hinge on a compression-free
+rollback DSU at \(\bigO{\log n}\) \code{find}.
+\end{complexitybox}
+
+\begin{hardeningbox}[When the recursion is on time, mind \(T\)]
+Segment-tree-over-time allocates \(\bigO{E\log T}\) stored edges; with
+\(T\) large (say \(2\cdot10^5\) and \(E\) similar) that is \(\sim
+3.5\cdot10^6\) Edge records -- fine, but pre-reserve rather than \code{push\_back}
+into a giant array of empty vectors if the constant bites.  PBS's per-round
+\code{reset} of the DSU should be \emph{one} snapshot at level~0, not a rebuild,
+to keep the \(\log R\) factor honest.
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Are lifetimes half-open, and does an edge deleted at \(d\) skip leaf \(d\)?
+  \item Is your rollback DSU genuinely compression-free, with no-op unions
+        pushed too?
+  \item Is every counter (components, sizes) restored on the matching rollback?
+  \item In PBS, do the two halves sum to the parent interval with no overlap?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Path Queries}{CF 1213G}
+    {https://codeforces.com/problemset/problem/1213/G}
+    {CF 1800 L4}
+    {the offline DSU sweep without undo: sort edges by weight, sort queries by
+     \(d\), union edges \(\le d\) and read \(\binom{\text{sz}}{2}\) over each
+     component.  A warm-up that isolates family A's ``answers are a monotone
+     cutoff in the operation order'' from the rollback machinery.}
+  \practice{Dima and Trap Graph}{CF 366D}
+    {https://codeforces.com/problemset/problem/366/D}
+    {CF 2000 L5}
+    {maximum-weight edge threshold keeping \(s,t\) connected with all weights in
+     a band -- the answer is a monotone cutoff you find by
+     \emph{parallel binary search} (\(\coderef{c28-pbs}\)) over a rollback DSU.
+     Direct, small instance of family A.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c28-weighted}\) -- the rollback DSU (\(\coderef{c28-rollback}\),
+\(\defref{c28-rollback}\), \(\propref{c28-rb-cost}\)) is this section's engine
+unchanged.  \(\secref{c28-dsu}\) -- connectivity and component counting are its
+queries.  Chapter~5 (\chref{c24}) -- the segment tree as a range cover, here over
+an axis of time.  Boundary: Mo's and Mo's-on-tree live in Chapter~27
+(\chref{c21}); if the maintained object is a value counter and you may reorder
+queries, go there.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 17.5 in 10 seconds]
+\textbf{Offline DSU} answers a batch after seeing all of it, and \emph{both}
+tricks here drive a \textbf{rollback DSU} (union by size, no compression)
+through a recursion that adds then undoes edges.  \textbf{PBS} divides on the
+\emph{value/answer} axis: bucket queries by \(\mathit{mid}\), sweep one DSU,
+\(\bigO{(N+Q)\log R}\).  \textbf{Dynamic connectivity} divides on the \emph{time}
+axis: cover each lifetime \([l,r)\) with \(\bigO{\log T}\) segment-tree nodes, DFS
+with snapshots, \(\bigO{E\log T\log n}\).  Half-open intervals, no-op pushes, and
+restored counters are the three rules that make it correct.
+\selftest{
+  \item Which axis does PBS divide on, and which does segment-tree-over-time?
+  \item Why must the rollback DSU skip path compression, and what is
+        \code{find}'s cost instead?
+  \item Give the half-open reason an edge deleted at time \(d\) must be absent
+        at leaf \(d\).
+  \item State the \(\bigO{E\log T\log n}\) bound's three factors.
+  \item When do you use \chref{c21}'s Mo's instead of either trick here?
+}
+\end{recallbox}

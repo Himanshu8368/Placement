@@ -1,0 +1,87 @@
+---
+title: "Attention and transformers"
+---
+
+# Attention and transformers
+
+**Reference question.** What does an attention layer compute, and what cost and bias come with it?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Scores | A compatibility $q_i^\top k_j / \sqrt{d}$ between a query at position $i$ and a key at position $j$. |
+| Weights | A softmax over allowed positions. The mask sets disallowed scores to a large negative number before the softmax. |
+| Output | A weighted sum of values. The layer is a routed average, not a lookup of a single token, unless the softmax is peaked. |
+| Causal mask | Position $i$ may not read $j > i$ in a next-token model. A bug here is label leakage. |
+| Cost | Full attention is quadratic in the sequence length, in memory and in the matmul. |
+
+## Theory
+
+Self-attention lets a position read any other allowed position in one step. The path length between distant tokens is constant, which is the contrast with the recurrent product of Jacobians. The price is quadratic compute and a weak inductive bias about order. Without a position encoding, the layer is permutation-equivariant in a precise sense: it does not know which token came first. Sequences are ordered, so you add positions, and those features are part of the model.
+
+The causal mask is the difference between a language model and a model that peeks at the answer. Bidirectional encoders are appropriate when the whole sequence is an input, as in classification of a complete document. They are inappropriate when you claim to predict the future. The mask test is the unit test. It is not optional because a library "usually" masks.
+
+Multi-head attention is several of these maps concatenated. It raises capacity. It does not by itself create linguistic understanding. Evaluate it as a function.
+
+## Derivation
+
+Let $Q, K, V$ be $T \times d$ matrices for one head and one example. Scores $S = Q K^\top / \sqrt{d}$. For a causal mask, set $S_{ij} = -\infty$ when $j > i$, then $A = \mathrm{softmax}(S)$ row-wise, and the output is $AV$. Row $i$ of $A$ sums to 1 and is zero after $i$. The gradient of a loss on the output with respect to $V$ is $A^\top \nabla_{\mathrm{out}}$. The gradient with respect to $S$ uses the Jacobian of the softmax. A numerical check on a short $T$ catches a mask that was applied after the softmax, which cannot zero the future once the weights are positive.
+
+## Code
+
+```python
+import numpy as np
+
+def causal_attention(Q, K, V):
+    Q = np.asarray(Q, dtype=np.float64)
+    K = np.asarray(K, dtype=np.float64)
+    V = np.asarray(V, dtype=np.float64)
+    scale = np.sqrt(Q.shape[-1])
+    scores = (Q @ K.T) / scale
+    t = scores.shape[0]
+    future = np.triu(np.ones((t, t), dtype=bool), k=1)
+    scores = np.where(future, -1e9, scores)
+    scores = scores - scores.max(axis=-1, keepdims=True)
+    weights = np.exp(scores)
+    weights = weights / weights.sum(axis=-1, keepdims=True)
+    return weights @ V, weights
+```
+
+## Experiment
+
+**Hypothesis.** With a causal mask, attention weights on the future are numerically zero and the output at position $i$ does not change when a future value vector changes. Without the mask, it does.
+
+**Protocol.** $T = 4$, random $Q, K, V$. Perturb $V$ at the last position and compare outputs at position 0.
+
+**Metric.** Max future weight, and the change in the position-0 output.
+
+**Decision rule.** Future weights below $10^{-8}$ and a zero change at position 0 for the masked layer. If the unmasked layer also shows a zero change, the query-key pair assigned that position no weight by chance; resample.
+
+## Project
+
+**Deliverable.** The masked attention function, the peek test, and a tiny trained or closed-form sequence task where a bag of tokens fails and a one-layer causal or bidirectional model matches the task's information constraint. Classification of a finished string may be bidirectional. Next-token prediction must be causal.
+
+**Constraints.** The peek test is in the debug checklist.
+
+**Rubric.** You can explain the quadratic cost at $T = 1024$ versus $T = 128$ in arithmetic operations for the score matrix.
+
+## Depth tracks
+
+**Beginner.** Implement causal attention and print the weight matrix.
+
+**University.** Run the peek test and the bag-of-tokens comparison.
+
+**Research.** Describe rotary or absolute position features in one paragraph and the failure mode if two sequences are concatenated without a segment boundary the model can see.
+
+## Failure modes
+
+- Applying the mask after the softmax.
+- A bidirectional encoder advertised as a next-token model.
+- Ignoring the pad mask so padding positions become keys the model attends to.
+
+## See also
+
+Volume 15 for the quadratic cost as a systems constraint. Volume 17 for models that use this block at large scale.

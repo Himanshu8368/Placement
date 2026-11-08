@@ -1,0 +1,364 @@
+### Problem: Design HashMap {#sec-ds-p4-hashmap}
+
+::: {.p-statement}
+Build a hash map from scratch (no built-in hash/dict containers) with three calls:
+
+- `put(key, val)` — insert or update the value at `key`;
+- `get(key)` — return the value at `key`, or `-1` if absent;
+- `remove(key)` — delete the mapping for `key` if present.
+
+Keys and values are in $[0, 10^6]$, and there are at most $10^4$ calls. The sample runs `put(1,1), put(2,2), get(1)=1, get(3)=-1, put(2,1), get(2)=1, remove(2), get(2)=-1`.
+
+Source: [LC 706 · Design HashMap](https://leetcode.com/problems/design-hashmap/){.solved difficulty="Easy"}
+:::
+
+::: {.p-intuition}
+Keys are bounded by $10^6$, so an array indexed *directly* by the key is legal: a **direct-address table** (@sec-ds-a4), $O(1)$ for everything but $O(U)$ memory even for two entries. A real hash map folds the universe into $m$ buckets with $h(k) = k \bmod m$ and resolves collisions by **chaining** (@sec-hash-sets). The average chain length is the **load factor** $\alpha = n/m$; when it grows past a threshold, double $m$ and **rehash**, re-inserting every key, because $k \bmod m$ changes when $m$ does.
+:::
+
+::: {.p-approach}
+1. **Direct addressing.** `vals = [-1] * (U + 1)`, indexed by the key. $O(1)$ everywhere, $O(U)$ memory: fine at $U = 10^6$, impossible at $U = 2^{63}$. This class is the model for the stress tests.
+2. **Chained buckets.** $m$ buckets, each a list of `[key, val]` pairs; a lookup hashes once and walks its chain, $O(1 + \alpha)$ expected under uniform hashing (@fig-ds-p4-hashmap). With a *fixed* $m$, $\alpha$ grows with $n$.
+3. **Grow and rehash.** Track the size $n$; when $n > 0.75\,m$, double $m$ and re-insert every pair into its *new* bucket. $\alpha$ stays below $0.75$, so every operation is $O(1)$ expected, amortised over the rehashes.
+
+**Operation contract (final form).** Invariant **I**: every stored pair `(k, v)` sits in bucket `k % cap`, each key at most once, `n` is the number of pairs, and $n \le 0.75 \cdot$ `cap` after every call.
+
+| Operation | What it does | How **I** survives | Cost |
+|---|---|---|---|
+| `put(k, v)` | walk bucket `k % cap`; overwrite if found, else append and `n += 1`; rehash if $n > 0.75\,$`cap` | a new key goes to its home bucket; the rehash recomputes every home under the new `cap` | $O(1 + \alpha)$ expected, plus $O(n)$ for a rehash, amortised $O(1)$ |
+| `get(k)` | walk bucket `k % cap` | read only | $O(1 + \alpha)$ expected |
+| `remove(k)` | walk bucket `k % cap`, delete the pair if found, `n -= 1` | removing never moves other pairs | $O(1 + \alpha)$ expected |
+:::
+
+::: {#fig-ds-p4-hashmap}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+hm_keys = [1, 2, 3, 4, 8]
+hm_tab = [[f"{k}:{10 * k}" for k in hm_keys if k % 4 == b] or ["-"] for b in range(4)]
+assert hm_tab[0] == ["4:40", "8:80"] and hm_tab[1] == ["1:10"]
+
+
+def draw(ax, p):
+    V.grid(ax, p, hm_tab, row_labels=["b0", "b1", "b2", "b3"],
+           colors={(0, 0): "amber", (0, 1): "amber"}, cell_w=1.4)
+V.show(draw)
+```
+
+Five pairs `k:10k` in four buckets, $h(k) = k \bmod 4$. Keys $4$ and $8$ collide in bucket $0$ (amber, a chain of two), so a lookup of $8$ compares two keys. After a resize to $m = 8$, key $8$ stays in bucket $0$ but key $4$ moves to bucket $4$: a rehash recomputes every home.
+
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Direct addressing
+
+::: {.form-next}
+An array whose index *is* the key. Every op is a single subscript; `-1` doubles as the empty marker because stored values are $\ge 0$. The whole $10^6{+}1$ table is allocated up front — the memory the chained form reclaims.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("hashmap", "direct")
+    assert str(final) == "outputs None None 1 -1 None 1 None -1"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class HashMapDirect:
+    def __init__(self, U=10 ** 6 + 1):
+        self.vals = [-1] * U            # index == key; -1 marks "absent"
+
+    def put(self, key, val):
+        self.vals[key] = val
+
+    def get(self, key):
+        return self.vals[key]
+
+    def remove(self, key):
+        self.vals[key] = -1
+
+
+m = HashMapDirect()
+m.put(1, 1); m.put(2, 2)
+assert m.get(1) == 1 and m.get(3) == -1
+m.put(2, 1)
+assert m.get(2) == 1
+m.remove(2)
+assert m.get(2) == -1
+```
+
+##### C++
+
+```cpp
+class HashMapDirect {
+    vector<int> vals;
+ public:
+    HashMapDirect() : vals(1000001, -1) {}
+    void put(int key, int val) { vals[key] = val; }
+    int get(int key) { return vals[key]; }
+    void remove(int key) { vals[key] = -1; }
+};
+```
+:::
+
+#### Chained buckets
+
+::: {.form-next}
+Collapse $U$ into $m$ buckets by modulus; each bucket is a list of pairs scanned in $O(\text{chain})$. `put` updates in place if the key is already in the chain, else appends. Memory is $O(m + n)$, and $\alpha = n/m$ stays near a constant when $m$ is chosen well.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("hashmap", "buckets")
+    assert str(final) == "outputs None None 1 -1 None 1 None -1"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class MyHashMap:
+    def __init__(self, m=1009):
+        self.m = m
+        self.buckets = [[] for _ in range(m)]
+
+    def _slot(self, key):
+        b = self.buckets[key % self.m]
+        for p in b:
+            if p[0] == key:
+                return b, p
+        return b, None
+
+    def put(self, key, val):
+        b, p = self._slot(key)
+        if p is not None:
+            p[1] = val
+        else:
+            b.append([key, val])
+
+    def get(self, key):
+        _, p = self._slot(key)
+        return p[1] if p is not None else -1
+
+    def remove(self, key):
+        b, p = self._slot(key)
+        if p is not None:
+            b.remove(p)
+
+
+m = MyHashMap()
+m.put(1, 1); m.put(2, 2)
+assert m.get(1) == 1 and m.get(3) == -1
+m.put(2, 1)
+assert m.get(2) == 1
+m.remove(2)
+assert m.get(2) == -1
+# collisions land in one bucket and stay distinguishable
+m.put(1009 + 5, 55); m.put(5, 5)
+assert m.get(5) == 5 and m.get(1014) == 55      # both have key % 1009 == 5
+# agree with the direct form on a random walk
+ref, buck = HashMapDirect(), MyHashMap(m=7)
+for _ in range(300):
+    k = random.randint(0, 40); v = random.randint(0, 999)
+    op = random.random()
+    if op < 0.5:
+        ref.put(k, v); buck.put(k, v)
+    elif op < 0.8:
+        assert ref.get(k) == buck.get(k)
+    else:
+        ref.remove(k); buck.remove(k)
+for k in range(0, 41):
+    assert ref.get(k) == buck.get(k)
+```
+
+##### C++
+
+```cpp
+class MyHashMap {
+    static const int M = 1009;
+    vector<pair<int,int>> buckets[M];
+ public:
+    void put(int key, int val) {
+        auto& b = buckets[key % M];
+        for (auto& p : b) if (p.first == key) { p.second = val; return; }
+        b.push_back({key, val});
+    }
+    int get(int key) {
+        for (auto& p : buckets[key % M]) if (p.first == key) return p.second;
+        return -1;
+    }
+    void remove(int key) {
+        auto& b = buckets[key % M];
+        for (size_t i = 0; i < b.size(); ++i) if (b[i].first == key) { b.erase(b.begin()+i); return; }
+    }
+};
+```
+:::
+
+#### Grow and rehash
+
+::: {.form-next}
+Keep the chains and a size; when $n$ exceeds $0.75\,m$, double $m$ and re-insert every pair: $k \bmod m$ differs under the new modulus, so keys genuinely move. The `_rehash` loop is why one resize costs $\Theta(m + n)$; the doubling makes that $O(1)$ amortised per `put`, the argument of @sec-arr-vec. The stress test runs random operations against the direct-address model and checks invariant **I** after every call.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    title, inp, steps, final = Traces.get("hashmap", "resize")
+    assert str(final) == "cap 4 -> 8; every key re-homed"
+    V.story(ax, p, title, inp, steps, final)
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class HashMapResize:
+    def __init__(self, cap=4, load=0.75):
+        self.cap = cap
+        self.n = 0
+        self.load = load
+        self.tbl = [[] for _ in range(cap)]
+
+    def _rehash(self):
+        old = self.tbl
+        self.cap *= 2
+        self.tbl = [[] for _ in range(self.cap)]
+        for b in old:
+            for kv in b:
+                self.tbl[kv[0] % self.cap].append(kv)   # NEW home under the NEW modulus
+
+    def put(self, key, val):
+        b = self.tbl[key % self.cap]
+        for p in b:
+            if p[0] == key:
+                p[1] = val
+                return
+        b.append([key, val])
+        self.n += 1
+        if self.n > self.load * self.cap:
+            self._rehash()
+
+    def get(self, key):
+        for p in self.tbl[key % self.cap]:
+            if p[0] == key:
+                return p[1]
+        return -1
+
+    def remove(self, key):
+        b = self.tbl[key % self.cap]
+        for p in b:
+            if p[0] == key:
+                b.remove(p)
+                self.n -= 1
+                return
+
+
+m = HashMapResize()
+m.put(1, 1); m.put(2, 2)
+assert m.get(1) == 1 and m.get(3) == -1
+m.put(2, 1)
+assert m.get(2) == 1
+m.remove(2)
+assert m.get(2) == -1
+# force several resizes and confirm re-homed keys survive
+for k in range(1, 20):
+    m.put(k, k * 10)
+assert m.cap >= 32
+for k in range(1, 20):
+    assert m.get(k) == k * 10
+
+
+def check_hashmap(h):
+    keys = [kv[0] for b in h.tbl for kv in b]
+    assert len(keys) == len(set(keys)) == h.n and h.n <= h.load * h.cap
+    assert all(kv[0] % h.cap == i for i, b in enumerate(h.tbl) for kv in b)
+
+
+# stress: random operations against the direct-address model, invariant I after every call
+for _ in range(200):
+    model, fast = HashMapDirect(U=60), HashMapResize(cap=2)
+    for _ in range(60):
+        k, v, r = random.randint(0, 59), random.randint(0, 999), random.random()
+        if r < 0.5:
+            model.put(k, v); fast.put(k, v)
+        elif r < 0.75:
+            model.remove(k); fast.remove(k)
+        else:
+            assert fast.get(k) == model.get(k)
+        check_hashmap(fast)
+    assert all(fast.get(k) == model.get(k) for k in range(60))
+```
+
+##### C++
+
+```cpp
+class HashMapResize {
+    int cap = 4, n = 0;
+    vector<vector<pair<int,int>>> tbl;
+    void rehash() {
+        auto old = move(tbl); cap *= 2; tbl.assign(cap, {});
+        for (auto& b : old) for (auto& kv : b) tbl[kv.first % cap].push_back(kv);
+    }
+ public:
+    HashMapResize() : tbl(4) {}
+    void put(int key, int val) {
+        auto& b = tbl[key % cap];
+        for (auto& p : b) if (p.first == key) { p.second = val; return; }
+        b.push_back({key, val}); if (++n > 3 * cap / 4) rehash();
+    }
+    int get(int key) {
+        for (auto& p : tbl[key % cap]) if (p.first == key) return p.second;
+        return -1;
+    }
+    void remove(int key) {
+        auto& b = tbl[key % cap];
+        for (size_t i = 0; i < b.size(); ++i) if (b[i].first == key) { b.erase(b.begin()+i); --n; return; }
+    }
+};
+```
+:::
+
+:::
+
+::: {.p-complexity}
+**Direct addressing:** $O(1)$ worst case per operation, $O(U)$ space. **Chained buckets:** $O(1 + n/m)$ expected per operation for a fixed $m$, $O(n)$ worst case if every key collides; $O(m + n)$ space. **Grow and rehash:** $O(1)$ expected per operation, amortised over rehashes (a $\Theta(m + n)$ rehash happens only after $\Omega(m)$ inserts since the previous one); space $O(n)$, because $m = \Theta(n)$ as long as the map has not shrunk. "Expected" assumes the keys spread evenly; $k \bmod m$ on adversarial keys does not (@sec-hash-anti).
+:::
+
+::: {.p-edge}
+- **Update vs insert in `put`**: scan the chain for an existing key and overwrite, else append — treating `put` as always-append duplicates the key and breaks `get`.
+- **Re-homing on resize**: after doubling $m$ you cannot reuse old bucket positions; every pair's index $k \bmod m$ changes, so re-insert from scratch (the `_rehash` body).
+- **Absence vs a stored $-1$**: because values are $\ge 0$, returning $-1$ is unambiguous; a map allowing negative values needs a separate "present" flag.
+- **Removing never shrinks** this table: after many deletions $m$ can be much larger than $n$. Halving $m$ when $n < m/8$ (not $m/2$, which would make a put/remove pair at the boundary rehash every time) restores $O(n)$ space.
+:::
+
+::: {.callout-warning title="Common mistakes"}
+- **Forgetting to re-hash on resize** and keeping pairs in their old buckets — the map silently loses entries the moment $m$ changes.
+- **A power-of-two $m$ with `k & (m - 1)`** keeps only the low bits of the key, so keys that differ only in high bits (multiples of $1024$, say) all collide; mix the key first, or use a prime $m$ (@sec-hash-sets).
+- **A fixed $m$ and no resize**, then claiming $O(1)$: the chains grow with $n$, so the true cost is $O(1 + n/m)$.
+:::
+
+**Variants.** The direct table is @sec-ds-p4-hotel's `occ[10]` with a bigger universe; both are "index equals key, no hashing". The rehash is the vector doubling of @sec-arr-vec applied to a table instead of a tail. @sec-ds-p4-hashset stores the same keys without chains, in the table's own cells.
+
+::: {.practice}
+- [CF 4C · Registration system](https://codeforces.com/problemset/problem/4/C){rating="1300"} — a name-to-count map with a lookup per request; write it once with your own chained table to see it work on strings.
+:::

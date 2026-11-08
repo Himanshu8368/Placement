@@ -1,0 +1,386 @@
+% =====================================================================
+%  31.1  The cut property and Kruskal's algorithm.
+%  Exports: sec:c17-kruskal  thm:c17-cut  lem:c17-safe  cor:c17-distinct
+%  def:c17-spanning  lst:c17-kruskal  prob:c17-connect  fig:c17-connect
+%  lst:c17-connect  fig:c17-kruskal-trace
+%  Solved CF 1095F "Make It Connected" (1900, L4), live-verified against the
+%  CF problem page (title "F. Make It Connected", 2s TL, 256 MB, n,m<=2e5,
+%  1<=a_i,w<=1e12).  Edge x-y costs a_x + a_y; m extra offers give x-y for w.
+%  Answer = MST over the (n-1) star-to-min edges plus the m offers.  Three
+%  official samples replayed in the Trace section: (3 2)->5, (4 0)->16,
+%  (5 4)->18.
+% =====================================================================
+\section{The Cut Property and Kruskal's Algorithm}\label{sec:c17-kruskal}
+
+\begin{previouslybox}[Ch.30 counted trees; this chapter chooses one]
+\(\chref{c32}\) ended with \emph{how many} spanning trees a graph has -- a
+determinant.  Here the graph carries weights and we want the \emph{one}
+cheapest spanning tree.  The whole chapter, and the proof of every greedy in it,
+follows from a single lemma about cuts.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{spanning tree} of a connected graph is a minimal set of edges touching
+every vertex -- \(n-1\) edges, no cycle.  Weighted, we want the cheapest one.
+The key structural fact is the \term{cut property} (\(\thmref{c17-cut}\)): the
+lightest edge crossing any cut is safe to take.  \term{Kruskal}'s algorithm is
+the mechanical reading of that lemma: sort the edges by weight and add each one
+that does not close a cycle, testing "does not close a cycle" with a DSU
+(\chref{c28}) in near-constant amortised time.  The cost is dominated by the
+sort, \(\bigO{m\log m}\), which makes Kruskal the sparse-graph default.
+
+We build the running graph \(G\) (\figref{c17-tree}) edge by edge, then solve
+CF 1095F (\(\probref{c17-connect}\)), where the graph is implicit: every pair
+\((x,y)\) can be bought for \(a_x+a_y\), plus a handful of discounted offers.
+The trick is realising that almost all of the complete graph can be ignored --
+only \(n-1\) "star" edges and the offers ever matter -- so an \(\bigO{m\log m}\)
+Kruskal runs on \(O(n+m)\) candidate edges.
+
+\textbf{Prerequisites.} Chapter~17 (\chref{c28}) -- the DSU; we call
+\texttt{find} and \texttt{union} as a black box and never rebuild them here.
+\(\secref{c17-prim}\) later gives the dense-graph twin; you can read this section
+standalone.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state the cut property and derive the cycle property from it; \hfill\lv{3}
+  \item run Kruskal by hand on a small weighted graph; \hfill\lv{3}
+  \item code Kruskal with a DSU in \(\bigO{m\log m}\); \hfill\lv{4}
+  \item solve CF 1095F by reducing an implicit complete graph to a star plus
+        offers. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{Spanning trees, cuts, and the one lemma}
+% ---------------------------------------------------------------
+
+\begin{definition}{Spanning tree}{c17-spanning}
+A \term{spanning tree} of a connected graph \(G=(V,E)\) is a subset
+\(T\subseteq E\) with \(|T|=|V|-1\) whose edges connect all of \(V\) without
+forming a cycle.  The \term{minimum spanning tree} (MST) is the spanning tree
+minimising \(w(T)=\sum_{e\in T} w(e)\).
+\end{definition}
+
+\begin{theorem}{Cut property}{c17-cut}
+Let \((S, V\setminus S)\) be any cut of \(G\), and let \(e\) be a minimum-weight
+edge crossing it.  Then \(e\) belongs to some MST of \(G\).  If that minimum is
+strictly smaller than every other crossing edge, \(e\) is in \textbf{every} MST.
+\end{theorem}
+
+\begin{proofbox}
+Take any MST \(T\).  If \(e\in T\) we are done.  Otherwise \(T\) must cross the
+cut with some other edge \(f\) (else \(T\) would not connect \(S\) to
+\(V\setminus S\)).  Adding \(e\) to \(T\) creates a unique cycle containing
+both \(e\) and \(f\); remove \(f\) to break the cycle.  The result
+\(T' = T - f + e\) is still a spanning tree, and \(w(T')=w(T)-w(f)+w(e)\le w(T)\)
+since \(w(e)\le w(f)\) (\(e\) is the cut's cheapest crossing edge).  Minimality
+of \(T\) forces equality, so \(T'\) is an MST containing \(e\).  When
+\(w(e)<w(f)\) strictly, the swap strictly improves any tree using \(f\), so no
+MST avoids \(e\).  \(\Box\)
+\end{proofbox}
+
+\begin{corollary}{Distinct weights give a unique MST}{c17-distinct}
+If all edge weights are distinct, the MST is unique.
+\end{corollary}
+
+\begin{proofbox}
+For every cut there is then a strictly cheapest crossing edge, so by the strict
+clause of \(\thmref{c17-cut}\) it lies in every MST.  Kruskal is forced at every
+step, leaving exactly one tree. \(\Box\)
+\end{proofbox}
+
+\begin{lemma}{Cycle property}{c17-safe}
+An edge that is the strictly heaviest edge on some cycle belongs to no MST.
+\end{lemma}
+
+\begin{proofbox}
+Let \(e\) be heaviest on cycle \(C\).  Consider the cut formed by removing \(e\)
+from \(C\): the rest of \(C\) crosses it with a lighter edge, so \(e\) is not the
+cut's cheapest crossing and \(\thmref{c17-cut}\) never forces it; excluding \(e\)
+leaves a spanning tree cheaper by the swap. \(\Box\)
+\end{proofbox}
+
+% ---------------------------------------------------------------
+\subsection{Kruskal's algorithm}
+% ---------------------------------------------------------------
+
+Kruskal grows the MST one edge at a time in global weight order.  At each step
+the already-taken edges partition \(V\) into components; the next edge either
+joins two components (safe: it is the cheapest crossing of the cut defined by
+those two components, so \(\thmref{c17-cut}\) blesses it) or has both endpoints
+in one component (it closes a cycle and is heaviest on it, so the cycle property
+\(\lemref{c17-safe}\) rejects it).  "Both endpoints in one component?" is exactly
+a DSU \texttt{find} test.
+
+\begin{lstlisting}[caption={Kruskal MST. Sort edges by weight, then union the endpoints, accumulating an edge exactly when its two endpoints were in different components. Uses the Ch.17 DSU. Returns the MST weight and fills the parent structure; total cost is dominated by the sort}, label={lst:c17-kruskal}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+struct Edge { int u, v; ll w; };
+int par[200005];
+int findSet(int x){ return par[x]==x ? x : par[x]=findSet(par[x]); }
+ll kruskal(int n, vector<Edge>& edges){
+  for(int i=1;i<=n;i++) par[i]=i;                 // fresh DSU
+  sort(edges.begin(), edges.end(),
+       [](const Edge& a, const Edge& b){ return a.w < b.w; });
+  ll total=0; int used=0;
+  for(const Edge& e : edges){
+    int ru=findSet(e.u), rv=findSet(e.v);
+    if(ru!=rv){                                    // crosses a cut -> safe
+      par[ru]=rv; total += e.w; used++;
+      if(used==n-1) break;                         // tree complete
+    }
+  }
+  return (used==n-1) ? total : -1;                 // -1 => graph disconnected
+}
+\end{lstlisting}
+
+\begin{tracebox}[Kruskal on the running graph \(G\)]
+Sorted edges: \(1\!-\!2{:}1,\ 3\!-\!4{:}2,\ 1\!-\!3{:}3,\ 2\!-\!3{:}4,\
+2\!-\!4{:}5,\ 4\!-\!5{:}6,\ 3\!-\!5{:}7\).  Start each vertex its own component.
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \(1\!-\!2{:}1\): comps \(\{1\},\{2\}\) differ -- take. Now \(\{1,2\}\).
+  \item \(3\!-\!4{:}2\): \(\{3\},\{4\}\) differ -- take. Now \(\{3,4\}\).
+  \item \(1\!-\!3{:}3\): \(\{1,2\},\{3,4\}\) differ -- take. Now \(\{1,2,3,4\}\).
+  \item \(2\!-\!3{:}4\): both in \(\{1,2,3,4\}\) -- cycle, reject.
+  \item \(2\!-\!4{:}5\): same component -- reject.
+  \item \(4\!-\!5{:}6\): \(\{1,2,3,4\},\{5\}\) differ -- take. Tree complete.
+  \item \(3\!-\!5{:}7\): never reached (used \(=n-1=4\)).
+\end{itemize}
+MST \(=\{1\!-\!2,3\!-\!4,1\!-\!3,4\!-\!5\}\), weight \(1+2+3+6=\mathbf{12}\).
+\end{tracebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.92, transform shape,
+   tnode/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.7pt,
+                 minimum size=7mm, font=\scriptsize\bfseries, inner sep=1pt},
+   acc/.style={line width=1.6pt, draw=successgreen!80!black},
+   rej/.style={line width=1pt, draw=warningred!80, dashed}]
+  \node[tnode] (v1) at (0,0) {1};
+  \node[tnode] (v2) at (3,1.2) {2};
+  \node[tnode] (v3) at (3,-1.4) {3};
+  \node[tnode] (v4) at (6,-0.4) {4};
+  \node[tnode] (v5) at (8.2,1) {5};
+  \draw[acc] (v1)--node[fill=white,inner sep=1pt,font=\scriptsize] {1} (v2);
+  \draw[acc] (v3)--node[fill=white,inner sep=1pt,font=\scriptsize] {2} (v4);
+  \draw[acc] (v1)--node[fill=white,inner sep=1pt,font=\scriptsize] {3} (v3);
+  \draw[acc] (v4)--node[fill=white,inner sep=1pt,font=\scriptsize] {6} (v5);
+  \draw[rej] (v2)--node[fill=white,inner sep=1pt,font=\scriptsize] {4} (v3);
+  \draw[rej] (v2)--node[fill=white,inner sep=1pt,font=\scriptsize] {5} (v4);
+  \draw[rej] (v3)--node[fill=white,inner sep=1pt,font=\scriptsize] {7} (v5);
+  \node[annot, font=\scriptsize] at (4,-2.7) {green: 4 taken (weight 12); red dashed: 3 rejected};
+\end{tikzpicture}
+\caption{The Kruskal trace on \(G\).  The three dashed edges each close a cycle
+where they are the heaviest member, so \(\lemref{c17-safe}\) rejects them; the
+four solid edges are exactly \(\figref{c17-tree}\)'s MST.}
+\label{fig:c17-kruskal-trace}
+\end{figure}
+
+% ---------------------------------------------------------------
+\subsection{Solved: CF 1095F -- Make It Connected (1900, L4)}
+% ---------------------------------------------------------------
+
+\solvedproblem{c17-connect}{Make It Connected}{CF 1095F}{https://codeforces.com/problemset/problem/1095/F}{CF 1900 L4}{cut property, implicit-graph reduction (star to the cheapest vertex), Kruskal with a DSU}
+
+\begin{problemstatement}[CF 1095F, verified against the live CF problem page]
+There are \(n\) cities; city \(i\) has a beauty value \(a_i\).  You may build a
+road between cities \(x\) and \(y\) at cost \(a_x + a_y\).  Additionally there
+are \(m\) special offers, each offering to connect cities \(x\) and \(y\) for a
+fixed cost \(w\) (which may be higher or lower than \(a_x+a_y\)).  Find the
+minimum total cost to make all \(n\) cities connected (each offer and each
+regular road may be used at most once, but you choose which to build).
+Constraints: \(2\le n\le 2\cdot 10^5\), \(0\le m\le 2\cdot 10^5\),
+\(1\le a_i, w \le 10^{12}\).  Time limit 2 seconds, memory 256 MB.  Samples:
+\(n=3,m=2\) with \(a=[1,3,3]\) and offers \((2,3,5),(1,2,1)\) answer \(5\);
+\(n=4,m=0\) with \(a=[1,3,3,7]\) answer \(16\); \(n=5,m=4\) with
+\(a=[1,2,3,4,5]\) and four offers answer \(18\).
+\end{problemstatement}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+   tnode/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.7pt,
+                 minimum size=7mm, font=\scriptsize\bfseries, inner sep=1pt},
+   star/.style={line width=1.5pt, draw=secondaryblue!80!black},
+   off/.style={line width=1.5pt, draw=difforange}]
+  \node[tnode] (s) at (0,0) {\(s\)};
+  \node[annot, font=\scriptsize] at (0,-0.9) {min } ;
+  \node[tnode] (c1) at (3.2,1.6) {1};
+  \node[tnode] (c2) at (4.2,-0.2) {2};
+  \node[tnode] (c3) at (3.0,-1.8) {3};
+  \node[tnode] (c4) at (0.6,2.2) {4};
+  \draw[star] (s)--(c1) (s)--(c2) (s)--(c3) (s)--(c4);
+  \draw[off, dashed] (c1)--(c4);
+  \node[annot, font=\scriptsize, text width=6cm, align=center] at (2,-3)
+    {blue: the \(n-1\) star edges \((i,s)\) costing \(a_i+a_s\); dashed orange: one offer};
+\end{tikzpicture}
+\caption{The reduction.  Only two families of edges can be in the MST: the
+\(n-1\) star edges to the cheapest city \(s\), and the \(m\) offers.  Every other
+regular road \((x,y)\) is dominated by \(x\!-\!s\) or \(y\!-\!s\) and is safely
+discarded before Kruskal runs on \(O(n+m)\) edges.}
+\label{fig:c17-connect}
+\end{figure}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+The graph has \(\binom{n}{2}\) regular roads -- you cannot feed them all to
+Kruskal.  What is the cheapest way to attach a single vertex to the rest, and how
+many edges per vertex do you actually need to consider?
+\peek{This is an MST over an implicit complete graph plus a few special edges.
+You never materialise \(\binom{n}{2}\) roads; you argue most of them away, then
+Kruskal on the survivors (\(\secref{c17-kruskal}\)).}
+\nudge{Let \(s=\arg\min_i a_i\).  To connect any vertex \(i\) to an already-built
+component, the cheapest possible regular road is \(i\!-\!s\) at cost \(a_i+a_s\):
+for any other endpoint \(j\), \(a_i+a_j\ge a_i+a_s\).  So a minimum spanning tree
+never needs a regular road except the star edges \((i,s)\).}
+\fullhint{Build a candidate edge list of exactly \((n-1)+m\) edges: the star edges
+\((i,s)\) weighted \(a_i+a_s\) for all \(i\ne s\), and every offer \((x,y,w)\).
+Run \(\coderef{c17-kruskal}\) on that list.  By the cut property the cheapest
+attachment for each \(i\) is via \(s\), and offers are the only edges that can
+beat the star; everything else is dominated and drops out. Total \(\bigO{(n+m)
+\log(n+m)}\). The full build is below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Two edge worlds coexist: the \(\binom n2\) regular roads priced \(a_x+a_y\), and
+\(m\) offers with arbitrary prices.  A plain Kruskal is hopeless on
+\(\binom n2\) edges for \(n=2\cdot 10^5\).  The job is to shrink the candidate
+set to \(O(n+m)\) without losing any edge the MST might want, then let Kruskal
+choose between the star and the offers.
+
+\solstep{Key Observations}
+\begin{observation}
+For a vertex \(i\ne s\) (with \(s\) the cheapest city), the cheapest regular road
+that can attach \(i\) to \emph{any} component not already containing \(i\) is
+\(i\!-\!s\), costing \(a_i+a_s\).  Any road \(i\!-\!j\) costs \(a_i+a_j\ge
+a_i+a_s\).  Hence in some MST, the only regular road incident to \(i\) is \(i\!-\!s\).
+\end{observation}
+\begin{observation}
+An offer \((x,y,w)\) can beat the star because \(w\) is independent of
+\(a_x,a_y\); it can be far cheaper than \(a_x+a_s\).  Offers are the sole reason
+a non-star edge enters the tree, so all \(m\) offers are kept.
+\end{observation}
+\begin{observation}
+Therefore the MST of the whole implicit graph equals the MST of the explicit
+graph on edge set \(\{(i,s): i\ne s\}\cup\{\text{offers}\}\), which has \(n-1+m\)
+edges -- a size Kruskal handles directly.
+\end{observation}
+
+\solstep{Think It With Me}
+\begin{thinkbox}
+\deadend{Materialise all \(\binom n2\) roads and Kruskal}{\(\sim 2\cdot 10^{10}\)
+edges for \(n=2\cdot 10^5\): the sort alone is a memory and time disaster.}
+\deadend{Connect every \(i\) to \(s\) unconditionally and sum \(a_i+a_s\)}{Ignores
+offers; sample 1 uses the offer \((1,2,1)\) to beat the star edge \(1\!-\!2{:}4\),
+so the pure star (\(=4+4=8\) for \(n=3\)) overcounts the true answer \(5\).}
+\aha{Keep the star edges \emph{and} every offer as one candidate list, then let
+Kruskal's cut-property filter decide per edge.  Where an offer is cheaper it wins
+the union; the star handles all the rest.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.28\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ full Kruskal & all \(\binom n2\) roads & \(\bigO{n^2\log n}\) & \mle\\
+2 & \lv{3}\ star only & connect all to \(s\), ignore offers & \(\bigO{n}\) & \textbf{WA}\\
+3 & \lv{4}\ \textbf{star + offers Kruskal} & \(n-1+m\) candidates & \(\bigO{(n+m)\log n}\) & \ac\\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 is the seductive shortcut: the star alone is the answer \emph{only when
+there are no useful offers}.  Sample 1 breaks it.  Rung 3 trusts Kruskal to mix
+the two edge families correctly.
+
+\solstep{Solution}
+Read \(a_1,\dots,a_n\), find \(s=\arg\min a_i\).  Push \(n-1\) star edges
+\((i,s,a_i+a_s)\) and all \(m\) offers \((x,y,w)\) into one vector.  Run
+\(\coderef{c17-kruskal}\).  Because every candidate is either a forced-cheap star
+edge or a genuine offer, the cut property guarantees the MST of the candidate set
+is the MST of the full implicit graph.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1095F. Find the cheapest city, build the n-1 star edges plus m offers, run Kruskal. Weights up to 2e12 so all sums are long long}, label={lst:c17-connect}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+struct Edge { int u, v; ll w; };
+vector<int> par;
+int findSet(int x){ return par[x]==x ? x : par[x]=findSet(par[x]); }
+int main(){
+  int n, m; scanf("%d %d", &n, &m);
+  vector<ll> a(n+1);
+  int s=1;
+  for(int i=1;i<=n;i++){ scanf("%lld", &a[i]); if(a[i]<a[s]) s=i; }
+  vector<Edge> edges;
+  for(int i=1;i<=n;i++) if(i!=s) edges.push_back({i, s, a[i]+a[s]});  // star
+  for(int k=0;k<m;k++){
+    int x,y; ll w; scanf("%d %d %lld", &x, &y, &w);
+    edges.push_back({x, y, w});                                       // offers
+  }
+  par.resize(n+1); for(int i=1;i<=n;i++) par[i]=i;
+  sort(edges.begin(), edges.end(),
+       [](const Edge& p, const Edge& q){ return p.w < q.w; });
+  ll total=0; int used=0;
+  for(const Edge& e : edges){
+    int ru=findSet(e.u), rv=findSet(e.v);
+    if(ru!=rv){ par[ru]=rv; total+=e.w; if(++used==n-1) break; }
+  }
+  printf("%lld\n", total);
+  return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Samples}
+\begin{tracebox}[Sample 1: \, \(n=3\), \(m=2\), \(a=(1,3,3)\), offers \((2,3,5),(1,2,1)\)]
+Cheapest city \(s=1\) (\(a_1=1\)).  Star edges: \(2\!-\!1{:}3+1=4\),
+\(3\!-\!1{:}3+1=4\).  Offers: \(2\!-\!3{:}5\), \(1\!-\!2{:}1\).  Sorted:
+\(1\!-\!2{:}1,\ 2\!-\!1{:}4,\ 3\!-\!1{:}4,\ 2\!-\!3{:}5\).  Kruskal: take
+\(1\!-\!2{:}1\); skip the duplicate \(2\!-\!1{:}4\) (same component); take
+\(3\!-\!1{:}4\); done.  Total \(1+4=\mathbf{5}\).
+\end{tracebox}
+\begin{tracebox}[Sample 2: \, \(n=4\), \(m=0\), \(a=(1,3,3,7)\)]
+\(s=1\).  Star edges only: \(2\!-\!1{:}4\), \(3\!-\!1{:}4\), \(4\!-\!1{:}8\).
+All taken.  Total \(4+4+8=\mathbf{16}\).
+\end{tracebox}
+\begin{tracebox}[Sample 3: \, \(n=5\), \(m=4\), \(a=(1,2,3,4,5)\), offers all costlier than the star]
+\(s=1\).  Star: \(2\!-\!1{:}3,\ 3\!-\!1{:}4,\ 4\!-\!1{:}5,\ 5\!-\!1{:}6\).  The
+four offers \((1,2{:}8),(1,3{:}10),(1,4{:}7),(1,5{:}15)\) are each more expensive
+than the matching star edge, so Kruskal takes the four star edges:
+\(3+4+5+6=\mathbf{18}\).
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Building the candidate list is \(\bigO{n+m}\); the Kruskal sort dominates at
+\(\bigO{(n+m)\log(n+m)}\), with the DSU's inverse-Ackermann unions negligible on
+top.  For \(n,m\le 2\cdot 10^5\) that is well inside 2 seconds.  Space
+\(\bigO{n+m}\) for the edge vector and DSU arrays.  Every accumulated cost uses
+\texttt{long long}: a single edge can be \(2\cdot 10^{12}\) and the total up to
+\(\approx 2\cdot 10^{17}\), past 32-bit range.
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+\item \(2\cdot 10^{12}\)-scale weights and \(2\cdot 10^{17}\) totals demand
+      \texttt{long long}; an \texttt{int} sum silently overflows to a wrong answer.
+\item \(s\) must be the minimum-\(a\) vertex \emph{before} offers are considered;
+      picking a different anchor loses the dominance proof and inflates the tree.
+\item An offer can be \emph{cheaper} than a star edge and can also duplicate a
+      pair already in the star (sample 1's offer \(1\!-\!2\)); do not dedupe --
+      Kruskal's cycle check discards the loser automatically.
+\item Ties in \(a_i\) (two cheapest cities): pick any one as \(s\); the star still
+      dominates, so correctness is unaffected.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[Recall -- what \(\secref{c17-kruskal}\) gave you]
+\selftest{
+  \item State the cut property and the cycle property in one line each.
+  \item Why does a distinct-weight graph have exactly one MST?
+  \item In Kruskal, what DSU operation decides whether an edge is taken?
+  \item For CF 1095F, why can the MST never need a regular road other than a star edge?
+}
+\end{recallbox}

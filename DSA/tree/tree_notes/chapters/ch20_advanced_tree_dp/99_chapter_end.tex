@@ -1,0 +1,926 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  Chapter 15 review -- the 15-station revision contract (chapter_end.txt).
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\defref/\exref/\figref.  No derivations except the Summit.
+%  Summit: CF 1498F Christmas Game -- reroot a Nim value. Each present at
+%  depth d is a token moving d -> d-k, Grundy = floor(d/k) mod 2; a node with
+%  odd a_i contributes that bit, so the root's verdict is the PARITY of
+%  {odd-a_i nodes at distance in [k,2k) mod 2k}.  Reroot a distance histogram
+%  of width 2k (combine = elementwise +, edge-transfer = cyclic shift by 1).
+%  Samples verified live:
+%    (n=5,k=1, a=0 3 2 4 4) -> 1 0 0 1 1;  plus T-overlay k=2 odd-a{4,10}.
+%  Exports prob:c20-summit, lst:c20-summit, lst:c20-kit.
+% =====================================================================
+
+\chaptersection{Chapter 15 Summary}
+
+One sentence: \emph{when the answer must be reported for \textbf{every} choice of
+root rather than one fixed root, the Ch.~13 fold is only half the story -- you
+add an \emph{up pass} that carries the same fold over the rest of the tree, join
+$\mathit{down}[v]$ and $\mathit{up}[v]$ at every node, and move the root across a
+single edge with one \term{edge-transfer} rule; the whole sweep is $\bigO{n}$
+whenever the combine is invertible, and stays $\bigO{n}$ even when it is not once
+prefix/suffix replaces the inverse.} Chapters~13 and~14 fixed the root; Chapter~15
+makes it a variable. Every entry below is a pointer, not a re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} p{0.48\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement (with conditions)} & \textbf{Where} \\
+\midrule
+Two-DFS reroot & $\mathit{answer}[v]=\Phi(\mathit{down}[v],\mathit{up}[v])$ read at
+every $v$; the down pass is Ch.13's fold, the up pass carries the fold over the
+complement. & \defref{c20-pair-state}, \thmref{c20-edge-transfer} \\
+Edge-transfer rule & For each child $c$ of $v$, $\mathit{up}[c]=\mathit{shift}
+(\Phi(\text{self}(v),\mathit{up}[v],\text{all siblings}))$; seed $\mathit{up}[\text{root}]
+=\Phi$'s identity, \emph{not} zero. & \thmref{c20-edge-transfer} \\
+Invertible parent piece & When $\Phi$ is $+$ or $\oplus$, siblings $=\mathit{down}
+[v]\ominus\mathit{down}[c]$ -- one subtraction, $\bigO{1}$ per edge, no sibling
+loop, $\bigO{n}$ total. & \defref{c20-parent-piece}, \thmref{c20-parent-piece-correct} \\
+Prefix/suffix merge & When $\Phi$ has \emph{no} inverse ($\max$/product-with-sign),
+$\mathit{excl}(i)=\Phi(\mathit{pre}[i],\mathit{suf}[i{+}1])$ gives "all children but
+$c_i$" in $\bigO{1}$ after $\bigO{\deg(v)}$ precompute; $\bigO{n}$ total. & \defref{c20-pre-suf}, \thmref{c20-pre-suf-linear} \\
+Reroot a count & Mark count past $c$ is $\mathit{down}[c]$, past $v$ is
+$\mathit{TOTAL}-\mathit{down}[c]$; a per-node \emph{verdict} is then reachability on
+the directed edge test, $\bigO{n}$. & \defref{c20-count-state}, \thmref{c20-count-edge-transfer} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter -- one down fold, one up fold, one join per node.}}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.19\linewidth} l l p{0.29\linewidth} p{0.155\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Time} & \textbf{Memory} & \textbf{When to use (deciding phrase)} & \textbf{Code} \\
+\midrule
+Two-DFS reroot ($\Phi=+$)
+  & $\bigO{n}$ & $\bigO{n}$
+  & ``report $\sum$ over the tree for every root''
+  & \coderef{c20-twodfs} \\
+Invertible pair reroot
+  & $\bigO{n}$ & $\bigO{n}$
+  & ``state is a pair; the combine is a sum, so subtract the child''
+  & \coderef{c20-updown} \\
+Prefix/suffix reroot
+  & $\bigO{n}$ & $\bigO{n}$
+  & ``combine is $\max$/signed-product -- no inverse -- for every root''
+  & \coderef{c20-presuf} \\
+Count reroot + reachability
+  & $\bigO{n}$ & $\bigO{n}$
+  & ``a yes/no per node decided by a count on both sides of every edge''
+  & \coderef{c20-count} \\
+Rerooted Nim / Grundy (Summit)
+  & $\bigO{nk}$ & $\bigO{nk}$
+  & ``who wins the token-sliding game for every root ($k$ small)''
+  & \coderef{c20-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches.
+It decides \emph{whether you even need to reroot} -- and hands off what Chapter~15
+does \emph{not} own: per-pair \emph{query} distance (Chapter~16's LCA,
+\chref{c11}), the $\bigO{n\log n}$ small-to-large upgrade (Chapter~17's DSU-on-tree,
+\chref{c28}), and centroid-based path counting (Chapter~24, \chref{c18}).
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You are handed an UNROOTED tree.  Where does the answer live?
+  |
+  |-- is ONE number required per node (or a max over all roots) -- the value
+  |   depends on the choice of root?
+  |     +-- NO  -> the root is fixed or irrelevant: this is Ch.13 (one fold).
+  |     +-- YES -> REROOT.  Go to the next question.
+  |
+  |-- can you move the root across one edge and update in O(1)?
+  |     +-- YES (sum/XOR, closed form) -> two-DFS, subtract the child:
+  |            [15.1 / 15.2]  lst:c20-twodfs, lst:c20-updown.
+  |            siblings = down[v] (-) down[c];  up[root] = Phi identity, NOT 0.
+  |
+  |-- is the combine NON-invertible (max / min / signed product / or)?
+  |     +-- YES -> prefix/suffix over the children, O(1) per child:
+  |            [15.3]  lst:c20-presuf.  excl(i) = Phi(pre[i], suf[i+1]).
+  |            NEVER try to "divide out" a signed product or subtract a max.
+  |
+  |-- is the per-node output a VERDICT decided by a count on both sides
+  |   of each edge (can I reach a target; is this edge safe)?
+  |     +-- YES -> count reroot (TOTAL - down) + directed reachability:
+  |            [15.4]  lst:c20-count.
+  |
+  |-- is the per-node value a GAME/Nim quantity that shifts with depth parity?
+  |     +-- reroot a distance histogram of width 2k:  [Summit, CF 1498F]
+  |            edge-transfer = cyclic shift by 1; verdict = parity read off it.
+  |
+  `-- answer needed for PAIRS on demand, not per-root? -> Ch.16 LCA (c11).
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Up-pass seeded with zero instead of $\Phi$'s identity.}
+        $\mathit{up}[\text{root}]$ is the fold over the \emph{empty} complement,
+        so it is $\mathcal{I}$ ($0$ for $+$, $-\infty$ for $\max$, $1$ for product),
+        not a hard $0$. Seeding a $\max$-reroot's $\mathit{up}$ with $0$ silently
+        wins at every negative node. (\thmref{c20-edge-transfer}).
+  \item \textbf{Subtracting out a non-invertible combine.} $\mathit{down}[v]\ominus
+        \mathit{down}[c]$ only exists for $+$ / $\oplus$. For $\max$ or a
+        signed product, "remove child $c$" needs \defref{c20-pre-suf}'s
+        $\mathit{excl}(i)=\Phi(\mathit{pre}[i],\mathit{suf}[i{+}1])$, not arithmetic.
+        (\thmref{c20-pre-suf-linear}).
+  \item \textbf{Prefix/suffix off-by-one.} "Everything but $c_i$" is
+        $\Phi(\mathit{pre}[i],\mathit{suf}[i{+}1])$. Using $\mathit{suf}[i]$ or
+        $\mathit{pre}[i{+}1]$ re-adds $x_i$; the bug hides on chains and bites on
+        wide nodes. (\defref{c20-pre-suf}).
+  \item \textbf{Double-shifting on the edge transfer.} Crossing $(v,c)$ re-indexes
+        the "self" term exactly once. Applying $\mathit{shift}$ twice (or once in
+        the wrong direction) shows up as an off-by-one depth / sign on \emph{every}
+        non-root answer -- CF~960E's $\mathit{tot}[c]=-\mathit{tot}[v]$ is the
+        canonical one-flip rule. (\thmref{c20-edge-transfer},
+        \probref{c20-presuf-solved}).
+  \item \textbf{Treating a rerooted count as an absolute size.} In
+        \defref{c20-count-state} the parent side is $\mathit{TOTAL}-\mathit{down}[c]$,
+        a \emph{different} number from $\mathit{down}[c]$; and the move graph in
+        CF~1626E is \emph{directed} -- assuming symmetry over-accepts stranded nodes.
+        (\probref{c20-count-solved}).
+  \item \textbf{$\bigO{\deg^2}$ sibling loop left in an invertible case.} If
+        $\Phi$ is a sum but you re-fold the siblings per child instead of
+        subtracting, a star root costs $\bigO{n^2}$. (\thmref{c20-parent-piece-correct},
+        \coderef{c20-updown}).
+  \item \textbf{\lstinline{long long} / modulo on signed reroot sums.} CF~960E's
+        $\mathit{tot},d,Q$ are \emph{signed}; accumulate with
+        \lstinline{((x\%MOD)+MOD)\%MOD} and widen products to \lstinline{long long}
+        before reducing. (\probref{c20-presuf-solved}).
+  \item \textbf{Recursion depth on a legal chain.} Same trap as Ch.12--14: at
+        $n\ge2\cdot10^{5}$ the up pass overflows the stack. Ch.12's
+        \coderef{c09-iter} two-phase form applies verbatim -- carry
+        $\mathit{up}[v]$ (or the width-$2k$ histogram, Summit) on the frame.
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled.
+Diagnose top-down -- every leaf names the training problem.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=58mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 6mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=1mm of verdict] (tle) {\textbf{TLE}};
+  \node[b, below left=8mm and 1mm of verdict, xshift=30mm] (re) {\textbf{RE}};
+  \node[b, below right=8mm and 6mm of verdict] (mle) {\textbf{MLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {up-pass seeded at $0$ not $\mathcal{I}$ (\thmref{c20-edge-transfer}; \probref{c20-presuf-solved});
+     non-invertible combine done by subtraction (\defref{c20-pre-suf});
+     sign double-flipped on the transfer (CF~960E, \probref{c20-presuf-solved});
+     move graph undirected in a count reroot (\probref{c20-count-solved})};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {$\bigO{\deg^2}$ sibling loop on a star, invertibility ignored (\coderef{c20-updown});
+     prefix/suffix rebuilt per child instead of once per node (\coderef{c20-presuf});
+     Summit histogram width $2k$ re-scanned without the cyclic-shift shortcut};
+  \node[l, below right=1mm and 2mm of re.south] (re1)
+    {recursive up pass on a legal $3\cdot10^{5}$ chain -- swap for \coderef{c09-iter};
+     off-by-one indexing into $\mathit{pre}/\mathit{suf}$ reading past the array};
+  \node[l, below right=1mm and 2mm of mle.south] (mle1)
+    {$\mathit{pre}/\mathit{suf}$ allocated $n\times\deg$ instead of per-node scratch;
+     Summit keeping all $[n][2k]$ histograms -- stream the parity if memory-bound};
+  \draw[flow] (verdict) -- (wa); \draw[flow] (verdict) -- (tle);
+  \draw[flow] (verdict) -- (re); \draw[flow] (verdict) -- (mle);
+  \draw[flow] (wa) -- (wa1); \draw[flow] (tle) -- (tle1);
+  \draw[flow] (re) -- (re1); \draw[flow] (mle) -- (mle1);
+\end{tikzpicture}
+\caption*{Chapter~15 verdict tree -- only the failures this chapter's problems can produce.}
+\end{figure}
+
+\medskip
+\noindent Backup table (same content, terse):
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llp{0.39\linewidth}l@{}}
+\toprule
+\textbf{Verdict} & \textbf{Usual cause} & \textbf{One-line fix} & \textbf{Trained in} \\
+\midrule
+WA  & up seed $0$       & \code{up[root] = PHI\_ID;} (identity, not zero)   & \thmref{c20-edge-transfer} \\
+WA  & subtract a $\max$ & \code{excl = phi(pre[i], suf[i+1]);}                & \probref{c20-presuf-solved} \\
+WA  & sign twice-flip   & apply \lstinline{tot[c] = -tot[v];} once            & \probref{c20-presuf-solved} \\
+WA  & undirected arcs   & build \code{arc[i].push\_back(j)} per destination   & \probref{c20-count-solved} \\
+TLE & $\bigO{\deg^2}$ loop & siblings via \code{down[v] - down[c];}          & \coderef{c20-updown} \\
+RE  & recursion on chain & \coderef{c09-iter} two-phase stack                 & \secref{c20-twodfs} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 15 at a glance]
+\textbf{The root became a variable.} Ch.13's \coderef{c09-dfs3} skeleton returns
+as the \emph{down} pass verbatim; the \emph{new} half is $\mathit{up}[v]$, the same
+fold over the complement of $\subtree(v)$, and the join
+$\mathit{answer}[v]=\Phi(\mathit{down}[v],\mathit{up}[v])$ read at every node
+(\defref{c20-pair-state}, \thmref{c20-edge-transfer}).
+
+\medskip
+\textbf{Invert or pay once.} If $\Phi$ is $+$/$\oplus$, the sibling fold is a
+subtraction -- $\bigO{1}$ per edge, $\bigO{n}$ total (\thmref{c20-parent-piece-correct}).
+If it is $\max$/signed-product/$\mathit{or}$, prefix/suffix buys the same
+$\bigO{n}$ with a two-line precompute per node (\thmref{c20-pre-suf-linear}).
+
+\medskip
+\textbf{Seed the up-pass with the identity.} $\mathit{up}[\text{root}]=\mathcal{I}$
+because the complement of the root is empty. $\mathcal{I}$ is $0$ for $+$, $-\infty$
+for $\max$, $1$ for $\times$, \lstinline{false} for $\mathit{or}$.
+
+\medskip
+\textbf{Count to verdict.} When the per-node output is a yes/no decided by a
+quantity on both sides of every edge, reroot the \emph{count}
+($\mathit{TOTAL}-\mathit{down}$) and finish with a \emph{directed}
+reachability sweep -- not another fold (\thmref{c20-count-edge-transfer}).
+
+\medskip
+\textbf{Know your boundaries.} Per-pair \emph{query} distance is Ch.16
+(\chref{c11}); $\bigO{n\log n}$ small-to-large is Ch.17 (\chref{c28}); centroid
+decomposition is Ch.24 (\chref{c18}). This chapter owns \emph{every-root tree DP}.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 15 code kit: the generic two-DFS reroot, the invertible pair (subtract the child), the non-invertible prefix/suffix, the count reroot with directed reachability, and the Summit's width-2k distance-histogram reroot}, label={lst:c20-kit}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+int n;  vector<vector<int>> adj;
+
+// (1) Generic two-DFS reroot.  down = Ch.13 fold, up = complement fold.        [15.1]  lst:c20-twodfs
+template<class Val> struct Reroot {
+    Val ID, phi(Val,Val), self(int), shift(Val,int,int), psi(Val,Val);
+    vector<Val> down, up, ans;
+    void dfs_down(int v, int p) {
+        down[v] = self(v);
+        for (int c : adj[v]) if (c != p) { dfs_down(c, v); down[v] = phi(down[v], down[c]); }
+    }
+    void dfs_up(int v, int p) {                                    // needs siblings:
+        ans[v] = psi(down[v], up[v]);                              // prefix/suffix (see (3))
+        // for each child c: up[c] = shift(phi(phi(up[v], self(v)), excl(c)), v, c);
+    }
+};
+// seed: up[root] = ID;  (NOT zero)
+
+// (2) Invertible pair reroot: siblings = down[v] - down[c]  (Phi = + here).     [15.2]  lst:c20-updown
+void dfs_down2(int v, int p) {
+    sub[v] = w[v];
+    for (int c : adj[v]) if (c != p) { dfs_down2(c, v); sub[v] += sub[c]; }
+}
+void dfs_up2(int v, int p) {
+    dp[v] = sub[v] + up[v];                                        // answer at v
+    for (int c : adj[v]) if (c != p) {
+        int siblings = sub[v] - sub[c];                             // invert Phi
+        up[c] = (up[v] + w[v] + siblings) /* + shift */;
+        dfs_up2(c, v);
+    }
+}
+
+// (3) Non-invertible prefix/suffix: all-but-child in O(1) per child.            [15.3]  lst:c20-presuf
+void dfs_up3(int v, int p) {
+    ans[v] = psi(down_[v], up_[v]);
+    vector<int> ch; for (int c : adj[v]) if (c != p) ch.push_back(c);
+    int k = ch.size();
+    vector<Val> pre(k + 1, PHI_ID), suf(k + 1, PHI_ID);
+    for (int i = 0; i < k; i++)      pre[i + 1] = phi(pre[i], down_[ch[i]]);
+    for (int i = k - 1; i >= 0; i--) suf[i]     = phi(down_[ch[i]], suf[i + 1]);
+    for (int i = 0; i < k; i++) {
+        Val siblings = phi(pre[i], suf[i + 1]);                     // EXCLUDE ch[i]
+        up_[ch[i]] = shift(phi(phi(up_[v], self_value(v)), siblings), v, ch[i]);
+        dfs_up3(ch[i], v);
+    }
+}
+
+// (4) Count reroot + directed reachability.  TOTAL - down[c] is the up value.   [15.4]  lst:c20-count
+//   down[c] = marks in subtree(c);  past v = TOTAL - down[c].
+//   emit arc j->i when destination i is marked or (marks past i) > threshold;
+//   multisource BFS from the marked nodes -> per-node verdict.
+
+// (5) Summit: reroot a Nim value via a distance histogram of width 2k.          [Summit 1498F]
+int K, M;                                           // M = 2*K
+vector<vector<int>> hdown, hall;                    // counts by dist mod 2K
+vector<ll> aval;
+void dfs_hdown(int v, int p) {                      // post-order
+    hdown[v].assign(M, 0); if (aval[v] & 1) hdown[v][0] = 1;
+    for (int c : adj[v]) if (c != p) { dfs_hdown(c, v);
+        for (int r = 0; r < M; r++) hdown[v][(r + 1) % M] += hdown[c][r]; }
+}
+void dfs_hall(int v, int p) {                       // pre-order transfer
+    for (int c : adj[v]) if (c != p) {
+        hall[c] = hdown[c];
+        for (int r = 0; r < M; r++) {               // nodes not in subtree(c), from v
+            int out = hall[v][r] - hdown[c][(r - 1 + M) % M];
+            hall[c][(r + 1) % M] += out;            // re-measure from c (shift +1)
+        }
+        dfs_hall(c, v);
+    }
+}
+// verdict at v = (sum_{r = K}^{2K-1} hall[v][r]) & 1;  1 = Alice wins.
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the
+chapter. Cover the marked line, reproduce it from memory, then check the
+answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- the two-DFS template with a closed-form edge transfer (from \coderef{c20-twodfs})}]
+void dfs_down(int v, int p) {                       // post-order fold
+    down[v] = /* FILL: self_value(v) */;
+    for (int c : adj[v]) if (c != p) { dfs_down(c, v); down[v] = phi(down[v], down[c]); }
+}
+void dfs_up(int v, int p) {                          // pre-order transfer
+    ans[v] = /* FILL: psi(down[v], up[v]) */;
+    for (int c : adj[v]) if (c != p) {
+        up[c] = /* FILL: shift(combine(up[v], self(v), siblings(v,c)), v, c) */;
+        dfs_up(c, v);
+    }
+}
+// seed: up[root] = PHI_ID;   // NOT zero
+\end{lstlisting}
+\noindent{\scriptsize Key: the seed is $\Phi$'s \emph{identity}, because the root's
+complement is empty -- seeding $0$ for a $\max$-reroot poisons every node below
+(\thmref{c20-edge-transfer}). $\mathit{up}[v]$ must be final (pre-order) before you
+build any $\mathit{up}[c]$ from it.}
+
+\begin{lstlisting}[caption={Drill 2 -- invertible pair reroot, subtract the child (from \coderef{c20-updown})}]
+void dfs_up2(int v, int p) {
+    dp[v] = /* FILL: psi(down[v], up[v]) */;
+    for (int c : adj[v]) if (c != p) {
+        int siblings = /* FILL: down[v] - down[c] */;     // invert Phi
+        up[c] = /* FILL: shift(up[v] + self(v) + siblings, v, c) */;
+        dfs_up2(c, v);
+    }
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the single \code{down[v] - down[c]} is the whole trick
+that collapses the sibling loop to $\bigO{1}$ (\thmref{c20-parent-piece-correct}).
+It is legal \emph{only} because $\Phi$ is a sum (or XOR). For $\Phi=\max$ this
+line is meaningless -- go to Drill~3.}
+
+\begin{lstlisting}[caption={Drill 3 -- prefix/suffix exclusive combine (from \coderef{c20-presuf})}]
+int k = ch.size();
+vector<Val> pre(k + 1, PHI_ID), suf(k + 1, PHI_ID);
+for (int i = 0; i < k; i++)      pre[i + 1] = phi(pre[i],       down[ch[i]]);
+for (int i = k - 1; i >= 0; i--) suf[i]     = phi(down[ch[i]],  suf[i + 1]);
+for (int i = 0; i < k; i++) {
+    Val excl = /* FILL: phi(pre[i], suf[i + 1]) */;     // EXCLUDE ch[i]
+    /* ... up[ch[i]] = shift(phi(phi(up[v], self(v)), excl), v, ch[i]); */
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: ``all children but $c_i$'' is $\Phi(\mathit{pre}[i],
+\mathit{suf}[i{+}1])$ \emph{with the $+1$} (\defref{c20-pre-suf}); $\mathit{suf}[i]$
+would double-count $c_i$. Both empty ends take $\mathcal{I}$, not $0$ for a $\max$.}
+
+\begin{lstlisting}[caption={Drill 4 -- count reroot feeding a directed verdict (from \coderef{c20-count})}]
+dfs_down(root);                       // down[v] = marks in subtree(v)
+int TOTAL = down[root];
+for (int i = 1; i <= n; i++)
+  for (int j : adj[i]) {
+    int iside = (/* FILL: j is child of i */ ? TOTAL - /* FILL: down[j] */
+                                         : /* FILL: down[i] */);
+    if (/* FILL: marked(i) or iside > threshold */) arc[i].push_back(j);
+  }
+// multisource BFS from the marked nodes over arc -> verdict.
+\end{lstlisting}
+\noindent{\scriptsize Key: the parent side is $\mathit{TOTAL}-\mathit{down}[\cdot]$,
+the child side is $\mathit{down}[\cdot]$ -- different numbers, and the arc test is
+\emph{per destination}, so the graph is directed (\thmref{c20-count-edge-transfer},
+\probref{c20-count-solved}).}
+
+\begin{lstlisting}[caption={Drill 5 -- Summit width-2k histogram transfer (from \coderef{c20-summit})}]
+void dfs_hall(int v, int p) {
+    for (int c : adj[v]) if (c != p) {
+        hall[c] = hdown[c];
+        for (int r = 0; r < M; r++) {
+            int out = /* FILL: hall[v][r] - hdown[c][(r-1+M)%M] */;
+            /* FILL: hall[c][(r+1)%M] += out; */       // re-measure from c: shift +1
+        }
+        dfs_hall(c, v);
+    }
+}
+// verdict at v = (sum_{r=K}^{2K-1} hall[v][r]) & 1.
+\end{lstlisting}
+\noindent{\scriptsize Key: the up-transfer of a \emph{distance histogram} is a cyclic
+shift by $1$ (move the root across one edge changes every distance by $\pm1$),
+exactly \thmref{c20-edge-transfer}'s $\mathit{shift}$ specialised to residue mod $2k$.
+The parity of the $[k,2k)$ band is the Nim verdict (\probref{c20-summit}).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, 4
+practice, one Summit. Tick \emph{only} after an unaided solve; a hinted
+attempt counts as half. The ten mixed problems are listed in their own
+station. Cite by name and number -- URLs appear once, in the solved and
+practice entries.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.235\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 15.1 -- the two-DFS template, edge transfer}} \\
+W15.1.1 & Tree Painting & CF 1187E & \lv{5} $\Phi=+$ two-DFS & $F(c)=F(v)+n-2\size(c)$; $\mathit{up}[\text{root}]$ seed; \lstinline{long long} \\
+P15.1.2 & Minimum Maximum Distance & CF 1881F & \lv{4} reroot a farthest-marked distance & reroot $\max$-distance-to-a-set; prefix/suffix if $\max$ not invertible \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 15.2 -- the up/down pair, invertible combine}} \\
+W15.2.1 & 0-1-Tree & CF 1156D & \lv{5} two invertible pair reroots & answer $\sum_v(z[v]o[v]-1)$; $0^{\ast}1^{\ast}$ paths; siblings $=$ subtract \\
+P15.2.2 & Three Paths on a Tree & CF 1294F & \lv{4} reroot far-endpoint triple & shared trunk + three leaves; farthest pair by reroot diameter \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 15.3 -- prefix/suffix merge (non-invertible)}} \\
+W15.3.1 & Alternating Tree & CF 960E & \lv{5} signed-sum reroot & reorder to $\sum_w V_wQ(w)$; flip $\mathit{tot}[c]=-\mathit{tot}[v]$; mod $10^9{+}7$ \\
+P15.3.2 & Casinos and Travel & CF 852E & \lv{5} parity DP with exclusive combine & can-a-node-start walk; prefix/suffix for ``all branches but this'' \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 15.4 -- reroot a count, read a verdict}} \\
+W15.4.1 & Black and White Tree & CF 1626E & \lv{5} count reroot + reachability & safe move $x\!\to\!b$: $b$ black or far side $\ge2$; directed arc, transposed BFS \\
+P15.4.2 & Labeling the Tree with Distances & CF 1794E & \lv{5} per-root feasibility verdict & reroot a distance/height count; yes/no per root from both edge sides \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+S15 & Christmas Game & CF 1498F & \lv{6} reroot a Nim value (histogram mod $2k$) & odd-$a_i$ nodes; parity of the $[k,2k)$ band; edge-transfer $=$ cyclic shift \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day~1 builds the two-DFS template and its closed-form
+transfer; day~2 makes the state a pair and spends invertibility; day~3 removes
+the inverse and installs prefix/suffix; day~4 reroots a count into a verdict;
+day~5 is the Summit. Solve in this order -- each day's tool is the previous
+day's output.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 15.1 & trace the $F$-vector on $T$ (\exref{c20-twodfs-run}); re-derive \thmref{c20-edge-transfer} cold; write \coderef{c20-twodfs}; CF~1187E \\
+2 & Read + do 15.2 & walk the pair reroot on the 0/1-labelled $T$ (\exref{c20-updown-run}); CF~1156D; CF~1294F as a reroot diameter \\
+3 & Read + do 15.3 & compute the signed $Q$ table on $T$ (\exref{c20-presuf-run}); CF~960E; CF~852E with the exclusive combine \\
+4 & Read + do 15.4 & reroot the mark count on $T$ with blacks $\{4,10\}$ (\exref{c20-count-run}); CF~1626E; CF~1794E feasibility \\
+5 & Summit + revise & CF~1498F with the width-$2k$ histogram (\probref{c20-summit}); walk the decision flowchart on five new statements \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier
+unlocks, not just a rating bucket.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.36\linewidth}p{0.34\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+$\lv{4}$ \ $\bigstar\bigstar\bigstar\bigstar$
+  & CF~1187E, CF~1881F, CF~1294F
+  & you can write the two-DFS template from memory and get the up-seed right \\
+$\lv{5}$ \ $\bigstar\bigstar\bigstar\bigstar\bigstar$
+  & CF~1156D, CF~960E, CF~852E, CF~1626E, CF~1794E, CF~627D, CF~1182D, CF~1691F, CF~1796E, CF~1467E, CF~1088E, CF~294E, CF~766E, CF~771C, CF~1923E
+  & you choose subtract-versus-prefix/suffix by the invertibility of $\Phi$, and reroot a count or a Nim value, not just a sum \\
+$\lv{6}$ \ $\bigstar\bigstar\bigstar\bigstar\bigstar\bigstar$
+  & CF~1498F (Summit)
+  & you reroot a growing state (a width-$2k$ histogram) whose transfer is a shift, recognising the parity verdict the game reduces to \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+Every reroot here is ``run Ch.13's fold down, carry the same fold up, join at the
+node.'' Each line collapses a family onto a listing already in the chapter -- no
+new theory.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``sum of subtree sizes / distances from each root'' (CF~1187E, CF~1092F)
+        $\longrightarrow$ two-DFS with $\Phi=+$ and $F(c)=F(v)+n-2\size(c)$
+        (\probref{c20-twodfs-solved}).
+  \item ``count valid ordered pairs whose path respects an edge-label automaton''
+        (CF~1156D) $\longrightarrow$ two invertible pair reroots + a per-node
+        product $\Psi$ (\probref{c20-updown-solved}).
+  \item ``sum over all directed paths of a per-node signed contribution'' (CF~960E)
+        $\longrightarrow$ reorder to $\sum_w V_wQ(w)$, reroot $\mathit{tot}$ with a
+        sign flip, exclusive prefix/suffix for the branch product
+        (\probref{c20-presuf-solved}).
+  \item ``a per-node win/lose verdict decided by a count on both sides of every
+        edge'' (CF~1626E) $\longrightarrow$ count reroot + directed reachability
+        (\probref{c20-count-solved}).
+  \item ``a game whose per-node value is a parity of a distance band'' (CF~1498F)
+        $\longrightarrow$ reroot a width-$2k$ distance histogram; the transfer is a
+        cyclic shift (\probref{c20-summit}).
+  \item Ch.13's fixed-root fold $\;+\;$ Chapter~15's up pass $\;\longrightarrow\;$
+        every-root version of \emph{any} Ch.13 / Ch.14 DP (the general principle,
+        not one problem).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+These refuse to say ``reroot''; decide \emph{whether the value depends on the root,
+what $\Phi$ is, and whether it is invertible} before opening the code. A hint tells
+you the shape of the answer, never the tool.
+
+\begin{mixedset}
+  \practice{Preorder Test}{Codeforces 627D}
+    {https://codeforces.com/problemset/problem/627/D}{CF 2600 · L6}
+    {Assign the permutation $1..n$ to the tree to minimise the maximum label at which a DFS pre-order gets stuck; the per-node cost is a function of how many children exceed a threshold, and the answer must be tested \emph{as if each node were the root} -- a reroot where the child-count fold is a sum, so siblings come from a subtraction (\coderef{c20-kit} row~2).}
+  \practice{Complete Mirror}{Codeforces 1182D}
+    {https://codeforces.com/problemset/problem/1182/D}{CF 2400 · L5}
+    {Find a root (and a labeling) making the tree a ``mirror'' -- every node's children pair up symmetrically. The symmetry flag is a subtree fold; testing it for \emph{every} candidate root is exactly the up/down pair, and $\Phi$ (a set-match over child signatures) is non-invertible, so the ``all children but one'' combine leans on prefix/suffix thinking (\defref{c20-pre-suf}).}
+  \practice{K-Set Tree}{Codeforces 1691F}
+    {https://codeforces.com/problemset/problem/1691/F}{CF 2500 · L5}
+    {Count assignments of values to a tree satisfying a global $\le k$-set constraint; each node reports a small vector over the set index. The constraint is per-edge and resets locally at the node, so every-root evaluation reuses \thmref{c20-count-edge-transfer}'s ``count both sides, decide'' with a width-$k$ profile.}
+  \practice{Colored Subgraphs}{Codeforces 1796E}
+    {https://codeforces.com/problemset/problem/1796/E}{CF 2500 · L5}
+    {Colour the tree's vertices so each colour class induces a connected subgraph meeting a demand; a per-root feasibility count drives the answer. Root-independence means one fold down and the parent-side piece up -- Ch.14's supply/demand state, re-read at every node (\defref{c20-parent-piece}).}
+  \practice{Distinctive Roots in a Tree}{Codeforces 1467E}
+    {https://codeforces.com/problemset/problem/1467/E}{CF 2500 · L5}
+    {A root is ``distinctive'' if the pre-order reach-set of the first path differs per subtree; count them. The reachability is a subtree fold whose answer changes with the root in a distance-residue way -- reroot the same count, transfer $=$ shift by $1$ (\thmref{c20-edge-transfer}).}
+  \practice{Ehab and a component choosing problem}{Codeforces 1088E}
+    {https://codeforces.com/problemset/problem/1088/E}{CF 2400 · L5}
+    {Choose a connected component maximising $\lceil \sum a / \rvert\text{size}\rvert$; per root the best branch is a $\max$ fold that must drop the chosen child -- a non-invertible $\max$ combine, so exclusive prefix/suffix (\coderef{c20-presuf}).}
+  \practice{Shaass the Great}{Codeforces 294E}
+    {https://codeforces.com/problemset/problem/294/E}{CF 2300 · L5}
+    {Swap two edges to minimise the sum of all pairwise distances; every candidate split needs the distance-sum rerooted across each edge. That is \probref{c20-twodfs-solved}'s $F(c)=F(v)+n-2\size(c)$ identity reused on both new sides.}
+  \practice{Mahmoud and a xor trip}{Codeforces 766E}
+    {https://codeforces.com/problemset/problem/766/E}{CF 2100 · L4}
+    {Sum the per-bit node XOR over all paths; linearity splits it bit by bit and the per-node fold counts same/different-prefix parities -- a Ch.13 fold whose sibling aggregates you can, if you insist on reporting per-root, recover by a $+$ reroot (\thmref{c20-parent-piece-correct}).}
+  \practice{Bear and Tree Jumps}{Codeforces 771C}
+    {https://codeforces.com/problemset/problem/771/C}{CF 2100 · L4}
+    {A frog jumps up to $3$ edges toward a target; sum the minimum-jump distances over all ordered pairs. Each node reports a residue-mod-$3$ histogram, and the histogram's combine is a sum with a $\pm$ correction -- reroot it exactly as the Summit reroots a residue band (\coderef{c20-summit}).}
+  \practice{Count Paths}{Codeforces 1923E}
+    {https://codeforces.com/problemset/problem/1923/E}{CF 2000 · L4}
+    {Count valid paths under a state machine whose transition depends on which endpoint is the root; the machine's per-node table is a fold, and the answer for every root is the two-DFS join with a non-invertible combine -- prefix/suffix (\defref{c20-pre-suf}).}
+\end{mixedset}
+
+
+\chaptersection{The Summit -- CF 1498F Christmas Game}
+
+\begin{notebox}[Why this is the chapter top rope]
+Sections 15.1--15.4 reroot a scalar, a pair, a signed sum and a count. The
+Summit reroots a \emph{game value} -- and the value you carry is not one number
+but a whole \textbf{distance histogram of width $2k$}. The token-sliding Nim hides
+a two-part reduction: (i)~each present at depth $d$ is an independent token that
+can only move to depth $d-k$, so its Grundy number is $\lfloor d/k\rfloor \bmod 2$;
+(ii)~a node contributes that bit only when $a_i$ is odd, so the root's verdict is
+the \emph{parity} of the odd-$a$ nodes whose distance lies in the residue band
+$[k,2k) \pmod{2k}$. Reading that parity for \emph{every} root is a reroot whose
+combine is elementwise addition (invertible!) and whose edge-transfer is a
+\emph{cyclic shift by one} -- \thmref{c20-edge-transfer}'s $\mathit{shift}$
+specialised to residue mod $2k$, exactly the object \probref{c20-count-solved}'s
+count and \probref{c20-presuf-solved}'s $\mathit{tot}$ were single-coordinate
+shadows of. It ties the chapter together: Ch.14 built the Grundy/Hackenbush
+machinery (\thmref{c27-hackenbush}, \thmref{c27-grundy-xor}); Chapter~15 points it
+at \emph{every} root.
+\end{notebox}
+
+\solvedproblem{c20-summit}{Christmas Game}{Codeforces 1498F}
+  {https://codeforces.com/problemset/problem/1498/F}{CF 2500 · L6}
+  {token-sliding Nim (grundy = floor(depth/k) mod 2), parity read from a residue band, reroot a width-2k distance histogram, edge-transfer = cyclic shift}
+
+\begin{problemstatement}[Christmas Game (statement and sample verified against the live problem)]
+A tree of $n$ vertices ($3 \le n \le 10^{5}$) and an integer $k$
+($1 \le k \le 20$). Root it at $r$; vertex $i$ then has $\depth_i$ and holds
+$a_i$ presents ($0 \le a_i \le 10^{9}$). Alice and Bob alternate (Alice first).
+A move: pick a vertex $i$ with $\depth_i \ge k$, choose $1 \le m \le a_i$, and move
+those $m$ presents to the $k$-th ancestor $j$ of $i$ (so $a_i \mathrel{-}= m$,
+$a_j \mathrel{+}= m$). The player unable to move loses. For \emph{each} root
+$r \in \{1,\dots,n\}$, print $1$ if Alice wins and $0$ otherwise.\\
+\textbf{Sample}: $n=5$, $k=1$, edges $1\text{--}2,\,1\text{--}3,\,5\text{--}2,\,
+4\text{--}3$, values $(0,3,2,4,4)$; the output is \texttt{1 0 0 1 1}.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{6}, give yourself 60 minutes]
+Do not try to analyse the whole game at once; the moves look like they couple
+far-apart vertices. Isolate \emph{one present}. (a)~A single present at depth $d$
+can only ever move to depth $d-k$, then $d-2k$, and so on -- what impartial game
+is a token that walks a one-way chain in steps of exactly $k$? (b)~A node holds
+$a_i$ \emph{identical} tokens -- how does the XOR behave when you XOR a value with
+itself an even number of times?
+\peek{For one token the options are $\{d-k\}$ only. A chain where each move drops
+      the index by exactly $k$ has Grundy value $0,1,0,1,\dots$ along the chain --
+      write down $\lfloor d/k\rfloor \bmod 2$.}
+\nudge{So a node contributes $\lfloor \depth_i/k\rfloor \bmod 2$ to the XOR iff
+      $a_i$ is odd (even multiplicities cancel). $\lfloor d/k\rfloor$ is odd exactly
+      when $d \bmod 2k \in [k, 2k)$. For a FIXED root you would just count the
+      odd-$a$ nodes in that band and take its parity. The hard part is doing that for
+      \emph{every} root -- what changes about $\depth_i$ when $r$ slides across an edge?}
+\fullhint{Fix a residue modulus $M = 2k$. For root $v$ define
+      $\mathit{hall}[v][t] = \#\{$ vertices $u$ with $a_u$ odd and
+      $\dist(v,u) \equiv t \pmod{M}\}$ for $t = 0..M{-}1$. Alice wins at $v$ iff
+      $\bigl(\sum_{t=k}^{M-1} \mathit{hall}[v][t]\bigr) \bmod 2 = 1$. Compute
+      $\mathit{hdown}[v][t] = \#$ odd-$a$ nodes in $\subtree(v)$ at $\dist(v,\cdot)
+      \equiv t$ in a post-order (shift a child's histogram by $+1$ as you fold it in).
+      Then reroot: $\mathit{hall}[\text{root}] = \mathit{hdown}[\text{root}]$, and for a
+      child $c$, $\mathit{hall}[c] = \mathit{hdown}[c] + \text{shift}_{+1}(\mathit{hall}[v]
+      - \text{shift}_{+1}(\mathit{hdown}[c]))$ -- subtract the subtree-$c$ contribution
+      (measured from $v$), re-measure the rest from $c$ by a cyclic shift, add the part
+      already inside $\subtree(c)$. Combine is a sum, so it is invertible; the
+      edge-transfer is a cyclic shift. Width $M = 2k \le 40$, so $\bigO{nk}$ total.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The move rule looks global, but it decomposes. A single present is a token that,
+once at depth $d$, can only ever be pushed to depth $d-k$ -- it can never skip,
+reverse, or move sideways. So the set of positions a token visits is a one-way
+chain $d \to d-k \to d-2k \to \cdots$, and by Sprague--Grundy the token is an
+independent sub-game whose value is the Grundy number of that chain,
+$g(d) = \operatorname{mex}\{g(d-k)\} = \lfloor d/k\rfloor \bmod 2$. Because $a_i$ tokens
+sit identically at node $i$, their combined value is $g(\depth_i)$ XORed $a_i$ times,
+which is $g(\depth_i)$ when $a_i$ is odd and $0$ when even. The whole game's value is
+therefore a single bit -- the parity of the number of odd-$a$ nodes sitting at an
+odd $\lfloor\depth/k\rfloor$ -- and Alice wins iff that bit is $1$. The remaining
+difficulty is entirely Chapter~15's: $\depth_i$ depends on the root, and we must
+read the parity for all $n$ roots. Since $\lfloor d/k\rfloor \bmod 2$ depends only on
+$d \bmod 2k$, the natural state to reroot is a width-$2k$ histogram of odd-$a$
+nodes by distance residue.
+
+\solstep{Key Observations}
+\begin{observation}
+A lone present at depth $d$ is a token on the chain $d, d{-}k, d{-}2k, \dots$; its
+Grundy value is $g(d)=\lfloor d/k\rfloor \bmod 2 \in \{0,1\}$.
+\end{observation}
+\begin{observation}
+Node $i$ with $a_i$ identical tokens contributes $g(\depth_i)$ iff $a_i$ is odd
+(even copies XOR to $0$). Hence the whole position's value is a \emph{single bit}:
+the parity of the set of odd-$a$ nodes with $\lfloor\depth_i/k\rfloor$ odd.
+\end{observation}
+\begin{observation}
+$\lfloor d/k\rfloor$ is odd iff $d \bmod 2k \in [k, 2k)$. The state that reroots
+cleanly is $\mathit{hall}[v][t] = \#\{$ odd-$a$ nodes at distance $\equiv t \pmod{2k}$
+from $v\}$; the verdict is $\bigl(\sum_{t=k}^{2k-1}\mathit{hall}[v][t]\bigr) \bmod 2$.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Enumerate each root, run a DFS to get all depths, count the band and take
+        its parity.}
+{$\bigO{n^2}$ -- at $n=10^{5}$ that is $10^{10}$ (\tle). It also re-derives depths
+from scratch $n$ times, ignoring that sliding the root one edge changes every
+distance by exactly $\pm1$.}
+\deadend{Claim the answer is root-independent (compute it once at root~$1$).}
+{False: the sample's five roots give three $1$s and two $0$s. $\lfloor\depth_i/k\rfloor$
+parity genuinely shifts with the root -- only the \emph{residue band} is invariant,
+and even that re-fills as the histogram rotates.}
+\aha{Reroot a width-$2k$ histogram. The combine (counting nodes) is a sum, so it is
+invertible: subtract subtree-$c$'s contribution as measured from $v$, re-measure the
+complement from $c$ with a $+1$ cyclic shift, and add subtree-$c$ back. That is
+\thmref{c20-edge-transfer} with $\Phi=+$ and $\mathit{shift}=$ rotate-by-one; the
+verdict is the band parity read off $\mathit{hall}[v]$. See \coderef{c20-summit}.}
+\end{thinkbox}
+
+\solstep{Solution}
+Modulus $M=2k$. Post-order: set $\mathit{hdown}[v][0] = (a_v \bmod 2)$; folding a
+child $c$ adds $\mathit{hdown}[c][t]$ into slot $\mathit{hdown}[v][(t{+}1)\bmod M]$.
+Pre-order reroot: start $\mathit{hall}[\text{root}] = \mathit{hdown}[\text{root}]$.
+For a child $c$ of $v$, begin with $\mathit{hall}[c] = \mathit{hdown}[c]$; then for
+each residue $t$ rotate by $+1$ and add the complement
+$\mathit{hall}[v][t] - \mathit{hdown}[c][(t{-}1)\bmod M]$. Output for node $v$ the
+bit $(\sum_{t=k}^{M-1}\mathit{hall}[v][t]) \bmod 2$. All arithmetic is on counts
+$\le n$ in \lstinline{int}; width $M\le 40$ keeps it $\bigO{nk}$.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[\coderef{c20-summit} outputs $1$ exactly when Alice wins at each root]
+\emph{Game reduction.} Each present is a token whose only option from depth $d$ is
+depth $d-k$; the resulting one-way chain has $g(d)=\operatorname{mex}\{g(d-k)\}$, so
+$g(d)=0$ for $d<k$ and alternates in blocks of $k$, i.e.\ $g(d)=\lfloor d/k\rfloor
+\bmod 2$. Disjoint sub-games compose by XOR (\thmref{c27-grundy-xor}); $a_i$ identical
+tokens XOR to $g(\depth_i)$ iff $a_i$ odd, else $0$. Alice wins iff the total XOR is
+non-zero, and every summand is in $\{0,1\}$, so the total is the parity of the odd-$a$
+nodes with $g(\depth_i)=1$. \emph{Band test.} $g(\depth_i)=\lfloor\depth_i/k\rfloor
+\bmod 2 = 1$ iff $\depth_i \bmod 2k \in [k,2k)$ (write $\depth_i = q\cdot 2k + t$,
+$t<M$; then $\lfloor\depth_i/k\rfloor = 2q + \lfloor t/k\rfloor$, odd iff $\lfloor t/k
+\rfloor = 1$, i.e.\ $k \le t < 2k$). Hence the verdict is
+$(\sum_{t=k}^{M-1}\mathit{hall}[v][t]) \bmod 2$. \emph{Histogram correctness.}
+$\mathit{hdown}$ is correct by Ch.13's fold: a child's residue $t$ becomes $t{+}1$
+one edge up, and $\mathit{hdown}[v][0]$ records $v$ itself. For the reroot,
+$\mathit{hall}[v]$ counts, by distance residue from $v$, all odd-$a$ nodes. Nodes in
+$\subtree(c)$ appear in $\mathit{hall}[v]$ at residue $t$ exactly when they have
+residue $t{-}1$ from $c$ (one edge closer to $v$), so their count is
+$\mathit{hdown}[c][(t{-}1)\bmod M]$; subtracting gives odd-$a$ nodes \emph{outside}
+$\subtree(c)$ by residue-from-$v$, and rotating by $+1$ re-measures them from $c$.
+Adding $\mathit{hdown}[c]$ (inside, already from $c$) yields $\mathit{hall}[c]$. By
+pre-order induction $\mathit{hall}[v]$ is correct for every $v$. \qed
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Codeforces 1498F -- reroot a width-2k distance histogram of odd-a nodes; verdict = parity of the [k,2k) band; O(nk), edge-transfer = cyclic shift}, label={lst:c20-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+int n, K, M;
+vector<vector<int>> adj, hdown, hall;
+vector<ll> a;
+
+void dfs_hdown(int v, int p) {                 // post-order: subtree residues mod M
+    hdown[v].assign(M, 0);
+    if (a[v] & 1) hdown[v][0] = 1;
+    for (int c : adj[v]) if (c != p) {
+        dfs_hdown(c, v);
+        for (int r = 0; r < M; r++) hdown[v][(r + 1) % M] += hdown[c][r];
+    }
+}
+void dfs_hall(int v, int p) {                  // pre-order: reroot, shift by +1
+    for (int c : adj[v]) if (c != p) {
+        hall[c] = hdown[c];                    // nodes inside subtree(c)
+        for (int r = 0; r < M; r++) {          // nodes OUTSIDE subtree(c)
+            int out = hall[v][r] - hdown[c][(r - 1 + M) % M];
+            hall[c][(r + 1) % M] += out;       // re-measure from c
+        }
+        dfs_hall(c, v);
+    }
+}
+int main() {
+    scanf("%d %d", &n, &K); M = 2 * K;
+    adj.assign(n + 1, {}); hdown.assign(n + 1, {}); hall.assign(n + 1, {});
+    a.assign(n + 1, 0);
+    for (int i = 0; i < n - 1; i++) {
+        int x, y; scanf("%d %d", &x, &y);
+        adj[x].push_back(y); adj[y].push_back(x);
+    }
+    for (int i = 1; i <= n; i++) scanf("%lld", &a[i]);
+    dfs_hdown(1, 0);
+    hall[1] = hdown[1];
+    dfs_hall(1, 0);
+    for (int v = 1; v <= n; v++) {
+        int band = 0;
+        for (int r = K; r < M; r++) band += hall[v][r];   // odd floor(depth/K)
+        printf("%d ", band & 1);                          // 1 = Alice wins
+    }
+    puts("");
+    return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample: $n=5$, $k=1$ ($M=2$), values $(0,3,2,4,4)$ $\Rightarrow$ 1 0 0 1 1]
+$k=1$: only node~$2$ has odd $a$ ($a_2=3$). Band $[k,M)=[1,2)$ = odd distance. Alice
+wins at root $v$ iff $\dist(v,2)$ is odd. $\mathit{hall}[v][1]=1$ exactly when
+node~$2$ sits at an odd distance from $v$.\\
+Tree edges $1\text{--}2,1\text{--}3,2\text{--}5,3\text{--}4$.
+Distances to node~$2$: $\dist(1,2)=1$, $\dist(2,2)=0$, $\dist(3,2)=2$,
+$\dist(4,2)=3$, $\dist(5,2)=1$. Parities $\Rightarrow$ verdicts
+$(1,0,0,1,1)$ \checkmark\ -- matches CF's sample.\\
+Cross-check the Grundy: a present at depth $1$ with $k=1$ has $g=\lfloor 1/1\rfloor\bmod2=1$,
+at depth $2$ gives $0$, at depth $3$ gives $1$ -- the parity read off band $[1,2)$.
+\end{tracebox}
+
+\begin{tracebox}[Running-tree overlay: $T$, $k=2$ ($M=4$), odd-$a$ nodes $\{4,10\}$]
+Band $[k,M)=[2,4)$ = distance $\bmod 4 \in \{2,3\}$. Distances on $T$ to node~$4$
+are $(2,1,3,0,2,4,4,3,5,6)$ and to node~$10$ are $(4,5,3,6,5,4,2,6,1,0)$ for roots
+$1..10$. A node scores per odd-$a$ vertex whose distance residue lands in $\{2,3\}$;
+count them and take parity:
+root~$1$: $d_4{=}2\checkmark, d_{10}{=}4{\equiv}0$ $\Rightarrow$ odd $\Rightarrow 1$;
+root~$2$: none $\Rightarrow 0$; root~$3$: both $\Rightarrow$ even $\Rightarrow 0$;
+root~$4$: $d_{10}{=}6{\equiv}2\checkmark$ $\Rightarrow 1$; root~$5$: $d_4{=}2\checkmark$
+$\Rightarrow 1$; root~$6$: none $\Rightarrow 0$; root~$7$: $d_{10}{=}2\checkmark$
+$\Rightarrow 1$; root~$8$: both $\Rightarrow 0$; root~$9$: none $\Rightarrow 0$;
+root~$10$: $d_4{=}6{\equiv}2\checkmark$ $\Rightarrow 1$.
+Verdicts $(1,0,0,1,1,0,1,0,0,1)$ \checkmark.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{nk}$: two passes, each doing $\bigO{M}=\bigO{k}$ histogram work per edge
+($M=2k\le 40$). Memory $\bigO{nk}$ for the two histogram tables ($n\cdot 2k$ \lstinline{int}
+$\le 8\cdot10^{6}$ bytes at $n=10^{5},k=20$). Counts fit \lstinline{int}; $a_i$ needs
+\lstinline{long long} but only its parity is read. Recursion depth $h$ -- at
+$n\le10^{5}$ convert the two passes to the explicit stack of \coderef{c09-iter} if the
+chain is long. Verdict: \ac; the archetype \emph{reroot a growing state} problem --
+the combine is invertible (a sum), the transfer is a shift, and the answer is a bit
+read off the width-$2k$ band.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to lose CF~1498F: (i)~forgetting the modulus is $2k$ (not $k$) -- the parity
+$\lfloor d/k\rfloor\bmod2$ has period $2k$, so a width-$k$ histogram misreads the
+band. (ii)~reading the wrong band: it is $t\in[k,2k)$, i.e.\ residues $\ge k$.
+(iii)~dropping the parity of the band sum and printing the count. (iv)~in the
+reroot, subtracting $\mathit{hdown}[c][t]$ instead of $\mathit{hdown}[c][(t{-}1)\bmod
+M]$ -- the off-by-one in the residue shift. (v)~deep recursion on a chain. Variants:
+any token game whose per-node value is $h(\depth \bmod P)$ for a small period $P$
+reroots with a width-$P$ histogram and a shift transfer; Ch.14's \thmref{c27-hackenbush}
+$g(v)=\bigoplus_c(g(c)+1)$ is the same Grundy fold read at a \emph{single} root, which
+this chapter's machinery would promote to every root.
+\end{warningbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled so far -- cumulative through Chapter~15. Chapters~1--14's
+rows are carried forward; Chapter~15's rows are appended. Pointers only, never prose.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.22\linewidth} l c p{0.26\linewidth} p{0.18\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Level} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapters 1--14 -- carried forward} \\
+Measures DFS ($\depth/\height/\size$) & 12 & \lv{2} & ``how deep / how tall / how many below'' & \coderef{c09-dfs3} \\
+Iterative two-phase DFS & 12 & \lv{3} & ``the chain may be $3\cdot10^{5}$ deep'' & \coderef{c09-iter} \\
+Subtree tuple fold (fixed root) & 13.1 & \lv{3} & ``an answer per node from a fixed-size tuple'' & \thmref{c10-subtree-template} \\
+In/out pair (MIS / vertex cover) & 13.2 & \lv{4} & ``take or leave $v$; forced out on children'' & \thmref{c10-mis-tree} \\
+Peak-harvest identity & 13.3 & \lv{4} & ``sum over all pairs with an additive $F$'' & \propref{c10-pairtop} \\
+Capped child-merge / tree knapsack & 14.1 & \lv{4} & ``state has an index $j$; merge children one at a time'' & \thmref{c27-amortize} \\
+Grundy / Hackenbush fold & 14.4 & \lv{4} & ``impartial game, disjoint sum by XOR'' & \thmref{c27-hackenbush}, \thmref{c27-grundy-xor} \\
+Supply/demand 2-index tree DP & 14 (Summit) & \lv{5} & ``per-edge, count-driven verdict at a fixed root'' & \probref{c27-summit} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 15 -- new this chapter} \\
+Two-DFS reroot template & 15.1 & \lv{4} & ``the value depends on the choice of root'' & \thmref{c20-edge-transfer}, \coderef{c20-twodfs} \\
+Invertible parent-side piece & 15.2 & \lv{4} & ``combine is $+$/$\oplus$ -- subtract the child'' & \defref{c20-parent-piece}, \coderef{c20-updown} \\
+Prefix/suffix exclusive combine & 15.3 & \lv{5} & ``combine is $\max$/signed-product -- no inverse'' & \defref{c20-pre-suf}, \coderef{c20-presuf} \\
+Count reroot + directed reachability & 15.4 & \lv{5} & ``a yes/no per node from a count on both sides'' & \defref{c20-count-state}, \coderef{c20-count} \\
+Reroot a distance histogram (Summit) & Summit & \lv{6} & ``reroot a game/Nim value with period $2k$'' & \coderef{c20-summit}, \probref{c20-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c10} -- backward: Ch.13's \thmref{c10-subtree-template} is the
+        \emph{down} pass of every reroot in this chapter, used verbatim; the up
+        pass and the edge-transfer rule (\thmref{c20-edge-transfer}) are what
+        Ch.13 deferred with ``the parent-side piece lives in Ch.15.'' discharged here.
+  \item \chref{c27} -- backward: Ch.14's \thmref{c27-amortize} capped merge and
+        \thmref{c27-hackenbush} Grundy fold are the fixed-root shadows this chapter
+        promotes to every root; the Summit (\probref{c20-summit}) is the game-value
+        reroot Ch.14 promised in its Last Word.
+  \item \chref{c11} -- forward: per-pair \emph{query} distance and $\bigO{\log n}$
+        LCA are Chapter~16's; a reroot answers a per-node quantity once, not an
+        online per-pair query.
+  \item \chref{c28} -- forward: DSU-on-tree / small-to-large upgrades a reroot that
+        carries a large map per node to $\bigO{n\log n}$; the width-$2k$ histogram
+        (Summit) is small enough not to need it.
+  \item \chref{c18} -- forward: centroid decomposition answers global path statistics
+        in $\bigO{n\log n}$ when the state is not a reroot-able per-node functional.
+\end{itemize}
+
+\begin{lastword}[Last Word -- Chapter 15]
+\emph{``Chapters~13--14 fixed the root; Chapter~15 lets it move. One fold down,
+one fold up, one join per node, and a single rule for sliding the root across an
+edge.''}
+
+\medskip
+The whole chapter is one discipline repeated four times: \emph{name a quantity that
+depends on the root, carry it on both sides of every edge, read it at every node}.
+A scalar with a closed-form shift returns CF~1187E's max-sum-of-subtree-sizes
+(\thmref{c20-edge-transfer}, \probref{c20-twodfs-solved}); an invertible pair returns
+CF~1156D's $0^{\ast}1^{\ast}$ count (\probref{c20-updown-solved}); a signed sum with a
+per-edge flip returns CF~960E's directed-path total (\probref{c20-presuf-solved}); a
+count read as a directed verdict returns CF~1626E's reachability
+(\probref{c20-count-solved}); and a width-$2k$ distance histogram returns CF~1498F's
+Nim verdicts (\probref{c20-summit}).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Seed the up-pass with the identity.} $\mathit{up}[\text{root}]$ is the
+        fold over the empty complement -- $\mathcal{I}$, not $0$. The WA signature is
+        ``correct at the root, uniformly wrong everywhere else.''
+  \item \emph{Invertible $\Rightarrow$ subtract; not invertible $\Rightarrow$ prefix/suffix.}
+        Naming $\Phi$'s inverse status is the whole implementation decision
+        (\thmref{c20-parent-piece-correct} versus \thmref{c20-pre-suf-linear}); never
+        divide out a signed product or subtract a $\max$.
+  \item \emph{The edge-transfer is applied exactly once.} A shift (or a sign flip,
+        or a cyclic rotation) that fires twice is an off-by-one on every non-root
+        answer -- CF~960E's $\mathit{tot}[c]=-\mathit{tot}[v]$ and the Summit's rotate-by-one
+        are the canonical single shifts.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: hand-compute the $\mathit{down}$/$\mathit{up}$
+overlay on the running tree $T$ before trusting a code answer (every trace in this
+chapter was re-derived on $T$ first); check that your combine's identity is the right
+one for $\Phi$ before seeding; and when the quantity is a distance or depth with a
+period, reach for a residue histogram of that width and let the transfer be a shift.
+
+\medskip
+\textbf{Next:} \chref{c11} takes the per-node quantities you can now compute for every
+root and turns the question outward -- \emph{given two vertices on demand, what is their
+relationship?} Chapter~15 answers a functional once per node; Chapter~16's LCA answers
+$\bigO{\log n}$-time queries about any pair, and \chref{c28}'s DSU-on-tree and
+\chref{c18}'s centroid decomposition handle the statistics that resist a per-node fold
+altogether. The root has been a variable; from here, the \emph{pair} becomes the object.
+\end{lastword}

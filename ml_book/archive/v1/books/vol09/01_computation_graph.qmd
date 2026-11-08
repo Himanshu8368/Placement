@@ -1,0 +1,83 @@
+---
+title: "Computation graphs"
+---
+
+# Computation graphs
+
+**Reference question.** How should you represent a network so that a forward value and a backward gradient are the same object?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Graph | A directed acyclic graph of tensors. Each node is a function of its parents. |
+| Forward | Evaluate nodes in topological order. Cache the inputs each node needs for its derivative. |
+| Backward | Apply the chain rule from the scalar loss toward the parameters, using cached values. |
+| Parameter | A leaf the loss depends on and that you intend to update. A constant is a leaf you do not update. |
+| Shape | Every node has a shape contract. A broadcast inside a node is part of the contract, not an accident. |
+
+## Theory
+
+A network is a function built by composition. The computation graph is the bookkeeping that makes the composition differentiable and implementable. Autodiff libraries hide the graph. A reference implementation should show one graph you can draw: an affine map, a pointwise nonlinearity, another affine map, and a loss. If you cannot name the intermediate tensors, you cannot check them.
+
+Caching is required because the local derivative often depends on the forward value. ReLU's derivative depends on the sign of the pre-activation. A sigmoid's derivative can be written from the sigmoid output. Throwing away the forward pass and hoping to differentiate the formula from parameters alone is algebraically possible and operationally the wrong interface.
+
+The loss is a node that reduces to a scalar. Gradients are defined for that scalar. If you forget the reduction and backpropagate a vector, you have invented an implicit sum or you have a bug. Say which reduction you used, mean or sum, because it rescales every gradient and therefore the learning rate.
+
+## Derivation
+
+Let $z = Wx + b$, $h = \phi(z)$, and $L$ a scalar depending on $h$. The chain rule in differentials is $dL = \langle \nabla_h L, dh \rangle$ and $dh = \phi'(z) \odot dz$, so $\nabla_z L = \nabla_h L \odot \phi'(z)$. From Volume 01, $\nabla_W L = (\nabla_z L) x^\top$ and $\nabla_b L = \nabla_z L$. A graph engine stores $\nabla_z L$ as the message sent to the affine node. Nothing in this calculation requires $W$ to be small. It requires the shapes of $\nabla_z L$ and $z$ to match.
+
+## Code
+
+```python
+import numpy as np
+
+def affine_forward(x, W, b):
+    return x @ W + b, (x, W, b)
+
+def affine_backward(grad_z, cache):
+    x, W, _b = cache
+    grad_W = x.T @ grad_z
+    grad_b = grad_z.sum(axis=0)
+    grad_x = grad_z @ W.T
+    return grad_x, grad_W, grad_b
+```
+
+## Experiment
+
+**Hypothesis.** The affine backward pass matches central differences on a scalar loss $L = \sum z_{ij}^2$ through $z = xW + b$, at a small random shape.
+
+**Protocol.** $n = 4$, input dimension 3, output dimension 2. Use the Volume 02 harness on the flattened parameters of $W$ and $b$.
+
+**Metric.** Relative gradient gap at $\varepsilon = 10^{-6}$.
+
+**Decision rule.** The gap should be below $10^{-6}$. A gap near $1$ often means a missing transpose or a mean/sum mismatch. Fix that before any training chapter.
+
+## Project
+
+**Deliverable.** A drawn graph for a two-layer network, the affine check, and a note that states whether your training loss is a mean or a sum.
+
+**Constraints.** The check uses float64 and a deterministic loss.
+
+**Rubric.** The relative gap is in the lab note next to the picture of the graph.
+
+## Depth tracks
+
+**Beginner.** Implement affine forward and check one matrix product by hand.
+
+**University.** Pass the gradient check for $W$ and $b$.
+
+**Research.** Add a batch-norm or layer-norm node only after you can write its forward and backward contracts. If you use a library instead, check one parameter gradient against a numerical difference with the library's own forward.
+
+## Failure modes
+
+- Broadcasting a bias of the wrong rank and accepting the forward value because it is finite.
+- Reducing with `mean` in the loss and `sum` in the hand-derived gradient.
+- Detaching a tensor so the graph looks connected and the gradient is zero.
+
+## See also
+
+The next chapter for the nonlinearity. Volume 02 for the harness you must reuse.

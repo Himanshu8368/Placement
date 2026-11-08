@@ -1,0 +1,382 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  16.1  Ancestors, LCA, and the naive walk              sec:c11-idea
+%  Exports: def:c11-anc  def:c11-lcadef  prop:c11-chain  prop:c11-walk
+%           ex:c11-census  fig:c11-chains  lst:c11-naive
+%  (No solved problem in this section -- theory + census + naive walk.)
+% =====================================================================
+\section{Ancestors, the LCA, and the $\bigO{h}$ Walk}\label{sec:c11-idea}
+
+\begin{previouslybox}[What you already know -- 4 questions]
+\begin{enumerate}[nosep, leftmargin=1.8em]
+  \item From \chref{c09}~(Ch.~12): the rooted-view DFS \coderef{c09-dfs3}
+        stamps \(\code{depth}(v)\), \(\code{par}[v]\) and \(\code{size}(v)\)
+        in one pass. \emph{(Which array do you need before any LCA question
+        can even be posed?)}
+  \item From \chref{c10}~(Ch.~13): the subtree fold harvests pair-values at
+        the LCA (\propref{c10-pairtop}). \emph{(What was the "top node"
+        $\ell$ in that construction?)}
+  \item From \chref{c24}~(Ch.~5): the entry-only \(\tin/\tout\) convention
+        identifies subtrees as intervals. \emph{(Can you test
+        "\(u\) is an ancestor of \(v\)" with just \(\tin\)?)}
+  \item From \figref{c11-tree}: the shared running tree~\(T\) rooted at~1,
+        with the depth/parent overlay already printed. \emph{(Which two
+        root-chains meet at node~3?)}
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Three lines of definition and one picture carry the whole chapter: root
+the tree, and every node drags a chain upward to the root; two chains
+climb together after they meet and never separate again.  ``Where do they
+meet?'' is the LCA question.  This section proves the meeting is well
+defined (common ancestors form a chain -- \propref{c11-chain}), computes a
+small census of LCAs on the running tree~\(T\) \emph{by hand, from the
+definition} (\exref{c11-census}) -- because every fast machine in
+\S\ref{sec:c11-euler}--\S\ref{sec:c11-lifting} is just this picture
+compressed -- and then writes the naive walk that is already correct and
+sometimes already fast enough.  We also plant the root-dependence warning
+here, where it is cheapest to understand.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state \(\lca\) from the chain-intersection definition and compute
+        any pair's LCA on paper in \(\bigO{h}\), including the
+        ancestor-of-each-other shortcut case; \hfill\lv{2}
+  \item prove common ancestors form a chain (so ``lowest'' is unique) and
+        use the characterisation \(\lca(u,v) = u \iff u \preceq v\);
+        \hfill\lv{2}--\lv{3}
+  \item write the equalise-then-step-together walk and explain why its
+        structure is \emph{the} template both fast machines will keep;
+        \hfill\lv{3}
+  \item give the worst-case cost honestly (\(\bigO{h}\) per query: fine on
+        a star, fatal on a path) and name when it matters (\(Q\) large).
+        \hfill\lv{2}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{Chains Upward}
+% ---------------------------------------------------------------
+
+\begin{definition}{Ancestor, descendant, parent chain}{c11-anc}
+Fix a root~\(r\).  The \term{ancestor chain} of~\(v\) is
+\(\ancestors(v) = (v = a_0,\; a_1,\; \dots,\; a_{\depth(v)} = r)\), the
+nodes of the unique route \(v \to r\) in order; \(a_j\) is the
+\term{\(j\)-th ancestor} of~\(v\).  We write \(u \preceq v\) when
+\(u \in \ancestors(v)\) (\(u\) is an \term{ancestor} of~\(v\), \(v\) a
+\term{descendant} of~\(u\)), counting \(v \preceq v\) itself;
+\(\code{par}(v) = a_1\).
+\end{definition}
+
+\noindent\textbf{Read it as:} the route, not a relation to prove.
+\(\preceq\) is exactly ``appears on the way up'', and the
+subtree-as-interval language of Ch.~5 translates: \(u \preceq v\) iff
+\(\tin(u) \le \tin(v) \le \tout(u)\).  The self-convention
+(\(v \preceq v\)) is what makes the next definition not lie about pairs
+like \((9, 10)\).
+
+\begin{definition}{Lowest common ancestor}{c11-lcadef}
+For nodes \(u, v\): \(\lca(u,v)\) is the deepest node of
+\(\ancestors(u) \cap \ancestors(v)\) -- the common ancestor with maximum
+\(\depth\).
+\end{definition}
+
+\begin{proposition}{Common ancestors form a chain}{c11-chain}
+\(\ancestors(u) \cap \ancestors(v) \ne \emptyset\) (both contain~\(r\)),
+and it equals \(\ancestors(\ell)\) where \(\ell\) is its deepest element.
+In particular the LCA is unique, \(w\) is a common ancestor of \(u,v\) iff
+\(w \preceq \lca(u,v)\), and \(\lca(u,v) = u \iff u \preceq v\).
+\end{proposition}
+
+\begin{proofbox}
+\(\ancestors(u)\) is a chain by definition (one route, no branches).  Take
+any two common ancestors \(w_1, w_2\) of~\(u\) and~\(v\): both lie on the
+single route \(u \to r\), and nodes of one chain are linearly ordered by
+depth -- so \(w_1 \preceq w_2\) or \(w_2 \preceq w_1\).  A deepest
+element~\(\ell\) exists (finite chain), and every common ancestor is an
+ancestor of~\(\ell\): \(\mathit{common} = \ancestors(\ell)\).  The final
+equivalence: if \(u \preceq v\), then \(\ancestors(u) \subseteq
+\ancestors(v)\), so the deepest common node is~\(u\); conversely
+\(\lca = u\) forces \(u\) into \(\ancestors(v)\).
+\end{proofbox}
+
+\begin{insightbox}[Three vocabularies for one node]
+\(\ell\) is the \emph{deepest common ancestor}; the \emph{parting point}
+where the chains from~\(u\) and~\(v\) merge; the \emph{top node / harvest
+point} of Ch.~13's pair decomposition (\propref{c10-pairtop}) \emph{if}
+\(u \ne v\) and neither is an ancestor of the other -- the degenerate rows
+of \(\exref{c11-census}\)'s census ride on~\(\ell\) itself, one arm of
+length~0.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{The Parting-Point Picture on T}
+% ---------------------------------------------------------------
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.88, transform shape,
+    gv/.style={circle, draw=black!60, fill=white, minimum size=6.6mm, font=\small},
+    ge/.style={draw=black!40, thick},
+    eU/.style={draw=primaryblue, very thick, -{Latex[length=2mm]}},
+    eV/.style={draw=accentorange, very thick, -{Latex[length=2mm]}},
+    hinge/.style={gv, fill=successgreen!35, draw=green!60!black, very thick}]
+  \node[gv] (n1) at (0,0)     {$1$};
+  \node[gv] (n2) at (-3,-1.6) {$2$};
+  \node[gv] (n3) at ( 3,-1.6) {$3$};
+  \node[gv] (n4) at (-5.2,-3.2) {$4$};
+  \node[gv] (n5) at (-1.6,-3.2) {$5$};
+  \node[gv] (n6) at ( 1.6,-3.2) {$6$};
+  \node[gv] (n7) at ( 5.2,-3.2) {$7$};
+  \node[hinge] (n8) at (-1.6,-4.8) {$8$};
+  \node[gv] (n9) at ( 5.2,-4.8) {$9$};
+  \node[gv] (n10) at ( 5.2,-6.4) {$10$};
+  \draw[ge] (n1)--(n2) (n1)--(n3) (n2)--(n4) (n2)--(n5)
+            (n3)--(n6) (n3)--(n7) (n5)--(n8) (n7)--(n9) (n9)--(n10);
+  % chain from 8 upward
+  \draw[eU] (n8) to[bend right=12] node[annot, font=\scriptsize, left, sloped]
+    {$u=8$} (n5);
+  \draw[eU] (n5) to[bend right=12] (n2);
+  \draw[eU] (n2) to[bend right=12] (n1);
+  % chain from 10 upward
+  \draw[eV] (n10) to[bend left=12] node[annot, font=\scriptsize, right, sloped]
+    {$v=10$} (n9);
+  \draw[eV] (n9) to[bend left=12] (n7);
+  \draw[eV] (n7) to[bend left=12] (n3);
+  \draw[eV] (n3) to[bend left=12] (n1);
+  % hinge at 1
+  \node[hinge] at (n1) {$1$};
+  \node[annot, font=\scriptsize, anchor=north, text width=38mm, align=center]
+    at (0,-0.55) {the two chains merge at~$1$\\(depth~$0$) and share nothing below};
+  \node[annot, font=\scriptsize, anchor=west, text width=38mm, align=left]
+    at (3.6,-0.3) {$\lca(8,10) = 1$: deeper on \emph{neither}\\
+    chain can be common -- $8 \not\preceq 10$, $10 \not\preceq 8$};
+\end{tikzpicture}
+\caption{The parting-point picture on~\(T\): \(\ell = 1\) is where the
+chains \(8 \to 5 \to 2 \to 1\) and \(10 \to 9 \to 7 \to 3 \to 1\) first
+touch; above~\(\ell\) they coincide (both empty), below it they never meet
+again (else two routes would join twice -- no cycles in a tree).  The
+hinge~\(1\) is the root.}\label{fig:c11-chains}
+\end{figure}
+
+% ---------------------------------------------------------------
+\subsection{Computing by Hand First (the census)}
+% ---------------------------------------------------------------
+
+\begin{example}{An LCA census straight from the definition}{c11-census}
+Intersect chains, take the deepest -- no machine yet, just
+\figref{c11-tree}.  On~\(T\) rooted at~1:
+\[
+\begin{array}{c|l|l|c}
+u & v & \ancestors(u) \cap \ancestors(v) & \lca(u,v) \\ \hline
+8  & 10 & \{1\} & 1\\
+4  & 5  & \{2, 1\} & 2\\
+6  & 7  & \{3, 1\} & 3\\
+8  & 9  & \{1\} & 1\\ \hline
+9  & 10 & \{9, 7, 3, 1\}\;\text{and } 9 \preceq 10 & \mathbf{9}\\
+5  & 5  & \ancestors(5) = \{5,2,1\} & \mathbf{5}
+\end{array}
+\]
+The last two rows are the shortcut cases \propref{c11-chain} licenses:
+when one node is an ancestor of the other the LCA \emph{is} that node (the
+chains did not part -- one contains the other), and
+\(\lca(u,u) = u\).  A machine that special-cases these two lines
+separately is a machine that did not read the proposition.
+\end{example}
+
+\begin{notebox}[Reading \(\exref{c11-census}\) in Ch.~13]
+Chapter~13's distance-DP section (\texttt{04\_distance\_dp.tex})
+references this exact example by label (\(\exref{c11-census}\)) when
+proving that \(\dist(s,u)+\dist(u,v)=\dist(s,v)\) iff \(u\) is on the
+route \(s\)-\(v\).  The census rows \((4,5)\) and \((6,7)\) serve as
+witnesses there.
+\end{notebox}
+
+\begin{warningbox}[The LCA lives on the \emph{rooted} tree -- root changes answers]
+Re-root~\(T\) at~6: the chains change, and \(\lca_6(3,6) = 6\) (since
+\(6 \preceq_6 3\) now), while \(\lca_1(3,6) = 3\).  Distances, by contrast,
+never moved -- the \(\bigO{1}\)-query machinery of \secref{c11-paths}
+routes around this on purpose.  Fix one root for a problem, use it
+everywhere, and when a statement is phrased unrooted (``the junction of
+the three paths'', CSES~1136-style), any fixed root is \emph{legal}: the
+answers that matter come out root-independent.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{The Naive Walk: Equalise, Then Step Together}
+% ---------------------------------------------------------------
+
+\begin{proposition}{The $\bigO{h}$ walk}{c11-walk}
+The following returns \(\lca(u,v)\): (i) while
+\(\depth(u) > \depth(v)\): \(u \leftarrow \code{par}[u]\); (ii)
+symmetrically for~\(v\); (iii) while \(u \ne v\): step \emph{both} up.
+Cost is at most \(\depth(u) + \depth(v) + 1\) parent moves.
+\end{proposition}
+
+\begin{proofbox}
+Phase (i)--(ii) cannot change the answer: climbing past the current LCA
+is impossible while depths exceed the other's (the shallower node's chain
+\emph{contains} the LCA of the pair -- \propref{c11-chain} applied to the
+shortened chain), and after equalisation both nodes sit at the same depth
+on their chains.  In phase (iii) equal depths mean the two walk in
+lockstep and can only \emph{land} on a common node simultaneously -- the
+first such landing is the deepest common ancestor: any deeper one would
+have been hit one step earlier.  Termination: both reach~\(r\) at latest.
+\end{proofbox}
+
+\begin{lstlisting}[caption={The walk in five lines -- the template 16.2 and 16.3 only change how far one ``step'' may jump}, label={lst:c11-naive}]
+int lca_naive(int u, int v) {
+    while (dep[u] > dep[v]) u = par[u];          // phase i:  raise the deeper side
+    while (dep[v] > dep[u]) v = par[v];          // phase ii: until depths match
+    while (u != v) { u = par[u]; v = par[v]; }   // phase iii: lockstep until first meet
+    return u;
+}
+\end{lstlisting}
+
+\noindent\textbf{Believe it because:} phase (iii) is
+\(\exref{c11-census}\) in motion -- the two chains \emph{merge at~\(\ell\)
+and coincide above it}, so walking equal depths forward, the first
+agreement \emph{must} be~\(\ell\); they can never cross without agreeing.
+Every fast method below keeps this two-phase shape and merely buys a
+faster ``step''.
+
+\begin{tracebox}[Walk on T: lca(8, 10)]
+\(\depth(8) = 3\), \(\depth(10) = 4\).  Phase (ii): \(v\leftarrow\code{par}[10]=9\),
+now \(\depth(9)=3=\depth(8)\).  Phase (iii): step both:
+\[
+\begin{array}{c|c|c}
+\text{step} & u & v \\ \hline
+0 & 8 & 9 \\
+1 & 5 & 7 \\
+2 & 2 & 3 \\
+3 & 1 & 1 \;\checkmark
+\end{array}
+\]
+First agreement at depth~0: \(\lca(8,10) = 1\).  Matches the census.  Cost:
+\(1 + 3 = 4\) parent moves \(= \depth(8)+\depth(10)-2\cdot\depth(1)+1\)
+\(= 3+4-0+1=8\).  Wait: the \(+1\) is the final loop-iteration check, so
+at most \(3+4+1=8\) pointer assignments.  For a pair on the same side
+\((4,5)\): phase (i) moves \(4\to\text{nothing}\) (same depth), phase (iii)
+steps \(4\to2,\;5\to2\): one move.  \(h=4\), so even the worst case is
+small on~\(T\).
+\end{tracebox}
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}l l l@{}}
+\toprule
+\textbf{Tree shape} & \textbf{Worst-case walk} & \textbf{Verdict for } \(Q\) \textbf{ queries} \\
+\midrule
+star / bushy (\(h = \bigO{1}\)) & \(\bigO{1}\) per query & naive \emph{wins} -- no preprocessing needed \\
+balanced binary (\(h = \bigO{\log n}\)) & \(\bigO{\log n}\) & naive is already contest-fast \\
+path / chain (\(h = n\)) & \(\bigO{n}\) & \(Q \ge 10^{3} \Rightarrow\) TLE: bring \secref{c11-euler} or \secref{c11-lifting} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent So the honest first move in an LCA problem: \emph{bound the
+height}.  If the statement hands you a shallow tree (or a random one,
+where Ch.~8's BST analysis says \(h = \bigO{\log n}\) in expectation),
+five lines of walk beat forty lines of table.  The rest of the chapter is
+for adversarial paths with large~\(Q\).
+
+% ---------------------------------------------------------------
+\subsection{Variations and Twists}
+% ---------------------------------------------------------------
+
+\begin{itemize}[nosep]
+  \item \textbf{Multiple LCAs at once.}  Given \(k\) nodes,
+        \(\lca(v_1,v_2,\dots,v_k)\) is the LCA of the min-depth and
+        max-depth nodes in any \(\tin\)-sorted order of the set.  Proof
+        sketch: the intersection of \(k\) chains is a chain (each
+        intersection of two chains is a chain), so the deepest common
+        element exists and equals the pairwise LCA of the two extremes.
+        The Summit (\chref{c11} 99 station~12) uses this. \hfill\lv{4}
+  \item \textbf{Lowest common ancestor with weights.}  If edges carry a
+        length, the \emph{hinge} is the same (graph structure unchanged),
+        but the \emph{distance} is \(\dist(r,u)+\dist(r,v)-2\dist(r,\ell)\).
+        \secref{c11-paths} makes this the definition. \hfill\lv{3}
+  \item \textbf{Ancestor test in \(\bigO{1}\).}  \(u \preceq v\) iff
+        \(\tin(u) \le \tin(v) \le \tout(u)\) -- this is Ch.~5's interval
+        test, restated for clarity in \propref{c11-interval}
+        (\secref{c11-paths}). \hfill\lv{2}
+  \item \textbf{Binary-tree specialisation.}  On a \emph{binary} tree with
+        parent pointers, the walk is the classic LC~236 post-order
+        solution (used in Ch.~1).  \(\lv{2}\)
+  \item \textbf{Forest → super-root.}  If the input is a forest with
+        \(Q\) queries spanning components, add node~0 and connect all
+        component roots to it; the walk and every table below extend
+        verbatim.  Queries within different components return 0. \hfill\lv{3}
+\end{itemize}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: Forgetting the self-convention]
+The LCA of a node with itself is that node (\(\lca(v,v)=v\)), not its
+parent.  If your walk starts by checking \(u \ne v\) and skips the loop,
+you never produce this row.  Test on \(\exref{c11-census}\)'s row~6.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: Treating \(\preceq\) as strict]
+Some code writes `if (isAnc(u,v)) return u;` using a \emph{strict}
+ancestor test that excludes \(u=v\).  Then \(\lca(v,v)\) falls through to
+the loop and the loop never fires because \(u = v\) already: either you
+return the wrong node or loop forever.  Pin the convention at the first
+line: \(u \preceq v\) includes \(u = v\).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: Assuming the root is fixed]
+On the tree~\(T\), \(\lca_1(8,10)=1\) but re-rooting at node~3 changes it:
+the chain \(8\to5\to2\to1\to3\) and \(10\to9\to7\to3\) now meet at~3
+(depth~0 in the new view).  Contest problems always say ``rooted at~1''
+or give a parent array.  If they don't, \emph{read the sample} -- the
+hinge answers decode the implicit root.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Corner}
+% ---------------------------------------------------------------
+
+\begin{practiceset}
+  \practice{Lowest Common Ancestor of a Binary Tree II}{LeetCode 1644}
+    {https://leetcode.com/problems/lowest-common-ancestor-of-a-binary-tree-ii/}
+    {LC Medium L2}
+    {premium statement; solve from this hint: it is LC~236 (Ch.~1's mixed
+     set -- the pure \emph{definition} exercise: no tables, just the
+     recursion) with one twist: \(p\) and~\(q\) are \emph{not guaranteed
+     to exist}.  Keep Ch.~1's post-order shape -- return the node if it is
+     \(p\) or~\(q\), else the side that found something, else the merge of
+     both -- but count arrivals: report an LCA only if the traversal found
+     \emph{both} targets; a lone sighting is not an ancestor of a missing
+     node.}
+\end{practiceset}
+
+\paragraph{Back-cites.}
+LC~236 (Ch.~1 mixed set M1.1, \chref{c01}) -- the binary-tree LCA is the
+base case of \(\exref{c11-census}\)'s structure.
+Ch.~5 (\(\chref{c24}\)) -- the \(\tin/\tout\) interval convention
+re-used in \propref{c11-interval}.
+Ch.~13 (\propref{c10-pairtop}) -- the ``harvest at the hinge'' identity
+that \(\exref{c11-census}\) makes concrete.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 16.1 in 10 seconds]
+Root the tree.  Every node drags a \emph{chain} up to the root.  Two
+chains meet and never part again: the meeting point is \(\lca(u,v)\).
+Common ancestors form a chain (\propref{c11-chain}) so the LCA is unique.
+Shortcut: \(\lca(u,v)=u\) iff \(u \preceq v\) (including \(u=v\)).  The
+naive walk equalises depths and steps in lockstep; cost \(\bigO{h}\), fine
+if \(h = \bigO{\log n}\) or \(Q\) small, fatal on a path with \(Q=10^5\).
+\selftest{
+  \item State \(\lca\) in one sentence.
+  \item What does \(\preceq\) include that a strict ``below'' does not?
+  \item Give the census row \((8,10)\) and explain why \(\lca=1\).
+  \item The walk's three phases?  Why does lockstep find the \emph{first}
+        agreement?
+  \item When is the naive walk fast enough?  Give \(h\) and~\(Q\) bounds.
+}
+\end{recallbox}

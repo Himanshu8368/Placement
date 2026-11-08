@@ -1,0 +1,469 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  11.4  Compressed and Persistent Tries        sec:c08-variants
+%  Exports: def:c08-radix  def:c08-persistent  lst:c08-persist
+%           prob:c08-persistxor  lst:c08-persistxor-soln  ex:c08-radixlab  (internal lab, no URL)
+%           (a plain comparison table, no label; Aho-Corasick notebox preview)
+% =====================================================================
+\section{Compressed and Persistent Tries}\label{sec:c08-variants}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item In \defref{c08-nodelayout} a fixed \code{child[26]} array wasted space on lone children. What
+        shape does the \texttt{care}/\texttt{cares} spine have -- how many children does each of $c,a,r,e$
+        have? (exactly one each -- a \emph{chain} ripe for collapsing)
+  \item \secref{c08-binary} added a per-node $\mathit{cnt}$ so a \emph{live} set could answer ``is this
+        branch non-empty?'' What breaks if a query must instead ask about a set as it was $k$ insertions
+        ago, while we keep inserting? (a single mutable count forgets the past -- we need \emph{versions})
+  \item A persistent/functional data structure shares untouched parts between versions and copies only
+        what changes. For a root-to-leaf trie insert, how many nodes actually change? (the ones on that
+        one path -- depth-many, everything else is shared)
+  \item Which prior chapter treats persistence as a general technique you can lean on for the full
+        functional-array machinery? (Chapter~21, \chref{c19})
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+The first three sections used one plain trie and never worried about its size or its history. This section
+engineers the structure for the two situations where the naive form fails. \textbf{Compression}: a chain of
+single-child nodes -- the $c$-$a$-$r$-$e$ spine shared by \texttt{car}, \texttt{care}, \texttt{cares} --
+stores one letter per node and one fat array per node for information that is really a \emph{substring};
+collapsing each maximal single-child chain into one edge yields the \term{radix} (compressed) trie
+(\defref{c08-radix}), the same idea that makes a big alphabet affordable and that lives inside production
+hash tables. \textbf{Persistence}: when queries reference the set \emph{as it was} at some moment -- the
+first $k$ insertions, or ``values that existed before index $i$'' -- a single mutable count is not enough;
+we keep a \term{version root} per prefix of insertions, \textbf{path-copying} only the depth-many nodes
+that change and sharing the rest (\defref{c08-persistent}).
+
+The section's solved anchor, LeetCode~1707 \probref{c08-persistxor}, is the purest persistence payoff:
+each query $[x,m]$ wants $\max_y (x\oplus y)$ over the sub-set $\{y \in \texttt{nums}: y \le m\}$. Sort the
+numbers, build a \emph{persistent binary trie} with one root per count of inserted values, and a query
+reduces to a binary search (how many values are $\le m$?) followed by the \secref{c08-binary} complement
+walk \emph{on that version's root} -- an $\bigO{\log C}$ answer that neither a mutable trie nor a fresh
+rebuild gives cheaply. We also preview Aho--Corasick in one paragraph and leave the full persistence
+abstraction to Chapter~21 (\chref{c19}).
+\textbf{Prerequisites.} \secref{c08-triebasics} (layout/memory), \secref{c08-binary} (the complement greedy
+and the $\mathit{cnt}$ field); binary search; a little pointer-sharing / ``copy-on-write'' intuition. No
+prior exposure to persistence is assumed -- this section builds one working instance.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item explain what a radix trie collapses and why it saves memory on sparse/large alphabets; \hfill\lv{4}
+  \item build a persistent binary trie by path-copying and query a specific version root; \hfill\lv{5}
+  \item solve ``max XOR with a value $\le m$'' by combining a sorted prefix with version roots; \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- a trie that must not forget, or must not bloat]
+\reckey{either (compress) the trie is \emph{too big} -- huge alphabet, long single-child chains, or a
+memory limit the $|\Sigma|\cdot\text{nodes}$ array cannot meet -- or (persist) queries reference the set
+at a \emph{point in its history}: a prefix of insertions, ``versions'', or a value range you turn into a
+prefix by sorting.}
+\recuse{
+  \item ``$k$-th / max XOR over the first $i$ insertions, or over $[l,r]$ of a sorted key order'' -- a
+        persistent trie, root per version (\probref{c08-persistxor}, \probref{c08-summit} kin);
+  \item ``max XOR with $y \le m$'' -- sort keys, persistent root indexed by $\operatorname{upper\_bound}$
+        (\probref{c08-persistxor});
+  \item ``memory blew up on a plain trie / very large alphabet'' -- a radix/compressed trie
+        (\defref{c08-radix});
+  \item ``dictionary with long shared prefixes, need fast LCP'' -- compression again.
+}
+\recnotuse{
+  \item a \emph{live}, history-free set with add/erase/query -- the mutable $\mathit{cnt}$ trie of
+        \secref{c08-binary} is enough (and is exactly the Summit \probref{c08-summit});
+  \item you need to \emph{edit} many past versions, not just read them -- full persistence with edits is
+        heavier and belongs to the general treatment in \chref{c19};
+  \item \emph{any} order statistic with deletion over a value domain -- a Fenwick/segment tree on
+        compressed values (\chref{c13}, \chref{c14}) may beat a trie.
+}
+One-line test: \emph{is the question either ``too many nodes?'' (compress) or ``which version of the set?''
+(persist)? Each maps to one of the two variants below.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Two different pressures, two engineering answers.
+
+\textbf{Memory / compression.} Look at \figref{c08-wordstrie} from \secref{c08-triebasics} once more. The
+path to \texttt{care} is $c\!\to\!a\!\to\!r\!\to\!e$, and every one of those nodes has \emph{exactly one}
+child -- they are a chain, not a decision. A 26-pointer array at each of them is mostly null: pure waste.
+A \term{radix trie} stores the whole shared substring ``car'' on \emph{one} edge, keeping nodes only where
+a real \emph{branch} occurs (or a word ends). Fewer nodes, fewer arrays, and lookup now compares a
+substring instead of one letter -- still $\bigO{L}$ total, just fewer allocations. This is precisely why
+$\Sigma=\{0,1\}$ binary tries rarely need it (max branching $2$, chains short) but letter tries over big
+alphabets do.
+
+\textbf{History / persistence.} The Summit and LC~1707 both need to ask ``over the set as it stood after
+$c$ insertions, what is the max XOR?'' Rebuilding a trie per query is $\bigO{n}$ each. A \emph{persistent}
+trie never destroys the old version: inserting a value \textbf{path-copies} -- it clones the $\le\!B$ nodes
+on its root-to-leaf path (bumping their $\mathit{cnt}$) and \emph{shares} every untouched subtree with the
+previous root (\defref{c08-persistent}). So $n$ versions cost $\bigO{nB}$ nodes total, but each version
+root is a complete, independently queryable trie. Version root $k$ holds the first $k$ values; the
+complement greedy of \secref{c08-binary} runs unchanged on it, only reading counts that are frozen for
+that version.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Radix (compressed / Patricia) trie}{c08-radix}
+A \term{radix trie} collapses every maximal chain of single-child nodes into a single edge whose label is
+the whole substring along that chain. Nodes survive only where the trie branches (a node with $\ge 2$
+children) or where a key terminates. Membership/prefix lookups still run in $\bigO{L}$ (a substring
+comparison per edge costs only the length it covers); the payoff is node and edge count proportional to
+the number of \emph{keys and branches}, not to $\sum|{\text{key}}|$, which matters enormously for a large
+or sparse alphabet. Rebuilding the compression after insertions costs a split operation; a \term{Patricia
+trie} is the bitwise ($\Sigma=\{0,1\}$) specialisation.
+\end{definition}
+
+\begin{definition}{Persistent trie by path-copying}{c08-persistent}
+A \term{persistent trie} keeps a \emph{root pointer per version}. Inserting into version $i$ to obtain
+version $i{+}1$ does not mutate any existing node: it \textbf{clones} each node on the depth-$B$ path
+being walked (copy its two/thirty-two child pointers and increment the cloned node's $\mathit{cnt}$),
+points the new clone's relevant child at the next clone, and \emph{reuses} the unchanged child pointers
+straight from version $i$. Cost is $\bigO{B}$ new nodes per insert and $\bigO{B}$ time; all untouched
+subtrees are shared, so $n$ versions use $\bigO{nB}$ nodes rather than $\bigO{n^2 B}$. A query selects a
+version by its root and runs the ordinary walk -- the frozen $\mathit{cnt}$ fields make it see exactly the
+keys of that version. This is the read-only (``partial'') persistence the XOR problems need; general
+persistence with edits is Chapter~21 (\chref{c19}).
+\end{definition}
+
+\begin{insightbox}
+Path-copying is the whole trick, and it is cheap \emph{because a trie insert changes one root-to-leaf
+path}. The number of new nodes per version is the depth ($B=31$ for integers), and every other node is
+shared -- persistence on a trie is nearly free in a way persistence on, say, a balanced BST is not, since
+a rotation there disturbs $\bigO{\log n}$ nodes with subtrees that themselves change shape. The
+$\mathit{cnt}$ field from \secref{c08-binary} is what makes a shared subtree still answer ``is this branch
+non-empty in \emph{this} version?'' correctly -- the count is per-version on the cloned spine and inherited
+by reference elsewhere.
+\end{insightbox}
+
+\subsection{The Algorithm: A Working Persistent XOR-Trie}
+
+Build roots $r_0, r_1, \dots, r_n$ over a sorted key list; $r_0$ is empty and $r_k$ contains the first $k$
+keys. \code{insert} clones the path and bumps counts; \code{query} descends a chosen version's root using
+the complement greedy, treating a null or $\mathit{cnt}=0$ branch as unavailable.
+
+\begin{lstlisting}[caption={Persistent binary trie for max XOR: path-copying insert and a version-rooted complement query}, label={lst:c08-persist}]
+struct PNode { PNode* ch[2]{}; int cnt = 0; };            // cnt = keys (in THIS version) passing here
+static const int MAXB = 30;                               // values <= 1e9 -> bits 30..0
+
+// Clone node n (or a fresh empty node if n is null): the essence of path-copying.
+PNode* clone(PNode* n) { PNode* c = new PNode(); if (n) { c->ch[0]=n->ch[0]; c->ch[1]=n->ch[1]; c->cnt=n->cnt; } return c; }
+
+// Return the root of version (prev + value x). Only the depth-(MAXB+1) path is copied.
+PNode* insert(PNode* prev, int x, int b) {
+    PNode* cur = clone(prev);
+    cur->cnt++;
+    if (b >= 0) {
+        int k = (x >> b) & 1;
+        PNode* pchild = prev ? prev->ch[k] : nullptr;
+        cur->ch[k] = insert(pchild, x, b - 1);            // recurse down one branch; other stays shared
+    }
+    return cur;
+}
+
+// max x XOR y over the keys present in this version-root; -1 if the version is empty.
+int query(PNode* u, int x, int b) {
+    if (!u || u->cnt == 0) return -1;                     // no value here in THIS version
+    if (b < 0) return 0;
+    int k = (x >> b) & 1, want = k ^ 1;
+    PNode* alt = u->ch[want];
+    if (alt && alt->cnt > 0) return (1 << b) | query(alt, x, b - 1);   // take complement branch
+    return query(u->ch[k], x, b - 1);                      // else same-bit branch (guaranteed cnt>0)
+}
+\end{lstlisting}
+
+\begin{complexitybox}
+Time: $\bigO{B}$ per version created (one path copy) and $\bigO{B}$ per query -- so building $n$ versions
+is $\bigO{nB}$ and answering $Q$ queries is $\bigO{Q B}$. Memory: $\bigO{nB}$ nodes ($B{+}1$ new clones
+per insert, everything else shared) -- for $n\le 2\cdot 10^5$, $B=31$ that is about $6\cdot 10^{6}$ small
+two-pointer nodes, the real budget to check. Verdict: this is the structure that makes ``max XOR over a
+value range / a prefix / a version'' an $\bigO{\log C}$ answer instead of an $\bigO{n}$ rebuild.
+\end{complexitybox}
+
+\subsection{Worked Example (in-chapter lab, no URL)}
+
+\begin{example}{Radix compression and subtree counting on a shared spine}{c08-radixlab}
+\emph{Compression.} Insert $\{$car, care, cares, cat$\}$. A plain trie uses nodes
+$c,a,r,e,s$ and $t$ -- six nodes, five of them ($c,a,r,e$ and the single-child links) on chains. The
+radix trie stores the edge ``ca'' then branches into ``r'' (which continues ``es'' with terminals at
+``r'' and ``re''... ) -- concretely it keeps a node only at the root, at the $r$/$t$ fork, and at each
+word end, folding $a$,$e$,$s$ single-child steps into substring labels: same lookups, fewer allocations.
+
+\emph{Counting.} With a per-node $\mathit{cnt}$ (\defref{c08-prefixcount}) over the \emph{plain} trie of
+$\mathcal{W}$ (\secref{c08-triebasics}), the $c$-$a$ node has $\mathit{cnt}=4$, $c$-$a$-$r$ has $3$,
+$c$-$a$-$t$ has $1$, $d$ has $1$ -- ``words with prefix car'' $=3$ is a single walk to $r$ and a read.
+Radix or plain, the count semantics are identical; compression only changes how many nodes hold them.
+\end{example}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Full vs partial persistence}: what we built is \emph{partial} (only the newest version is
+        edited, older ones are read-only). Editing arbitrary old versions needs fat nodes or more machinery
+        -- \chref{c19}. \hfill\lv{5}
+  \item \textbf{Offline instead of persistent}: LC~1707 also yields to \emph{sorting queries by $m$} and
+        inserting into one \emph{mutable} trie as $m$ grows -- no cloning, same $\bigO{(n+Q)\log C}$, less
+        memory, but it only works because queries are known up front and independent. \hfill\lv{4}
+  \item \textbf{Version = time of insertion}: to answer ``over indices $[l,r]$'' build roots by index order
+        and use root $r$ minus root $l{-}1$ conceptually via the range count -- the persistent prefix-sum
+        idea (\chref{c19}, \chref{c13}). \hfill\lv{5}
+  \item \textbf{Radix rebuild cost}: inserting into a compressed trie may \emph{split} an edge; amortise it
+        or fall back to a plain trie when inserts dominate. \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- mutating a shared node in a persistent insert]
+The one rule of path-copying: \emph{never} write into an existing version's node. If your \code{insert}
+follows a child pointer and mutates it in place instead of cloning, every older version that shares that
+subtree silently changes -- queries on root $k$ see values inserted after $k$. Clone \emph{before}
+descending (\coderef{c08-persist}), bump the clone's count, and only then re-link.
+\end{warningbox}
+\begin{warningbox}[Trap 2 -- reading $\mathit{cnt}$ from the wrong version]
+A version root's correctness rests on each cloned spine node carrying the count \emph{for that version}.
+Reusing a stale $\mathit{cnt}$ (e.g.\ incrementing the parent clone but comparing a child count that
+belongs to the newer version) makes ``is this branch non-empty?'' lie. Every clone copies then increments;
+the shared (uncopied) children already had the right count for the values they hold.
+\end{warningbox}
+\begin{warningbox}[Trap 3 -- empty-range queries]
+When no key satisfies the version's condition ($\mathit{cnt}=0$ at the root, or $m$ below every value),
+\code{query} must return \emph{no answer} (LC~1707 wants $-1$). A greedy descent that ignores the empty
+case walks off a null child and crashes or returns a spurious value -- guard on $\mathit{cnt}=0$ first.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's anchor is LeetCode~1707, \probref{c08-persistxor}: for each query $[x,m]$ return
+$\max_{\texttt{nums}[j]\le m}(x\oplus \texttt{nums}[j])$, or $-1$ if none qualify. Sorting the numbers and
+building a persistent binary trie -- one root per count of smallest values -- turns ``nums $\le m$'' into
+``query version root $= \operatorname{upper\_bound}$ index'', solved by the \secref{c08-binary} complement
+walk on that frozen root.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c08-persistxor}{Maximum XOR With an Element From Array}{LeetCode 1707}
+  {https://leetcode.com/problems/maximum-xor-with-an-element-from-array/}{LC Hard · L5}
+  {persistent binary trie, path-copying roots, sort + upper\_bound by m, version complement query, -1 empty}
+
+\begin{problemstatement}[Maximum XOR With an Element From Array]
+Given an array \texttt{nums} of non-negative integers and \texttt{queries[i] = [x\textsubscript{i}, m\textsubscript{i}]},
+answer query $i$ with the \emph{maximum} value of $x_i \oplus \texttt{nums}[j]$ over all $j$ such that
+$\texttt{nums}[j] \le m_i$; if no such $j$ exists the answer is $-1$. Constraints (official):
+$1 \le |\texttt{nums}|, |\texttt{queries}| \le 2\cdot 10^{5}$ and $0 \le \texttt{nums}[j], x_i, m_i \le 10^{9}$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 30 minutes]
+Each query restricts to $\{\text{nums} \le m\}$. Sort \texttt{nums}; then that subset is a \emph{prefix} of
+the sorted order. A structure that answers max-XOR over ``the first $k$ inserted'' is exactly a persistent
+trie root $k$.
+\peek{What does ``nums[j] $\le m$'' become after you sort nums?}
+\nudge{A count $k=\operatorname{upper\_bound}(\text{sorted},m)$, i.e.\ the first $k$ sorted values. Build
+a persistent trie with root $r_k$ holding those $k$ values, then run the complement query on $r_k$.}
+\fullhint{Sort \texttt{nums}. Create roots $r_0..r_n$ where $r_{t+1}=\text{insert}(r_t,\text{sorted}[t])$.
+For query $[x,m]$: $k=\operatorname{upper\_bound}$; if $k=0$ answer $-1$; else answer \code{query($r_k$,x)}.
+Every operation is $\bigO{31}$.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+For each $(x,m)$ we maximise $x\oplus y$ over the \emph{value-filtered} subset $\{y\in\texttt{nums}: y\le m\}$.
+The unconstrained max-XOR is \probref{c08-maxxor}'s greedy; the filter $\le m$ is what forces history. Sort
+\texttt{nums} ascending; then $\{y\le m\}$ is a prefix of length $k=\operatorname{upper\_bound}(m)$. Querying
+max-XOR over ``the set of the first $k$ sorted values'' is a version query -- persistent roots give it in
+$\bigO{B}$ without a rebuild. Empty prefix ($k=0$) $\Rightarrow$ answer $-1$.
+
+\solstep{Key Observations}
+\begin{observation}
+After sorting, the condition $y\le m$ becomes ``$y$ is among the first $k$ values'' for
+$k=\operatorname{upper\_bound}$ -- turning a value filter into a \emph{version} index (\defref{c08-persistent}).
+\end{observation}
+\begin{observation}
+A persistent binary trie root $r_k$ answers max-XOR over its $k$ keys with the same complement greedy of
+\lemref{c08-greedybit}; each node's $\mathit{cnt}$ tells the walk which branches are non-empty \emph{in
+version $k$}.
+\end{observation}
+\begin{observation}
+Building all $n{+}1$ roots costs $\bigO{nB}$ nodes (path-copying shares everything off the inserted path),
+so total time is $\bigO{(n+Q)B}$ with $B=30$ bits for $\le 10^9$.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{For each query, scan nums for the max $y\le m$ XOR $x$.}
+{$O(Q\cdot n)=4\cdot 10^{10}$ -- \re. Independent queries make this hopeless.}
+\deadend{Rebuild a fresh trie for each query's filtered subset.}
+{Correct but $O(Q\cdot n B)$ -- building is the bottleneck; you are re-doing shared work every time.}
+\aha{Sort once, build $n{+}1$ persistent roots by successive path-copying insert, then each query is a
+binary search plus a $\bigO{B}$ complement walk on the matching version root -- $O((n+Q)\log C)$.}
+\end{thinkbox}
+
+\solstep{Solution}
+Sort \texttt{nums}. Set $r_0$ empty and build $r_{t+1}$ from $r_t$ by inserting sorted[$t$], using the
+path-copying \code{insert} of \coderef{c08-persist}; this gives one root per prefix count. For a query
+$(x,m)$, let $k$ be the count of values $\le m$ (a binary search). If $k=0$ emit $-1$; else emit the
+\code{query} result on root $r_k$ with value $x$ -- the complement greedy reading $r_k$'s frozen counts.
+That is \coderef{c08-persist}'s two routines plus a sort and a binary search.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Version root $r_k$ yields the constrained max XOR]
+By \defref{c08-persistent}, $r_k$ encodes exactly the first $k$ sorted values and shares all structure
+outside the copied path, so it is a faithful trie of $\{y\le m\}$ (the sorted prefix of that size). By
+\lemref{c08-greedybit} the complement walk on $r_k$ returns $\max_{y \text{ in } r_k} x\oplus y$, which is
+$\max_{y\in\texttt{nums},\,y\le m} x\oplus y$. If $k=0$ no $y\le m$ exists and $-1$ is the required output
+by the problem statement. Hence every query returns the specified value. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={LeetCode 1707 -- sort, build persistent roots, upper\_bound + version query}, label={lst:c08-persistxor-soln}]
+class Solution {
+    struct PNode { PNode* ch[2]{}; int cnt=0; } *null_=nullptr;
+    static const int MAXB = 30;
+    PNode* ins(PNode* prev, int x, int b){
+        PNode* cur = new PNode();                       // clone-on-write: always make a fresh node
+        if (prev){ cur->ch[0]=prev->ch[0]; cur->ch[1]=prev->ch[1]; cur->cnt=prev->cnt; }
+        cur->cnt++;
+        if (b>=0){ int k=(x>>b)&1; PNode* pc = prev? prev->ch[k]:nullptr; cur->ch[k]=ins(pc,x,b-1); }
+        return cur;
+    }
+    int qry(PNode* u, int x, int b){
+        if(!u || u->cnt==0) return -1;
+        if(b<0) return 0;
+        int k=(x>>b)&1, want=k^1;
+        PNode* alt=u->ch[want];
+        if(alt && alt->cnt>0) return (1<<b) | qry(alt,x,b-1);
+        return qry(u->ch[k],x,b-1);
+    }
+public:
+    vector<int> maximizeXor(vector<int>& nums, vector<vector<int>>& queries) {
+        sort(nums.begin(), nums.end());
+        vector<PNode*> roots(1, ins(null_, 0, -1));     // roots[0] = empty version
+        roots[0]->cnt = 0;
+        for (int t=0;t<(int)nums.size();++t) roots.push_back(ins(roots.back(), nums[t], MAXB));
+        vector<int> ans;
+        for (auto& q : queries){
+            int x=q[0], m=q[1];
+            int k = upper_bound(nums.begin(), nums.end(), m) - nums.begin();  // count of values <= m
+            ans.push_back(k==0 ? -1 : qry(roots[k], x, MAXB));
+        }
+        return ans;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample: nums=(0,1,2,3,4), queries (3,1),(1,3),(5,6) -> 3,3,7]
+sorted nums (0,1,2,3,4); roots $r_0..r_5$ built by prefix insertion.\\
+query (3,1): $k$ = count(nums$\le$1) = 2 (values 0,1). query on $r_2$ with $x{=}3$: $3\oplus 0{=}3$, $3\oplus 1{=}2$ -> max 3.\\
+query (1,3): $k$ = count(nums$\le$3) = 4 (0,1,2,3). query on $r_4$ with $x{=}1$: best $1\oplus 2{=}3$ -> 3.\\
+query (5,6): $k$ = count(nums$\le$6) = 5 (all). query on $r_5$ with $x{=}5$: $5\oplus 2{=}7$ -> 7.\\
+Answers = (3, 3, 7). \checkmark\ matches the official output exactly.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time: sort $\bigO{n\log n}$; building $n{+}1$ roots $\bigO{nB}$; each query a $\bigO{\log n}$ binary
+search plus $\bigO{B}$ walk. With $B=30$ and $n,Q\le 2\cdot 10^5$ this is roughly
+$6\cdot 10^{6}{+}$, comfortably within limits. Memory: $\bigO{nB}$ trie nodes (shared across versions) --
+the number to sanity-check against the memory cap, each node two pointers and an $\mathit{int}$. Verdict:
+\ac. (The offline-by-$m$ variant drops persistence and the clone cost entirely -- see Variations.)
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Live slips: (i) mutating a shared node during insertion, corrupting older versions (Trap 1) -- always
+allocate a fresh node; (ii) answering with the wrong version root (using $r_n$ instead of $r_k$) -- then
+the $y\le m$ filter is silently ignored -- \textbf{WA}; (iii) not special-casing $k=0$ -- should emit $-1$.
+\emph{Variant (no persistence):} sort queries by $m$, walk a single \emph{mutable} trie inserting values
+as $m$ advances, answer online -- identical $\bigO{(n+Q)B}$ and lower memory, valid \emph{only} because
+queries are independent and known in advance.
+\end{warningbox}
+
+\begin{notebox}[Aho--Corasick, in one paragraph (previewed, not built)]
+The plain trie answers ``is this a prefix?'' but not ``does \emph{any} dictionary word appear as a
+\emph{substring} of this long text?''. \term{Aho--Corasick} adds a \emph{failure link} on every node -- a
+longest-proper-suffix pointer, essentially KMP generalised from one pattern to a trie of many -- so a
+single left-to-right scan of the text, following trie edges and falling back on failure links, reports
+every dictionary hit in $\bigO{|\text{text}| + \text{matches}}$. It is a whole chapter's worth of BFS
+construction and link semantics, explicitly \emph{out of scope} here: this chapter owns reading a key
+symbol-by-symbol from the root, and Aho--Corasick is the multi-pattern substring extension of that idea.
+\end{notebox}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}p{0.24\linewidth} p{0.24\linewidth} p{0.46\linewidth}@{}}
+\toprule
+\textbf{Variant} & \textbf{Node cost / op} & \textbf{Use it when} \\
+\midrule
+Plain trie ($\Sigma$ letters) & $\bigO{|\Sigma|\cdot\text{nodes}}$ memory & small alphabet, history-free
+  membership \& prefix queries (\secref{c08-triebasics}) \\
+Binary (XOR) trie & $2$ children, depth $\bigO{B}$ & integer max/min XOR, live add/erase
+  (\secref{c08-binary}, \probref{c08-summit}) \\
+Radix / compressed & nodes $\propto$ keys $+$ branches & large/sparse alphabet, long shared prefixes
+  (\defref{c08-radix}) \\
+Persistent & $\bigO{B}$ new nodes per version & queries over a \emph{version / prefix / value range}
+  (\defref{c08-persistent}, \probref{c08-persistxor}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Two engineering axes on the same skeleton: \emph{memory} (compress single-child chains into a
+        radix trie, \defref{c08-radix}) and \emph{time/history} (path-copying persistent roots,
+        \defref{c08-persistent}).
+  \item A persistent XOR-trie turns ``max XOR with $y\le m$ / within a range / after $k$ insertions'' into
+        $\bigO{B}$ per version by keeping a frozen $\mathit{cnt}$ spine and sharing everything else.
+  \item Never mutate a shared node: clone-then-write is the one rule that keeps old versions correct
+        (Trap 1). General persistence, and Aho--Corasick's failure links, live in \chref{c19} and beyond.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Cold-write \coderef{c08-persist}} and reproduce the official trace (3,3,7) of
+        \probref{c08-persistxor} by hand on the five sorted roots.
+  \item \textbf{Code the offline alternative}: sort queries by $m$, use one mutable trie from
+        \coderef{c08-maxxor}; confirm identical answers without any cloning.
+  \item \textbf{Read ahead}: the same path-copying gives persistent segment trees for range $k$-th --
+        Chapter~21 (\chref{c19}); value-domain order statistics with deletes -- Chapters~13--14
+        (\chref{c13}, \chref{c14}).
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you turn the value constraint ($y\le m$) into a version index via a sort + binary search?
+  \item Does your insert always allocate a fresh node instead of editing a shared one?
+  \item Did you return $-1$ when the filtered set is empty, rather than walking a null branch?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Count Pairs With XOR in a Range}{LeetCode 1803}
+    {https://leetcode.com/problems/count-pairs-with-xor-in-a-range/}{LC Hard · L5}
+    {Count pairs $(i,j)$ with a low $\le$ nums[i]$\oplus$nums[j] $\le$ high. A binary trie answers
+    ``how many stored $y$ give $x\oplus y < K$'' by descending MSB-first and, whenever $x$'s bit equals
+    $K$'s bit, adding the whole \emph{same-bit} branch's $\mathit{cnt}$ before continuing on the path that
+    keeps the prefix $\le K$; take $\text{count}(<\text{high}{+}1)-\text{count}(<\text{low})$. Insert
+    elements progressively so each $x$ is queried only against earlier ones (no double count). It reuses
+    the $\mathit{cnt}$ idea from \probref{c08-persistxor} on a \emph{mutable} trie -- persistence is not
+    required because there is no value filter, just a live set.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 11.4 Compressed \& Persistent Tries]
+Two ways the plain trie fails and their fixes. \textbf{Too big}: a radix/compressed trie folds maximal
+single-child chains into one substring edge, keeping nodes only at branches/terminals (\defref{c08-radix}).
+\textbf{Must not forget}: a persistent trie path-copies the $\bigO{B}$ nodes on an insert and shares the
+rest, giving a root per version (\defref{c08-persistent}) -- the frozen $\mathit{cnt}$ spine makes a version
+queryable. LC~1707 sorts, builds roots, and answers ``max XOR with $y\le m$'' by
+$k=\operatorname{upper\_bound}$ then a complement walk on root $k$, or $-1$ (\probref{c08-persistxor}).
+General persistence \chref{c19}; value-domain with deletes \chref{c13}, \chref{c14}; Aho--Corasick is the
+failure-link preview, not taught.
+\selftest{
+  \item What does a radix trie collapse, and when does that save the most?
+  \item State the one rule of path-copying and the bug you hit by breaking it.
+  \item How does sorting turn ``$y\le m$'' into a persistent-trie version query?
+  \item When is the \emph{offline} (mutable trie) solution to LC~1707 acceptable?
+  \item What field lets a version root answer ``is this branch non-empty?'' for its frozen set?
+}
+\end{recallbox}

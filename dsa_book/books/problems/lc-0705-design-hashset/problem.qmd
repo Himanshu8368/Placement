@@ -1,0 +1,294 @@
+### Problem: Design HashSet {#sec-ds-p4-hashset}
+
+::: {.p-statement}
+Build a hash set without any built-in hash table:
+
+- `add(key)` — insert `key`;
+- `contains(key)` — return whether `key` is in the set;
+- `remove(key)` — delete `key`; if it is absent, do nothing.
+
+$0 \le$ `key` $\le 10^6$ and there are at most $10^4$ calls. The sample runs `add(1), add(2), contains(1) = true, contains(3) = false, add(2), contains(2) = true, remove(2), contains(2) = false`.
+
+Source: [LC 705 · Design HashSet](https://leetcode.com/problems/design-hashset/){.solved difficulty="Easy"}
+:::
+
+::: {.p-intuition}
+A set only needs one bit per possible key, so with keys up to $10^6$ a **bit array** of $10^6 + 1$ bits (125 KB) is a complete answer. When the universe is too large for that, store the keys themselves in the table's cells: **open addressing** probes `h(k), h(k)+1, h(k)+2, …` until it finds the key or an empty cell. A deleted key must leave a **tombstone**, not an empty cell, or a later search would stop early and miss keys that were placed beyond it (@sec-ds-a4).
+:::
+
+::: {.p-approach}
+1. **Scan a list.** Keep the keys in a list; every call scans it. $O(n)$ per call. This class is the naive model.
+2. **Bit array.** One bit per key in the universe, packed eight to a byte; `add`, `remove` and `contains` set, clear and test one bit. $O(1)$ worst case, $O(U/8)$ bytes.
+3. **Open addressing.** A table of `cap` cells (a power of two), each `EMPTY`, `TOMB` or a key. A key's search starts at a hashed position and walks right, wrapping around. Rebuild the table when live keys plus tombstones fill half of it. $O(1)$ expected per call, $O(n)$ memory.
+
+**Operation contract (final form).** Invariant **I**: for every stored key $k$, no cell on its probe path, from `h(k)` up to the cell holding $k$, is `EMPTY`; and `used` (live keys plus tombstones) is at most `cap / 2`.
+
+| Operation | What it does | How **I** survives | Cost |
+|---|---|---|---|
+| `add(k)` | probe from `h(k)`; stop if $k$ is found; otherwise write $k$ into the first tombstone seen, or the `EMPTY` cell that ended the probe; rebuild if `used` exceeds `cap / 2` | the new key's path consists of cells that were already non-empty | $O(1)$ expected, rebuild amortised |
+| `contains(k)` | probe until $k$ or `EMPTY` | read only; by **I**, reaching `EMPTY` proves absence | $O(1)$ expected |
+| `remove(k)` | probe; if found, overwrite with `TOMB` | the cell stays non-empty, so every other key's path is intact | $O(1)$ expected |
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Scan a list
+
+::: {.form-next}
+A plain list of keys. Correct and $O(n)$ per call; it is the model that the two faster forms are stress-tested against.
+:::
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class HashSetScan:
+    def __init__(self):
+        self.keys = []
+
+    def add(self, k):
+        if k not in self.keys:
+            self.keys.append(k)
+
+    def remove(self, k):
+        if k in self.keys:
+            self.keys.remove(k)
+
+    def contains(self, k):
+        return k in self.keys
+
+
+HS_SAMPLE = [("add", 1), ("add", 2), ("contains", 1), ("contains", 3), ("add", 2),
+             ("contains", 2), ("remove", 2), ("contains", 2)]
+HS_OUT = [None, None, True, False, None, True, None, False]
+
+
+def replay_set(s, ops):
+    return [getattr(s, name)(k) for name, k in ops]
+
+
+assert replay_set(HashSetScan(), HS_SAMPLE) == HS_OUT
+```
+
+##### C++
+
+```cpp
+class HashSetScan {
+    vector<int> keys;
+ public:
+    void add(int k) { if (!contains(k)) keys.push_back(k); }
+    void remove(int k) {
+        auto it = find(keys.begin(), keys.end(), k);
+        if (it != keys.end()) keys.erase(it);
+    }
+    bool contains(int k) { return find(keys.begin(), keys.end(), k) != keys.end(); }
+};
+```
+:::
+
+#### Bit array
+
+::: {.form-next}
+Direct addressing with one *bit* per key: byte `k >> 3`, bit `k & 7`. Every call is one shift, one mask and one memory access. The whole universe of $10^6 + 1$ keys costs 125 KB, which is why this is the right answer when the universe is small.
+:::
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+class HashSetBits:
+    def __init__(self, universe=10 ** 6 + 1):
+        self.bits = bytearray((universe + 7) // 8)
+
+    def add(self, k):
+        self.bits[k >> 3] |= 1 << (k & 7)
+
+    def remove(self, k):
+        self.bits[k >> 3] &= ~(1 << (k & 7)) & 0xFF
+
+    def contains(self, k):
+        return bool(self.bits[k >> 3] >> (k & 7) & 1)
+
+
+assert replay_set(HashSetBits(), HS_SAMPLE) == HS_OUT
+assert len(HashSetBits().bits) == 125001
+```
+
+##### C++
+
+```cpp
+class HashSetBits {
+    vector<unsigned char> bits;
+ public:
+    HashSetBits() : bits((1000001 + 7) / 8, 0) {}
+    void add(int k) { bits[k >> 3] |= (unsigned char)(1u << (k & 7)); }
+    void remove(int k) { bits[k >> 3] &= (unsigned char)~(1u << (k & 7)); }
+    bool contains(int k) { return (bits[k >> 3] >> (k & 7)) & 1; }
+};
+```
+:::
+
+#### Open addressing
+
+::: {.form-next}
+Memory proportional to the number of keys, not to the universe. Keys live in the table's own cells; collisions are resolved by walking to the next cell. `remove` leaves a tombstone, and a rebuild (which also clears the tombstones) keeps the table at most half used. The stress test runs random operations against the scanning model, with a tiny universe so collisions and tombstones are frequent, and checks **I** after every call.
+:::
+
+::: {.panel-tabset group="lang"}
+
+##### Python
+
+```{python}
+EMPTY, TOMB = -1, -2                 # keys are >= 0, so negatives are free markers
+
+
+class MyHashSet:
+    def __init__(self, cap=8):
+        self.cap = cap               # always a power of two
+        self.slots = [EMPTY] * cap
+        self.live = 0
+        self.used = 0                # live keys + tombstones
+
+    def _home(self, k):              # multiplicative hashing: mix, then keep the top bits
+        bits = self.cap.bit_length() - 1
+        return ((k * 0x9E3779B97F4A7C15) & (2 ** 64 - 1)) >> (64 - bits) if bits else 0
+
+    def _find(self, k):
+        """Return (cell of k or None, first reusable cell on the path)."""
+        i, free = self._home(k), None
+        while True:
+            s = self.slots[i]
+            if s == k:
+                return i, free
+            if s == EMPTY:
+                return None, (i if free is None else free)
+            if s == TOMB and free is None:
+                free = i
+            i = (i + 1) & (self.cap - 1)
+
+    def _rebuild(self, cap):
+        old = [s for s in self.slots if s >= 0]
+        self.cap, self.slots, self.live, self.used = cap, [EMPTY] * cap, 0, 0
+        for k in old:
+            self.add(k)
+
+    def add(self, k):
+        hit, free = self._find(k)
+        if hit is not None:
+            return
+        if self.slots[free] == EMPTY:
+            self.used += 1           # reusing a tombstone does not raise `used`
+        self.slots[free] = k
+        self.live += 1
+        if 2 * self.used > self.cap:
+            self._rebuild(self.cap * 2 if 4 * self.live > self.cap else self.cap)
+
+    def remove(self, k):
+        hit, _ = self._find(k)
+        if hit is not None:
+            self.slots[hit] = TOMB
+            self.live -= 1
+
+    def contains(self, k):
+        return self._find(k)[0] is not None
+
+    def check(self):
+        assert self.used == sum(s != EMPTY for s in self.slots) and 2 * self.used <= self.cap
+        for cell, k in enumerate(self.slots):
+            if k >= 0:
+                i = self._home(k)
+                while i != cell:     # every cell on the probe path is non-empty
+                    assert self.slots[i] != EMPTY
+                    i = (i + 1) & (self.cap - 1)
+
+
+assert replay_set(MyHashSet(), HS_SAMPLE) == HS_OUT
+# stress: random operations against the scanning model and the bit array
+for _ in range(300):
+    fast, bits, model = MyHashSet(cap=2), HashSetBits(universe=30), HashSetScan()
+    for _ in range(60):
+        k, r = random.randint(0, 29), random.random()
+        if r < 0.45:
+            fast.add(k); bits.add(k); model.add(k)
+        elif r < 0.8:
+            fast.remove(k); bits.remove(k); model.remove(k)
+        else:
+            assert fast.contains(k) == bits.contains(k) == model.contains(k)
+        fast.check()
+    assert sorted(s for s in fast.slots if s >= 0) == sorted(model.keys)
+```
+
+##### C++
+
+```cpp
+class MyHashSet {
+    static constexpr long long EMPTY = -1, TOMB = -2;   // keys are >= 0
+    vector<long long> slots;
+    int cap, bits, live = 0, used = 0;
+    int home(long long k) const {
+        if (bits == 0) return 0;
+        unsigned long long x = (unsigned long long)k * 0x9E3779B97F4A7C15ULL;
+        return (int)(x >> (64 - bits));
+    }
+    // returns the cell holding k, or -1; *freeCell = first reusable cell on the path
+    int findCell(long long k, int* freeCell) const {
+        int i = home(k), fr = -1;
+        while (true) {
+            if (slots[i] == k) { *freeCell = fr; return i; }
+            if (slots[i] == EMPTY) { *freeCell = fr < 0 ? i : fr; return -1; }
+            if (slots[i] == TOMB && fr < 0) fr = i;
+            i = (i + 1) & (cap - 1);
+        }
+    }
+    void rebuild(int newCap) {
+        vector<long long> old;
+        for (long long s : slots) if (s >= 0) old.push_back(s);
+        cap = newCap; bits = 0; while ((1 << bits) < cap) ++bits;
+        slots.assign(cap, EMPTY); live = used = 0;
+        for (long long k : old) add((int)k);
+    }
+ public:
+    MyHashSet() : slots(8, EMPTY), cap(8), bits(3) {}
+    void add(int key) {
+        int fr, hit = findCell(key, &fr);
+        if (hit >= 0) return;
+        if (slots[fr] == EMPTY) ++used;
+        slots[fr] = key; ++live;
+        if (2 * used > cap) rebuild(4 * live > cap ? 2 * cap : cap);
+    }
+    void remove(int key) {
+        int fr, hit = findCell(key, &fr);
+        if (hit >= 0) { slots[hit] = TOMB; --live; }
+    }
+    bool contains(int key) { int fr; return findCell(key, &fr) >= 0; }
+};
+```
+:::
+
+:::
+
+::: {.p-complexity}
+**Scan a list:** $O(n)$ per call, $O(n)$ space. **Bit array:** $O(1)$ worst case per call, $O(U)$ bits of space ($U = 10^6 + 1$, 125 KB) allocated up front. **Open addressing:** $O(1)$ expected per call while the table is at most half used (the expected probe count of linear probing depends only on the fill ratio), plus an $O(\text{cap})$ rebuild that happens only after $\Omega(\text{cap})$ insertions, so $O(1)$ amortised; $O(n)$ space.
+:::
+
+::: {.p-edge}
+- **Removing an absent key** does nothing; removing a key twice leaves one tombstone.
+- **Re-adding a removed key** reuses the first tombstone on its path, so a remove/add cycle does not grow `used`.
+- **A table full of tombstones**: without the rebuild, `contains` of an absent key would walk forever. Counting tombstones in `used` guarantees an `EMPTY` cell always exists.
+:::
+
+::: {.callout-warning title="Common mistakes"}
+- **Deleting by writing `EMPTY`.** Insert $a$ and $b$ with the same home: $b$ lands one cell to the right. Remove $a$ by emptying its cell, and `contains(b)` stops at that empty cell and answers `false`.
+- **Counting only live keys toward the load.** Tombstones lengthen probes just like keys; the resize test must use live keys plus tombstones.
+- **`k % cap` with a power-of-two `cap`.** That keeps only the low bits of $k$; keys that are multiples of `cap` all start at cell $0$. Mix the key (here, a multiply and the top bits) before reducing it.
+:::
+
+**Variants.** Python's `dict` and `set` use open addressing (with a perturbed probe sequence rather than a linear one), and many fast C++ hash tables do too, because walking adjacent cells is cache-friendly (@sec-arr-cache). `std::vector<bool>` and `std::bitset` are the library forms of the bit array.
+
+::: {.practice}
+- [LC 217 · Contains Duplicate](https://leetcode.com/problems/contains-duplicate/){difficulty="Easy"} — answer it with your own open-addressing set instead of the built-in one, and test it on keys that are all multiples of a power of two.
+:::

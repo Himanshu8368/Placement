@@ -1,0 +1,740 @@
+# MEX, Distinctness and Value-Domain Problems {#sec-mex}
+
+<!--
+Author-facing provenance (not rendered): Chapter 21 of the arrays volume, the third chapter of Part IV,
+per outline.yml ("MEX, Distinctness & Value-Domain Problems"). Lesson labels follow the outline
+"covers" order exactly: sec-mex-a1 (MEX definition and the presence table), a2 (MEX of every prefix
+or suffix), a3 (distinct count and last-occurrence bookkeeping), a4 (frequency of frequencies),
+a5 (permutation recognition via MEX + sum + distinct), a6 (small value domain — table indexed by
+value, not by position). Patterns sec-mex-p1..p5 with two solved problems each:
+p1-mexim + p1-subset, p2-mexmax + p2-increments, p3-meximum + p3-prefix-mex,
+p4-erasure + p4-dcq, p5-permsum + p5-special (value-domain view).
+Storyboards use inline V.grid/V.array/V.trace draws (no companion traces module); every sample output
+quoted is produced by a cell in this file and asserted against the brute force; where a CF or LC
+statement is paraphrased, the constraints come from the judge page and the algorithm has been
+stress-tested.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 31 (modular arithmetic and the sieve habit of iterating over values instead of indices) · **CPH** frequency-array techniques and the "smallest excluded value" trick · **CP-Algorithms**: MEX (minimum excluded value), Mo's algorithm (as a value-domain application), last-occurrence linked list · Coverage: the MEX of a multiset and its two halves (present below / absent at the target); incremental MEX under an add/remove stream; the last-occurrence pointer as the canonical distinct-in-range tool; frequency-of-frequency tables that make "how many values appear exactly $k$ times" an $O(1)$ read; permutation recognition via $\mathrm{MEX}=n$ plus a distinct check; and the value-indexed table as the object that turns an $O(n^2)$ "over all subarrays" question into an $O(n \sqrt{n})$ or $O(n \log n)$ sweep.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Compute the MEX of a multiset in $O(n)$ with a presence table of size $n+1$, and explain why nothing larger than $n$ can be the answer (@sec-mex-a1).
+- Split the MEX question into its two halves — "everything below $x$ is present" and "$x$ is absent" — and reason about any MEX problem by counting how many of each side you need to fix (@sec-mex-a1, @sec-mex-p1).
+- Maintain the MEX under an append stream: extend one prefix at a time, spend $O(1)$ amortised to fill the hole you just exposed, and answer "MEX of prefix $i$" in $O(n \log n)$ worst case but $O(n)$ amortised (@sec-mex-a2, @sec-mex-p2).
+- Answer "how many distinct values in $a[l..r]$" online with a last-occurrence linked list, or offline with a Fenwick tree over positions (@sec-mex-a3, @sec-mex-p4-dcq).
+- Read a **frequency of frequency** table: given `cnt[v]` for each value, build `fc[k] = |{v : cnt[v] = k}|` in $O(n)$ and answer "how many values appear exactly $k$ times" in $O(1)$ (@sec-mex-a4).
+- Recognise a permutation of $1..n$ by any of three equivalent keys — $\max=n$, $\mathrm{MEX}=n+1$ on the $0$-indexed variant, or $\mathrm{sum}=n(n+1)/2$ plus all-distinct — and pick the cheapest one per problem (@sec-mex-a5, @sec-mex-p5-permsum).
+- Turn an "over all subarrays" claim about values into a table indexed by value and use the small-domain constraint to shrink the loop (@sec-mex-a6, @sec-mex-p5-special).
+:::
+
+```{python}
+#| include: false
+import bisect
+import random
+from collections import Counter, defaultdict, deque
+
+import matplotlib.pyplot as plt
+import numpy as np
+import sys
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-mex-why}
+
+::: {.callout-note title="In plain words"}
+Every problem in this chapter asks some version of the same two questions. *Which values are here?* and *which value is missing?* The first is answered by a **presence table** or a **frequency table**; the second is answered by the MEX. Once you commit to a table indexed by **value** (rather than by position), a lot of subarray and window questions that look quadratic collapse into a scan of $0, 1, \ldots, n$ — and the scan is bounded by the array length, not by the values themselves, because a value larger than $n$ can never be a MEX.
+:::
+
+An MEX problem and a distinct-count problem look unrelated on the page, but both are answered by the same move: replace the array by a table indexed by the values it contains. Then "MEX of a set" becomes "find the smallest index with `count[v] = 0`", and "distinct count of a set" becomes "count indices with `count[v] > 0`". The difference is only in what you ask the table. The chapter organises the patterns by how the table is *maintained*: rebuilt per query, extended one element at a time, or paired with a Fenwick tree over positions.
+
+Three constraints in a statement tell you you are in this chapter's territory:
+
+| Statement hint | What it lets you do | Which section uses it |
+|---|---|---|
+| $0 \le a_i \le n$ or $1 \le a_i \le n$ | A value table of size $n+1$ fits | @sec-mex-a1, @sec-mex-a5, @sec-mex-p5-permsum |
+| "MEX of every prefix / subarray / partition" | Maintain one table as the window slides | @sec-mex-a2, @sec-mex-p3 |
+| "Distinct count" or "how many values appear exactly $k$ times" | Bucket by frequency, then read the bucket | @sec-mex-a3, @sec-mex-a4, @sec-mex-p4 |
+
+Values larger than $n$ do not really live in the same universe as values $\le n$ for the MEX question. An MEX of a length-$n$ array can never exceed $n$, because $n+1$ distinct values $\le n$ would require $n+1$ slots. That single pigeonhole line is why the tables in this chapter are bounded by $n+1$, not by the maximum value.
+
+The lessons build the toolkit in six steps:
+
+- **A1 — MEX of a set.** Definition, computation with a presence table, and the two-halves view (@sec-mex-a1).
+- **A2 — MEX of every prefix.** Extend the presence table one position at a time and walk the MEX forward (@sec-mex-a2).
+- **A3 — Distinct count with a last-occurrence pointer.** "How many values in $a[l..r]$" answered offline in $O((n+q)\log n)$ (@sec-mex-a3).
+- **A4 — Frequency of frequency.** $O(n)$ build, $O(1)$ read for "how many values occur exactly $k$ times" (@sec-mex-a4).
+- **A5 — Permutation recognition.** Three equivalent tests, each with a different cost (@sec-mex-a5).
+- **A6 — Small value domain.** Index a table by value, iterate by value not by position (@sec-mex-a6).
+
+Part B turns the toolkit into five patterns: MEX as a presence invariant (@sec-mex-p1), MEX under operations (@sec-mex-p2), MEX over a sliding structure (@sec-mex-p3), distinct count in a window or range (@sec-mex-p4), and permutation reconstruction (@sec-mex-p5). Every problem in this chapter uses at least one value-indexed table; the trick is choosing the right shape (presence, count, last-occurrence, or frequency-of-frequency).
+
+## Part A — Lessons
+
+## A1. MEX of a Set: the Presence Table {#sec-mex-a1}
+
+::: {.callout-note title="In plain words"}
+$\operatorname{MEX}(S)$ is the smallest non-negative integer **not** in $S$. The prefix "non-negative" matters: $\operatorname{MEX}(\{1,2,3\}) = 0$, because $0$ is missing. To compute it, walk up from $0$ and stop at the first gap. With a table indexed by value you do exactly that in $O(n)$: fill the table with what is present, then scan for the first zero.
+:::
+
+An important size observation is what makes the table small enough. For a set $S$ with $n$ elements, $\operatorname{MEX}(S) \le n$: if $\operatorname{MEX}(S) > n$, then $S$ would contain every value in $0..n$, which is $n+1$ distinct elements — impossible. So a table of length $n+1$ is enough, and any element $v > n$ can be dropped immediately.
+
+```{python}
+def mex1(s):
+    """MEX of a set or iterable. Table of size n+1; ignore anything larger."""
+    n = len(s)
+    present = [False] * (n + 1)
+    for v in s:
+        if 0 <= v <= n:
+            present[v] = True
+    return next(i for i, ok in enumerate(present) if not ok)
+
+
+assert mex1([0, 1, 2, 3]) == 4            # contiguous 0..3: MEX is 4
+assert mex1([1, 2, 3, 4]) == 0            # 0 is missing
+assert mex1([0, 0, 1, 1, 3, 7]) == 2      # 2 is the first gap
+assert mex1([]) == 0                      # empty
+assert mex1([5]) == 0                     # size 1, value 5: table of length 2 has 0 free
+```
+
+The **two-halves** reading pays off throughout the chapter: $\operatorname{MEX}(S) = x$ means *every $v < x$ is in $S$* AND *$x$ is not in $S$*. Any MEX-affecting operation costs you the number of holes you must fill on the left plus the erasures required on the right. That's the pivot CF 862A uses (@sec-idx-p2-mex in @sec-lts-a5) and it is the pivot in every problem in @sec-mex-p1.
+
+::: {#fig-mex-presence}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+S1 = [0, 1, 3, 3, 5, 8]
+n1 = len(S1)
+pres = [False] * (n1 + 1)
+for v in S1:
+    if 0 <= v <= n1:
+        pres[v] = True
+mx = next(i for i, ok in enumerate(pres) if not ok)
+assert mx == 2 and n1 == 6
+
+
+def draw(ax, p):
+    row = ["present[0..6]"] + [str(int(ok)) for ok in pres]
+    V.array(ax, p, [int(ok) for ok in pres], label="presence (values > n ignored)",
+            colors={i: ("green" if ok else "red") for i, ok in enumerate(pres)},
+            pointers=[(mx, "MEX", "indigo", "top")],
+            note="MEX is the first red cell; values above n never enter the table")
+V.show(draw)
+```
+
+For $S = \{0, 1, 3, 3, 5, 8\}$, $|S| = 6$. The table is $7$ cells wide (indices $0..6$), the value $8$ sits outside it and does not matter, and the first red cell is at index $2$ — that is the MEX.
+
+:::
+
+```{python}
+# A useful sanity pair: the definition as a while-loop is exactly the presence-table version.
+def mex2(s):
+    st = set(s)
+    m = 0
+    while m in st:
+        m += 1
+    return m
+
+
+for _ in range(200):
+    arr = random.sample(range(0, 30), random.randint(0, 10))
+    assert mex1(arr) == mex2(arr), arr
+```
+
+The two formulations have the same cost but different shapes. `mex2` uses a `set` and grows unboundedly in the "how high do I check" sense; `mex1` uses a table and is bounded by $n+1$. When a query stream asks for MEX after each addition, the table is what you want, because it survives between queries and each query just fills a cell.
+
+## A2. MEX of Every Prefix {#sec-mex-a2}
+
+::: {.callout-note title="In plain words"}
+Given $a[1..n]$, answer "MEX of $a[1..i]$" for every $i$ from $1$ to $n$ in $O(n)$ total. Keep one presence table across the whole scan, and a pointer `m` that walks up only when the current `m` becomes present. Each value $0..n$ is looked at most once by the pointer, so the pointer is amortised $O(1)$ per position.
+:::
+
+```{python}
+def prefix_mex(a):
+    """MEX of a[:1], a[:2], ..., a[:n] in one pass. Amortised O(n)."""
+    n = len(a)
+    present = [False] * (n + 1)
+    m = 0
+    out = []
+    for x in a:
+        if 0 <= x <= n:
+            present[x] = True
+            if x == m:
+                while m <= n and present[m]:
+                    m += 1
+        out.append(m)
+    return out
+
+
+assert prefix_mex([0, 1, 2, 3]) == [1, 2, 3, 4]         # MEX walks up as each new value arrives
+assert prefix_mex([5, 0, 1, 2]) == [0, 1, 2, 3]         # a value > n is dropped at position 0
+assert prefix_mex([3, 0, 1, 0, 2]) == [0, 1, 2, 2, 4]   # 0 is not present at position 1, MEX starts at 0
+```
+
+The `if x == m` guard is the whole trick: adding a value $v \ne m$ never changes the MEX, because $v$ was already not the current smallest missing. Only when $v = m$ do we have a chance that $m+1$ is now also present, and the while-loop walks forward. Every value $0..n$ is checked as a potential `m` at most once across the whole scan, so the total while-loop work is bounded by $n+1$.
+
+The suffix MEX is the same, run on the reversed array. Both are used in @sec-mex-p3-prefix-mex and in the constructive problems in @sec-mex-p2.
+
+## A3. Distinct Count and the Last-Occurrence Pointer {#sec-mex-a3}
+
+::: {.callout-note title="In plain words"}
+"How many distinct values in $a[l..r]$" is not a fold like a sum. Two views work: keep a window of size $r-l+1$ and a `Counter` that supports add/remove (sliding window); or process queries offline sorted by right endpoint, keeping only the last occurrence of each value active in a Fenwick tree. The second view costs $O((n+q) \log n)$ but answers many queries on a static array.
+:::
+
+The sliding version is simpler and covers the window problems in @sec-mex-p4-erasure. The offline version handles range queries where the window is not monotone and appears in @sec-mex-p4-dcq. Both share one invariant: each value is counted **once**, and we track which occurrence owns that count.
+
+```{python}
+def a3_window_distinct(a):
+    """Length of the longest subarray of pairwise-distinct values."""
+    last = {}              # value -> rightmost index seen so far
+    lo = 0                 # left end of the current all-distinct window
+    best = 0
+    for hi, x in enumerate(a):
+        if x in last and last[x] >= lo:
+            lo = last[x] + 1
+        last[x] = hi
+        best = max(best, hi - lo + 1)
+    return best
+
+
+assert a3_window_distinct([1, 2, 3, 1, 4]) == 4            # [2, 3, 1, 4]
+assert a3_window_distinct([1, 1, 1, 1]) == 1
+assert a3_window_distinct([5, 4, 3, 2, 1]) == 5
+```
+
+::: {#fig-mex-window}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+w_arr = [1, 2, 3, 1, 4]
+
+
+def draw(ax, p):
+    # Replay the window; show each step's window as one row of an array.
+    last, lo, rows = {}, 0, []
+    for i, x in enumerate(w_arr):
+        if x in last and last[x] >= lo:
+            lo = last[x] + 1
+        last[x] = i
+        cells = [str(v) if lo <= k <= i else "." for k, v in enumerate(w_arr)]
+        rows.append({"values": cells, "label": f"hi = {i}, lo = {lo}"})
+    assert max(len([c for c in r["values"] if c != "."]) for r in rows) == 4
+    V.trace(ax, p, rows)
+V.show(draw)
+```
+
+The window advances one position at a time; on seeing a repeat, the left end jumps to just after the earlier copy. The best length over the walk (4) is the answer.
+
+:::
+
+The rightmost-copy rule keeps the window all-distinct: at every step, `lo` is one past the last position of the value we just moved onto. This invariant generalises: it works for any "longest window with property P" where P is monotone under shrinking (all-distinct, all-$\le K$, sum $\le S$, etc.).
+
+## A4. Frequency of Frequency {#sec-mex-a4}
+
+::: {.callout-note title="In plain words"}
+Instead of asking "how many times does value $v$ appear", ask "how many values appear exactly $k$ times". Build `cnt[v]` (value → count) then flip it into `fc[k]` (count → number of values). Every question of the form "how much do I have to delete to make all remaining frequencies equal" becomes a scan over $k$.
+:::
+
+```{python}
+def fc_of(a):
+    """Return (cnt_by_value, fc_by_freq)."""
+    cnt = Counter(a)
+    fc = Counter(cnt.values())           # fc[k] = |{v : cnt[v] = k}|
+    return cnt, fc
+
+
+cnt, fc = fc_of([1, 2, 2, 3, 3, 3, 4, 4, 4, 4])
+assert cnt == {1: 1, 2: 2, 3: 3, 4: 4}
+assert dict(fc) == {1: 1, 2: 1, 3: 1, 4: 1}   # one value each at freq 1, 2, 3, 4
+
+_, fc2 = fc_of([1, 1, 2, 2, 3, 3, 3, 3])
+assert dict(fc2) == {2: 2, 4: 1}         # two values at freq 2 (1 and 2); one at freq 4 (3)
+```
+
+The `fc` table is a length-$n$ array of small integers: since $\sum_v \mathit{cnt}[v] = n$, no frequency can exceed $n$, and the number of *distinct* values is at most $\sqrt{2n}$ for any frequency $\ge \sqrt{2n}$ — this is the same harmonic split that made @sec-gcd-a4 fast. It means a scan of "for each target frequency $k = 1..n$, compute the deletions needed" runs in $O(n + \sqrt{n} \cdot \text{something})$, which is the shape of CF 1490F (see @sec-srt-p4-b).
+
+For a static array, `fc` is a one-shot read. When elements are added or removed one at a time, `cnt[v]` changes and you must update two cells of `fc`: `fc[cnt[v]] -= 1`, `fc[cnt[v] ± 1] += 1`, then bump `cnt[v]`. The double update is the only non-trivial line.
+
+## A5. Permutation Recognition: Three Equivalent Tests {#sec-mex-a5}
+
+::: {.callout-note title="In plain words"}
+A length-$n$ array is a permutation of $1..n$ if and only if any of these hold: (1) every value is between $1$ and $n$ and the sum is $n(n+1)/2$ **and** all values are distinct; (2) the maximum is $n$, the minimum is $1$, and the count of distinct values is $n$; (3) the MEX on the $0$-indexed variant is $n+1$ (equivalently, MEX of $a-1$ is $n+1$). Test (1) is $O(n)$ and needs only integer arithmetic; test (2) needs a distinct check which usually means a presence table; test (3) is test (2) with the same table. Pick the one that costs least on the shape of the problem.
+:::
+
+```{python}
+def a5_perm_sum_distinct(a, n):
+    """Is `a` a permutation of 1..n? sum + all-distinct via a presence table."""
+    if len(a) != n:
+        return False
+    s = 0
+    seen = [False] * (n + 1)
+    for v in a:
+        if not (1 <= v <= n) or seen[v]:
+            return False
+        seen[v] = True
+        s += v
+    return s == n * (n + 1) // 2
+
+
+def a5_perm_mex(a, n):
+    """Is `a` a permutation of 1..n? Check via MEX on 0..n view."""
+    if len(a) != n:
+        return False
+    return mex1([v - 1 for v in a]) == n     # shifted: MEX on 0..n-1 view = n iff a is perm 1..n
+
+
+for _ in range(200):
+    n = random.randint(1, 15)
+    arr = random.sample(range(1, n + 1), n)
+    assert a5_perm_sum_distinct(arr, n) and a5_perm_mex(arr, n)
+    arr[0] += 1                            # break the sum and/or distinctness
+    assert not a5_perm_sum_distinct(arr, n) and not a5_perm_mex(arr, n)
+
+# Both tests agree on a "close to a permutation" but wrong input:
+assert not a5_perm_sum_distinct([1, 1, 4], 3)      # sum 6 = 3*4/2 but not distinct
+assert not a5_perm_mex([1, 1, 4], 3)               # MEX of [0, 0, 3] is 1, not 3
+```
+
+The sum-plus-distinct test is the safer one when the constraints may allow values above $n$: check the range and the distinct-ness first, and only then verify the sum. It is what @sec-mex-p5-permsum uses to spot which elements are missing from a scrambled permutation of prefix sums.
+
+## A6. Small Value Domain: Index a Table by Value {#sec-mex-a6}
+
+::: {.callout-note title="In plain words"}
+When the constraints say values are $\le n$ (or $\le 2n$, or $\le n^2$ with small $n$), replace the array by a table of counts indexed by **value**. Suddenly an $O(n)$ "for each value, do X" loop is cheaper than an $O(n)$ "for each position, do X" loop *only* when X needs a whole-value scan; more often the value table is a helper inside a positional loop, so you get both views for the price of one array.
+:::
+
+Chapter 20 used the same trick in @sec-gcd-a4 (harmonic value-domain sieve). Here the domain is not divisors but the values themselves, and the tables are usually a `Counter` or a length-$(V+1)$ list of counts. Two patterns:
+
+1. **Count subarrays with a value property.** Enumerate the value, then use positional prefix/suffix tables to count. Example: for each value $v$, the subarrays in which $v$ is the *unique* maximum are counted by nearest-greater-left and nearest-greater-right, giving $O(n)$ total.
+2. **Count pairs with a value relation.** Enumerate the value (or a bucket of values) and multiply counts. Example: pairs with sum $S$ — for each $v$, look at `cnt[v] * cnt[S - v]`.
+
+```{python}
+# Example: for each value v, count subarrays in which v is the maximum.
+# Standard nearest-greater-left / nearest-greater-right stack in O(n).
+def a6_max_contribution(a):
+    """Return dict {v: number of subarrays whose max equals v}, ties broken by the LEFT occurrence.
+
+    Uses the standard nearest-strictly-greater-left / nearest-greater-or-equal-right convention
+    so that duplicate maxima are attributed to exactly one subarray (the leftmost occurrence).
+    """
+    n = len(a)
+    ng_left = [-1] * n
+    st = []
+    for i in range(n):
+        while st and a[st[-1]] < a[i]:        # strict less -> pops
+            st.pop()
+        ng_left[i] = st[-1] if st else -1
+        st.append(i)
+    ng_right = [n] * n
+    st = []
+    for i in range(n - 1, -1, -1):
+        while st and a[st[-1]] <= a[i]:       # non-strict <= -> ties go to the LEFT index
+            st.pop()
+        ng_right[i] = st[-1] if st else n
+        st.append(i)
+    out = defaultdict(int)
+    for i in range(n):
+        # subarrays [lo..hi] with lo in (ng_left[i], i] and hi in [i, ng_right[i])
+        out[a[i]] += (i - ng_left[i]) * (ng_right[i] - i)
+    return dict(out)
+
+
+contrib = a6_max_contribution([1, 3, 2, 3])
+assert contrib == {1: 1, 3: 8, 2: 1}      # sum = 10 = n*(n+1)/2 for n = 4
+```
+
+The contribution identity is the same technique used in @sec-cnt-a1: sum over subarrays of "value of the max" equals sum over positions of "count of subarrays where this position owns the max" times the value. The value-domain view adds the extra dimension: if you only care about **which values** own maxima, group by `a[i]` and you get the histogram in the code above.
+
+@fig-mex-domains contrasts the three tables (position, presence, count) that recur in every problem of the chapter.
+
+::: {#fig-mex-domains}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+A6 = [2, 5, 3, 2, 7, 3, 3]
+n6 = len(A6)
+presence = [int(v in A6) for v in range(n6 + 1)]
+c6 = Counter(A6)
+counts = [c6.get(v, 0) for v in range(n6 + 1)]
+fc6 = Counter(c6.values())
+fc_row = [fc6.get(k, 0) for k in range(max(c6.values()) + 1)]
+
+
+def draw(ax, p):
+    dom = [["domain", "0", "1", "2", "3", "4", "5", "6", "7"],
+           ["a[i] (by position)", *map(str, A6)],
+           ["presence[v]", *[str(x) for x in presence]],
+           ["count[v]", *[str(x) for x in counts]],
+           ["freq-of-freq", *[str(fc6.get(k, 0)) for k in range(4)]]]
+    V.grid(ax, p, dom, colors={(2, 3): "green", (2, 5): "green", (2, 7): "green",
+                               (2, 2): "red", (2, 4): "red", (2, 6): "red",
+                               (4, 1): "amber"},
+           cell_w=1.15)
+V.show(draw)
+```
+
+Same array, three tables. Row 2 is the position view. Row 3 is the presence view ($v \in A$ for $v \in 0..7$ — this is exactly the table used to compute $\operatorname{MEX} = 0$ here). Row 4 is the count view ($2$ appears twice, $3$ appears three times, $5$ once, $7$ once). Row 5 is the frequency-of-frequency view: one value at frequency $1$, one at frequency $2$, one at frequency $3$.
+
+:::
+
+Every lesson in this chapter picks one row of that picture and reads it differently. When a new MEX or distinctness statement appears on the page, the first move is not "how do I iterate over positions" but "which row answers this question, and what is the smallest maintenance cost?"
+
+## Part B — Patterns
+
+Each pattern below is one *shape of maintenance* on a value-indexed table. The two solved problems per pattern put that shape on a real contest problem.
+
+**Where we are.** The five patterns climb one idea at a time on top of A1's presence table. Pattern 1 keeps the table read-only and asks what the definition alone gives you when you get to *choose* the set — sort, partition, or hit the target MEX with a budget. Pattern 2 lets the table *change* between queries: an add, a delete, or a $-1$ on some element, and the invariant is only "the walk-up pointer never rewinds". Pattern 3 fixes the array and moves the *window*: the table has to support both $+1$ and $-1$ per step, so you trade A1's monotone walk for a two-pointer sweep that re-derives each MEX. Pattern 4 drops MEX entirely and reads the same table for *distinct count* — a window or a range query is answered by the *non-zero* cells, not by the *first zero*. Pattern 5 returns to the whole-array view and combines the table with a value-domain constraint: the answer is not one number but a *list* of missing values, and the size of the table is what makes the enumeration tractable. Pattern 1 is where the arithmetic starts; its two problems differ only in what you're allowed to do with the multiset — reorder it, or split it in two.
+
+## P1. MEX as a presence invariant {#sec-mex-p1}
+
+**From the definition to a game.** Once you can compute MEX of one set in $O(n)$, the natural next question is: "what is the best MEX I can achieve, if I get to split, delete, or add elements under a budget?" Every such problem reduces to counting how many holes below the target exist and whether the target itself sits in the array. Two problems below: a small constructive one and a partition into two subsets whose MEXes sum to a maximum.
+
+::: {.callout-important title="Template"}
+- **Split the MEX claim in half.** $\operatorname{MEX}(S) = x$ iff every $v < x$ is in $S$ AND $x$ is not in $S$. Count holes below $x$ and $x$'s own multiplicity; that pair of numbers is the entire state of any one-shot MEX problem (@sec-mex-a1).
+- **One table, $O(n)$ build, $O(1)$ amortised read.** `present = [False] * (n + 1)`, mark, then `next(i for i, ok in enumerate(present) if not ok)`. Values above $n$ can be dropped because MEX is bounded by the size of the set.
+- **Sorting by value is the universal constructive primitive.** When the task is "reorder so prefix MEXes don't decrease", emit all copies of $0$, then all copies of $1$, and so on; the MEX curve jumps exactly once per new value present, and never rewinds (@sec-mex-p1-mexim).
+- **The sum-of-two-MEXes bound is one formula.** For a partition $A \sqcup B = S$: $\max = \operatorname{mex}(\{v : \mathit{cnt}[v] \ge 1\}) + \operatorname{mex}(\{v : \mathit{cnt}[v] \ge 2\})$. The first term puts the cheapest occurrence of each value on one side; the second reuses the surplus (@sec-mex-a1, @sec-mex-p1-subset-mex).
+:::
+
+{{< include ../problems/cf-1497a-meximization/problem.qmd >}}
+
+[**From ordering to splitting.** The previous problem asks which order keeps MEXes non-decreasing; the next asks which split makes the sum of MEXes maximum. Same presence table, different decision.]{.flow-bridge}
+
+{{< include ../problems/cf-1406a-subset-mex/problem.qmd >}}
+
+## P2. MEX under operations {#sec-mex-p2}
+
+**From a single array to a stream of edits.** When an operation can change the presence table (add $k$, delete one, decrement one), the answer to the MEX query is no longer one pass over the array — it is a maintained structure. The trick: keep the table across operations, and pay only when the current MEX cell becomes occupied.
+
+::: {.callout-important title="Template"}
+- **Pointer never rewinds.** $\mathit{mex}$ is monotone non-decreasing under additions, so the walk-up `while present[mex]: mex += 1` is amortised $O(n)$ across all operations, not $O(n)$ each (@sec-mex-a2).
+- **Bucket by modulus when the op is $+k$.** A query "add any $y \equiv n \pmod{x}$" is really "is there any residue slot $\ge n$ with a free counter?" — reduce the array to $\mathit{cnt}[r] = |\{a_i \bmod x = r\}|$ and let the pointer consume counters (@sec-mex-p2-mex-max).
+- **Cost to reach target $k$ = holes below $k$ + $\mathit{cnt}[k]$.** Under decrement-only ops, every value $< k$ needs at least one occurrence, and value $k$ must have none: the greedy uses a max-heap of spares to reuse surplus at lower values (@sec-mex-p2-increments).
+- **Rebuild vs. maintain.** If $q$ is small ($q \le 100$), rebuilding the table per query is $O(qn)$ and fine; only at $q \sim n$ does the monotone pointer matter. Cost the maintenance before you code it.
+:::
+
+{{< include ../problems/cf-1294d-mex-maximizing/problem.qmd >}}
+
+[**From additions to subtractions.** The greedy in the last problem fills holes upward; the next removes elements downward and asks the smallest cost to achieve each MEX. Same table, opposite direction.]{.flow-bridge}
+
+{{< include ../problems/cf-1619e-mex-and-increments/problem.qmd >}}
+
+## P3. Sliding MEX across prefixes and suffixes {#sec-mex-p3}
+
+**From operations to windows.** Now the array is fixed and the *window* moves. MEX of a window changes by one add and one remove per step; the table has to support both. Two constructions: a deque-based greedy that pops from either end, and a prefix-mex-to-array inversion.
+
+::: {.callout-important title="Template"}
+- **Suffix MEX precompute turns greedy trivial.** Walk right to left with a `set` and a monotone pointer; `suf[i] = MEX(a[i..n-1])` in $O(n)$. Then split at the earliest position where every $< \mathit{suf}[lo]$ has appeared — a count array of size $\mathit{suf}[lo]$ suffices (@sec-mex-p3-meximum).
+- **Prefix MEX inversion: force the change, keep a spare pool.** Given $m_0, m_1, \ldots$, when $m_i > m_{i-1}$ the new element is *forced* to be $m_{i-1}$; when $m_i = m_{i-1}$ the element must be $> m_i$ (or already-issued spares). Track unissued values in a queue for the neutral case (@sec-mex-p3-prefix-mex).
+- **Deque from either end.** When the window is defined by "pop left or right", the two ends are independent until they meet. Precompute both marginal MEX arrays and read $O(1)$ per step.
+- **Amortised add/remove cost.** Each element enters the table once and leaves once; $O(n)$ operations total across the sweep. A `Counter` with a "current-MEX pointer" that never rewinds reproduces the A2 invariant inside a sliding structure.
+:::
+
+{{< include ../problems/cf-1628a-meximum-array/problem.qmd >}}
+
+[**From a walk to a reconstruction.** The previous problem reads the array and emits MEXes. The next inverts that: given the MEXes of prefixes, emit an array. Same table, one more round trip.]{.flow-bridge}
+
+{{< include ../problems/cf-1364c-ehab-and-prefix-mexs/problem.qmd >}}
+
+## P4. Distinct values in a range or window {#sec-mex-p4}
+
+**From a single set to many ranges.** Distinct-count is MEX's twin. A window problem can slide; a range query needs either a Fenwick tree over last-occurrence positions (offline) or a per-value set of positions (online). The problems below use each shape.
+
+::: {.callout-important title="Template"}
+- **Last-occurrence pointer $\ell$.** Store $\mathit{last}[v]$ = the index where $v$ was most recently seen. When you extend $r$ to a repeated value, jump $\ell \mathrel{:=} \max(\ell,\ \mathit{last}[v] + 1)$ and adjust the running aggregate. $O(n)$ per sweep, amortised (A3).
+- **Distinct count = nonzero cells.** For a static range query, sort queries offline by right endpoint and use a BIT over positions: set $\mathit{bit}[i] = 1$ iff $i$ is the last occurrence of its value so far; the sum over $[l..r]$ is the answer (@sec-mex-p4-dcq).
+- **Online: ordered set of positions per value.** $|\Sigma|$ sets (or one map of sets) answer "does $v$ appear in $[l..r]$" in $O(\log n)$ via `lower_bound`. With $|\Sigma| = 26$ this fits comfortably for $n \le 2 \cdot 10^5$.
+- **Bitmask segment tree for small alphabets.** Store at each node the OR of characters in its interval; the popcount of the OR of $O(\log n)$ covering nodes is the distinct count. Beats the ordered-set form by a constant factor and generalises to any $|\Sigma| \le 64$ (@sec-mex-p4-dcq Form 3).
+:::
+
+{{< include ../problems/lc-1695-maximum-erasure-value/problem.qmd >}}
+
+[**From a window to a query.** The previous problem slides one window across the whole array once. The next answers many "distinct in range" queries on a dynamic string — the last-occurrence pointer becomes a per-character ordered set.]{.flow-bridge}
+
+{{< include ../problems/cf-1234d-distinct-characters-queries/problem.qmd >}}
+
+## P5. Permutation reconstruction and value-domain enumeration {#sec-mex-p5}
+
+**From recognising to reconstructing.** @sec-mex-a5 gave three tests for "is this a permutation?" Now the array is a permutation *with damage* — some entries replaced by arbitrary values — and the task is to recover the missing ones. The last slot is the general "index the array by value" trick used to count subarrays whose sum hits a present value.
+
+::: {.callout-important title="Template"}
+- **Value table is the *only* state.** When values are bounded by $n$, `seen[v]` indexed by value (not position) collapses most reconstruction problems to a single $O(n)$ pass (@sec-mex-a6).
+- **Permutation sum plus distinct $=$ permutation.** $\sum = n(n+1)/2$ and all $n$ values lie in $[1..n]$ with no duplicates — but if one slot is *damaged*, the sum test breaks and you have to diff prefix sums and read the gaps (@sec-mex-a5, @sec-mex-p5-permsum).
+- **Diff-then-bucket recovers a lost element.** Given prefix sums $s_1 < s_2 < \cdots < s_{n-1}$ with one slot removed, the $n$ differences $d_i = s_i - s_{i-1}$ (with $s_0 = 0$ and a final $d_n = \mathit{total} - s_{n-1}$) are exactly the surviving permutation values; bucket them by value and read off the missing ones.
+- **Enumerate subarray sums into a value table.** When the question is "how many $a_i$ equal some subarray sum", the naive $O(n^2)$ loop over $(l, r)$ is *the intended solution* at $n \le 2000$. Cap the table at $\max(a)$; anything larger can't match. Use `found` flag to avoid double-counting one $a_i$ against many matching subarrays (@sec-mex-p5-special).
+:::
+
+{{< include ../problems/cf-1851d-prefix-permutation-sums/problem.qmd >}}
+
+[**From reconstruction to enumeration.** The last problem uses a value table to spot which elements are missing. The next uses a value table to enumerate subarray sums that match values, giving an $O(n^2)$-space $O(n^2)$-time count that the constraint line ($n \le 2000$) makes the intended solution.]{.flow-bridge}
+
+{{< include ../problems/cf-1352e-special-elements/problem.qmd >}}
+
+**Looking back.** Every pattern in Part B is one question about a value-indexed table: *what do you read, and how do you maintain it across edits?* P1 reads it once and treats the two halves of the definition ("all below present" AND "target absent") as the whole state; P2 keeps the walk-up pointer monotone and pays only when the current MEX cell is filled; P3 makes the table support both $+1$ and $-1$ per step, trading A2's monotone walk for a two-pointer sweep; P4 forgets the MEX row entirely and reads the *non-zero* count; P5 drops the position axis and lets the value axis carry the answer. The chain from Part A is exactly the same, read forward: A1's table becomes A2's monotone pointer, becomes A3's last-occurrence, becomes A4's frequency-of-frequency, becomes A5's permutation test, becomes A6's value-domain index. Each pattern is one lesson's structural fact promoted to a solved problem.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Smallest non-negative not in the set" | Presence table + walk-up; amortised $O(n)$ | @sec-mex-a1 |
+| "MEX of every prefix" | One pass, one table, one pointer that never rewinds | @sec-mex-a2 |
+| "Count distinct in a sliding window" | Last-occurrence pointer + set; amortised $O(n)$ | @sec-mex-a3 |
+| "Frequency of frequencies" / "bucket by count" | `fc[cnt[v]]++`; histogram of a histogram | @sec-mex-a4 |
+| "Is this a permutation of $1..n$?" | Sum $= n(n+1)/2$ and distinct, or MEX $= n+1$ and in-range | @sec-mex-a5 |
+| "Values bounded by $n$; index by value, not position" | Value-domain table of size $n+2$ | @sec-mex-a6 |
+| "Rearrange so prefix MEXes are non-decreasing" | Sort by value; emit all copies of each before moving on | @sec-mex-p1-mexim |
+| "Split into two subsets maximising $\operatorname{mex}(A) + \operatorname{mex}(B)$" | Formula $\operatorname{mex}(\ge 1) + \operatorname{mex}(\ge 2)$ on the count table | @sec-mex-p1-subset-mex |
+| "$q$ queries adding any $y \equiv n \pmod{x}$; MEX after each" | Residue table + amortised greedy pointer | @sec-mex-p2-mex-max |
+| "Cost to reach each MEX under decrement ops" | Walk $k = 1..n$; track spares and cnt[k] pushes | @sec-mex-p2-increments |
+| "Emit MEX of shrinking window, pop from either end" | Two-pointer walk with cnt table | @sec-mex-p3-meximum |
+| "Given prefix MEXes, reconstruct the array" | Force $a_i = m_{i-1}$ on growth; else pick from spare pool | @sec-mex-p3-prefix-mex |
+| "Max-sum subarray with distinct elements" | Sliding window + running sum | @sec-mex-p4-erasure |
+| "$q$ range distinct-queries with updates" | 26 ordered sets or segment-tree bitmask | @sec-mex-p4-dcq |
+| "Permutation with entries replaced; recover missing" | Diff prefix sums, count frequency, spot gaps | @sec-mex-p5-permsum |
+| "Count $a_i$ that equal some subarray sum" | Prefix sums + value-indexed boolean table | @sec-mex-p5-special |
+
+## Pitfalls {#sec-mex-pit}
+
+::: {.callout-warning title="Common mistakes"}
+- **Re-scanning MEX from $0$ on every prefix.** @sec-mex-a2's pointer advances monotonically because adding $a_i$ cannot remove any value already seen. Rewinding `m = 0` at every step turns $O(n)$ into $O(n^2)$, and on $n = 10^6$ it silently TLEs.
+- **Missing the `while m in present: m += 1` loop.** A single `if` after inserting $a_i$ handles only one step; it fails whenever $a_i$ fills a hole that was blocking several consecutive values. Input `[0, 2, 1]` grows MEX $1 \to 2 \to 3$ at the last step: a one-shot `if` returns $2$.
+- **Duplicate-counting in a subset-sum oracle.** When checking "does $a_i$ match some subarray sum" (@sec-mex-p5-special), the naive `for (l, r): if sum == a[i]: cnt++` counts $a_i$ once per matching subarray. Use a `found` flag or a value table.
+- **Bucketing CF 1294D by $n$ instead of $n \bmod x$.** The operation preserves residue; only the residue class matters. Storing `cnt[n]` for the raw value $n$ wastes space and never advances the pointer because most entries stay zero (@sec-mex-p2-mex-max).
+- **Forgetting to reset `spare_ptr` after a forced placement in @sec-mex-p3-prefix-mex.** A forced $a_i = m_{i-1}$ can consume a value that was also in the spare pool (whenever $m_{i-1}$ is not a MEX target). If the pointer doesn't skip forward past already-used entries, the same value gets placed twice and later "growth" checks fail on inputs like `[1, 1, 3]`.
+- **Using `sum + distinct` to test permutation without bounding values.** On `[1, 1, 4]` the sum is $6$ and there are three entries, but it isn't a permutation of $[1..3]$. Add the range check `all(1 <= x <= n)`, or replace it with "MEX is $n+1$" (@sec-mex-a5).
+- **Shrinking the sliding window past the collision.** In LC 1695 (@sec-mex-p4-erasure), the naive `while a[l] != a[r]: l += 1` breaks on inputs like `[1, 2, 3, 2, 5]` because the middle `2` gets skipped without removing `1`. Correct invariant: remove from set while the offending value is still in it.
+- **Answering CF 1234D type 2 with a fresh `set(s[l..r])`.** $O(n)$ per query is $O(n q)$ total; at $n, q = 10^5$ it does not pass. The 26-ordered-set shape is the intended solution (@sec-mex-p4-dcq).
+- **Ignoring the $+1$ in "strictly greater than MEX" phrasing.** CF 1406A asks for $\operatorname{mex}(A) + \operatorname{mex}(B)$ where each is a value, not a count; the formula `mex(≥1) + mex(≥2)` already includes the "first missing" $+1$ implicitly, so hand-counting "present values" undercounts by one on `[0, 1, 2]` (answer $3 + 0 = 3$, not $2$).
+- **Overflow in the frequency-of-frequency sum.** On @sec-mex-a4's `fc` table, `sum(fc[c] * c for c in ...)` fits $O(n^2)$ — with $n = 10^6$ that is $10^{12}$, which exceeds 32-bit `int`. Use `long long` (@sec-arr-size-trap).
+:::
+
+## Exercises
+
+**1. [E] Compute the MEX of `[3, 0, 1, 4]`, `[5, 6, 7]`, and `[]`. Explain the empty case.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`MEX([3, 0, 1, 4]) = 2` (0 and 1 present, 2 missing). `MEX([5, 6, 7]) = 0` (0 already missing). `MEX([]) = 0`: by convention the smallest non-negative integer not present, and 0 is not present in an empty set (@sec-mex-a1).
+:::
+
+**2. [E] Compute the prefix-MEX sequence of `[0, 2, 0, 3, 1]`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Prefix `[0]`: MEX `1`. Prefix `[0, 2]`: MEX `1`. Prefix `[0, 2, 0]`: MEX `1`. Prefix `[0, 2, 0, 3]`: MEX `1`. Prefix `[0, 2, 0, 3, 1]`: MEX `4`. Sequence: `[1, 1, 1, 1, 4]` (@sec-mex-a2).
+:::
+
+**3. [E] On `[1, 2, 1, 3, 2, 1]`, build `cnt[v]` and `fc[c]`. How many values appear exactly twice?**
+
+::: {.callout-note collapse="true" title="Solution"}
+`cnt = {1: 3, 2: 2, 3: 1}`. `fc = {3: 1, 2: 1, 1: 1}` — one value has count 3, one has count 2, one has count 1. Exactly **one** value appears twice: value 2 (@sec-mex-a4).
+:::
+
+**4. [E] Give three independent tests for "is `a` a permutation of `1..n`?" for `n = 4`, `a = [1, 1, 4, 2]`. Which fail?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sum test: `sum = 8 ≠ 10`. Fails, correctly rejects. Distinct test: `|set(a)| = 3 < 4`. Fails. MEX test: `MEX([1,1,4,2]) = 3 ≠ n+1 = 5`. Fails. On `a = [1, 2, 3, 4]`: sum `10`, distinct `4`, MEX `5` — all three accept (@sec-mex-a5).
+:::
+
+**5. [E] CF 1406A: for `[0, 0, 1, 1]`, compute `mex(>=1)` and `mex(>=2)`; report the sum and a split.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`cnt[0]=2, cnt[1]=2, cnt[2]=0`. `mex(>=1)` walks 0, 1 present, stops at 2: value 2. `mex(>=2)` walks 0, 1 both have count >= 2, stops at 2: value 2. Sum = 4. Split A = {0, 1}, B = {0, 1} achieves 2 + 2 (@sec-mex-p1-subset-mex).
+:::
+
+**6. [E] CF 1294D: `x = 3`, queries `[0, 1, 2, 0, 1, 2, 1]`. Give `cnt[0..2]` and the answer after each query.**
+
+::: {.callout-note collapse="true" title="Solution"}
+After each query: `[1,0,0]/1`, `[1,1,0]/2`, `[1,1,1]/3`, `[2,1,1]/4`, `[2,2,1]/5`, `[2,2,2]/6`, `[2,3,2]/6`. The answer never decreases because each token can only extend the greedy walk forward (@sec-mex-p2-mex-max).
+:::
+
+**7. [E] LC 1695: trace the sliding window on `[4, 2, 4, 5, 6]` at every step of `r`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`r=0, x=4`: window {4}, sum 4, best 4. `r=1, x=2`: window {4,2}, sum 6, best 6. `r=2, x=4`: collide; shrink to `l=1`, drop 4, sum 2; add 4 → window {2,4}, sum 6. `r=3, x=5`: window {2,4,5}, sum 11. `r=4, x=6`: window {2,4,5,6}, sum 17. Answer 17 (@sec-mex-p4-erasure).
+:::
+
+**8. [E] CF 1352E: for `a = [2, 1, 3, 6]`, list every length-`>=2` subarray sum and the matching values.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Length 2: `[2,1]=3`, `[1,3]=4`, `[3,6]=9`. Length 3: `[2,1,3]=6`, `[1,3,6]=10`. Length 4: `[2,1,3,6]=12`. Sum set {3, 4, 6, 9, 10, 12}. Intersect with {2, 1, 3, 6}: matches 3 and 6. Count 2 (@sec-mex-p5-special).
+:::
+
+**9. [E] CF 1364C: reconstruct `a` from `m = [1, 1, 2, 3]` and verify the prefix MEXes.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Step 1 grows MEX: forced `a[1]=0`. Step 2 keeps `1`: pick from spare `{0, 4}` — 0 already used, so `a[2]=4`. Step 3 grows: `a[3]=1`. Step 4 grows: `a[4]=2`. `a = [0, 4, 1, 2]`. Verify prefix MEXes of `[0]`, `[0,4]`, `[0,4,1]`, `[0,4,1,2]` = `[1, 1, 2, 3]` (@sec-mex-p3-prefix-mex).
+:::
+
+**10. [M] CF 1497A: rearrange `[5, 3, 1, 3, 0, 1, 0]` so prefix MEXes are non-decreasing and list the walk.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort: `[0, 0, 1, 1, 3, 3, 5]`. Walk: after first 0 → 1; after second 0 → 1; after first 1 → 2; after second 1 → 2; after first 3 → 2; after second 3 → 2; after 5 → 2. Sequence `[1, 1, 2, 2, 2, 2, 2]`, non-decreasing. Sorted order groups duplicates, so the pointer advances only once per distinct value (@sec-mex-p1-mexim).
+:::
+
+**11. [M] CF 1234D: on `s = "abacaba"`, build the 26-sets after `1 3 z`. Answer `2 1 4`, `2 3 5`, `2 1 7`.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Before update: `a = {1, 3, 5, 7}`, `b = {2, 6}`, `c = {4}`. After `1 3 z`: `a = {1, 5, 7}`, `z = {3}`. `2 1 4`: `a` has 1, `b` has 2, `z` has 3, `c` has 4 → 4. `2 3 5`: `a` has 5, `z` has 3 → 2. `2 1 7`: `a, b, c, z` each have a position in range → 4 (@sec-mex-p4-dcq).
+:::
+
+**12. [M] CF 1294D: argue `ans = min_r (r + cnt[r] * x)` holds at all times, and explain why the greedy pointer reaches the same value without the `O(x)` scan.**
+
+::: {.callout-note collapse="true" title="Solution"}
+For MEX = k we need to cover `0..k-1`. Covering value v costs one token of residue `v mod x`. The i-th token of residue r covers value `r + i*x`. With `cnt[r]` tokens, the first uncovered value in class r is `r + cnt[r]*x`. MEX is min over r. The greedy pointer walks up from 0 consuming one token per step: `cnt[ans % x]--; ans++`. Total work is amortised O(1) per query because every token is consumed exactly once (@sec-mex-p2-mex-max).
+:::
+
+**13. [M] CF 1352E: bound the sum values that can be indexed. Why is capping at `max(a)` correct even though subarray sums can be much larger?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A subarray sum s can only match if `s = a_i` for some i, so `s <= max(a)`. Any sum above the cap is wasted work. Concretely, `[1, 1, 1, 1, 1]` has max 1; every length-`>=2` sum is `>= 2`, so nothing matches. The value-indexed table caps at `max(a) = 1` and stays all-zero (@sec-mex-p5-special).
+:::
+
+**14. [H] Design a data structure supporting `insert(v)`, `erase(v)`, `mex()` in `O(log n)` amortised. Explain why a plain presence table is not enough.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A plain `cnt[v]` table plus a monotone pointer fails because erase can *decrease* MEX: insert 0 then erase 0 moves MEX from 1 back to 0, but the pointer cannot rewind. Track `cnt[v]` and an ordered set of missing values (`missing`). Insert `v`: if `cnt[v]` goes `0 → 1`, remove `v` from missing. Erase `v`: if `cnt[v]` goes `1 → 0`, add `v`. `mex()` returns `min(missing)`. With `std::set` or a Fenwick over `present` and binary-lifting for the first zero, every operation is `O(log n)` (@sec-mex-pit, exercise 14).
+:::
+
+**15. [H] Given an array of `n` non-negative integers, count subarrays whose MEX is exactly `k`, for every `k` from `0` to `n`. Aim for `O(n)` or `O(n log n)` total.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Decompose: `count(MEX = k) = count(MEX >= k) - count(MEX >= k+1)`. To count subarrays with MEX `>= k`, require `0..k-1` present. Two-pointer sweep for each k: find minimal `r` per `l` covering the set of required values. Do this for every k in `O(n)` total by sweeping pointers monotonically (a value that fails coverage at k can only fail again at k+1, so `r` moves rightward). Overall `O(n^2)` naive; the tight bound is `O(n)` amortised per k via an "exactly k present" style decomposition (@sec-mex-a2, @sec-mex-a6).
+:::
+
+## Interview questions
+
+**1. Define MEX. Compute it in `O(n)` time and `O(n)` extra space; then argue why `O(n)` extra space is required in the comparison model.**
+
+::: {.callout-note collapse="true" title="Answer"}
+MEX of a set `S ⊆ Z≥0` is `min Z≥0 \ S`. `O(n)` time: presence table + walk-up. Extra space is required because the answer depends on the pattern of values seen; sorting takes `O(n log n)` and can be walked with `O(1)` extra, but a linear-time solution needs random access into a bucket per value (@sec-mex-a1).
+:::
+
+**2. Give a one-line Python expression for the prefix-MEX list; then convert it to `O(n)` time.**
+
+::: {.callout-note collapse="true" title="Answer"}
+One-liner (slow): `[mex(a[:i+1]) for i in range(len(a))]` — `O(n^2)`. `O(n)`: maintain a set and a pointer `m`; after each insert, `while m in seen: m += 1`; append `m`. The pointer is monotone so total work across all `while` steps is `O(n)` (@sec-mex-a2).
+:::
+
+**3. Design `insert(v)`, `erase(v)`, `mex()` on a dynamic multiset in `O(log n)` amortised.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Track `cnt[v]` and an ordered set `missing`. On insert, if `cnt[v]` goes 0→1, remove `v` from missing; on erase, if `cnt[v]` goes 1→0, add `v`. `mex()` returns `min(missing)`. With `std::set`, Python `sortedcontainers.SortedSet`, or a Fenwick over `present` with binary lifting for the first zero, every op is `O(log n)` (@sec-mex-pit, exercise 14).
+:::
+
+**4. Given `n` integers up to `10^9` and `q` offline "distinct in `[l, r]`?" queries, answer in `O((n + q) log n)` total.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort queries by `r`. Sweep `r` left-to-right, maintaining a BIT over positions with `+1` at the last occurrence of each value and `-1` at the previous position. For query `[l, r]`, the sum on `[l, r]` is the number of distinct values. Per-value sorted lists (as in @sec-mex-p4-dcq) work online at `O(Σ log n)` per query but need a small alphabet (@sec-mex-a3).
+:::
+
+**5. How do you check "is `a` a permutation of `1..n`?" in `O(1)` extra space?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Negation trick: walk `a`; for each `|a_i|`, negate `a[|a_i| - 1]`. If already negative, duplicate found. After the pass, every entry must be negative. Restores the array on exit. `O(1)` extra, `O(n)` time. XOR-check also works but does not detect duplicates alone (@sec-mex-a5).
+:::
+
+**6. Explain the difference between "frequency of values" and "frequency of frequencies". Give a problem that requires the latter.**
+
+::: {.callout-note collapse="true" title="Answer"}
+`cnt[v]` = number of occurrences of `v`. `fc[c]` = number of values with count `c`. The second is a histogram of the first. CF 1490F (Equalize the Array) needs `fc`: given counts per value, compute the cheapest deletions to make every remaining count equal; iterate targets `c` and use `fc` to sum the values to trim (@sec-mex-a4).
+:::
+
+**7. Why does "sum + distinct" fail as a permutation test without a range check? Give a counterexample.**
+
+::: {.callout-note collapse="true" title="Answer"}
+`[0, 2, 4]` for `n = 3`: sum `6 = n(n+1)/2` and all three entries are distinct, but `{0, 2, 4} ≠ {1, 2, 3}`. The test only proves "sum matches target", not "membership in the target range". Add `all(1 <= x <= n)` or use MEX `= n + 1` (@sec-mex-a5).
+:::
+
+**8. CF 1406A: derive the closed form `mex(>=1) + mex(>=2)` and justify the two-subset assignment.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Every value with count `>= 1` can be placed into `A` to grow `mex(A)` up to the first gap; every value with count `>= 2` can additionally be placed into `B`. Once a value with count `= 1` goes into `A`, `B` never sees it, so `mex(B)` stops there. Assignment: `A` takes one copy of every present value (`mex = ` first gap of `cnt >= 1`); `B` takes one copy of every doubly-present value (`mex = ` first gap of `cnt >= 2`) (@sec-mex-p1-subset-mex).
+:::
+
+**9. CF 1294D: state the amortised-`O(1)`-per-query argument and the invariant the pointer preserves.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Invariant: values `0..(ans-1)` are covered and `ans` is the smallest uncovered value. Each query contributes exactly one token to `cnt`. The while-loop consumes one token per advance, and total advances across all queries cannot exceed total tokens, which is `q`. So the while-loop's combined cost is `O(q)` amortised (@sec-mex-p2-mex-max).
+:::
+
+**10. For LC 1695, argue that the sliding window is amortised `O(n)` even though the inner while-loop can run multiple times per iteration.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Each index `l` advances monotonically from 0 to `n` over the run. Total `set.discard` operations across every iteration of the outer `for` is at most `n`. Combined with `n` insertions on the right, the set is touched `O(n)` times. Sum operations and best updates are `O(1)` each (@sec-mex-p4-erasure).
+:::
+
+**11. CF 1234D: generalise the per-character set solution to alphabet size `Σ`. What changes when `Σ = 26` vs `Σ = n`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Per-character set is `O(Σ log n)` per query. With `Σ = 26` that is a small constant factor; with `Σ = n` it degenerates to `O(n log n)` per query, which loses to a segment-tree bitmask (only fits when `Σ <= 64` per machine word) or a Wavelet tree / BIT of last-occurrences (@sec-mex-p4-dcq).
+:::
+
+**12. CF 1364C: argue that the greedy walk either produces a valid `a` or correctly returns `-1`. Where is the completeness argument?**
+
+::: {.callout-note collapse="true" title="Answer"}
+On growth (`m[i] > m[i-1]`), `a[i] = m[i-1]` is forced — the only placement that fills the previous hole without disturbing earlier prefix MEXes. On same (`m[i] = m[i-1]`), `a[i] ≠ m[i]` and must not consume a value needed later: the spare pool (values never appearing in `m`) is exactly the safe set. If a growth step is rejected because values in `(m[i-1], m[i])` were not pre-placed, no alternative assignment could have placed them: earlier same-steps drew from the spare pool and earlier growth-steps were forced (@sec-mex-p3-prefix-mex).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **The presence table + pointer.** `seen = set(); m = 0; for x in a: seen.add(x); while m in seen: m += 1`. The pointer never rewinds when only inserts happen. That is the amortised-`O(n)` MEX (@sec-mex-a1, @sec-mex-a2).
+- **The count table + two-level histogram.** `cnt[v]` = occurrences of `v`; `fc[c]` = how many `v` have count `c`. The second is what lets you bucket by "how often" instead of "what" (@sec-mex-a4).
+- **Value-domain indexing.** When `0 <= a[i] <= n`, allocate a table of size `n+2` indexed by value. Sort becomes counting-sort; membership tests become array reads; the whole algorithm collapses to `O(n)` (@sec-mex-a6).
+- **Two-pointer window with a count table.** Add at right; while the invariant breaks, remove at left. Same template drives distinctness (LC 1695), MEX-scan (@sec-mex-p5-special), and CF 1628A (@sec-mex-p3-meximum).
+- **Amortised-greedy pointer on a residue or MEX walk.** CF 1294D's `ans` pointer, prefix-MEX in @sec-mex-a2, and CF 1364C's `spare_ptr` all share the shape: one integer, monotone across the run, moves only when a bucket opens.
+- **Spare-pool reconstruction.** Given a target sequence of MEXes, force placements on growth, draw from a value pool (spare = values never appearing as MEX targets) on same; check "already used" before consuming a spare (@sec-mex-p3-prefix-mex).
+:::
+
+- The chapter keeps returning to one observation: when values are bounded by `n`, a table indexed by value beats a table indexed by position. MEX is a value-domain question, so is "which values appear twice?", so is "does this array match some subarray sum?" — each collapses to a walk over `cnt[]` (@sec-mex-a1, @sec-mex-a6).
+- The monotone-pointer trick is what makes amortised linear time work. Whenever operations only ADD to a set, the MEX pointer never rewinds and the amortised walk is exact. When operations can remove, the pointer fails and you need a `missing` set or an ordered structure behind it (@sec-mex-pit, exercise 14).
+- MEX-under-queries (CF 1294D, CF 1619E) is the residue-table version of the same habit: index not by value but by value under an equivalence relation (`mod x`, or `decrement-possible-to-reach`). The greedy pointer walks the answer up; a token or an extra copy advances it.
+- Distinct-count is MEX's twin. Where MEX asks "what is the smallest missing?", distinct-count asks "how many are present?". Sliding-window versions share the same set + two-pointer code; range-query versions share the last-occurrence trick (@sec-mex-a3, @sec-mex-p4-dcq).
+- Permutation recognition (sum+distinct, or MEX) works only when the values are pre-bounded to the target range; otherwise `[0, 2, 4]` fools you. Reconstruction (CF 1851D) is the same table read backwards: diff the prefix sums and check which values in `1..n` are missing (@sec-mex-a5, @sec-mex-p5-permsum).
+- Spare-pool reasoning (@sec-mex-p3-prefix-mex) is a small but instructive example of "the constraint that makes greedy correct": forced placements exhaust the MEX-target values, so same-MEX positions can only draw from the complement, and drawing an already-used spare is a bug.
+
+## Practice ladder
+
+Ordered by pattern, following the five-part climb. The ten problems solved in Part B are marked `.solved`; every other entry is "solve it after the lesson named."
+
+::: {.practice}
+- [CF 1497A · Meximization](https://codeforces.com/problemset/problem/1497/A){.solved rating="800"} — sort by value so the prefix MEX never decreases (@sec-mex-p1-mexim).
+- [CF 1406A · Subset Mex](https://codeforces.com/problemset/problem/1406/A){.solved rating="900"} — closed-form `mex(>=1) + mex(>=2)` on the count table (@sec-mex-p1-subset-mex).
+- [CF 1294D · MEX maximizing](https://codeforces.com/problemset/problem/1294/D){.solved rating="1600"} — residue table with a monotone greedy pointer (@sec-mex-p2-mex-max).
+- [CF 1619E · MEX and Increments](https://codeforces.com/problemset/problem/1619/E){.solved rating="1700"} — decrement-based MEX costs (@sec-mex-p2-increments).
+- [CF 1628A · Meximum Array](https://codeforces.com/problemset/problem/1628/A){.solved rating="1400"} — two-pointer walk that emits MEX then shrinks from one side (@sec-mex-p3-meximum).
+- [CF 1364C · Ehab and Prefix MEXs](https://codeforces.com/problemset/problem/1364/C){.solved rating="1600"} — reconstruct an array from its prefix-MEX list (@sec-mex-p3-prefix-mex).
+- [LC 1695 · Maximum Erasure Value](https://leetcode.com/problems/maximum-erasure-value/){.solved difficulty="Medium"} — sliding window + running sum, all-distinct invariant (@sec-mex-p4-erasure).
+- [CF 1234D · Distinct Characters Queries](https://codeforces.com/problemset/problem/1234/D){.solved rating="1600"} — 26 ordered sets, or segment tree over bitmasks (@sec-mex-p4-dcq).
+- [CF 1851D · Prefix Permutation Sums](https://codeforces.com/problemset/problem/1851/D){.solved rating="1300"} — diff, count, spot the missing values (@sec-mex-p5-permsum).
+- [CF 1352E · Special Elements](https://codeforces.com/problemset/problem/1352/E){.solved rating="1500"} — value-indexed table capped at `max(a)` (@sec-mex-p5-special).
+- [CF 862A · Mahmoud and Ehab and the MEX](https://codeforces.com/problemset/problem/862/A){rating="1000"} — solved at @sec-idx-p2-mex in @sec-idx; a light MEX-insertion exercise.
+- [CF 1567B · MEXor Mixup](https://codeforces.com/problemset/problem/1567/B){rating="1000"} — solved at @sec-idx-p4-mexor in @sec-idx; the XOR/MEX fusion.
+- [CF 1490F · Equalize the Array](https://codeforces.com/problemset/problem/1490/F){rating="1500"} — frequency-of-frequency histogram with a small value domain (@sec-mex-a4).
+- [CF 1781C · Equal Frequencies](https://codeforces.com/problemset/problem/1781/C){rating="1600"} — pairs MEX with a stack-style pairing invariant (@sec-mex-p2).
+- [CF 1943A · MEX Game 1](https://codeforces.com/problemset/problem/1943/A){rating="1300"} — sorting-and-MEX hybrid; direct practice for @sec-mex-a2.
+- [CF 1613D · MEX Sequences](https://codeforces.com/problemset/problem/1613/D){rating="1900"} — stretch: DP with MEX-style constraints (@sec-mex-p1).
+- [LC 2848 · Points That Intersect With Cars](https://leetcode.com/problems/points-that-intersect-with-cars/){difficulty="Easy"} — small value-domain counting; warm-up for @sec-mex-a6.
+- [CSES 2183 · Missing Number](https://cses.fi/problemset/task/1083) — XOR or sum-based MEX for `1..n`; single-shot practice for @sec-mex-a5.
+- [CSES 1090 · Sliding Median](https://cses.fi/problemset/task/1074) — window + ordered structure; the same two-set shape as CF 1294D and LC 1695 with a different objective (@sec-mex-a3).
+:::
+
+## Further reading
+
+- [CP-Algorithms — MEX of a Set](https://cp-algorithms.com/data_structures/segment_tree.html) — the ordered-set segment-tree variant for insert / erase / MEX queries with `O(log n)` per operation.
+- [Codeforces EDU — Segment Tree](https://codeforces.com/edu/course/2/lesson/6) — the segment-tree bitmask pattern used in @sec-mex-p4-dcq Form 3; generalises to any `Sigma <= 64`.
+- [Codeforces blog — "All MEX problems on Codeforces" (topic 151775)](https://codeforces.com/topic/151775/en1) — a curated rating-ordered list of MEX-tagged problems; useful for stretching past this chapter's roster.
+- [CP-Algorithms — Sqrt Decomposition](https://cp-algorithms.com/data_structures/sqrt_decomposition.html) — Mo's algorithm and the offline variant for distinct-in-range queries discussed in @sec-mex-a3.
+- [Wikipedia — Sparse Table](https://en.wikipedia.org/wiki/Sparse_table) — background on the value-domain lookup pattern used by @sec-mex-a6 and its use for range-MEX under a static array.
+- [USACO Guide — Sliding Window](https://usaco.guide/gold/sliding-window) — the sliding-window template used in @sec-mex-p4-erasure, with worked variants (max subarray, longest substring with unique chars).
+- [Codeforces Round 762 Editorial (Div. 3)](https://codeforces.com/blog/entry/98159) — the intended CF 1619E solution walkthrough; useful for the decrement-based MEX structure.
+- [Codeforces Round 858 (Div. 2) Editorial — Mex Master](https://codeforces.com/blog/entry/111050) — sibling to CF 1294D; same residue + MEX pattern with a different operation model.
+
+

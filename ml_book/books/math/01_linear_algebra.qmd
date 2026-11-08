@@ -1,0 +1,822 @@
+# Linear Algebra for Machine Learning {#sec-linalg}
+
+::: {.callout-note title="Sources"}
+**MML** ch. 2 (linear algebra), 3 (analytic geometry), 4 (matrix decompositions) · **UDL** App. B · **CS229** *Linear Algebra Review and Reference* · **ESL** §3.2, §3.4.1 (least squares and ridge through the SVD) · **D2L** §2.3 · Strang's *Linear Algebra* lectures are a useful video companion.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Read every ML formula as shapes: know what $\mathbf{X}\mathbf{w}$, $\mathbf{X}^\top\mathbf{X}$ and $\mathbf{u}\mathbf{v}^\top$ are, and what they cost to compute.
+- Explain rank, column space and null space, and recognise when a model's parameters are **not identifiable**.
+- Derive least squares as an orthogonal projection, and solve it in a numerically stable way (QR or SVD instead of an explicit inverse).
+- Compute and interpret eigendecompositions and the SVD, and implement power iteration and Gram–Schmidt from scratch.
+- Use the SVD to explain low-rank approximation (PCA, LoRA, compression), the condition number, and ridge shrinkage.
+:::
+
+## Why this matters
+
+Almost every ML model is made of linear algebra with a few nonlinearities in between:
+
+| Model | Linear-algebra core |
+|---|---|
+| Linear and logistic regression | $\hat{\mathbf{y}} = \mathbf{X}\mathbf{w}$ |
+| Neural network layer | $\mathbf{h} = \sigma(\mathbf{W}\mathbf{x} + \mathbf{b})$ |
+| Attention | $\operatorname{softmax}(\mathbf{Q}\mathbf{K}^\top/\sqrt{d})\,\mathbf{V}$ |
+| PCA | eigenvectors of the covariance matrix, i.e. the SVD of the centred data |
+| Recommender systems | $\mathbf{R} \approx \mathbf{U}\mathbf{V}^\top$ (low rank) |
+| LoRA fine-tuning | $\mathbf{W} + \mathbf{B}\mathbf{A}$ with $\operatorname{rank}(\mathbf{B}\mathbf{A}) \le r$ |
+| Embeddings and search | dot products and cosine similarities |
+
+This chapter is about the small set of facts these models actually rely on. Each fact is stated, derived, and checked in code.
+
+```{python}
+#| include: false
+import numpy as np
+import matplotlib.pyplot as plt
+np.set_printoptions(precision=4, suppress=True)
+rng = np.random.default_rng(0)
+```
+
+## Vectors {#sec-linalg-vectors}
+
+### Definition and intuition
+
+A **vector** $\mathbf{x}\in\mathbb{R}^d$ is an ordered list of $d$ real numbers, written as a column:
+
+$$
+\mathbf{x} = \begin{bmatrix} x_1 \\ \vdots \\ x_d \end{bmatrix}, \qquad \mathbf{x}^\top = [x_1, \dots, x_d].
+$$
+
+There are two useful pictures of a vector. It can be a **point** in space, such as one house described by (area, rooms, age). It can also be an **arrow**, a direction and a length, such as a gradient pointing uphill. Vectors add component by component and scale by numbers, and those two operations are all "linear" means.
+
+### Dot product, norms, angles
+
+The **dot product** (inner product) is
+
+$$
+\mathbf{x}^\top\mathbf{y} = \sum_{i=1}^d x_i y_i = \|\mathbf{x}\|_2\,\|\mathbf{y}\|_2\cos\theta,
+$$ {#eq-dot}
+
+where $\theta$ is the angle between the two vectors. In ML it measures *alignment*. A linear model's score $\mathbf{w}^\top\mathbf{x}$ is large when the input points the same way as the weights.
+
+A **norm** measures size. The three you will meet constantly are:
+
+| Norm | Formula | Unit ball shape | Used for |
+|---|---|---|---|
+| $\ell_2$ (Euclidean) | $\|\mathbf{x}\|_2=\sqrt{\sum_i x_i^2}$ | circle / sphere | distances, ridge / weight decay |
+| $\ell_1$ | $\|\mathbf{x}\|_1=\sum_i |x_i|$ | diamond | lasso (sparsity), robust losses |
+| $\ell_\infty$ | $\|\mathbf{x}\|_\infty=\max_i |x_i|$ | square / cube | adversarial perturbations, gradient clipping by value |
+
+**Cosine similarity** removes length and keeps only direction:
+
+$$
+\cos(\mathbf{x},\mathbf{y}) = \frac{\mathbf{x}^\top\mathbf{y}}{\|\mathbf{x}\|_2\|\mathbf{y}\|_2}\in[-1,1].
+$$
+
+It is the standard similarity for text and image embeddings. If the vectors are already normalised to unit length, cosine similarity and the dot product are the same number, which is why retrieval systems normalise embeddings first.
+
+The **Cauchy–Schwarz inequality** $|\mathbf{x}^\top\mathbf{y}|\le\|\mathbf{x}\|_2\|\mathbf{y}\|_2$ is why the cosine stays inside $[-1,1]$. Equality holds exactly when one vector is a multiple of the other.
+
+### Projection onto a vector {#sec-linalg-proj-vector}
+
+The projection of $\mathbf{b}$ onto the line spanned by $\mathbf{a}$ is the point $c\,\mathbf{a}$ closest to $\mathbf{b}$.
+
+**Derivation.** Minimise $f(c)=\|\mathbf{b}-c\mathbf{a}\|_2^2 = \mathbf{b}^\top\mathbf{b} - 2c\,\mathbf{a}^\top\mathbf{b} + c^2\,\mathbf{a}^\top\mathbf{a}$. Setting $f'(c) = -2\mathbf{a}^\top\mathbf{b} + 2c\,\mathbf{a}^\top\mathbf{a} = 0$ gives
+
+$$
+c^\star = \frac{\mathbf{a}^\top\mathbf{b}}{\mathbf{a}^\top\mathbf{a}}, \qquad
+\operatorname{proj}_{\mathbf{a}}(\mathbf{b}) = \frac{\mathbf{a}^\top\mathbf{b}}{\mathbf{a}^\top\mathbf{a}}\,\mathbf{a} = \underbrace{\frac{\mathbf{a}\mathbf{a}^\top}{\mathbf{a}^\top\mathbf{a}}}_{\mathbf{P}}\mathbf{b}.
+$$ {#eq-proj-vector}
+
+The residual $\mathbf{r} = \mathbf{b} - c^\star\mathbf{a}$ is **orthogonal** to $\mathbf{a}$: $\mathbf{a}^\top\mathbf{r} = \mathbf{a}^\top\mathbf{b} - c^\star\mathbf{a}^\top\mathbf{a} = 0$. Remember this sentence, because it comes back as least squares in @sec-linalg-least-squares: *the best approximation leaves an error perpendicular to everything you could have used.*
+
+### Worked example 1: projection by hand
+
+Let $\mathbf{a}=(1,1)$ and $\mathbf{b}=(2,3)$. Then $\mathbf{a}^\top\mathbf{b}=5$ and $\mathbf{a}^\top\mathbf{a}=2$, so $c^\star=2.5$ and the projection is $(2.5, 2.5)$. The residual is $(-0.5, 0.5)$, and $\mathbf{a}^\top\mathbf{r} = -0.5+0.5=0$. ✓
+
+```{python}
+#| label: fig-projection
+#| fig-cap: "Projecting b onto the line through a. The residual is perpendicular to a."
+def project_onto_vector(b, a):
+    return (a @ b) / (a @ a) * a
+
+a, b = np.array([1.0, 1.0]), np.array([2.0, 3.0])
+p = project_onto_vector(b, a)
+r = b - p
+assert np.allclose(p, [2.5, 2.5]) and abs(a @ r) < 1e-12
+
+fig, ax = plt.subplots(figsize=(4.2, 4.2))
+ax.plot([-0.5, 3.5], [-0.5, 3.5], "k:", lw=1, label="span(a)")
+for v, c, name in [(a, "C0", "a"), (b, "C1", "b"), (p, "C2", "proj")]:
+    ax.annotate("", xy=v, xytext=(0, 0), arrowprops=dict(arrowstyle="->", color=c, lw=2))
+    ax.text(*(v + 0.08), name, color=c)
+ax.plot([p[0], b[0]], [p[1], b[1]], "C3--", label="residual r")
+ax.set_xlim(-0.5, 3.5); ax.set_ylim(-0.5, 3.5); ax.set_aspect("equal"); ax.legend(loc="lower right")
+plt.show()
+```
+
+### Worked example 2: cosine similarity of embeddings
+
+Suppose three "document embeddings" are $\mathbf{d}_1=(3,4,0)$, $\mathbf{d}_2=(6,8,0)$ and $\mathbf{d}_3=(0,1,1)$. Then $\mathbf{d}_1$ and $\mathbf{d}_2$ point the same way, with cosine 1, even though the raw dot product $\mathbf{d}_1^\top\mathbf{d}_2=50$ is mostly about length. For $\mathbf{d}_1$ and $\mathbf{d}_3$, the cosine is $4/(5\sqrt2)\approx0.566$.
+
+```{python}
+def cosine(x, y):
+    return (x @ y) / (np.linalg.norm(x) * np.linalg.norm(y))
+
+d1, d2, d3 = np.array([3., 4, 0]), np.array([6., 8, 0]), np.array([0., 1, 1])
+print("dot(d1,d2) =", d1 @ d2, " cos(d1,d2) =", cosine(d1, d2))
+print("dot(d1,d3) =", d1 @ d3, " cos(d1,d3) =", round(cosine(d1, d3), 4))
+
+# Norms side by side
+x = np.array([3.0, -4.0, 1.0])
+print("L1, L2, Linf:", np.abs(x).sum(), np.sqrt((x**2).sum()), np.abs(x).max())
+assert np.isclose(np.sqrt((x**2).sum()), np.linalg.norm(x))
+```
+
+## Matrices as linear maps {#sec-linalg-matrices}
+
+### Four ways to read a matrix product
+
+A matrix $\mathbf{A}\in\mathbb{R}^{m\times n}$ is a **linear map** from $\mathbb{R}^n$ to $\mathbb{R}^m$. Its columns are where the standard basis vectors land: $\mathbf{A}\mathbf{e}_j = \mathbf{a}_{:j}$. For $\mathbf{C}=\mathbf{A}\mathbf{B}$ with $\mathbf{B}\in\mathbb{R}^{n\times p}$, there are four equivalent readings, and each one is the natural one somewhere in ML:
+
+1. **Entry view**: $C_{ij} = \sum_k A_{ik}B_{kj}$, the dot product of row $i$ of $\mathbf{A}$ with column $j$ of $\mathbf{B}$. *Attention scores* $\mathbf{Q}\mathbf{K}^\top$ are all query–key dot products.
+2. **Column view**: column $j$ of $\mathbf{C}$ is $\mathbf{A}\mathbf{b}_{:j}$, a combination of the columns of $\mathbf{A}$. *Predictions* $\mathbf{X}\mathbf{w} = \sum_j w_j\,\mathbf{x}_{:j}$ are a weighted sum of feature columns.
+3. **Row view**: row $i$ of $\mathbf{C}$ is $\mathbf{a}_{i:}\mathbf{B}$. *A batch through a layer*: each example (row) is transformed independently.
+4. **Outer-product view**: $\mathbf{A}\mathbf{B} = \sum_{k=1}^n \mathbf{a}_{:k}\,\mathbf{b}_{k:}$, a sum of $n$ rank-1 matrices. *Gradients of a linear layer* ($\nabla_{\mathbf{W}} = \boldsymbol\delta\,\mathbf{x}^\top$) and low-rank factorisations both come from this view.
+
+Computing $\mathbf{A}\mathbf{B}$ costs $O(mnp)$ multiply-adds. For a batch of $n$ examples through a $d_\text{in}\!\to\! d_\text{out}$ layer, that is $O(n\,d_\text{in}\,d_\text{out})$, and it is the dominant cost of training most neural networks.
+
+```{python}
+A = rng.normal(size=(3, 4)); B = rng.normal(size=(4, 2))
+C = A @ B
+entry = np.array([[A[i] @ B[:, j] for j in range(2)] for i in range(3)])
+column = np.stack([A @ B[:, j] for j in range(2)], axis=1)
+outer = sum(np.outer(A[:, k], B[k]) for k in range(4))
+assert np.allclose(C, entry) and np.allclose(C, column) and np.allclose(C, outer)
+print("all four views agree; C has shape", C.shape)
+```
+
+### Shapes in ML: a checklist
+
+With $n$ examples and $d$ features, $\mathbf{X}\in\mathbb{R}^{n\times d}$ and $\mathbf{w}\in\mathbb{R}^{d}$:
+
+| Expression | Shape | Meaning |
+|---|---|---|
+| $\mathbf{X}\mathbf{w}$ | $n$ | one prediction per example |
+| $\mathbf{X}^\top\mathbf{X}$ | $d\times d$ | Gram matrix of the features (unnormalised second moments) |
+| $\mathbf{X}\mathbf{X}^\top$ | $n\times n$ | similarities between examples (the linear-kernel matrix) |
+| $\mathbf{X}^\top\mathbf{r}$ | $d$ | how each feature correlates with the residual $\mathbf{r}$ (the least-squares gradient, up to a factor $-2$) |
+| $\mathbf{u}\mathbf{v}^\top$ | $\dim\mathbf{u}\times\dim\mathbf{v}$ | outer product, rank 1 |
+
+### Special matrices
+
+- **Identity** $\mathbf{I}$: $\mathbf{I}\mathbf{x}=\mathbf{x}$.
+- **Diagonal** $\operatorname{diag}(\mathbf{s})$: scales each coordinate separately. In NumPy, `s[:, None] * X` scales rows without building the matrix.
+- **Symmetric**: $\mathbf{A}=\mathbf{A}^\top$. Covariance, Gram, kernel and Hessian matrices are all symmetric.
+- **Orthogonal** $\mathbf{Q}$: $\mathbf{Q}^\top\mathbf{Q}=\mathbf{I}$. It preserves lengths and angles ($\|\mathbf{Q}\mathbf{x}\|=\|\mathbf{x}\|$), so it is a rotation or reflection. Its inverse is free: $\mathbf{Q}^{-1}=\mathbf{Q}^\top$.
+- **Inverse** $\mathbf{A}^{-1}$: exists only for square $\mathbf{A}$ with full rank. Useful identities: $(\mathbf{A}\mathbf{B})^{-1}=\mathbf{B}^{-1}\mathbf{A}^{-1}$ and $(\mathbf{A}\mathbf{B})^\top=\mathbf{B}^\top\mathbf{A}^\top$.
+
+**Trace and determinant.** $\operatorname{tr}(\mathbf{A})=\sum_i A_{ii}$, and it is *cyclic*: $\operatorname{tr}(\mathbf{A}\mathbf{B}\mathbf{C})=\operatorname{tr}(\mathbf{C}\mathbf{A}\mathbf{B})$, which is used constantly in matrix calculus. $\det(\mathbf{A})$ is the factor by which $\mathbf{A}$ scales volume. $\det\mathbf{A}=0$ exactly when $\mathbf{A}$ squashes space into a lower dimension, i.e. is not invertible. Determinants appear in Gaussian densities and normalising flows. Otherwise they are mostly avoided, because they overflow and underflow easily (use `slogdet`).
+
+## Linear systems, rank, and the four subspaces {#sec-linalg-rank}
+
+### Column space, null space, rank
+
+For $\mathbf{A}\in\mathbb{R}^{m\times n}$:
+
+- **Column space** $\mathcal{C}(\mathbf{A}) = \{\mathbf{A}\mathbf{x}\}$: every output the map can produce. For a linear model, this is *every prediction vector the model can express* on the training set.
+- **Null space** $\mathcal{N}(\mathbf{A}) = \{\mathbf{x} : \mathbf{A}\mathbf{x}=\mathbf{0}\}$: the input directions the map ignores.
+- **Rank** $r=\dim\mathcal{C}(\mathbf{A})$: the number of linearly independent columns, which always equals the number of independent rows. $r\le\min(m,n)$.
+
+The **rank–nullity theorem** says $\operatorname{rank}(\mathbf{A}) + \dim\mathcal{N}(\mathbf{A}) = n$, the number of columns.
+
+**Why ML cares: identifiability.** If $\mathbf{v}\in\mathcal{N}(\mathbf{X})$ with $\mathbf{v}\neq\mathbf{0}$, then $\mathbf{X}(\mathbf{w}+t\mathbf{v}) = \mathbf{X}\mathbf{w}$ for every $t$. Infinitely many weight vectors give *identical predictions*, so "the" coefficients do not exist, even though the predictions are perfectly well defined. You get this when:
+
+- two features are copies or exact linear combinations of each other (e.g. price in USD and price in EUR at a fixed rate);
+- you one-hot encode *all* $K$ levels of a category *and* keep an intercept column (the **dummy-variable trap**): the $K$ indicator columns add up to the intercept column;
+- you have more features than examples ($d>n$), so $\operatorname{rank}\le n<d$ and the null space is non-empty.
+
+### Worked example 3: finding rank and null space
+
+Take
+$$
+\mathbf{A} = \begin{bmatrix}1&2&3\\2&4&6\\1&0&1\end{bmatrix}.
+$$
+Row 2 is twice row 1, so at most two rows are independent. Rows 1 and 3 are not multiples of each other, so $\operatorname{rank}=2$, and by rank–nullity $\dim\mathcal{N}=3-2=1$. To find the null space, solve $x+2y+3z=0$ and $x+z=0$. The second gives $x=-z$. Substituting, $-z+2y+3z=0$, so $y=-z$. With $z=-1$, $\mathbf{v}=(1,1,-1)$. Check: $\mathbf{A}\mathbf{v} = (1+2-3,\ 2+4-6,\ 1+0-1) = \mathbf{0}$. ✓
+
+```{python}
+A = np.array([[1., 2, 3], [2, 4, 6], [1, 0, 1]])
+v = np.array([1., 1, -1])
+print("rank:", np.linalg.matrix_rank(A), " A @ v =", A @ v)
+assert np.linalg.matrix_rank(A) == 2 and np.allclose(A @ v, 0)
+```
+
+### Worked example 4: the dummy-variable trap
+
+```{python}
+colour = np.array([0, 1, 2, 1, 0, 2, 2])       # a categorical feature with 3 levels
+onehot = np.eye(3)[colour]                      # 7 x 3
+X_trap = np.column_stack([np.ones(7), onehot])  # intercept + all 3 dummies
+X_ok = np.column_stack([np.ones(7), onehot[:, 1:]])  # drop one level
+print("trap: shape", X_trap.shape, "rank", np.linalg.matrix_rank(X_trap))
+print("ok:   shape", X_ok.shape, "rank", np.linalg.matrix_rank(X_ok))
+# The null direction: +1 on the intercept, -1 on every dummy
+v = np.array([1., -1, -1, -1])
+assert np.allclose(X_trap @ v, 0)
+```
+
+The trap matrix has 4 columns but rank 3, so its coefficients are not unique. Dropping one level, or dropping the intercept, fixes it. Regularisation such as ridge also makes the solution unique, which is one reason scikit-learn does not complain.
+
+### When does $\mathbf{A}\mathbf{x}=\mathbf{b}$ have a solution?
+
+- **A solution exists** if and only if $\mathbf{b}\in\mathcal{C}(\mathbf{A})$.
+- **It is unique** if and only if $\mathcal{N}(\mathbf{A})=\{\mathbf{0}\}$, i.e. the columns are independent ($\operatorname{rank}=n$).
+
+In regression we usually have $n \gg d$ (many more examples than features), so $\mathbf{y}\notin\mathcal{C}(\mathbf{X})$ and $\mathbf{X}\mathbf{w}=\mathbf{y}$ has *no* exact solution. We then ask for the closest one, which leads to the next section.
+
+## Orthogonality, projections and least squares {#sec-linalg-least-squares}
+
+### Least squares as a projection
+
+We want $\mathbf{w}$ minimising $\|\mathbf{y}-\mathbf{X}\mathbf{w}\|_2^2$. Geometrically, $\mathbf{X}\mathbf{w}$ ranges over the column space, so we want the point of $\mathcal{C}(\mathbf{X})$ closest to $\mathbf{y}$, which is the **orthogonal projection** of $\mathbf{y}$ onto that subspace. Generalising @eq-proj-vector, the residual $\mathbf{r}=\mathbf{y}-\mathbf{X}\hat{\mathbf{w}}$ must be orthogonal to *every* column:
+
+$$
+\mathbf{X}^\top(\mathbf{y}-\mathbf{X}\hat{\mathbf{w}}) = \mathbf{0}
+\quad\Longleftrightarrow\quad
+\mathbf{X}^\top\mathbf{X}\,\hat{\mathbf{w}} = \mathbf{X}^\top\mathbf{y}.
+$$ {#eq-normal-equations}
+
+These are the **normal equations** ("normal" here means perpendicular). The same equations come out of calculus: the gradient of $\|\mathbf{y}-\mathbf{X}\mathbf{w}\|^2$ is $-2\mathbf{X}^\top(\mathbf{y}-\mathbf{X}\mathbf{w})$, and setting it to zero gives @eq-normal-equations. Matrix calculus is covered properly in the next chapter.
+
+**Why the projection is the minimum.** For any other $\mathbf{w}$, write $\mathbf{y}-\mathbf{X}\mathbf{w} = (\mathbf{y}-\mathbf{X}\hat{\mathbf{w}}) + \mathbf{X}(\hat{\mathbf{w}}-\mathbf{w})$. The first term is orthogonal to the column space and the second lies in it, so by Pythagoras
+$$
+\|\mathbf{y}-\mathbf{X}\mathbf{w}\|^2 = \|\mathbf{y}-\mathbf{X}\hat{\mathbf{w}}\|^2 + \|\mathbf{X}(\hat{\mathbf{w}}-\mathbf{w})\|^2 \;\ge\; \|\mathbf{y}-\mathbf{X}\hat{\mathbf{w}}\|^2.
+$$
+
+If $\mathbf{X}$ has full column rank, $\mathbf{X}^\top\mathbf{X}$ is invertible (proved in @sec-linalg-psd), and
+
+$$
+\hat{\mathbf{w}} = (\mathbf{X}^\top\mathbf{X})^{-1}\mathbf{X}^\top\mathbf{y}, \qquad
+\hat{\mathbf{y}} = \underbrace{\mathbf{X}(\mathbf{X}^\top\mathbf{X})^{-1}\mathbf{X}^\top}_{\mathbf{H}\ \text{("hat" matrix)}}\mathbf{y}.
+$$ {#eq-ols}
+
+The hat matrix $\mathbf{H}$ is a projection matrix: it is symmetric ($\mathbf{H}^\top=\mathbf{H}$) and idempotent ($\mathbf{H}^2=\mathbf{H}$, because projecting twice changes nothing).
+
+### Worked example 5: fitting a line by hand
+
+Fit $y = w_0 + w_1 x$ to the points $(0,1), (1,3), (2,4)$.
+
+$$
+\mathbf{X}=\begin{bmatrix}1&0\\1&1\\1&2\end{bmatrix},\;
+\mathbf{y}=\begin{bmatrix}1\\3\\4\end{bmatrix},\;
+\mathbf{X}^\top\mathbf{X}=\begin{bmatrix}3&3\\3&5\end{bmatrix},\;
+\mathbf{X}^\top\mathbf{y}=\begin{bmatrix}8\\11\end{bmatrix}.
+$$
+
+$\det(\mathbf{X}^\top\mathbf{X}) = 15-9 = 6$, so $(\mathbf{X}^\top\mathbf{X})^{-1} = \tfrac16\begin{bmatrix}5&-3\\-3&3\end{bmatrix}$ and
+
+$$
+\hat{\mathbf{w}} = \tfrac16\begin{bmatrix}5\cdot8-3\cdot11\\-3\cdot8+3\cdot11\end{bmatrix} = \tfrac16\begin{bmatrix}7\\9\end{bmatrix} = \begin{bmatrix}1.1\overline{6}\\1.5\end{bmatrix}.
+$$
+
+Check the orthogonality conditions. The predictions are $(1.1\overline{6},\, 2.\overline{6},\, 4.1\overline{6})$ and the residuals are $(-\tfrac16,\, \tfrac13,\, -\tfrac16)$. They sum to $0$, so they are orthogonal to the intercept column. Their $x$-weighted sum is $0\cdot(-\tfrac16)+1\cdot\tfrac13+2\cdot(-\tfrac16)=0$, so they are orthogonal to the $x$ column. ✓
+
+```{python}
+X = np.array([[1., 0], [1, 1], [1, 2]]); y = np.array([1., 3, 4])
+w = np.linalg.solve(X.T @ X, X.T @ y)
+r = y - X @ w
+print("w =", w, " residual =", r, " X^T r =", X.T @ r)
+H = X @ np.linalg.solve(X.T @ X, X.T)
+assert np.allclose(w, [7/6, 1.5]) and np.allclose(X.T @ r, 0)
+assert np.allclose(H, H.T) and np.allclose(H @ H, H)   # symmetric + idempotent
+```
+
+### Orthonormal bases, Gram–Schmidt and QR {#sec-linalg-qr}
+
+Projections become trivial with an **orthonormal** basis $\mathbf{q}_1,\dots,\mathbf{q}_k$ (unit length and mutually orthogonal). The projection of $\mathbf{y}$ onto their span is simply $\sum_i (\mathbf{q}_i^\top\mathbf{y})\,\mathbf{q}_i = \mathbf{Q}\mathbf{Q}^\top\mathbf{y}$. There is nothing to invert.
+
+**Gram–Schmidt** turns independent columns $\mathbf{a}_1,\dots,\mathbf{a}_n$ into an orthonormal set. Take each column, subtract its projections onto the $\mathbf{q}$'s found so far, and normalise what is left. Recording the coefficients gives the factorisation
+
+$$
+\mathbf{A} = \mathbf{Q}\mathbf{R},\qquad \mathbf{Q}\in\mathbb{R}^{m\times n}\text{ with orthonormal columns},\ \mathbf{R}\in\mathbb{R}^{n\times n}\text{ upper triangular}.
+$$
+
+With $\mathbf{X}=\mathbf{Q}\mathbf{R}$, the normal equations become $\mathbf{R}^\top\mathbf{Q}^\top\mathbf{Q}\mathbf{R}\mathbf{w}=\mathbf{R}^\top\mathbf{Q}^\top\mathbf{y}$. Since $\mathbf{Q}^\top\mathbf{Q}=\mathbf{I}$ and $\mathbf{R}^\top$ is invertible, this reduces to $\mathbf{R}\mathbf{w}=\mathbf{Q}^\top\mathbf{y}$, a triangular system solved by back-substitution. This route never forms $\mathbf{X}^\top\mathbf{X}$, which is why it is more accurate (see @sec-linalg-conditioning).
+
+```{python}
+#| label: gram-schmidt
+def gram_schmidt_qr(A):
+    """Modified Gram-Schmidt: A (m x n, independent columns) -> Q (m x n), R (n x n)."""
+    m, n = A.shape
+    Q = A.astype(float).copy()
+    R = np.zeros((n, n))
+    for j in range(n):
+        for i in range(j):                 # remove components along earlier q's
+            R[i, j] = Q[:, i] @ Q[:, j]
+            Q[:, j] -= R[i, j] * Q[:, i]
+        R[j, j] = np.linalg.norm(Q[:, j])
+        Q[:, j] /= R[j, j]
+    return Q, R
+
+def back_substitute(R, b):
+    n = len(b); x = np.zeros(n)
+    for i in reversed(range(n)):
+        x[i] = (b[i] - R[i, i+1:] @ x[i+1:]) / R[i, i]
+    return x
+
+A = rng.normal(size=(6, 4))
+Q, R = gram_schmidt_qr(A)
+assert np.allclose(Q @ R, A) and np.allclose(Q.T @ Q, np.eye(4)) and np.allclose(R, np.triu(R))
+Q_np, R_np = np.linalg.qr(A)
+assert np.allclose(np.abs(R), np.abs(R_np))  # same up to the sign of each column
+
+# Least squares via QR, checked against numpy
+y = rng.normal(size=6)
+w_qr = back_substitute(R, Q.T @ y)
+assert np.allclose(w_qr, np.linalg.lstsq(A, y, rcond=None)[0])
+print("Gram-Schmidt QR and least squares via QR match numpy.")
+```
+
+## Eigenvalues and eigenvectors {#sec-linalg-eigen}
+
+### Definition and intuition
+
+A nonzero vector $\mathbf{v}$ is an **eigenvector** of a square matrix $\mathbf{A}$ with **eigenvalue** $\lambda$ if
+
+$$
+\mathbf{A}\mathbf{v} = \lambda\mathbf{v}.
+$$
+
+Along an eigenvector, the map only stretches by $\lambda$ (or flips, if $\lambda<0$). It never rotates. The eigenvalues are the roots of the **characteristic polynomial** $\det(\mathbf{A}-\lambda\mathbf{I})=0$, because $(\mathbf{A}-\lambda\mathbf{I})\mathbf{v}=\mathbf{0}$ with $\mathbf{v}\ne\mathbf{0}$ requires $\mathbf{A}-\lambda\mathbf{I}$ to be singular. Two facts make quick checks easy:
+
+$$
+\operatorname{tr}(\mathbf{A}) = \sum_i\lambda_i, \qquad \det(\mathbf{A}) = \prod_i\lambda_i.
+$$
+
+### The spectral theorem: symmetric matrices
+
+ML's matrices are usually symmetric (covariances, Gram and kernel matrices, Hessians), and symmetric matrices behave especially well.
+
+::: {.callout-important title="Spectral theorem"}
+If $\mathbf{A}=\mathbf{A}^\top\in\mathbb{R}^{n\times n}$, then all eigenvalues are **real**, and there is an **orthonormal** basis of eigenvectors:
+$$
+\mathbf{A} = \mathbf{Q}\boldsymbol\Lambda\mathbf{Q}^\top = \sum_{i=1}^n \lambda_i\,\mathbf{q}_i\mathbf{q}_i^\top,\qquad \mathbf{Q}^\top\mathbf{Q}=\mathbf{I}.
+$$
+:::
+
+So a symmetric matrix does three things: it rotates into the eigenbasis ($\mathbf{Q}^\top$), scales each axis ($\boldsymbol\Lambda$), and rotates back ($\mathbf{Q}$).
+
+**Proof that eigenvectors for different eigenvalues are orthogonal.** Let $\mathbf{A}\mathbf{u}=\lambda\mathbf{u}$ and $\mathbf{A}\mathbf{v}=\mu\mathbf{v}$ with $\lambda\ne\mu$. Then $\lambda\,\mathbf{u}^\top\mathbf{v} = (\mathbf{A}\mathbf{u})^\top\mathbf{v} = \mathbf{u}^\top\mathbf{A}^\top\mathbf{v} = \mathbf{u}^\top\mathbf{A}\mathbf{v} = \mu\,\mathbf{u}^\top\mathbf{v}$. So $(\lambda-\mu)\mathbf{u}^\top\mathbf{v}=0$, which forces $\mathbf{u}^\top\mathbf{v}=0$.
+
+### Worked example 6: a 2×2 eigendecomposition
+
+$\mathbf{A}=\begin{bmatrix}2&1\\1&2\end{bmatrix}$. The characteristic polynomial is $(2-\lambda)^2-1 = 0$, so $\lambda = 3$ or $\lambda = 1$. Check: trace $4=3+1$ ✓, det $3=3\cdot1$ ✓.
+
+- $\lambda=3$: $(\mathbf{A}-3\mathbf{I})\mathbf{v}=\begin{bmatrix}-1&1\\1&-1\end{bmatrix}\mathbf{v}=\mathbf{0}$, so $\mathbf{q}_1=\tfrac{1}{\sqrt2}(1,1)$.
+- $\lambda=1$: $\begin{bmatrix}1&1\\1&1\end{bmatrix}\mathbf{v}=\mathbf{0}$, so $\mathbf{q}_2=\tfrac{1}{\sqrt2}(1,-1)$.
+
+$\mathbf{A}$ stretches the diagonal direction $(1,1)$ by 3 and leaves the anti-diagonal unchanged. Note that $\mathbf{q}_1\perp\mathbf{q}_2$, as the spectral theorem promises.
+
+```{python}
+A = np.array([[2., 1], [1, 2]])
+lam, Q = np.linalg.eigh(A)          # eigh: for symmetric matrices, ascending eigenvalues
+print("eigenvalues:", lam); print("eigenvectors (columns):\n", Q)
+assert np.allclose(Q @ np.diag(lam) @ Q.T, A) and np.allclose(Q.T @ Q, np.eye(2))
+assert np.isclose(lam.sum(), np.trace(A)) and np.isclose(lam.prod(), np.linalg.det(A))
+```
+
+::: {.callout-warning title="eig vs eigh"}
+Use `np.linalg.eigh` for symmetric matrices. It is faster, it guarantees real eigenvalues (sorted ascending) and orthonormal eigenvectors. `np.linalg.eig` works for any square matrix but may return complex numbers and non-orthogonal vectors because of round-off.
+:::
+
+### Positive semidefinite matrices and quadratic forms {#sec-linalg-psd}
+
+A symmetric $\mathbf{A}$ is **positive semidefinite (PSD)**, written $\mathbf{A}\succeq0$, if $\mathbf{z}^\top\mathbf{A}\mathbf{z}\ge 0$ for all $\mathbf{z}$. It is **positive definite (PD)**, $\mathbf{A}\succ0$, if $\mathbf{z}^\top\mathbf{A}\mathbf{z}>0$ for all $\mathbf{z}\ne\mathbf{0}$. Using the spectral decomposition with $\mathbf{c}=\mathbf{Q}^\top\mathbf{z}$,
+
+$$
+\mathbf{z}^\top\mathbf{A}\mathbf{z} = \mathbf{c}^\top\boldsymbol\Lambda\mathbf{c} = \sum_i\lambda_i c_i^2,
+$$
+
+so **PSD $\iff$ all $\lambda_i\ge0$**, and **PD $\iff$ all $\lambda_i>0$**. The level sets of $\mathbf{z}^\top\mathbf{A}\mathbf{z}$ are ellipses whose axes are the eigenvectors, with lengths proportional to $1/\sqrt{\lambda_i}$.
+
+**Every Gram matrix is PSD:** $\mathbf{z}^\top\mathbf{X}^\top\mathbf{X}\mathbf{z} = \|\mathbf{X}\mathbf{z}\|^2\ge0$. It is PD exactly when $\mathbf{X}\mathbf{z}\neq\mathbf{0}$ for every $\mathbf{z}\neq\mathbf{0}$, i.e. when $\mathbf{X}$ has full column rank. This proves the claim used in @eq-ols. Where PSD matrices appear in ML:
+
+- **Covariance matrices** $\boldsymbol\Sigma = \mathbb{E}[(\mathbf{x}-\boldsymbol\mu)(\mathbf{x}-\boldsymbol\mu)^\top]$, since $\mathbf{z}^\top\boldsymbol\Sigma\mathbf{z}=\operatorname{Var}(\mathbf{z}^\top\mathbf{x})\ge0$.
+- **Kernel matrices** $K_{ij}=k(\mathbf{x}_i,\mathbf{x}_j)$ (SVMs, Gaussian processes). A valid kernel *must* give a PSD matrix.
+- **Hessians of convex functions.** A function is convex where its Hessian is PSD (covered in the optimization chapter).
+
+### Power iteration {#sec-linalg-power}
+
+How do you find the top eigenvector of a huge matrix (PageRank, top principal component) without a full decomposition? Repeatedly multiply and normalise:
+
+$$
+\mathbf{v}_{t+1} = \frac{\mathbf{A}\mathbf{v}_t}{\|\mathbf{A}\mathbf{v}_t\|}.
+$$
+
+**Why it works.** Write $\mathbf{v}_0=\sum_i c_i\mathbf{q}_i$ in the eigenbasis, with $|\lambda_1|>|\lambda_2|\ge\dots$. Then $\mathbf{A}^t\mathbf{v}_0 = \lambda_1^t\big(c_1\mathbf{q}_1 + \sum_{i\ge2}c_i(\lambda_i/\lambda_1)^t\mathbf{q}_i\big)$. Every other component shrinks like $|\lambda_2/\lambda_1|^t$, so the **eigengap** controls the speed. The eigenvalue estimate is the Rayleigh quotient $\mathbf{v}^\top\mathbf{A}\mathbf{v}$ (for unit $\mathbf{v}$). This requires $c_1\neq0$, which a random start gives with probability 1.
+
+```{python}
+#| label: fig-power-iteration
+#| fig-cap: "Power iteration: the angle error shrinks geometrically at rate |λ2/λ1|."
+def power_iteration(A, iters=100, seed=0):
+    v = np.random.default_rng(seed).normal(size=A.shape[0])
+    v /= np.linalg.norm(v)
+    history = []
+    for _ in range(iters):
+        v = A @ v
+        v /= np.linalg.norm(v)
+        history.append(v.copy())
+    return v @ A @ v, v, history
+
+# A symmetric matrix with known eigenvalues 5, 2, 1, 0.5
+Qr, _ = np.linalg.qr(rng.normal(size=(4, 4)))
+A = Qr @ np.diag([5., 2, 1, 0.5]) @ Qr.T
+lam1, v1, hist = power_iteration(A)
+assert np.isclose(lam1, 5.0) and np.isclose(abs(v1 @ Qr[:, 0]), 1.0)
+
+err = [np.sqrt(max(0.0, 1 - (h @ Qr[:, 0])**2)) for h in hist]   # sin(angle to the true q1)
+plt.semilogy(err, label="power iteration")
+plt.semilogy(err[0] * (2/5) ** np.arange(len(err)), "--", label=r"$(\lambda_2/\lambda_1)^t$")
+plt.xlabel("iteration"); plt.ylabel("sin(angle) error"); plt.legend(); plt.ylim(1e-16, 2); plt.show()
+```
+
+## The singular value decomposition {#sec-linalg-svd}
+
+### Statement and geometry
+
+Eigendecompositions need a square matrix, and the nice orthonormal version needs a symmetric one. The **SVD** works for *every* matrix.
+
+::: {.callout-important title="Singular value decomposition"}
+Any $\mathbf{A}\in\mathbb{R}^{m\times n}$ of rank $r$ can be written
+$$
+\mathbf{A} = \mathbf{U}\boldsymbol\Sigma\mathbf{V}^\top = \sum_{i=1}^{r}\sigma_i\,\mathbf{u}_i\mathbf{v}_i^\top,\qquad \sigma_1\ge\sigma_2\ge\dots\ge\sigma_r>0,
+$$
+where the **left singular vectors** $\mathbf{u}_i\in\mathbb{R}^m$ are orthonormal and the **right singular vectors** $\mathbf{v}_i\in\mathbb{R}^n$ are orthonormal.
+:::
+
+**Geometry.** Every linear map does three things: it rotates ($\mathbf{V}^\top$), stretches along the axes ($\boldsymbol\Sigma$), and rotates again ($\mathbf{U}$). It sends the unit sphere to an ellipsoid with semi-axes $\sigma_i\mathbf{u}_i$. The SVD is also a sum of rank-1 pieces sorted by importance, which is the reason it underlies all low-rank methods.
+
+**Connection to eigenvalues.** $\mathbf{A}^\top\mathbf{A} = \mathbf{V}\boldsymbol\Sigma^\top\mathbf{U}^\top\mathbf{U}\boldsymbol\Sigma\mathbf{V}^\top = \mathbf{V}\boldsymbol\Sigma^\top\boldsymbol\Sigma\mathbf{V}^\top$. So the right singular vectors are the eigenvectors of $\mathbf{A}^\top\mathbf{A}$, and $\sigma_i^2$ are its eigenvalues. In the same way, the $\mathbf{u}_i$ are eigenvectors of $\mathbf{A}\mathbf{A}^\top$. Given $\mathbf{v}_i$, we get $\mathbf{u}_i = \mathbf{A}\mathbf{v}_i/\sigma_i$.
+
+### Worked example 7: an SVD by hand
+
+$\mathbf{A}=\begin{bmatrix}3&0\\4&5\end{bmatrix}$. Then $\mathbf{A}^\top\mathbf{A}=\begin{bmatrix}25&20\\20&25\end{bmatrix}$, whose eigenvalues are $45$ and $5$ (by the same pattern as worked example 6), with eigenvectors $\mathbf{v}_1=\tfrac1{\sqrt2}(1,1)$ and $\mathbf{v}_2=\tfrac1{\sqrt2}(1,-1)$. So $\sigma_1=\sqrt{45}=3\sqrt5$ and $\sigma_2=\sqrt5$. Then
+
+$$
+\mathbf{u}_1=\frac{\mathbf{A}\mathbf{v}_1}{\sigma_1}=\frac{(3,9)/\sqrt2}{3\sqrt5}=\tfrac{1}{\sqrt{10}}(1,3),\qquad
+\mathbf{u}_2=\frac{\mathbf{A}\mathbf{v}_2}{\sigma_2}=\frac{(3,-1)/\sqrt2}{\sqrt5}=\tfrac{1}{\sqrt{10}}(3,-1).
+$$
+
+Check: $\mathbf{u}_1^\top\mathbf{u}_2 = (3-3)/10 = 0$ ✓, and $\sigma_1\sigma_2 = 15 = |\det\mathbf{A}|$ ✓.
+
+```{python}
+#| label: fig-svd-ellipse
+#| fig-cap: "A = UΣVᵀ maps the unit circle (left) to an ellipse (right) with semi-axes σ1·u1 and σ2·u2. The right singular vectors v1, v2 are the circle directions that land on the axes."
+A = np.array([[3., 0], [4, 5]])
+U, s, Vt = np.linalg.svd(A)
+print("singular values:", s, " expected:", np.array([3*np.sqrt(5), np.sqrt(5)]))
+assert np.allclose(s, [3*np.sqrt(5), np.sqrt(5)])
+assert np.allclose(np.abs(U[:, 0]), np.array([1, 3]) / np.sqrt(10))
+
+t = np.linspace(0, 2*np.pi, 200); circle = np.stack([np.cos(t), np.sin(t)])
+ellipse = A @ circle
+fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+axes[0].plot(*circle, "k", lw=1)
+for i, c in enumerate(["C0", "C1"]):
+    axes[0].annotate("", xy=Vt[i], xytext=(0, 0), arrowprops=dict(arrowstyle="->", color=c, lw=2))
+    axes[1].annotate("", xy=s[i] * U[:, i], xytext=(0, 0), arrowprops=dict(arrowstyle="->", color=c, lw=2))
+axes[1].plot(*ellipse, "k", lw=1)
+axes[0].set_title("unit circle, $v_1, v_2$"); axes[1].set_title(r"$A\cdot$circle, $\sigma_1 u_1, \sigma_2 u_2$")
+for ax in axes: ax.set_aspect("equal"); ax.axhline(0, c="gray", lw=.5); ax.axvline(0, c="gray", lw=.5)
+plt.tight_layout(); plt.show()
+```
+
+### Low-rank approximation (Eckart–Young) {#sec-linalg-lowrank}
+
+Keeping only the top $k$ terms of the SVD gives $\mathbf{A}_k=\sum_{i=1}^k\sigma_i\mathbf{u}_i\mathbf{v}_i^\top$.
+
+::: {.callout-important title="Eckart–Young–Mirsky theorem"}
+Among all matrices of rank at most $k$, $\mathbf{A}_k$ is the closest to $\mathbf{A}$ in both the spectral and Frobenius norms:
+$$
+\|\mathbf{A}-\mathbf{A}_k\|_2 = \sigma_{k+1},\qquad \|\mathbf{A}-\mathbf{A}_k\|_F = \sqrt{\textstyle\sum_{i>k}\sigma_i^2}.
+$$
+:::
+
+This one theorem is behind:
+
+- **PCA.** The top-$k$ right singular vectors of the *centred* data matrix are the principal directions, and $\sigma_i^2/(n-1)$ is the variance along each one. (There is a full PCA chapter later.)
+- **Compression.** Storing $\mathbf{A}_k$ takes $k(m+n+1)$ numbers instead of $mn$.
+- **Recommender systems.** A ratings matrix is assumed to be approximately low rank (user taste × item features).
+- **LoRA.** A fine-tuning update $\Delta\mathbf{W}$ is constrained to rank $r$, i.e. $\Delta\mathbf{W}=\mathbf{B}\mathbf{A}$ with only $r(d_\text{in}+d_\text{out})$ parameters.
+
+### Worked example 8: low-rank structure of handwritten digits
+
+The 1,797 handwritten digits in scikit-learn are $8\times8$ images, giving a $1797\times64$ data matrix. How much of the image content survives with only $k$ singular directions?
+
+```{python}
+#| label: fig-digits-lowrank
+#| fig-cap: "Left: the singular values of the centred digits matrix decay quickly. Right: one digit reconstructed from k components."
+from sklearn.datasets import load_digits
+X = load_digits().data                      # 1797 x 64
+mu = X.mean(axis=0); Xc = X - mu
+U, s, Vt = np.linalg.svd(Xc, full_matrices=False)
+
+def rank_k(U, s, Vt, k):
+    return (U[:, :k] * s[:k]) @ Vt[:k]
+
+for k in [2, 10, 20, 40]:
+    err = np.linalg.norm(Xc - rank_k(U, s, Vt, k))
+    assert np.isclose(err, np.sqrt((s[k:]**2).sum()))           # Eckart-Young, Frobenius
+    assert np.isclose(np.linalg.norm(Xc - rank_k(U, s, Vt, k), 2), s[k])  # spectral norm
+    print(f"k={k:2d}: relative error {err/np.linalg.norm(Xc):.3f}, "
+          f"energy kept {(s[:k]**2).sum()/(s**2).sum():.3f}")
+
+fig, axes = plt.subplots(1, 6, figsize=(10, 2.2), gridspec_kw={"width_ratios": [3, 1, 1, 1, 1, 1]})
+axes[0].semilogy(s, "o-", ms=2); axes[0].set_title("singular values"); axes[0].set_xlabel("i")
+for ax, k in zip(axes[1:], [2, 5, 10, 20, 64]):
+    ax.imshow((rank_k(U, s, Vt, k)[0] + mu).reshape(8, 8), cmap="gray_r")
+    ax.set_title(f"k={k}"); ax.axis("off")
+plt.tight_layout(); plt.show()
+```
+
+About 20 of 64 directions keep roughly 90% of the variation. The data lives close to a low-dimensional subspace, and much of machine learning relies on this kind of structure.
+
+### The pseudoinverse and minimum-norm solutions
+
+When $\mathbf{X}$ is rank-deficient, the normal equations have infinitely many solutions. The SVD picks the one with the **smallest norm**:
+
+$$
+\mathbf{X}^+ = \mathbf{V}\boldsymbol\Sigma^+\mathbf{U}^\top,\quad \boldsymbol\Sigma^+ = \operatorname{diag}(1/\sigma_1,\dots,1/\sigma_r,0,\dots,0),\qquad \hat{\mathbf{w}} = \mathbf{X}^+\mathbf{y}.
+$$
+
+**Why it has minimum norm.** Every solution has the form $\hat{\mathbf{w}} + \mathbf{n}$ with $\mathbf{n}\in\mathcal{N}(\mathbf{X})$. The vector $\mathbf{X}^+\mathbf{y}$ lies in the span of $\mathbf{v}_1,\dots,\mathbf{v}_r$, which is orthogonal to the null space. So $\|\hat{\mathbf{w}}+\mathbf{n}\|^2=\|\hat{\mathbf{w}}\|^2+\|\mathbf{n}\|^2$, which is smallest when $\mathbf{n}=\mathbf{0}$. This is what `np.linalg.lstsq` and `np.linalg.pinv` return. Interestingly, gradient descent started from $\mathbf{w}=\mathbf{0}$ on an under-determined least-squares problem converges to this same minimum-norm solution, an early example of *implicit regularisation*.
+
+```{python}
+X = rng.normal(size=(5, 8))                  # d > n: infinitely many exact fits
+y = rng.normal(size=5)
+U, s, Vt = np.linalg.svd(X, full_matrices=False)
+w_pinv = Vt.T @ ((U.T @ y) / s)
+assert np.allclose(X @ w_pinv, y)                         # fits exactly
+assert np.allclose(w_pinv, np.linalg.lstsq(X, y, rcond=None)[0])
+null_dir = np.linalg.svd(X)[2][-1]                        # a vector in N(X)
+w_other = w_pinv + 3 * null_dir
+assert np.allclose(X @ w_other, y)                        # also fits exactly...
+print("norm of pinv solution:", np.linalg.norm(w_pinv).round(4),
+      " other solution:", np.linalg.norm(w_other).round(4))   # ...but is longer
+```
+
+### Ridge regression through the SVD
+
+Ridge regression minimises $\|\mathbf{y}-\mathbf{X}\mathbf{w}\|^2+\lambda\|\mathbf{w}\|^2$, and its solution is $\hat{\mathbf{w}}_\lambda=(\mathbf{X}^\top\mathbf{X}+\lambda\mathbf{I})^{-1}\mathbf{X}^\top\mathbf{y}$. Substitute $\mathbf{X}=\mathbf{U}\boldsymbol\Sigma\mathbf{V}^\top$ (thin SVD, with $\mathbf{V}$ square when $n \ge d$). Then $\mathbf{X}^\top\mathbf{X}+\lambda\mathbf{I} = \mathbf{V}(\boldsymbol\Sigma^2+\lambda\mathbf{I})\mathbf{V}^\top$, so
+
+$$
+\hat{\mathbf{w}}_\lambda = \sum_{i}\frac{\sigma_i}{\sigma_i^2+\lambda}\,(\mathbf{u}_i^\top\mathbf{y})\,\mathbf{v}_i,
+\qquad
+\hat{\mathbf{y}}_\lambda = \sum_i \underbrace{\frac{\sigma_i^2}{\sigma_i^2+\lambda}}_{\text{shrinkage factor}}(\mathbf{u}_i^\top\mathbf{y})\,\mathbf{u}_i.
+$$ {#eq-ridge-svd}
+
+Compare this with OLS ($\lambda=0$), whose factor is $1/\sigma_i$. Directions with small $\sigma_i$, where the data carries little information and noise is amplified most, are **shrunk the most**. Ridge is a smooth version of keeping only the top singular directions. The sum $\sum_i\sigma_i^2/(\sigma_i^2+\lambda)$ is the **effective degrees of freedom** of the fit.
+
+```{python}
+from sklearn.linear_model import Ridge
+n, d, lam = 50, 6, 3.0
+X = rng.normal(size=(n, d)); y = X @ rng.normal(size=d) + 0.5 * rng.normal(size=n)
+U, s, Vt = np.linalg.svd(X, full_matrices=False)
+w_svd = Vt.T @ (s / (s**2 + lam) * (U.T @ y))
+w_sk = Ridge(alpha=lam, fit_intercept=False).fit(X, y).coef_
+assert np.allclose(w_svd, w_sk)
+print("shrinkage factors:", (s**2 / (s**2 + lam)).round(3))
+print("effective dof:", (s**2 / (s**2 + lam)).sum().round(3), "of", d)
+```
+
+## Conditioning and numerical stability {#sec-linalg-conditioning}
+
+The **condition number** of a matrix (in the 2-norm) is
+
+$$
+\kappa(\mathbf{A}) = \frac{\sigma_{\max}}{\sigma_{\min}}.
+$$
+
+It bounds how much relative error in the input can grow in the output when solving $\mathbf{A}\mathbf{x}=\mathbf{b}$: roughly, you lose $\log_{10}\kappa$ digits of accuracy. Double precision has about 16 digits, so $\kappa\approx10^{12}$ leaves you about 4.
+
+The key fact for regression is that $\kappa(\mathbf{X}^\top\mathbf{X})=\kappa(\mathbf{X})^2$, because the singular values of $\mathbf{X}^\top\mathbf{X}$ are the squares $\sigma_i^2$. **Forming the normal equations squares the condition number**, which doubles the number of digits lost. QR and SVD work with $\mathbf{X}$ directly and lose only $\log_{10}\kappa(\mathbf{X})$ digits. The condition number also governs how fast gradient descent converges on a quadratic, as the optimization chapter shows. That is why feature scaling speeds up training.
+
+### Worked example 9: polynomial features are badly conditioned
+
+```{python}
+x = np.linspace(0, 1, 30)
+true_w = rng.normal(size=11)
+print(f"{'degree':>6} {'cond(X)':>10} {'cond(XtX)':>10} {'err normal-eq':>14} {'err QR':>10}")
+for deg in [3, 6, 10]:
+    X = np.vander(x, deg + 1, increasing=True)          # columns 1, x, x^2, ...
+    w_true = true_w[:deg + 1]; y = X @ w_true            # noiseless: exact answer known
+    kX, kG = np.linalg.cond(X), np.linalg.cond(X.T @ X)
+    assert np.isclose(np.log10(kG), 2 * np.log10(kX), rtol=0.05)   # kappa squared
+    w_ne = np.linalg.solve(X.T @ X, X.T @ y)
+    Q, R = np.linalg.qr(X); w_qr = np.linalg.solve(R, Q.T @ y)
+    rel = lambda w: np.linalg.norm(w - w_true) / np.linalg.norm(w_true)
+    print(f"{deg:>6} {kX:>10.1e} {kG:>10.1e} {rel(w_ne):>14.1e} {rel(w_qr):>10.1e}")
+```
+
+As the degree grows, the normal-equation solution loses accuracy much faster than QR does. In practice:
+
+::: {.callout-warning title="Numerical rules of thumb"}
+1. **Never compute `inv(X.T @ X) @ X.T @ y`.** Use `np.linalg.lstsq` (SVD-based), a QR solve, or `np.linalg.solve` if you must use normal equations.
+2. **Standardise features** (zero mean, unit variance). This often cuts $\kappa$ by orders of magnitude.
+3. **Add a ridge term** $\lambda\mathbf{I}$. It lifts every eigenvalue of $\mathbf{X}^\top\mathbf{X}$ by $\lambda$, so $\kappa(\mathbf{X}^\top\mathbf{X}+\lambda\mathbf{I})=(\sigma_1^2+\lambda)/(\sigma_d^2+\lambda)$.
+4. **Use `slogdet`** instead of `det`, and **`logsumexp`** instead of `log(sum(exp))`.
+:::
+
+## Matrix norms
+
+| Norm | Definition | Equals |
+|---|---|---|
+| Frobenius | $\|\mathbf{A}\|_F=\sqrt{\sum_{ij}A_{ij}^2}$ | $\sqrt{\operatorname{tr}(\mathbf{A}^\top\mathbf{A})}=\sqrt{\sum_i\sigma_i^2}$ |
+| Spectral (operator 2-norm) | $\|\mathbf{A}\|_2=\max_{\|\mathbf{x}\|=1}\|\mathbf{A}\mathbf{x}\|$ | $\sigma_1$ |
+| Nuclear | $\|\mathbf{A}\|_*$ | $\sum_i\sigma_i$ (a convex proxy for rank, used in matrix completion) |
+
+The spectral norm is the largest factor by which the matrix can stretch a vector. It appears in **Lipschitz bounds** for neural networks, in spectral normalisation for GANs, and in stability analysis. A layer with $\|\mathbf{W}\|_2\le1$ can never amplify the size of a perturbation.
+
+```{python}
+A = rng.normal(size=(5, 3)); s = np.linalg.svd(A, compute_uv=False)
+assert np.isclose(np.linalg.norm(A, "fro"), np.sqrt((s**2).sum()))
+assert np.isclose(np.linalg.norm(A, 2), s[0])
+assert np.isclose(np.linalg.norm(A, "nuc"), s.sum())
+# The spectral norm is the max stretch: no random unit vector beats sigma_1
+xs = rng.normal(size=(3, 10000)); xs /= np.linalg.norm(xs, axis=0)
+assert np.linalg.norm(A @ xs, axis=0).max() <= s[0] + 1e-12
+print("Frobenius, spectral and nuclear norms match their singular-value formulas.")
+```
+
+## Pitfalls and practical notes
+
+::: {.callout-warning title="Common mistakes"}
+- **Broadcasting surprises.** If `y` has shape `(n,)` and `X @ w` has shape `(n, 1)`, then `y - X @ w` has shape `(n, n)`. Keep 1-D vectors consistently, or check `.shape` with an assert.
+- **Row vs column convention.** The maths treats examples as columns $\mathbf{x}$, while the data matrix stores them as rows. That is why a layer is written $\mathbf{W}\mathbf{x}$ in the maths but `X @ W.T` in PyTorch's `nn.Linear`.
+- **Sign and order of eigenvectors.** Eigenvectors and singular vectors are only defined up to sign (and, for repeated eigenvalues, up to rotation within the eigenspace). Compare them with `abs` or through projections. `eigh` sorts eigenvalues in ascending order, while `svd` sorts singular values in descending order.
+- **Rank tolerance.** In floating point, "rank" means "number of singular values above a tolerance". Duplicated or almost duplicated features give tiny singular values, not exact zeros.
+- **Reading parameters when columns are collinear.** If two features are nearly collinear, individual coefficients can be huge, unstable and meaningless, while predictions stay fine. Do not interpret coefficients without checking the condition number.
+:::
+
+## Exercises
+
+**1. [E]** Compute the cosine similarity of $(1,2,2)$ and $(2,0,1)$.
+
+::: {.callout-note collapse="true" title="Solution"}
+The dot product is $2+0+2=4$, and the norms are $\sqrt{1+4+4}=3$ and $\sqrt{4+0+1}=\sqrt5$. So $\cos = 4/(3\sqrt5)\approx0.596$.
+:::
+
+**2. [E]** For $\mathbf{X}\in\mathbb{R}^{100\times5}$, give the shapes of $\mathbf{X}^\top\mathbf{X}$, $\mathbf{X}\mathbf{X}^\top$, and $\mathbf{X}^\top\mathbf{y}$. What is the largest possible rank of $\mathbf{X}\mathbf{X}^\top$?
+
+::: {.callout-note collapse="true" title="Solution"}
+$5\times5$, $100\times100$, and $5$. Since $\operatorname{rank}(\mathbf{X}\mathbf{X}^\top)=\operatorname{rank}(\mathbf{X})\le5$, the $100\times100$ matrix $\mathbf{X}\mathbf{X}^\top$ has at least 95 zero eigenvalues.
+:::
+
+**3. [E]** Show that $\mathbf{P}=\mathbf{a}\mathbf{a}^\top/(\mathbf{a}^\top\mathbf{a})$ is symmetric and idempotent. What are its eigenvalues?
+
+::: {.callout-note collapse="true" title="Solution"}
+Symmetric: $(\mathbf{a}\mathbf{a}^\top)^\top=\mathbf{a}\mathbf{a}^\top$. Idempotent: $\mathbf{P}^2=\mathbf{a}(\mathbf{a}^\top\mathbf{a})\mathbf{a}^\top/(\mathbf{a}^\top\mathbf{a})^2=\mathbf{P}$. If $\mathbf{P}\mathbf{v}=\lambda\mathbf{v}$, then $\lambda\mathbf{v}=\mathbf{P}\mathbf{v}=\mathbf{P}^2\mathbf{v}=\lambda^2\mathbf{v}$, so $\lambda\in\{0,1\}$. The eigenvalue 1 has eigenvector $\mathbf{a}$, and the eigenvalue 0 has the $(d-1)$-dimensional space $\mathbf{a}^\perp$ as eigenspace.
+:::
+
+**4. [E]** Find the eigenvalues and eigenvectors of $\begin{bmatrix}4&1\\2&3\end{bmatrix}$. Check them with the trace and determinant.
+
+::: {.callout-note collapse="true" title="Solution"}
+Trace 7 and determinant 10 give $\lambda^2-7\lambda+10=0$, so $\lambda\in\{5,2\}$. For $\lambda=5$: $\begin{bmatrix}-1&1\\2&-2\end{bmatrix}\mathbf{v}=0$ gives $\mathbf{v}=(1,1)$. For $\lambda=2$: $\begin{bmatrix}2&1\\2&1\end{bmatrix}\mathbf{v}=0$ gives $\mathbf{v}=(1,-2)$. These eigenvectors are *not* orthogonal ($1-2\ne0$), which is fine because the matrix is not symmetric.
+:::
+
+**5. [M]** Prove that for nonzero $\mathbf{u}\in\mathbb{R}^m$ and $\mathbf{v}\in\mathbb{R}^n$, the outer product $\mathbf{u}\mathbf{v}^\top$ has rank 1. What are its singular values?
+
+::: {.callout-note collapse="true" title="Solution"}
+Every column is $v_j\mathbf{u}$, a multiple of $\mathbf{u}$, so the column space is $\operatorname{span}(\mathbf{u})$ and the rank is 1 (it is not 0 because some $v_j\ne0$). Writing $\mathbf{u}\mathbf{v}^\top = \|\mathbf{u}\|\|\mathbf{v}\|\cdot\frac{\mathbf{u}}{\|\mathbf{u}\|}\frac{\mathbf{v}^\top}{\|\mathbf{v}\|}$ gives a valid SVD with $\sigma_1=\|\mathbf{u}\|\|\mathbf{v}\|$. All other singular values are 0.
+:::
+
+**6. [M]** Prove $\|\mathbf{A}\|_2=\sigma_1$, i.e. $\max_{\|\mathbf{x}\|=1}\|\mathbf{A}\mathbf{x}\|=\sigma_1$.
+
+::: {.callout-note collapse="true" title="Solution"}
+Write $\mathbf{x}=\mathbf{V}\mathbf{c}$ with $\|\mathbf{c}\|=\|\mathbf{x}\|=1$. Then $\|\mathbf{A}\mathbf{x}\|^2=\|\mathbf{U}\boldsymbol\Sigma\mathbf{c}\|^2=\|\boldsymbol\Sigma\mathbf{c}\|^2=\sum_i\sigma_i^2c_i^2\le\sigma_1^2\sum_ic_i^2=\sigma_1^2$, with equality at $\mathbf{c}=\mathbf{e}_1$, i.e. $\mathbf{x}=\mathbf{v}_1$.
+:::
+
+**7. [M]** Show that for least squares, $\|\mathbf{y}\|^2=\|\hat{\mathbf{y}}\|^2+\|\mathbf{y}-\hat{\mathbf{y}}\|^2$. When the model includes an intercept, use this to derive $R^2 = 1-\text{RSS}/\text{TSS}\in[0,1]$.
+
+::: {.callout-note collapse="true" title="Solution"}
+$\hat{\mathbf{y}}\in\mathcal{C}(\mathbf{X})$ and $\mathbf{y}-\hat{\mathbf{y}}\perp\mathcal{C}(\mathbf{X})$, so the cross term $2\hat{\mathbf{y}}^\top(\mathbf{y}-\hat{\mathbf{y}})$ vanishes and Pythagoras gives the identity. With an intercept, $\mathbf{1}\in\mathcal{C}(\mathbf{X})$, so the residuals sum to zero and $\bar{\hat y}=\bar y$. Apply the same argument to the centred vectors $\mathbf{y}-\bar y\mathbf{1}$ and $\hat{\mathbf{y}}-\bar y\mathbf{1}$ (both differences of vectors whose relevant parts are in the column space) to get TSS = ESS + RSS. Hence $R^2=\text{ESS}/\text{TSS}=1-\text{RSS}/\text{TSS}\in[0,1]$. Without an intercept this decomposition fails, and $1 - \text{RSS}/\text{TSS}$ can be negative.
+:::
+
+**8. [M]** Using @eq-ridge-svd, show that as $\lambda\to0$ the ridge solution tends to the minimum-norm least-squares solution $\mathbf{X}^+\mathbf{y}$, and as $\lambda\to\infty$ it tends to $\mathbf{0}$.
+
+::: {.callout-note collapse="true" title="Solution"}
+For $\sigma_i>0$, $\sigma_i/(\sigma_i^2+\lambda)\to1/\sigma_i$ as $\lambda\to0$, which is the pseudoinverse coefficient. Directions with $\sigma_i=0$ have coefficient $0$ for every $\lambda>0$, matching $\boldsymbol\Sigma^+$. As $\lambda\to\infty$, every coefficient $\to0$. (Note that at exactly $\lambda = 0$ with rank deficiency, $(\mathbf{X}^\top\mathbf{X})^{-1}$ does not exist, so the limit is the meaningful statement.)
+:::
+
+**9. [M]** Code: verify numerically, for a random $6\times6$ symmetric matrix, that the trace equals the sum of the eigenvalues and the determinant equals their product. Then make the matrix PSD by computing $\mathbf{B}^\top\mathbf{B}$ and check that the smallest eigenvalue is $\ge -10^{-12}$.
+
+::: {.callout-note collapse="true" title="Solution"}
+```python
+M = rng.normal(size=(6, 6)); S = (M + M.T) / 2
+lam = np.linalg.eigvalsh(S)
+assert np.isclose(lam.sum(), np.trace(S)) and np.isclose(lam.prod(), np.linalg.det(S))
+B = rng.normal(size=(4, 6)); G = B.T @ B          # rank <= 4, so two (near-)zero eigenvalues
+print(np.linalg.eigvalsh(G))                         # all >= -1e-12
+```
+:::
+
+**10. [H]** Let $\mathbf{X}\in\mathbb{R}^{n\times d}$ be centred (column means zero), with SVD $\mathbf{X}=\mathbf{U}\boldsymbol\Sigma\mathbf{V}^\top$. Show that the sample covariance $\mathbf{S}=\frac{1}{n-1}\mathbf{X}^\top\mathbf{X}$ has eigenvectors $\mathbf{v}_i$ and eigenvalues $\sigma_i^2/(n-1)$. Then show that the first principal component direction $\mathbf{v}_1$ maximises the variance $\operatorname{Var}(\mathbf{X}\mathbf{z})$ over unit vectors $\mathbf{z}$.
+
+::: {.callout-note collapse="true" title="Solution"}
+$\mathbf{X}^\top\mathbf{X}=\mathbf{V}\boldsymbol\Sigma^2\mathbf{V}^\top$, so $\mathbf{S}=\mathbf{V}\frac{\boldsymbol\Sigma^2}{n-1}\mathbf{V}^\top$, which is a spectral decomposition. The sample variance of the projections $\mathbf{X}\mathbf{z}$ (mean zero) is $\frac{1}{n-1}\|\mathbf{X}\mathbf{z}\|^2=\mathbf{z}^\top\mathbf{S}\mathbf{z}$. Writing $\mathbf{z}=\mathbf{V}\mathbf{c}$ with $\|\mathbf{c}\|=1$ gives $\sum_i\frac{\sigma_i^2}{n-1}c_i^2\le\frac{\sigma_1^2}{n-1}$, with equality at $\mathbf{z}=\mathbf{v}_1$. (This is the variational characterisation of the top eigenvector, the Rayleigh quotient.)
+:::
+
+**11. [H]** Show that $\kappa(\mathbf{X}^\top\mathbf{X}+\lambda\mathbf{I}) = (\sigma_1^2+\lambda)/(\sigma_d^2+\lambda)$, and conclude that adding ridge regularisation always improves conditioning when $\sigma_1 > \sigma_d$. What $\lambda$ guarantees $\kappa\le100$?
+
+::: {.callout-note collapse="true" title="Solution"}
+$\mathbf{X}^\top\mathbf{X}+\lambda\mathbf{I}=\mathbf{V}(\boldsymbol\Sigma^2+\lambda\mathbf{I})\mathbf{V}^\top$, which is symmetric PD with eigenvalues $\sigma_i^2+\lambda$. For a symmetric PD matrix the singular values are the eigenvalues, so $\kappa$ is the ratio of the extremes. The function $f(\lambda)=(a+\lambda)/(b+\lambda)$ with $a>b$ has derivative $(b-a)/(b+\lambda)^2<0$, so it decreases towards 1. Requiring $(\sigma_1^2+\lambda)\le100(\sigma_d^2+\lambda)$ gives $\lambda\ge(\sigma_1^2-100\sigma_d^2)/99$.
+:::
+
+**12. [H]** (Implicit regularisation.) For an under-determined problem ($d>n$, $\mathbf{X}$ of full row rank), show that gradient descent on $\frac12\|\mathbf{X}\mathbf{w}-\mathbf{y}\|^2$ started from $\mathbf{w}_0=\mathbf{0}$, with a small enough step size, converges to $\mathbf{X}^+\mathbf{y}$. Hint: every gradient lies in the row space of $\mathbf{X}$.
+
+::: {.callout-note collapse="true" title="Solution"}
+The gradient is $\mathbf{X}^\top(\mathbf{X}\mathbf{w}-\mathbf{y})\in\mathcal{C}(\mathbf{X}^\top)$ (the row space). Starting at $\mathbf{0}$, every iterate stays in the row space. Gradient descent converges to *some* minimiser, i.e. a $\mathbf{w}$ with $\mathbf{X}\mathbf{w}=\mathbf{y}$ (exact fits exist because the rank is $n$). The only exact fit inside the row space is the one with no null-space component, which is exactly $\mathbf{X}^+\mathbf{y}$ (see the pseudoinverse section). Check it numerically by running GD with step $1/\sigma_1^2$ and comparing with `np.linalg.pinv(X) @ y`.
+:::
+
+## Interview questions
+
+**Q1. What is the difference between an eigendecomposition and an SVD?**
+
+::: {.callout-note collapse="true" title="Answer"}
+An eigendecomposition $\mathbf{A}=\mathbf{Q}\boldsymbol\Lambda\mathbf{Q}^{-1}$ needs a square matrix and may not exist, or may be complex. For symmetric matrices it is orthonormal with real eigenvalues. The SVD $\mathbf{A}=\mathbf{U}\boldsymbol\Sigma\mathbf{V}^\top$ exists for *any* $m\times n$ matrix, uses two different orthonormal bases, and has non-negative singular values. They are linked by: the $\sigma_i^2$ are the eigenvalues of $\mathbf{A}^\top\mathbf{A}$, and the $\mathbf{V}$ are its eigenvectors. For symmetric PSD matrices the two coincide.
+:::
+
+**Q2. Why shouldn't you compute $(\mathbf{X}^\top\mathbf{X})^{-1}\mathbf{X}^\top\mathbf{y}$ directly?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Two reasons. (1) **Numerics.** $\kappa(\mathbf{X}^\top\mathbf{X})=\kappa(\mathbf{X})^2$, so you lose twice as many digits, and an explicit inverse adds more round-off than a solve. (2) **Rank deficiency.** If the features are collinear, the inverse doesn't exist. Use QR, or an SVD-based `lstsq` (which returns the minimum-norm solution), or add a ridge term. For very large problems, use iterative methods (conjugate gradient, SGD).
+:::
+
+**Q3. Your linear regression has two features that are almost perfectly correlated. What happens?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$\mathbf{X}$ has a tiny singular value along the direction "feature1 − feature2", so the coefficients along it are amplified by $1/\sigma_{\min}$. The individual coefficients become large, have high variance, and may take opposite signs, while the predictions remain stable. Fixes: drop or combine one feature, use ridge (it shrinks exactly that direction), or use PCA. Don't interpret the individual coefficients.
+:::
+
+**Q4. What is a positive semidefinite matrix, and where does it show up in ML?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A symmetric matrix with $\mathbf{z}^\top\mathbf{A}\mathbf{z}\ge0$ for all $\mathbf{z}$, equivalently with all eigenvalues $\ge0$. Examples: covariance matrices (variances of projections are non-negative), Gram and kernel matrices (a valid kernel must produce a PSD matrix), Hessians of convex losses, and $\mathbf{X}^\top\mathbf{X}$. A PSD Hessian means the loss is locally bowl-shaped, which is what makes optimization well behaved.
+:::
+
+**Q5. How is PCA related to the SVD?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Centre the data to get $\mathbf{X}_c$ and take $\mathbf{X}_c=\mathbf{U}\boldsymbol\Sigma\mathbf{V}^\top$. The principal directions are the columns of $\mathbf{V}$, the variance explained by component $i$ is $\sigma_i^2/(n-1)$, and the projected coordinates (scores) are $\mathbf{U}\boldsymbol\Sigma$. Using the SVD of $\mathbf{X}_c$ is preferred to an eigendecomposition of the covariance because it avoids forming $\mathbf{X}^\top\mathbf{X}$, which would square the condition number. By Eckart–Young, keeping $k$ components is the best rank-$k$ reconstruction.
+:::
+
+**Q6. Dot product vs cosine similarity for embeddings: which should you use?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Cosine similarity ignores length and compares only direction. The dot product also rewards length, which can encode popularity or confidence (e.g. in recommender two-tower models trained with a dot product). If the vectors are L2-normalised they are identical, and Euclidean distance becomes monotone in the dot product: $\|\mathbf{a}-\mathbf{b}\|^2=2-2\mathbf{a}^\top\mathbf{b}$. Use whatever the model was trained with. Normalising enables fast maximum-inner-product search.
+:::
+
+**Q7. What is the condition number, and why does it matter beyond solving linear systems?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$\kappa=\sigma_{\max}/\sigma_{\min}$, which measures how much a map distorts relative errors. For optimization, gradient descent on a quadratic with Hessian $\mathbf{H}$ converges at a rate set by $\kappa(\mathbf{H})$: the iteration count grows roughly like $\kappa$ (like $\sqrt{\kappa}$ with momentum). Badly scaled features cause large $\kappa$ and slow, zig-zagging training, which is why feature standardisation, batch normalisation and adaptive optimizers help.
+:::
+
+**Q8. L1 vs L2 norm: why does an L1 penalty produce sparse solutions?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Geometrically, the L1 ball is a diamond with corners on the axes. The smallest diamond that touches the elliptical loss contours usually touches at a corner, where some coordinates are exactly zero. The L2 ball is round, so the touching point is generically not on an axis. Analytically, the L1 subgradient has a constant size $\lambda$ near zero, which can pin a coefficient at exactly 0. The L2 gradient $2\lambda w$ vanishes near zero, so it only shrinks.
+:::
+
+**Q9. What does it cost to compute $\mathbf{A}\mathbf{B}$ for $\mathbf{A}\in\mathbb{R}^{m\times n}$ and $\mathbf{B}\in\mathbb{R}^{n\times p}$? How should you evaluate $\mathbf{A}\mathbf{B}\mathbf{x}$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(mnp)$ multiply-adds. Evaluate $\mathbf{A}(\mathbf{B}\mathbf{x})$, which costs $O(np + mn)$, rather than $(\mathbf{A}\mathbf{B})\mathbf{x}$, which costs $O(mnp)$. Matrix-chain ordering matters a lot, for example in LoRA: computing $\mathbf{B}(\mathbf{A}\mathbf{x})$ with rank $r$ costs $O(r(d_\text{in}+d_\text{out}))$ per token, instead of materialising the $d_\text{out}\times d_\text{in}$ product.
+:::
+
+**Q10. Why do low-rank approximations come up so often in ML (LoRA, recommenders, compression)?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Real data and weight updates tend to have rapidly decaying singular values: most of the "energy" lies in a few directions. Eckart–Young guarantees the truncated SVD is the optimal rank-$k$ approximation, so you can store and compute with $k(m+n)$ numbers instead of $mn$ while losing little. A low rank also acts as a regulariser (fewer degrees of freedom), and in recommenders it is the modelling assumption that taste is described by a few latent factors.
+:::
+
+## Summary
+
+::: {.callout-important title="Key equations"}
+| | |
+|---|---|
+| Projection onto $\mathbf{a}$ | $\dfrac{\mathbf{a}\mathbf{a}^\top}{\mathbf{a}^\top\mathbf{a}}\mathbf{b}$ |
+| Normal equations | $\mathbf{X}^\top\mathbf{X}\hat{\mathbf{w}}=\mathbf{X}^\top\mathbf{y}$ |
+| Spectral theorem | $\mathbf{A}=\mathbf{Q}\boldsymbol\Lambda\mathbf{Q}^\top$ for $\mathbf{A}=\mathbf{A}^\top$ |
+| SVD | $\mathbf{A}=\mathbf{U}\boldsymbol\Sigma\mathbf{V}^\top=\sum_i\sigma_i\mathbf{u}_i\mathbf{v}_i^\top$ |
+| Eckart–Young | $\|\mathbf{A}-\mathbf{A}_k\|_2=\sigma_{k+1}$ |
+| Pseudoinverse | $\mathbf{X}^+=\mathbf{V}\boldsymbol\Sigma^+\mathbf{U}^\top$ (minimum-norm least squares) |
+| Ridge via SVD | $\hat{\mathbf{w}}_\lambda=\sum_i\frac{\sigma_i}{\sigma_i^2+\lambda}(\mathbf{u}_i^\top\mathbf{y})\mathbf{v}_i$ |
+| Condition number | $\kappa=\sigma_{\max}/\sigma_{\min}$, $\ \kappa(\mathbf{X}^\top\mathbf{X})=\kappa(\mathbf{X})^2$ |
+:::
+
+- A matrix is a linear map. Read products by entries, columns, rows or outer products, whichever fits the ML formula in front of you.
+- Rank is the number of independent directions. A non-trivial null space means the parameters are not identifiable, even when the predictions are fine.
+- Least squares is an orthogonal projection: the residual is perpendicular to every feature column.
+- Symmetric matrices have real eigenvalues and orthonormal eigenvectors. PSD means all eigenvalues are $\ge0$, and every Gram or covariance matrix is PSD.
+- The SVD exists for every matrix. It gives the geometry of a map (rotate–stretch–rotate), the best low-rank approximations, the pseudoinverse, and the condition number.
+- Numerically, avoid explicit inverses and normal equations when accuracy matters. Prefer QR or SVD, standardise features, and add ridge when the problem is ill-conditioned.

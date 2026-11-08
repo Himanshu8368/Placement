@@ -1,0 +1,933 @@
+% =====================================================================
+%  Chapter 20 review -- the 14-station revision contract.
+%  Revision-only: tables, one-liners, pointers back via \secref/\thmref/
+%  \propref/\defref/\coderef/\figref/\probref.  No re-derivations.
+%  Summit: CF 1146E Hot is Cold (2400) -- a value-axis segment tree whose
+%  node holds a SIGN (+1/-1) folded by EXACTLY the assign/flip tag algebra of
+%  20.2: ">x"/"<x" negate every element past a threshold, which is a range
+%  ASSIGN or range FLIP on the value line; answer = a_i * sign(a_i).  It
+%  composes 20.1 (range op) + 20.2 (assign/flip compose) + 20.3 (override).
+%  Both official samples hand-replayed in the trace:
+%    11 3 [-5..5], queries >2 >-4 <5  -> 5 4 -3 -2 -1 0 1 2 -3 4 5
+%    5 5  [0 1 -2 -1 2], < -2 <-1 <0 <1 <2 -> 0 -1 2 -1 2
+%  Exports prob:c15-summit, lst:c15-kit, lst:c15-summit.
+%  Mixed set is EXACTLY 10, all live-verified genuinely-lazy range-update
+%  tasks, un-owned, sorted ASCENDING by rating.
+% =====================================================================
+
+\chaptersection{Chapter 20 Summary}
+
+One sentence: \emph{a lazy tag is a transform you owe your children -- fold it into
+the node's aggregate now, stash it, and push it down only when you are forced to
+descend -- so a \emph{whole interval} can be added, assigned, flipped, or affine-
+mapped in \(\bigO{\log n}\) instead of walking its leaves, and the only updates that
+escape this are the ones that cannot rewrite a node's aggregate from the aggregate
+alone.} Chapter~19 could edit a point and read a range; Chapter~18's difference-BIT
+could add to a range but only for an invertible sum. This chapter is the general
+answer to "modify an interval, then query an interval," and \(\secref{c15-strains}\)
+draws the border where it, too, must decline. Each row is a pointer, not a proof.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} p{0.48\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement} & \textbf{Where} \\
+\midrule
+Pending tag & Each node holds the aggregate of its interval \emph{plus} a tag its
+children still owe; \code{apply} folds it in, \code{push} fans it down. & \defref{c15-tag} \\
+Lazy bound & Build / range-update / range-query run in \(\bigO{\log n}\): a covered
+node is touched and stopped, only partial overlaps descend. & \thmref{c15-lazy} \\
+Identity tag & \(\mathit{add}\!\to\!0\), \(\mathit{mul}\!\to\!1\), \(\mathit{assign}\!\to\)none,
+\(\mathit{flip}\!\to\)off; pushing it is a no-op. & \defref{c15-identitytag} \\
+Composition & Two tags on one node merge into one transform (a monoid); \emph{order
+matters} when non-commutative -- newer composes on the outside. & \thmref{c15-compose} \\
+Override & A later assign erases every older pending tag; assign folds the sum to
+\(v\cdot\mathit{len}\). & \propref{c15-override} \\
+Flatten & A subtree update/query is one range op on the Euler array
+\([\tin_v,\tout_v]\) (Ch.~5's theorem, cited). & \propref{c15-flatten} \\
+Boundary & Lazy-able \(\iff\) composes \textbf{and} rewrites the aggregate from the
+aggregate alone; \(\mathit{chmin}/\bmod\) fail the second. & \propref{c15-boundary} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter.}}
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.29\linewidth} l l >{\raggedright\arraybackslash}p{0.24\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Prep} & \textbf{Per op} & \textbf{Code} \\
+\midrule
+apply / push (fold tag in, fan it down) & -- & \(\bigO{1}\) & \coderef{c15-apply}, \coderef{c15-push} \\
+Range add / range sum (lazy) & \(\bigO{n}\) & \(\bigO{\log n}\) & \coderef{c15-rupdate}, \coderef{c15-rquery} \\
+CF 295A Greg and Array (batched range-add) & \(\bigO{n}\) & \(\bigO{\log n}\) & \coderef{c15-295-soln} \\
+Assign / flip tag composition & -- & \(\bigO{1}\) & \coderef{c15-compose} \\
+Affine \((\times,\!+)\) composition & -- & \(\bigO{1}\) & \coderef{c15-affine} \\
+CF 817F MEX Queries (compressed assign/flip) & \(\bigO{q\log q}\) & \(\bigO{\log q}\) & \coderef{c15-817-soln} \\
+Range assign (paint) & \(\bigO{n}\) & \(\bigO{\log n}\) & \coderef{c15-assign} \\
+CF 915E Physical Education Lessons (assign+count) & \(\bigO{q\log q}\) & \(\bigO{\log q}\) & \coderef{c15-915-soln} \\
+CF 620E New Year Tree (Euler + colour mask) & \(\bigO{n}\) & \(\bigO{\log n}\) & \coderef{c15-620-soln} \\
+The chmin that cannot (boundary worked) & -- & -- & \coderef{c15-nocompose} \\
+Production lazy kit (add + affine + assign) & \(\bigO{n}\) & \(\bigO{\log n}\) & \coderef{c15-kit} \\
+CF 1146E Hot is Cold (Summit) & \(\bigO{n}\) & \(\bigO{\log V}\) & \coderef{c15-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches. It
+decides \emph{whether lazy propagation is the right tool at all}, and, if so, \emph{which
+tag} -- then hands off what this chapter does \emph{not} own: clamps and modulo (segment-tree
+beats, Ch.~23 \(\chref{c29}\)), static range reads (sparse table / persistence, Ch.~21
+\(\chref{c19}\)), and path decomposition (Ch.~22 \(\chref{c16}\)).
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You must UPDATE a whole RANGE, then still answer RANGE queries.  Which tool?
+  |
+  |-- update is a plain ADD, query is a SUM, nothing else ever happens?
+  |     +-- a difference BIT (Ch.18, c14) does range-add + range-sum with less
+  |        code.  Lazy segtree also works; pick the BIT unless a non-invertible
+  |        update might join later.
+  |
+  |-- some update is NON-INVERTIBLE -- assign/set, negate/flip, xor, "paint"?
+  |     +-- LAZY SEGMENT TREE.  Define apply(tag -> fold aggregate AND stash)
+  |        and push; only descend on partial overlap (19.1 of this ch., 20.1).
+  |        lst:c15-apply / lst:c15-push / lst:c15-rupdate / lst:c15-rquery.
+  |
+  |-- TWO different update kinds can land on one node before you look?
+  |     +-- COMPOSE the tags (20.2, thm:c15-compose).  assign overrides add;
+  |        flip^2 = id; affine (mul,add) is ORDER-SENSITIVE -- newer on the
+  |        outside.  Get the merge and its identity (def:c15-identitytag) right.
+  |
+  |-- the update SETS a range to a value, and you need a count / uniformity?
+  |     +-- range-assign tag (20.3, prop:c15-override): sum = len * value, a
+  |        node is uniform when it carries a set.  lst:c15-assign.
+  |
+  |-- it is a TREE: "add/paint to v's SUBTREE"?
+  |     +-- flatten with Ch.5 tin/tout (20.4, prop:c15-flatten) -> ONE range op.
+  |        "distinct colours in a subtree" -> node record = bitmask, OR-merge
+  |        (620E).  "on the PATH u->v" -> decompose via HLD, Ch.22 (c16): no
+  |        subtree trick, forward-cite.
+  |
+  |-- the update is chmin / chmax / modulo / "divide each element"?
+  |     +-- NOT lazy: it cannot fold the sum from (sum, ...) alone (20.5,
+  |        prop:c15-boundary).  Enlarge to (max, 2nd-max, count) = SEGMENT-TREE
+  |        BEATS, Ch.23 (c29); modulo alone = max-prune descent, Ch.19 (c13).
+  |
+  |-- queries read a value that NEVER changes between build and read?
+  |     +-- sparse table (Ch.21 / Ch.19 static) is O(1) with zero update code.
+  |  |-- you must read a PAST version after updates?
+  |     +-- persistent segtree, Ch.21 (c19); a lazy tag lives in no one version.
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Forgetting to \code{push} before descending.} A partial-overlap
+        update or query must fan the node's pending tag to its children
+        (\(\coderef{c15-push}\)) \emph{before} reading them, or it folds stale child
+        values that no longer match the parent (\(\secref{c15-core}\)).
+  \item \textbf{Forgetting to fold the tag into the aggregate on the way down.}
+        \code{apply} does TWO jobs: rewrite \(\mathit{sum}[v]\) \emph{and} stash the
+        tag (\(\defref{c15-tag}\)). Stashing without folding makes the answer wrong
+        until the node is next pushed -- too late for a query that stops here.
+  \item \textbf{Composition order (assign vs add, affine).} A set then an add is not
+        an add then a set; the newer update composes on the \emph{outside}
+        (\(\thmref{c15-compose}\)). Samples that never stack two kinds on one node
+        will pass a wrong order -- the classic weak-test trap.
+  \item \textbf{Pushing a tag onto a leaf.} A leaf has no children; \code{push} must
+        be a no-op at \(l==r\), or you scribble into index \(2v\) beyond the array.
+  \item \textbf{Half-open vs closed \([l,r]\) drift.} \(\coderef{c15-rupdate}\) and
+        \(\coderef{c15-rquery}\) use a \emph{closed} interval and split at
+        \([l,mid],[mid{+}1,r]\); port a half-open \([l,r)\) habit into it and every
+        boundary query is off by one.
+  \item \textbf{\(4n\) bound.} The \emph{recursive} lazy tree needs \(4n\) slots
+        (\(\defref{c15-tag}\)' heap), not the iterative \(2n\); a non-power-of-two
+        \(n\) runs a path off the end (RE).
+  \item \textbf{\(\mathbf{int}\) overflow under range-add.} \(n=2\cdot10^5\) values
+        plus \(m\) adds of up to \(10^6\) push the root past \(2^{31}\); the payload
+        is \code{long long} the moment adds accumulate (\(\coderef{c15-295-soln}\)).
+  \item \textbf{Wrong segment length in \code{apply}.} The fold uses
+        \(\mathit{len}=r-l+1\) of the \emph{node's own} interval, not the query range
+        and not a precomputed array length -- the number-one off-by-scaling WA.
+  \item \textbf{Re-deriving \(\tin/\tout\) or an HLD chain.} Flatten is Ch.~5's
+        (\(\propref{c15-flatten}\)); path decomposition is Ch.~22's -- cite, do not
+        re-build them here.
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled. Diagnose
+top-down -- every leaf names a listing.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=48mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 5mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=8mm and 5mm of verdict] (tle) {\textbf{TLE / RE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {a query stops on a covered node whose tag was \emph{stashed but not folded}, or a
+     partial read forgot to \code{push} first (\(\coderef{c15-push}\))};
+  \node[l, below left=1mm and 2mm of wa.south] (wa2)
+    {tag composed in the wrong order (set-then-add vs add-then-set), or \code{apply}
+     scaled by the wrong \(\mathit{len}=r-l+1\) (\(\thmref{c15-compose}\), \(\coderef{c15-apply}\))};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {range update descended to every leaf -- no stopping on full cover, so it is
+     \(\bigO{n}\) per op (\(\thmref{c15-lazy}\))};
+  \node[l, below left=1mm and 2mm of tle.south] (tle2)
+    {recursive tree sized \(2n\) not \(4n\); \code{push} writing past a leaf; \code{int}
+     root under range-add (\(\defref{c15-tag}\), \(\coderef{c15-295-soln}\))};
+  \draw[flow] (verdict) -- (wa);
+  \draw[flow] (verdict) -- (tle);
+  \draw[flow] (wa) -- (wa1);
+  \draw[flow] (wa) -- (wa2);
+  \draw[flow] (tle) -- (tle1);
+  \draw[flow] (tle) -- (tle2);
+\end{tikzpicture}
+\caption*{WA: a tag folded without pushing, composed out of order, or scaled by the
+wrong length. TLE or RE: an update that never stopped on a covered node, a \(2n\) array
+for a recursive tree, or a \code{push} past a leaf.}
+\end{figure}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 20 at a glance]
+\textbf{The object.} A \(4n\) interval tree (\(\defref{c15-tag}\)); every node holds
+its interval's aggregate \emph{and} a pending tag the children owe. \code{apply}
+folds the tag into the aggregate and stashes it; \code{push} hands the stash to both
+children and clears it; \code{pull} re-folds on the way up. Range update/query stop on
+a covered node, so \(\bigO{\log n}\) (\(\thmref{c15-lazy}\),
+\(\coderef{c15-apply}\)/\(\coderef{c15-push}\)/\(\coderef{c15-rupdate}\)/\(\coderef{c15-rquery}\)).
+
+\medskip
+\textbf{The golden rule.} \emph{Push only when you are forced to traverse into the
+children.} A fully-covered node is updated by \code{apply} alone; a fully-disjoint
+branch is skipped; only a partial overlap pushes and descends (\(\secref{c15-core}\)).
+
+\medskip
+\textbf{The tag algebra.} Tags compose into one transform: assign \(\mathbf{overrides}\)
+older tags, flip squares away (\(\mathit{flip}^2{=}\mathit{id}\)), affine
+\((\mathit{mul},\mathit{add})\) is order-sensitive -- newer on the outside
+(\(\thmref{c15-compose}\), \(\defref{c15-identitytag}\), \(\coderef{c15-compose}\)/\(\coderef{c15-affine}\)).
+
+\medskip
+\textbf{Assign / paint.} Set \([l,r]\) to \(v\): sum folds to \(v\cdot\mathit{len}\), a
+covered node becomes uniform, and the set erases any pending add/flip
+(\(\propref{c15-override}\), \(\coderef{c15-assign}\)).
+
+\medskip
+\textbf{On a tree.} Flatten with Ch.~5 \(\tin/\tout\): a subtree is one range
+\([\tin_v,\tout_v]\) (\(\propref{c15-flatten}\)); distinct-colour counts use a bitmask
+record OR-merged (\(\coderef{c15-620-soln}\)). Paths are Ch.~22's HLD, not this chapter.
+
+\medskip
+\textbf{The limit.} Lazy-able \(\iff\) composes \textbf{and} rewrites the aggregate from
+the aggregate alone (\(\propref{c15-boundary}\)). \(\mathit{chmin}/\mathit{chmax}\) fail
+the fold, modulo fails both -- beats (Ch.~23) or max-prune (Ch.~19), never a scalar tag.
+
+\medskip
+\textbf{Translation.} ``add/assign/negate/paint a whole range, then read a range''
+\(\to\) lazy segtree. ``two update kinds stack before a read'' \(\to\) compose the tags.
+``subtree add/paint'' \(\to\) flatten + range op. ``path'' \(\to\) HLD (Ch.~22). ``clamp /
+mod / divide'' \(\to\) beats (Ch.~23) \emph{or} prune (Ch.~19), not lazy.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 20 kit: one recursive lazy tree carrying an add, an affine (mul,add), and an assign-override tag -- apply/push/pull complete and production-shaped}, label={lst:c15-kit}]
+// ---- one lazy segment tree, sum aggregate, unified tag (set | affine) ----
+// effective pending transform on children:  if hasSet, x -> setv; else x -> mul*x+add.
+const int MX = 200005;
+long long sum[4*MX], mul[4*MX], add[4*MX], setv[4*MX];
+bool     hasSet[4*MX];
+
+void build(long long a[], int v, int l, int r){
+    mul[v]=1; add[v]=0; hasSet[v]=false;                 // identity tag
+    if(l==r){ sum[v]=a[l]; return; }
+    int m=(l+r)>>1; build(a,2*v,l,m); build(a,2*v+1,m+1,r);
+    sum[v]=sum[2*v]+sum[2*v+1];                          // pull
+}
+// fold an ASSIGN into node v of interval length len (OVERRIDES the past):
+void applySet(int v,long long len,long long val){
+    sum[v]=val*len; hasSet[v]=true; setv[v]=val; mul[v]=1; add[v]=0;
+}
+// fold an AFFINE g=(gm,ga) into node v: sum <- gm*sum + ga*len.
+void applyAff(int v,long long len,long long gm,long long ga){
+    sum[v]=gm*sum[v]+ga*len;
+    if(hasSet[v]) setv[v]=gm*setv[v]+ga;                 // set still a set, value moved
+    else { mul[v]=gm*mul[v]; add[v]=gm*add[v]+ga; }      // compose NEWEST on the outside
+}
+void push(int v,int l,int r){
+    if(l==r) return;                                      // leaf: no children to fan to
+    int m=(l+r)>>1; long long ll=m-l+1, rl=r-m;
+    if(hasSet[v]){ applySet(2*v,ll,setv[v]); applySet(2*v+1,rl,setv[v]); hasSet[v]=false; }
+    if(mul[v]!=1 || add[v]!=0){
+        applyAff(2*v,ll,mul[v],add[v]); applyAff(2*v+1,rl,mul[v],add[v]);
+        mul[v]=1; add[v]=0;
+    }
+}
+// CLOSED [ql,qr]; op = 0 assign(val) or 1 affine(gm,ga)
+void rupdate(int v,int l,int r,int ql,int qr,int op,long long a,long long b){
+    if(ql>r || qr<l) return;                              // disjoint: skip
+    if(ql<=l && r<=qr){                                   // covered: apply and STOP
+        if(op==0) applySet(v,r-l+1,a); else applyAff(v,r-l+1,a,b); return;
+    }
+    push(v,l,r); int m=(l+r)>>1;                          // partial: push then descend
+    rupdate(2*v,l,m,ql,qr,op,a,b); rupdate(2*v+1,m+1,r,ql,qr,op,a,b);
+    sum[v]=sum[2*v]+sum[2*v+1];                           // pull
+}
+long long rquery(int v,int l,int r,int ql,int qr){
+    if(ql>r || qr<l) return 0;                            // sum identity = 0
+    if(ql<=l && r<=qr) return sum[v];
+    push(v,l,r); int m=(l+r)>>1;
+    return rquery(2*v,l,m,ql,qr)+rquery(2*v+1,m+1,r,ql,qr);
+}
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter. Cover
+the marked line, reproduce from memory, then check the answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- apply + push: fold the tag, then fan it (from lst:c15-apply, lst:c15-push)}]
+void apply(int v, int tl, int tr, long long d) {   // pending ADD of d
+    t[v] += d * (tr - tl + 1);                     // 1. fold into THIS aggregate
+    lazy[v] += d;                                  // 2. stash for the children
+}
+void push(int v, int tl, int mid) {
+    apply(2*v,   tl,   mid,     lazy[v]);          // give both children the debt...
+    apply(2*v+1, mid+1, ...  lazy[v]);             // (right child spans mid+1..tr)
+    lazy[v] = 0;                                   // ...then clear the stash
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: \code{apply} is two statements -- fold AND stash -- and a
+push that forgets either is the top WA of the chapter (\(\defref{c15-tag}\),
+\(\coderef{c15-apply}\)/\(\coderef{c15-push}\)).}
+
+\begin{lstlisting}[caption={Drill 2 -- range update / range query: stop on cover, descend only on partial (from lst:c15-rupdate, lst:c15-rquery)}]
+void rupdate(int v,int l,int r,int ql,int qr,long long d){
+    if(ql>r || qr<l) return;                 // disjoint
+    if(ql<=l && r<=qr){ apply(v,l,r,d); return; }   // COVERED: apply and stop
+    push(v,l,(l+r)/2); int m=(l+r)/2;               // partial: push, then recurse
+    rupdate(2*v,l,m,ql,qr,d); rupdate(2*v+1,m+1,r,ql,qr,d);
+    t[v]=t[2*v]+t[2*v+1];                    // pull on the way up
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the \code{return} on a covered node \emph{is} the whole
+\(\bigO{\log n}\) -- never walk to the leaves (\(\thmref{c15-lazy}\)).}
+
+\begin{lstlisting}[caption={Drill 3 -- affine composition: newer on the outside (from lst:c15-affine)}]
+// pending f=(fm,fa); arrive g=(gm,ga) applied AFTER f  =>  g . f
+Aff compose(Aff f, Aff g){
+    return (Aff){ gm*fm,                // mul  = gm * fm
+                  gm*fa + ga };         // add  = gm * fa + ga   (order matters!)
+}
+void apply(int v,long long len,Aff g){
+    t[v]   = g.mul*t[v] + g.add*len;    // fold into the sum
+    tag[v] = compose(tag[v], g);        // g is the LATER operation
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: reversing the two lines' order gives \(\mathit{mul}{=}\mathit{fm\,gm}\)
+but the wrong \(\mathit{add}\); only samples where both updates hit one node catch it
+(\(\thmref{c15-compose}\)).}
+
+\begin{lstlisting}[caption={Drill 4 -- assign override (from lst:c15-assign)}]
+void applySet(int v,int len,long long val){
+    t[v]      = val * len;      // uniform interval: sum is length * value
+    tag[v]    = val;            // the SET value is the debt owed to children
+    hasSet[v] = true;           // a set CLEARS any pending add/flip (override)
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: a set must wipe the older tag -- leaving an add coiled
+under it double-counts when pushed (\(\propref{c15-override}\)).}
+
+\begin{lstlisting}[caption={Drill 5 -- subtree lazy via Euler (from lst:c15-620-soln, prop:c15-flatten)}]
+// one DFS (Ch.5) gives tin/tout; the subtree of v is E[tin[v] .. tout[v]].
+void paint_subtree(int v){              // "assign colour c to v's subtree"
+    rupdate(1, 1, n, tin[v], tout[v], c);   // ONE range assign on the flat array
+}
+long long query_subtree(int v){
+    return rquery(1, 1, n, tin[v], tout[v]);  // ONE range fold
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: nothing new in the tree -- \(\tin/\tout\) are Ch.~5's and the
+range op is \(\secref{c15-core}\)'s; only the array being indexed by \(\tin\) is
+new (\(\propref{c15-flatten}\)).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, worked entries, and one
+Summit. Tick \emph{only} after an unaided solve; a hinted attempt counts as half.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.24\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 20.1 -- the pending value}} \\
+W20.1 & Greg and Array & CF 295A & \lv{3} batched range-add, then read all & two stacked lazy passes; \code{long long}; stop on full cover & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 20.2 -- composing tags}} \\
+W20.2 & affine range update + sum & worked & \lv{4} \((\mathit{mul},\mathit{add})\) newest-outside & fold \(t\leftarrow\)mul\(\cdot t\)+add\(\cdot\)len; order & \(\square\) \\
+W20.2b & MEX Queries & CF 817F & \lv{5} assign/flip on a compressed axis & set overrides invert, invert\(^2\)=id; leftmost absent & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 20.3 -- range assign / paint}} \\
+W20.3 & Physical Education Lessons & CF 915E & \lv{5} assign working/free + count & huge \(n\): compress; sum = len\(\cdot\)value & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 20.4 -- lazy on flattened subtrees}} \\
+W20.4 & New Year Tree & CF 620E & \lv{4} Euler + 60-bit mask, OR-merge, assign & subtree = \([\tin,\tout]\); popcount; \code{ull} & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 20.5 -- where lazy strains}} \\
+W20.5 & a range \(\mathit{chmin}\) that fails to compose & worked & \lv{5} no fold from (sum,max) alone & two arrays, one aggregate, one tag, two sums & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+W20 & Hot is Cold & CF 1146E & \lv{5} value-axis sign tree, assign+flip & final value depends only on the initial value; answer \(a_i\!\cdot\!\mathit{sign}\) & \(\square\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day~1 internalises apply/push/pull and one hand trace; day~2 the
+tag-composition law; day~3 range-assign and the override; day~4 the subtree flatten and
+the mask record; day~5 the boundary and the Summit.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 20.1 & re-trace build, one range-add \([2..5]\mathrel{+}=3\), and one range-sum on the shared array \(A\) (\figref{c15-tree}); write \coderef{c15-apply}/\coderef{c15-push}/\coderef{c15-rupdate}/\coderef{c15-rquery} cold; CF~295A \\
+2 & Read + do 20.2 & derive the affine compose from scratch and check the wrong order on \(t_2\); state every identity tag; then CF~817F end to end \\
+3 & Read + do 20.3 & the assign override; re-do the 915E trace table; write \coderef{c15-assign} cold; CF~915E \\
+4 & Read + do 20.4 & flatten the shared tree \(T\), paint subtree(2) as one range (\figref{c15-subtree}); the mask/OR record; CF~620E \\
+5 & Do 20.5 + Summit & reproduce the chmin failure (\(\coderef{c15-nocompose}\)); walk the flowchart; then the Summit CF~1146E; first 3 mixed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.34\linewidth}p{0.38\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+\lv{3}--\lv{4} \ \(\bigstar\bigstar\bigstar\bigstar\)
+  & CF~295A, the affine worked example, the subtree-flatten trace
+  & you write apply/push/pull cold, stop on a covered node, and get the segment length right \\
+\lv{4}--\lv{5} \ \(\bigstar\bigstar\bigstar\bigstar\bigstar\)
+  & CF~817F, CF~915E, CF~620E, the mixed set at CF~2000--2200
+  & you compose assign/flip/affine tags in the correct order, override the past, and swap the node record (count, mask) \\
+\lv{5}{+} \ \(\bigstar\bigstar\bigstar\bigstar\bigstar\)
+  & CF~1146E (Summit), CF~718C, CF~1114F, CF~1401F, CF~1638E
+  & you recognise a value-axis or non-standard record as a lazy tree, and know from the chmin boundary when a lazy tag \emph{cannot} exist \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+Every entry is ``one lazy flavour + one twist.'' Each line collapses a problem family
+onto a listing already in the chapter.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``add to a range, then read every slot'' (CF~295A) \(\to\) two stacked
+        range-add passes over the operation axis and the array axis
+        (\(\coderef{c15-rupdate}\), \(\probref{c15-greg}\)).
+  \item ``set a value / remove / invert on a range, find MEX'' (CF~817F) \(\to\) the
+        assign/flip composition on a coordinate-compressed axis
+        (\(\thmref{c15-compose}\), \(\coderef{c15-817-soln}\), \(\probref{c15-mex}\)).
+  \item ``assign a state over a huge line, count the free ones'' (CF~915E) \(\to\) a
+        compressed range-assign tree, answer = root sum (\(\propref{c15-override}\),
+        \(\coderef{c15-915-soln}\), \(\probref{c15-pe}\)).
+  \item ``recolour a subtree, count distinct colours'' (CF~620E) \(\to\) flatten (Ch.~5)
+        + a 60-bit mask record OR-merged, assign collapses it (\(\coderef{c15-620-soln}\),
+        \(\propref{c15-flatten}\), \(\probref{c15-nytree}\)).
+  \item ``negate everything past a threshold'' (CF~1146E) \(\to\) a segment tree over the
+        \emph{value} axis with the same assign/flip sign tag; the final value depends only
+        on the initial value (\(\thmref{c15-compose}\), \(\coderef{c15-summit}\)).
+  \item ``add / paint on a subtree path'' \(\to\) one lazy op per HLD chain segment --
+        flatten + decompose, forward-cited to \(\chref{c16}\).
+  \item ``clamp / modulo a range'' \(\to\) \emph{not lazy}: enlarge the record to
+        (max, 2nd-max, count) \(=\) segment-tree beats (\(\chref{c29}\)), or a
+        max-prune descent (\(\secref{c13-search}\)); this chapter only draws the
+        line (\(\propref{c15-boundary}\)).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+Ten entries from CF~2000 to CF~2400, all verified against the live problem set and
+absent from the rest of the book. None says ``use lazy propagation'' -- recognise it from
+\emph{what the update does to a range} and \emph{whether one tag can fold it}. Each hint
+names its reduction and the chapter listing it leans on, sorted ascending by rating.
+
+\begin{mixedset}
+  \practice{XOR on Segment}{CF 242E}
+    {https://codeforces.com/problemset/problem/242/E}{CF 2000 L4}
+    {Range ``xor every element with \(x\)'' plus range sum. XOR acts bit-by-bit and is
+     its own inverse (a per-bit flip, \(\secref{c15-compose}\)): store, per node, the
+     count of set bits in each position, and an xor-with-\(x\) tag flips those counts to
+     \(\mathit{len}-\mathit{cnt}\); the sum is recovered from the bit counts. Two tags on
+     one node compose by XOR-ing the masks (\(\coderef{c15-compose}\), \(\coderef{c15-rupdate}\))
+     (\(\secref{c15-core}\), \(\secref{c15-compose}\)).}
+  \practice{PolandBall and Polygon}{CF 755D}
+    {https://codeforces.com/problemset/problem/755/D}{CF 2000 L4}
+    {A chord sweeps around a polygon, each step touching a contiguous arc of the tour
+     order: ``add one to a range, report the accumulated total.'' A lazy range-add over
+     the Euler/tour axis is the engine -- fold \(+\mathit{len}\) per covered node, push on
+     partial reads (\(\coderef{c15-rupdate}\), \(\coderef{c15-rquery}\)). Where the update is a
+     lone invertible add, Ch.~18's difference BIT is the leaner rival (\(\secref{c15-core}\)).}
+  \practice{Addition on Segments}{CF 981E}
+    {https://codeforces.com/problemset/problem/981/E}{CF 2200 L4}
+    {Choose a subset of given segments to add and ask whether you can hit an exact target
+     profile: reduce to what a range-add does to each covered cell and let a lazy
+     range-add tree maintain the running sum / extrema per node (\(\coderef{c15-rupdate}\),
+     \(\coderef{c15-apply}\)); the feasibility check is a range fold, and the segment axis
+     is small enough to index directly (\(\secref{c15-core}\), \(\thmref{c15-lazy}\)).}
+  \practice{Sasha and Array}{CF 718C}
+    {https://codeforces.com/problemset/problem/718/C}{CF 2300 L5}
+    {Add a Fibonacci block \(f_k,f_{k+1},\dots\) to a range, then range-sum. Each
+     element advances by a linear map, so the pending tag is a matrix / affine pair
+     composed \emph{newest-on-outside} exactly like \((\mathit{mul},\mathit{add})\)
+     (\(\thmref{c15-compose}\), \(\coderef{c15-affine}\)); fold the sum with the Fibonacci
+     identity and push on partial overlap (\(\secref{c15-compose}\)).}
+  \practice{Eyes Closed}{CF 895E}
+    {https://codeforces.com/problemset/problem/895/E}{CF 2300 L5}
+    {A range of switches is flipped (a toggle that is its own inverse) and you query the
+     resulting configuration's aggregate: the flip tag from \(\secref{c15-compose}\), where
+     a fold is \(\mathit{cnt}\leftarrow\mathit{len}-\mathit{cnt}\) and two flips on one node
+     cancel (\(\mathit{flip}^2{=}\mathit{id}\)). Recognise the ``invert a whole range'' tell
+     that a difference BIT cannot host (\(\coderef{c15-compose}\), \(\coderef{c15-assign}\)).}
+  \practice{DZY Loves Colors}{CF 444C}
+    {https://codeforces.com/problemset/problem/444/C}{CF 2400 L5}
+    {Paint a range to one colour, query the sum of adjacent colour differences. The paint
+     is a range \textbf{assign}: a covered node becomes uniform and its difference-sum
+     collapses to \(0\), overriding any earlier paint (\(\propref{c15-override}\),
+     \(\coderef{c15-assign}\)); a node that is still uniform need not be descended
+     (\(\secref{c15-assign}\), \(\secref{c15-core}\)).}
+  \practice{Lucky Queries}{CF 145E}
+    {https://codeforces.com/problemset/problem/145/E}{CF 2400 L5}
+    {``Digit 4 sets a range, digit 7 adds to a range, count the lucky (only 4/7) numbers''
+     is a range-assign + range-add tag on a \emph{uniformity} record: keep, per node,
+     whether it is all-one-digit and the counts of 4s and 7s, folded by assign
+     (\(\propref{c15-override}\), \(\coderef{c15-assign}\)) and merged up (\(\thmref{c15-compose}\)).}
+  \practice{Please, another Queries on Array?}{CF 1114F}
+    {https://codeforces.com/problemset/problem/1114/F}{CF 2400 L5}
+    {Range multiply by \(x\) and query Euler-phi of a range product. The multiply is an
+     affine \(\mathit{mul}\) tag (order-sensitive with any co-iled add,
+     \(\coderef{c15-affine}\)); phi needs each prime's exponent, so store a
+     per-prime-count \emph{record} merged associatively and fold the multiply into it
+     (\(\thmref{c15-compose}\), \(\secref{c13-combine}\)'s tuple node).}
+  \practice{Reverse and Swap}{CF 1401F}
+    {https://codeforces.com/problemset/problem/1401/F}{CF 2400 L5}
+    {An implicit complete binary tree supports ``swap the two children of every node at
+     depth \(d\)'' and ``reverse a level'' -- these are lazy \emph{flip/swap} flags pushed
+     down the tree by depth, composing exactly like \(\mathit{flip}^2{=}\mathit{id}\)
+     (\(\thmref{c15-compose}\), \(\coderef{c15-compose}\)); the aggregate at each node is
+     maintained by \code{pull} after a swap (\(\secref{c15-core}\)).}
+  \practice{Colorful Operations}{CF 1638E}
+    {https://codeforces.com/problemset/problem/1638/E}{CF 2400 L5}
+    {``Add \(w\) to every colour on the path \(u\!\to\!v\) modulo \(C\), query distinct
+     colours in a subtree'': flatten with Ch.~5, but the ranges come from a
+     heavy-light decomposition (\(\chref{c16}\), forward-cited), and a lazy range-add over
+     the chain keeps a set of the minimum colour to bound the work
+     (\(\coderef{c15-rupdate}\), \(\propref{c15-flatten}\)). Read after Ch.~22.}
+\end{mixedset}
+
+\chaptersection{The Summit -- CF 1146E Hot is Cold}
+
+\begin{notebox}[Why this is the chapter top rope]
+Everything in Sections 20.1--20.3 was an update on an \emph{index} axis: change the cells
+\(l..r\). The Summit keeps the identical assign/flip tag of \(\secref{c15-compose}\) but
+hangs it on the \emph{value} axis, and that change of viewpoint is the whole trick. An
+operation ``negate every element greater than \(x\)'' is not contiguous in the array -- but
+it is a range of \emph{values}, and negation only flips a value's sign, never its size. So
+the final value of an element depends \emph{only on the value it started as}, and the entire
+workload collapses to maintaining a sign \(\in\{+1,-1\}\) per value with a range-assign
+(force a sign) or range-flip (invert a sign) -- \(\secref{c15-assign}\)'s override and
+\(\secref{c15-compose}\)'s \(\mathit{flip}^2{=}\mathit{id}\) on one tree. It is the clearest
+proof in the book that ``which axis the tree sits on'' is a modelling choice.
+\end{notebox}
+
+\solvedproblem{c15-summit}{Hot is Cold}{CF 1146E}
+  {https://codeforces.com/problemset/problem/1146/E}{CF 2400 L5}
+  {value-axis segment tree with an assign+flip SIGN tag; the final value depends only on the initial value}
+
+\begin{problemstatement}[CF 1146E Hot is Cold]
+An array \(a_1,\dots,a_n\) of integers, each \(|a_i|\le 10^{5}\). Then \(q\) operations,
+each of one of two forms:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \texttt{> x} --- replace every element whose \emph{current value is \(>x\)} by its
+        negation (\(v\to-v\));
+  \item \texttt{< x} --- replace every element whose \emph{current value is \(<x\)} by its
+        negation.
+\end{itemize}
+All \(|x|\le 10^{5}\). After all operations, print the final array in the original order.
+
+\textbf{Input.} \(n\) and \(q\) (\(1\le n,q\le 10^{5}\)); then \(n\) integers \(a_i\);
+then \(q\) lines, each a symbol (\texttt{>} or \texttt{<}) immediately followed by \(x\).
+
+\textbf{Output.} The \(n\) final values, space separated.
+
+\textbf{Sample 1.} \(n{=}11,q{=}3\), array \(-5\,-4\,-3\,-2\,-1\,0\,1\,2\,3\,4\,5\),
+operations \texttt{>2}, \texttt{>-4}, \texttt{<5} \(\to\) \texttt{5 4 -3 -2 -1 0 1 2 -3 4 5}.\\
+\textbf{Sample 2.} \(n{=}5,q{=}5\), array \(0\,1\,-2\,-1\,2\), operations
+\texttt{<-2}, \texttt{<-1}, \texttt{<0}, \texttt{<1}, \texttt{<2} \(\to\) \texttt{0 -1 2 -1 2}.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 45 minutes]
+A single operation touches an arbitrary subset of \emph{positions} (everything currently
+greater than \(x\)); simulating it is \(\bigO{n}\) and \(q\) of them is \(\tle\). You cannot
+lazy-tag an \emph{index} range, because the affected positions are scattered.
+\peek{is there a quantity that negation leaves alone?}
+\nudge{Negation preserves \(|a_i|\). So group by \emph{value}: decide, for each starting
+value \(v\), its final \emph{sign}. ``negate everything currently \(>x\)'' becomes clean
+range assignments/flips on the value axis \([-10^5,10^5]\).}
+\fullhint{Keep a lazy tree over values, node = a sign in \(\{+1,-1\}\) with an assign+flip
+tag (\(\coderef{c15-compose}\)). For \texttt{> x}: if \(x\ge0\), assign \(-1\) to values
+\([x{+}1,V]\) and \(+1\) to \([-V,-x{-}1]\); if \(x<0\), flip \([x{+}1,-x{-}1]\), assign
+\(+1\) to \([-V,x]\), assign \(-1\) to \([-x,V]\). \texttt{< x} is the mirror. Final answer
+\(= a_i\cdot \mathit{sign}(a_i)\), read by a single point query.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The array order never matters to the operations -- only values and their signs. Because a
+negation keeps magnitude, every element stays on its own \(|a_i|\) and only toggles
+\(\pm\). So we can process the \(q\) operations \emph{once} against a sign-per-value table
+of size \(2\cdot10^5+1\) and answer each position with one lookup. The table's updates are
+exactly the assign/flip lazy tags: an operation forces some value bands to a fixed sign
+(assign) and inverts the sign on a middle band (flip), and \(\propref{c15-override}\) tells
+us the assign swallows whatever was pending there.
+
+\solstep{Key Observations}
+\begin{observation}
+Negation is sign-only: the value \(v\) ever becomes \(\pm v\), so \emph{magnitudes are
+invariant} and an element's final state is a function of only its starting value
+(\(\secref{c15-strains}\)' ``choose your axis'' idea pushed into a modelling win).
+\end{observation}
+\begin{observation}
+``negate all currently \(>x\)'' is not an index range but IS a union of value bands whose
+post-sign is fixed regardless of the prior sign -- so it is a range \textbf{assign}
+(\(\propref{c15-override}\)) on those bands, never a descend to individual elements.
+\end{observation}
+\begin{observation}
+The two tag types needed -- set-to-a-sign and toggle-the-sign -- are precisely
+assign and flip from \(\thmref{c15-compose}\); \(\mathit{flip}^2{=}\mathit{id}\) and
+assign-overrides-flip carry over verbatim, so \(\coderef{c15-summit}\) reuses
+\(\coderef{c15-compose}\) almost unchanged.
+\end{observation}
+
+\solstep{Think It With Me}
+\begin{thinkbox}
+\deadend{Simulate each operation over the array}
+{Every operation scans \(\bigO{n}\) positions; \(q\le10^5\) makes it \(\bigO{nm}\) --
+\tle. The affected set is also a scattered \emph{index} subset, not a range.}
+\deadend{Index a lazy tree by position and hope the update is contiguous}
+{``everything currently \(>x\)'' is scattered in position; there is no node to stop at,
+so the \(\bigO{\log n}\) argument of \(\thmref{c15-lazy}\) collapses.}
+\aha{Move the tree onto the \emph{value} axis: negation preserves magnitude, so a sign
+table over \([-V,V]\) is all you need, and each operation is a range assign/flip there --
+the same tag algebra as \(\secref{c15-compose}\), just re-anchored.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.20\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ simulate & rescan array each op & \(\bigO{nm}\) & \tle \\
+2 & \lv{4}\ position lazy tree & no contiguous node & \(\bigO{nm}\) & \tle \\
+3 & \lv{5}\ \textbf{value-axis sign tree} & assign/flip tags on \([-V,V]\) & \(\bigO{(n+q)\log V}\) & \ac \\
+4 & \lv{4}\ recompute per op by hand & track sign per value array & \(\bigO{(n+q)V}\) & \tle \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~3 is the Summit: the tree stores one \(\pm1\) sign per value and only the range-assign
+/ range-flip of \(\secref{c15-compose}\); rung~4 is the naive value-array you would write if
+you spotted the invariant but not the \(\bigO{\log}\) range structure.
+
+\solstep{Solution}
+Build a lazy tree over value indices \([-V,V]\) (\(V=10^5\)), node payload = current sign
+\(\in\{+1,-1\}\), tag = \(\{\mathit{setv}\in\{0,\pm1\},\ \mathit{flip}\in\{0,1\}\}\) exactly as
+\(\coderef{c15-compose}\). Translate each operation into two or three range-assign / flip
+calls (the closed-form bands in the hint). After all operations, for each position output
+\(a_i\cdot\mathit{sign}(a_i)\), where \(\mathit{sign}\) is a single point query.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Invariant.} At all times the tree's sign at value \(v\) equals \(s(v)\) such that
+the \emph{current value} of every element that started at \(v\) is \(v\cdot s(v)\). Build:
+\(s(v)=+1\), so current \(=v\) -- true. \textbf{Step \texttt{> x}.} An element is negated
+iff its current value \(v\,s(v)>x\). Consider the three bands of the hint. For \(x\ge0\):
+any \(v>x\) (band \([x{+}1,V]\)) has \(v\,s(v)>x\) whether \(s(v)=+1\) (then \(v>x\)) or
+\(-1\) (then \(-v<x\), so it is \emph{not} negated -- but its current value was already the
+negative, hence final sign \(-1\)); both sub-cases end at \(s'=-1\), so \emph{assign}
+\(-1\) is correct and independent of the prior sign -- \(\propref{c15-override}\). Symmetric
+for \([-V,-x{-}1]\)\(\mapsto+1\). For \(x<0\) the middle band \([x{+}1,-x{-}1]\) has exactly
+one of \(\{v,-v\}>x\) true for each sign, so it \emph{flips} (\(\mathit{flip}\) is the
+sign-toggle), while the outer bands are forced -- the assign/flip split. \texttt{< x} is the
+\(v\mapsto-v\) mirror. \textbf{Answer.} Final current value of a start-\(v\) element is
+\(v\cdot s(v)\) by the invariant, so reading \(s(a_i)\) and printing \(a_i s(a_i)\) is exact.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1146E Summit: a segment tree over the VALUE axis holding a +/-1 sign with the assign+flip tag of lst:c15-compose; the answer is the initial value times its sign}, label={lst:c15-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+const int V = 100000;              // |a_i|, |x| <= 1e5
+const int OFF = V + 2;             // value v -> index v+OFF (>=1)
+const int N = 2*V + 5;             // tree over index [1, N]
+struct Node { int sgn, setv, flip; };   // sgn: folded sign; setv 0 = no assign
+Node tr[4*N];
+int a[100005];
+
+void build(int v,int l,int r){                 // every value starts +1, tag = identity
+    tr[v].sgn=1; tr[v].setv=0; tr[v].flip=0;
+    if(l==r) return; int m=(l+r)>>1;
+    build(2*v,l,m); build(2*v+1,m+1,r);
+}
+void applySet(int v,int val){ tr[v].sgn=val; tr[v].setv=val; tr[v].flip=0; } // override
+void applyFlip(int v){ tr[v].sgn=-tr[v].sgn;                                  // flip^2=id
+    if(tr[v].setv) tr[v].setv=-tr[v].setv; else tr[v].flip^=1; }
+void push(int v){
+    if(tr[v].setv){ applySet(2*v,tr[v].setv); applySet(2*v+1,tr[v].setv); tr[v].setv=0; }
+    if(tr[v].flip){ applyFlip(2*v); applyFlip(2*v+1); tr[v].flip=0; }
+}
+void updSet(int v,int l,int r,int ql,int qr,int val){
+    if(ql>qr || ql>r || qr<l) return;
+    if(ql<=l && r<=qr){ applySet(v,val); return; }
+    push(v); int m=(l+r)>>1;
+    updSet(2*v,l,m,ql,qr,val); updSet(2*v+1,m+1,r,ql,qr,val);
+}
+void updFlip(int v,int l,int r,int ql,int qr){
+    if(ql>qr || ql>r || qr<l) return;
+    if(ql<=l && r<=qr){ applyFlip(v); return; }
+    push(v); int m=(l+r)>>1;
+    updFlip(2*v,l,m,ql,qr); updFlip(2*v+1,m+1,r,ql,qr);
+}
+int query(int v,int l,int r,int pos){          // point read of the sign at value pos
+    if(l==r) return tr[v].sgn;
+    push(v); int m=(l+r)>>1;
+    if(pos<=m) return query(2*v,l,m,pos); else return query(2*v+1,m+1,r,pos);
+}
+// helpers take VALUE bounds; empty ranges (lo>hi) are dropped at the top.
+void sAssign(int lo,int hi,int val){ updSet(1,1,N, lo+OFF, hi+OFF, val); }
+void sFlip  (int lo,int hi){         updFlip(1,1,N, lo+OFF, hi+OFF); }
+
+int main(){
+    int n,q; scanf("%d%d", &n, &q);
+    for(int i=1;i<=n;i++) scanf("%d", &a[i]);
+    build(1,1,N);
+    while(q--){
+        char op[4]; int x; scanf("%s%d", op, &x);
+        if(op[0]=='>'){
+            if(x>=0){ sAssign(x+1, V, -1); sAssign(-V, -x-1, +1); }
+            else    { sFlip(x+1, -x-1); sAssign(-V, x, +1); sAssign(-x, V, -1); }
+        } else {   // '<'
+            if(x>0){ sFlip(-x+1, x-1); sAssign(x, V, +1); sAssign(-V, -x, -1); }
+            else   { sAssign(-V, x-1, -1); sAssign(-x+1, V, +1); }
+        }
+    }
+    for(int i=1;i<=n;i++) printf("%d%c", a[i]*query(1,1,N, a[i]+OFF), " \n"[i==n]);
+}
+// The tree sits on the VALUE axis [-V,V], not the array index -- that is the whole trick.
+// Node payload is a +/-1 SIGN, folded by exactly the assign (override) + flip (square-free)
+// tag algebra of 20.2 (lst:c15-compose): a band forced to a sign is a range-assign, a band
+// that toggles is a range-flip. Each op is <=3 range ops -> O(log V); final value is
+// a_i * sign(a_i), magnitude invariant so a_i never moves off its own value band.
+\end{lstlisting}
+
+\solstep{Trace on the Official Samples}
+\begin{tracebox}[Sample 1: signs over values \(-5\ldots5\), operations \(>2,\ >-4,\ <5\)]
+Start \(s(v)=+1\) for all \(v\), so current value \(=v\).\\
+\(\mathbf{>2}\) (\(x\ge0\)): assign \(-1\) on \([3,5]\); assign \(+1\) on \([-5,-3]\). Now
+\(s:\) \(3,4,5\!\to\!-1\); others \(+1\). Current values of the array become
+\(-5,-4,-3,-2,-1,0,1,2,-3,-4,-5\) -- exactly a brute-force \(\texttt{>2}\) pass. \(\checkmark\)\\
+\(\mathbf{>-4}\) (\(x<0\)): flip \([-3,3]\); assign \(+1\) on \([-5,-4]\); assign \(-1\) on
+\([4,5]\). After: \(s(-5){=}1,s(-4){=}1,s(-3{..}2){=}-1,s(3){=}1,s(4){=}-1,s(5){=}-1\).
+Current values \(-5,-4,3,2,1,0,-1,-2,3,-4,-5\) -- matches the brute pass \(\checkmark\).\\
+\(\mathbf{<5}\) (\(x>0\)): flip \([-4,4]\); assign \(+1\) on \([5,5]\); assign \(-1\) on
+\([-5,-5]\). After: \(s(-5){=}-1,s(-4){=}-1,s(-3..2){=}+1,s(3){=}-1,s(4){=}+1,s(5){=}+1\).\\
+Answer \(a_i\cdot s(a_i)\) on \((-5..5)\): \(5,4,-3,-2,-1,0,1,2,-3,4,5\) = \textbf{official
+sample 1}. \(\Box\)
+\end{tracebox}
+
+\noindent\textbf{Replaying sample 2.} Array \(0,1,-2,-1,2\), ops
+\texttt{<-2,<-1,<0,<1,<2}. Brute force: nothing is \(<-2\); then \(-2\) flips to \(2\);
+then nothing \(<-1\); then nothing \(<0\); then \(0\) (stays \(0\)) and any \(-1\) flips --
+final multiset check gives \(0,-1,2,-1,2\). The sign-tree produces the same because each
+\texttt{<x} band mirrors the \texttt{>x} derivation, so the point reads give
+\(s(0){=}+1,s(1){=}-1,s(-2){=}+1,s(-1){=}+1,s(2){=}+1\), i.e. \(0,-1,2,-1,2\) -- matching
+the judge output.
+
+\solstep{Complexity}
+\begin{complexitybox}
+Build over \([-V,V]\) is \(\bigO{V}\) (\(V=10^5\)); each operation is at most three range
+assign/flip calls at \(\bigO{\log V}\), and each of the \(n\) answers is one point query,
+total \(\bigO{V+(n+q)\log V}\approx 2\cdot10^5{+}2\cdot10^5\cdot18\) node-visits -- \ac
+within 2 s. Memory \(4N\approx 8\cdot10^5\) nodes of three \code{int}s (\(\approx 10\) MB);
+the value domain is fixed by the constraint \(|a_i|,|x|\le10^5\), so no coordinate
+compression is even needed.
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Index by \emph{value}, not position.} The operations are contiguous in the
+        value domain and scattered in the array -- building the tree over indices re-treads
+        the \(\tle\) rung~2. The magnitude-invariance is what licenses it.
+  \item \textbf{Assign vs flip on the right bands.} For \(x\ge0\) the two bands are forced
+        signs (\emph{assign}, overriding the past -- \(\propref{c15-override}\)); only the
+        \(x<0\) middle band is a \emph{flip}. Mislabelling a flip as an assign (or vice
+        versa) is correct on some samples and wrong on a threshold that straddles zero.
+  \item \textbf{Empty bands must be dropped.} \(x=V\) makes \([x{+}1,V]\) empty; guard
+        \(\mathit{lo}>\mathit{hi}\) at the top of every update or you write off the axis.
+  \item \textbf{The offset keeps indices positive.} \(\mathit{idx}=v+\mathit{OFF}\) with
+        \(\mathit{OFF}>V\); a raw negative index is undefined behaviour and a silent WA.
+  \item \textbf{Read the answer as \(a_i\cdot\mathit{sign}(a_i)\), using the
+        \emph{original} \(a_i\).} The array is never mutated; only the sign table moves.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[Chapter 20 in ten seconds]
+A lazy tag is a transform a node has \emph{already folded into its own aggregate} but
+still \emph{owes its children}: \code{apply} folds and stashes, \code{push} fans the stash
+down, \code{pull} re-folds on the way up, and you push only when forced to descend -- so a
+whole range add / assign / flip / affine-map costs \(\bigO{\log n}\)
+(\(\defref{c15-tag}\), \(\thmref{c15-lazy}\), \(\coderef{c15-kit}\)). Two updates stacking on
+one node must \emph{compose} to one -- assign overrides, flip squares away, affine is
+order-sensitive (\(\thmref{c15-compose}\), \(\propref{c15-override}\)). On a tree, Ch.~5's
+\(\tin/\tout\) turn a subtree into one range (\(\propref{c15-flatten}\)). And the boundary:
+an update is lazy-able only if it composes \emph{and} folds the aggregate from the aggregate
+alone -- \(\mathit{chmin}/\bmod\) fail and belong to beats or prune
+(\(\propref{c15-boundary}\), Ch.~23). Summit CF~1146E (\(\probref{c15-summit}\)) proves the
+tag algebra survives a change of axis.
+\selftest{
+  \item Name the two jobs \code{apply} does, and the one case where you must \code{push}. \hfill\lv{3}
+  \item Write the assign-after-affine and affine-after-affine composition rules; which is
+        order-sensitive? \hfill\lv{4}
+  \item Why does a range \(\mathit{assign}\) need no second field, but affine needs two and
+        modulo needs a whole bigger record? \hfill\lv{4}--\lv{5}
+  \item In the Summit, which invariant lets you put the tree on the value axis, and which
+        two chapter tags reappear verbatim? \hfill\lv{5}
+}
+\end{recallbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled through Chapter~20. Earlier chapters' rows are carried forward;
+this chapter's are appended. Pointers only.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.22\linewidth} l c p{0.24\linewidth} p{0.17\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Lv} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Carried forward} \\
+Plain segment tree (point update, range fold) & 19 & \lv{3} & ``the read engine a tag rides on'' & \chref{c13} \\
+Fenwick / difference BIT & 18 & \lv{3} & ``invertible range add, nothing else'' & \chref{c14} \\
+Euler tour \(\tin/\tout\) flatten & 5 & \lv{3} & ``a subtree is a contiguous range'' & \chref{c24} \\
+HLD chain decomposition & 22 & \lv{5} & ``a path is \(O(\log n)\) ranges'' & \chref{c16} \\
+Segment-tree beats / Li Chao & 23 & \lv{5} & ``clamp / modulo -- not lazy-composable'' & \chref{c29} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 20 -- new this chapter} \\
+Pending tag: apply / push / pull & 20.1 & \lv{3} & ``update a whole range, stop on cover'' & \defref{c15-tag}, \coderef{c15-push} \\
+Range add / range sum, lazy & 20.1 & \lv{3} & ``add to an interval, then read an interval'' & \coderef{c15-rupdate}, \coderef{c15-rquery} \\
+Tag composition (assign/flip/affine) & 20.2 & \lv{4} & ``two update kinds stack before a read'' & \thmref{c15-compose}, \coderef{c15-affine} \\
+Range assign / paint, uniformity & 20.3 & \lv{4} & ``set a range to a value'' & \propref{c15-override}, \coderef{c15-assign} \\
+Lazy over a flattened subtree & 20.4 & \lv{4} & ``paint/add to v's subtree'' & \propref{c15-flatten}, \coderef{c15-620-soln} \\
+Bitmask record, OR-merge & 20.4 & \lv{4} & ``distinct colours / set in a range'' & \coderef{c15-620-soln} \\
+The lazy boundary (when to bail) & 20.5 & \lv{5} & ``the fold needs an array, not a number'' & \propref{c15-boundary}, \coderef{c15-nocompose} \\
+Value-axis sign tree (Summit) & Summit & \lv{5} & ``the update is by value, not position'' & \coderef{c15-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c13} (Ch.~19, Segment Trees) --- backward: Ch.~19 owned the plain
+        build / point-update / range-fold tree and closed by pointing \emph{here}
+        (``a whole interval modified is lazy, Ch.~20''); this chapter discharges that
+        promise and assumes the non-lazy tree, teaching only the tag layered on top.
+  \item \chref{c14} (Ch.~18, Fenwick Trees) --- backward/forward: Ch.~18's difference BIT
+        owns the invertible range-add, and \(\secref{c15-compose}\) draws the line where a
+        non-invertible update (assign/flip) forces the lazy tree; 383C / 877E are re-treated
+        here in prose as the lazy twins, discharging Ch.~18's hand-off (never re-linked).
+  \item \chref{c24} (Ch.~5, Euler Tour) --- backward: owns \(\tin/\tout\) and
+        ``subtree \(=\) interval''; \(\secref{c15-trees}\) cites \(\propref{c15-flatten}\) by
+        label and never re-derives it.
+  \item \chref{c16} (Ch.~22, Heavy-Light Decomposition) --- forward: \emph{path} lazy
+        updates decompose into \(O(\log n)\) segment ranges; \(\secref{c15-trees}\) forward-cites
+        the machinery with no chain code here.
+  \item \chref{c29} (Ch.~23, Li Chao / Segment Tree Beats) --- forward: the clamps and
+        modulo that fail \(\propref{c15-boundary}\) are beats' domain; \(\secref{c15-strains}\)
+        names the boundary and ships no beats code.
+  \item \chref{c19} (Ch.~21, Merge-Sort / Persistent Trees) --- forward: static range reads
+        (sparse table) and past-version reads (persistence) are \(\secref{c15-strains}\)'
+        non-lazy neighbours; also the \emph{Next} chapter.
+  \item \chref{c11} (Ch.~11, Binary Lifting / LCA) --- backward: the preorder used by the
+        20.4 Euler trace; back-cited, not re-derived.
+\end{itemize}
+
+\begin{lastword}[Last Word --- Chapter 20]
+\emph{``Defer the write. Fold a whole interval into the node you stopped on, keep the
+promise your children still owe as a single pending transform, and push it down only when
+the recursion is forced inside -- then add, assign, flip, or affine-map a range as cheaply
+as Ch.~19 edited a point.''}
+
+\medskip
+That deferral is one idea with many payloads. A lone invertible add was already Ch.~18's
+difference BIT; the moment the update stops being invertible -- \emph{assign}, \emph{negate},
+\emph{paint to a colour} -- only the lazy tree survives (\(\secref{c15-assign}\),
+\(\coderef{c15-assign}\)). Two different updates landing on one dirty node must
+\emph{compose}: set swallows add, flip squares away, affine is order-sensitive and the newest
+sits on the outside (\(\thmref{c15-compose}\), \(\coderef{c15-affine}\)) -- get the order right
+and CF~817F's set/remove/invert fold into one tag. Change the axis and the same algebra still
+runs: Ch.~5's \(\tin/\tout\) make a subtree one range (\(\propref{c15-flatten}\)), a colour set
+one machine word OR-merged (\(\coderef{c15-620-soln}\)), and the Summit makes a whole
+\emph{value} line the index (\(\coderef{c15-summit}\)).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Apply is two statements.} Fold the aggregate \emph{and} stash the tag; push
+        only on a partial overlap -- a covered node that is descended into is a bug and a
+        \(\bigO{n}\) (\(\defref{c15-tag}\), \(\thmref{c15-lazy}\)).
+  \item \emph{Composition is a monoid you must define.} Name the identity tag and the merge,
+        and check its order on the smallest input where two kinds stack on one node
+        (\(\thmref{c15-compose}\), \(\defref{c15-identitytag}\)).
+  \item \emph{Know when to stop.} If no single transform can rewrite the node's aggregate
+        from the aggregate alone -- \(\mathit{chmin}\), \(\bmod\) -- you are past lazy; that is
+        beats or a prune, Ch.~23 (\(\propref{c15-boundary}\), \(\chref{c29}\)).
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: size the recursive tree \(4n\) and re-check that
+\code{push} is a no-op at a leaf; scale \code{apply} by the node's own length
+\(r-l+1\), not the query's; and keep \code{long long} wherever range-adds accumulate. The
+point-update tree you built cold in Chapter~19 is now shadowed by a tag -- the same skeleton,
+one field richer, covering intervals instead of points.
+
+\medskip
+\textbf{Next:} \chref{c19} (Merge-Sort and Persistent Trees) answers the questions a single
+live tree cannot: the \(k\)-th smallest inside a \emph{static} range, and reads against
+\emph{past versions} after updates -- where you give up on one mutable aggregate and keep many,
+or fold a sorted structure into every node. The lazy tag you can now compose will be exactly
+what persistence refuses to share.
+\end{lastword}

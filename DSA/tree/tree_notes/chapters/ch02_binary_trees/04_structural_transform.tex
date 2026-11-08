@@ -1,0 +1,1181 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  2.4  Structural Transformation                       sec:c02-transform
+%  Exports: def:c02-return-newroot  def:c02-flip  def:c02-mutate-rebuild
+%           thm:c02-invert-invol  thm:c02-rewrite-frame
+%           lst:c02-transform-skeleton  ex:c02-invert-trace
+%           fig:c02-invert  fig:c02-where
+%           prob:c02-print  prob:c02-create-tree  prob:c02-flip-eq
+%           prob:c02-delete-forest
+% =====================================================================
+\section{Structural Transformation: Rewiring the Tree}\label{sec:c02-transform}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item In \probref{c02-prune} a \emph{boolean} return value triggered a pointer
+        write. What exactly did that value signal, and why did the write have to
+        happen \emph{after} the recursive calls? (\secref{c02-bottomup})
+  \item On $R$, what are $\height(2)$ and $\height(3)$ (in edges), and which
+        channel -- up or down -- did that number travel? (\secref{c02-bottomup})
+  \item \probref{c02-path-sum-iii} had to \emph{undo} two hashmap entries on the
+        way back up. What general rule about mutating shared state inside a
+        recursion does that teach you -- and where will it bite again today?
+        (\secref{c02-topdown})
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+For three sections the tree has been a read-only object: you carried numbers down
+and returned numbers up, but the pointers never moved. This section points the
+recursion \emph{at the tree itself}. A \term{structural transformation} changes
+which node is whose child -- swap two children, cut a subtree, graft a new node,
+rebuild the whole shape from a description. The unifying idiom is small but sharp:
+\textbf{make the recursive call \emph{return the new root} of the subtree it
+transformed}, so the parent can decide what to do with it. Master that one line
+and Invert, Prune, Delete-and-Split, and the construct-from-description family
+all become the same twelve lines with a different rewrite.
+
+\textbf{Prerequisites.} The return contract of \secref{c02-bottomup} (a call hands
+a value \emph{up}); the base-case discipline of \secref{c02-model}; the
+return-that-rewires preview you already met in \probref{c02-prune}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item write the ``return the transformed subtree root'' skeleton and use it to
+        swap, prune, and splice pointers without leaking the old shape;      \hfill\lv{3}
+  \item place the rewrite on the correct side of the recursion -- act on the way
+        \emph{down} when the parent decides, on the way \emph{up} when the
+        children's results decide;                                            \hfill\lv{3}--\lv{4}
+  \item rebuild a tree from indirect descriptions (layouts, parent/child rules)
+        by treating construction as recursion with a returned root;           \hfill\lv{3}--\lv{4}
+  \item recognise an \emph{equivalence-under-flip} question (``can flips make
+        these trees equal?'') and prove the greedy/recursive test correct.     \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- structural transformation]
+\reckey{``invert / mirror / flip the tree'', ``prune / remove / delete nodes'',
+``return the root after\ldots'', ``rebuild the tree from\ldots'', ``split into
+forests'', ``can swapping children make them equal?'' -- the \emph{shape}, not a
+number, is the output.}
+\recuse{
+  \item the answer is itself a tree (or its root pointer): invert, prune,
+        delete-and-return-forest -- return the new subtree root (\defref{c02-return-newroot});
+  \item the tree must be \emph{built} from a specification rather than given
+        (a grid of descriptions, two traversals): construct top-down, hand the
+        assembled root back;
+  \item a \emph{yes/no} question whose witness is a set of flips: compare subtree
+        invariants that a flip cannot change (\probref{c02-flip-eq}).
+}
+\recnotuse{
+  \item you only need a \emph{number} about the tree (sum, height, count) and the
+        pointers stay put -- that is pure bottom-up, \secref{c02-bottomup};
+  \item the task is a fixed \emph{visit order} (print inorder/level-order) with no
+        pointer change -- \chref{c03};
+  \item children are kept \emph{value-ordered} and must stay so for search --
+        that is a BST operation, \chref{c05}, with balance invariants this
+        chapter never touches.
+}
+One-line test: \emph{does a correct program leave the \emph{pointer graph}
+different from how it started? If yes -- swap/cut/add edges -- this is a
+transformation and every call should return the root of the subtree it rebuilt.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Recall Invert Binary Tree (LC 226), which you solved in Chapter~1: swap the two
+children of \emph{every} node. Its whole program is three lines, and the reason it
+is three lines is that the recursion returns the node it just finished flipping,
+so the caller can reattach it. Read $R$ and its mirror in \figref{c02-invert}: the
+\emph{shape} changes, the values stay welded to their nodes.
+
+\begin{figure}[H]
+\centering
+\begin{tabular}{@{}c c c@{}}
+\begin{forest} snaptree
+[1 [2 [4] [5]] [3 [,phantom] [6]] ]
+\end{forest}
+& $\xrightarrow{\ \text{invert}\ }$ &
+\begin{forest} snaptree
+[1 [3 [6] [,phantom]] [2 [5] [4]] ]
+\end{forest} \\
+{\footnotesize original $R$} & & {\footnotesize every node's children swapped}
+\end{tabular}
+\caption{Inverting $R$. Node $3$ had a lone \emph{right} child $6$; after the
+flip $6$ hangs on the \emph{left}. Node $2$'s pair $\{4,5\}$ becomes $\{5,4\}$.
+The values never move -- only the two pointers at each node change.}\label{fig:c02-invert}
+\end{figure}
+
+Now the key idea that generalises. A transformation recursion has the same
+topology as the bottom-up recursions of \secref{c02-bottomup}, but the returned
+value is a \emph{pointer}, not a number:
+
+\begin{center}
+\begin{tikzpicture}[diagram, node distance=3mm and 14mm]
+  \node[boxnode, fill=softpurple!10, draw=softpurple] (s)
+    {\code{dfs(v)}\\returns the\\new $\subtree(v)$ root};
+  \node[annot, below=1mm of s.south, align=center, font=\scriptsize]
+    {parent does \emph{whatever the rewrite is}\\using the returned child roots,\\then returns \emph{itself} (or a stand-in)};
+\end{tikzpicture}
+\end{center}
+
+Because the return type is a node pointer, the recursion can do things a numeric
+return never could: \emph{delete} a subtree (return \code{nullptr}), \emph{split}
+a tree into several roots (\probref{c02-delete-forest}), or \emph{assemble} nodes
+that did not exist before (\probref{c02-create-tree}). Everything is the same
+skeleton -- only the rewrite line and the return change.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Flip at a node}{c02-flip}
+A \term{flip} (or \term{mirror step}) at node $v$ is the assignment
+$v\to\mathit{left} \leftrightarrow v\to\mathit{right}$: the two child pointers are
+exchanged, nothing else changes. A \term{flip set} is a choice, for some nodes, of
+whether to flip them; flipping a node's descendants is independent of flipping the
+node.
+\end{definition}
+
+\noindent\textbf{In plain words.} A flip is a swap of two pointers, never a move of
+values. One flip is local; ``invert the tree'' means flip at \emph{every} node.
+Because each node is flipped at most once and children are separate objects, the
+order in which you flip across nodes does not matter.
+
+\begin{definition}{Return-the-new-root contract}{c02-return-newroot}
+In a \term{transforming recursion} the call $\mathit{dfs}(v)$ returns the pointer
+that should stand in $v$'s former place in $v\!\to\!\mathit{parent}$'s child slot:
+often $v$ itself (possibly rewired), sometimes \code{nullptr} (delete), sometimes a
+different node (splice/replace). The caller \emph{assigns} the returned pointer into
+the child slot it recursed from.
+\end{definition}
+
+\noindent\textbf{In plain words.} ``Whatever you turn this subtree into, hand its
+top back to me and I will plug it in where the old one was.'' Deletion is the
+special case ``return nothing''; a forest split is ``return nothing \emph{and}
+report a new tree here''. This one sentence collapses \probref{c02-delete-forest}
+into three lines.
+
+\begin{definition}{Mutate in place vs.\ rebuild}{c02-mutate-rebuild}
+A transformation \term{mutates in place} when it edits the pointers of the given
+nodes (invert, prune). It \term{rebuilds} when it allocates a fresh tree from a
+specification, leaving the input intact (construct-from-traversals, \probref{c02-create-tree}).
+Both use a returning recursion; they differ only in whether the returned node is
+an \emph{existing} one or a \emph{newly allocated} one.
+\end{definition}
+
+\noindent\textbf{In plain words.} Ask ``am I allowed to trash the input?'' If yes,
+edit pointers (cheaper, and LeetCode hands you ownership). If the input must
+survive -- or must be assembled from scratch -- you build new nodes. The recursion
+shape is identical either way.
+
+\begin{notebox}[Mutate in place vs.\ rebuild]
+\textbf{Mutate in place} edits the pointers of the given nodes and hands back the
+same node (or \code{nullptr} to delete it): invert, prune, delete-and-split.
+\textbf{Rebuild fresh} allocates new nodes from a specification, leaving the
+read-only input intact, and returns a brand-new root: \probref{c02-create-tree},
+construct-from-traversals. Both run on the same returning recursion
+(\defref{c02-return-newroot}); they differ only in whether the returned node
+already existed.
+\end{notebox}
+
+\subsection{Core Properties}
+
+\begin{theorem}{Inversion is an Involution}{c02-invert-invol}
+Let $\mathcal{I}(T)$ be the tree obtained by flipping every node of $T$. Then
+$\mathcal{I}(\mathcal{I}(T)) = T$ for every binary tree $T$; equivalently,
+$\mathcal{I}$ is its own inverse.
+\end{theorem}
+\begin{proofbox}
+Structural induction on $\size$. Base $T=\nil$: $\mathcal{I}(\nil)=\nil$, trivially
+equal. Step $T=(v,L,R)$: by definition $\mathcal{I}(T)$ has root $v$ with children
+$\mathcal{I}(R)$ (left) and $\mathcal{I}(L)$ (right). Applying $\mathcal{I}$ again
+swaps them back and, by the inductive hypothesis, $\mathcal{I}(\mathcal{I}(L))=L$
+and $\mathcal{I}(\mathcal{I}(R))=R$, so $\mathcal{I}(\mathcal{I}(T))$ has children
+$(L,R)$ -- exactly $T$. A double flip restores each pair of pointers, and the
+operations on distinct nodes commute, so order of visiting is irrelevant.
+\end{proofbox}
+\begin{insightbox}
+The proof uses only ``swap is self-inverse'' and ``children are independent'' --
+which is why invert needs no bookkeeping: no flag to remember, no restore step
+(\emph{cf.}~the hashmap you had to undo in \probref{c02-path-sum-iii}). Any transformation
+whose per-node action is self-inverse and local inherits this safety.
+\end{insightbox}
+
+\begin{theorem}{Where the Rewrite Goes}{c02-rewrite-frame}
+Let a transformation act independently at each node with an action that depends
+on (i) the node's own data and (ii) the \emph{already-transformed} subtrees of its
+children. Then performing the action \emph{after} the recursive calls
+(post-order) is correct. Dually, if the action at $v$ depends on a decision made
+by $v$'s \emph{parent} (e.g.\ ``flip here only if the parent told you to''), that
+decision must be carried \emph{into} the call and the action taken on the way
+\emph{down} (pre-order), before recursing.
+\end{theorem}
+\begin{proofbox}
+Post-order case: the action at $v$ reads the new child roots; recursing first
+guarantees, by \thmref{c02-postorder} (structural induction), those children are
+correct, so $v$'s action has valid inputs and returns a correct $\subtree(v)$.
+Pre-order case: the parent's decision is a function of the path to $v$, not of
+$\subtree(v)$'s interior, so it is fully known on entry; applying it before
+recursing lets each child inherit the state its own action needs. Placing a
+child-dependent rewrite in pre-order would read \emph{stale} (untransformed)
+children, and placing a parent-decided flip in post-order would flip after the
+children already committed to the wrong orientation -- both give a wrong shape,
+verifiable on a two-level tree.
+\end{proofbox}
+
+\subsection{The Transform Skeleton}
+
+\begin{lstlisting}[caption={The transforming recursion: SLOT 1 (recurse), SLOT 2 (the rewrite), SLOT 3 (what to return). Which side SLOT 2 goes on is decided by \thmref{c02-rewrite-frame}.}, label={lst:c02-transform-skeleton}]
+TreeNode* dfs(TreeNode* v /*, carried state if pre-order */) {
+    if (!v) return nullptr;               // SLOT 0: null in, null out
+    // [PRE-ORDER rewrite here if the PARENT decides -- \thmref{c02-rewrite-frame}]
+    TreeNode* L = dfs(v->left  /*, state*/);   // recurse -> new left root
+    TreeNode* R = dfs(v->right /*, state*/);   // recurse -> new right root
+    v->left = L;  v->right = R;            // SLOT 2: the rewrite (post-order
+    // v->left = R; v->right = L;         //   default) e.g. INVERT = this swap
+    return v;                              // SLOT 3: new root of subtree(v);
+}                                           //   or nullptr to DELETE, or an
+                                            //   orphan pushed to a forest list
+TreeNode* transform(TreeNode* root){ return dfs(root); }
+\end{lstlisting}
+
+\begin{complexitybox}
+Every variant visits each node once: $\bigO{n}$ time, $\bigO{h}$ stack by
+\lemref{c02-visit-count}. The rewrite itself is $\bigO{1}$. The only recurring
+cost \emph{bug} is an accidental second traversal -- re-flipping to ``fix'' an
+orientation instead of fixing SLOT 2 (\thmref{c02-invert-invol} says a double flip
+is a no-op), or rebuilding a whole subtree per node when one pass suffices.
+\end{complexitybox}
+
+\subsection{Worked Examples}
+
+\begin{example}{Inverting $R$, one call at a time}{c02-invert-trace}
+With \code{dfs(v)} $=$ \{ recurse $L$, recurse $R$, \code{swap(v->left,v->right)},
+\code{return v} \}: the leaves $4,5,6$ each recurse on two nulls, swap nothing, and
+return themselves. Node $2$ gets $L{=}4,R{=}5$, swaps them so its children become
+$(5,4)$, returns $2$. Node $3$ gets $L{=}\nil,R{=}6$, swaps to $(6,\nil)$, returns
+$3$. The root $1$ gets $L{=}2,R{=}3$, swaps to $(3,2)$, returns $1$. The assembled
+mirror matches \figref{c02-invert}.
+\end{example}
+
+\begin{tracebox}[Return values up the stack on $R$ (invert)]
+\begin{center}\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}c c c c c@{}}
+\toprule
+\textbf{node} & \textbf{children in} & \textbf{$L,R$ returned} & \textbf{after swap} & \textbf{returns}\\
+\midrule
+$4,5,6$ & leaves   & $(
+il,
+il)$ / $(
+il,
+il)$ & unchanged & self\\
+$2$     & $4,5$    & $(4,5)$   & $(5,4)$   & $2$\\
+$3$     & $(\cdot),6$ & $(\nil,6)$ & $(6,\nil)$ & $3$\\
+$1$     & $2,3$    & $(2,3)$   & $(3,2)$   & $1$\\
+\bottomrule
+\end{tabular}\end{center}
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item Flip at \emph{every} node: invert (\figref{c02-invert}); flip at
+        \emph{chosen} nodes to hit a target traversal: \secref{c02-transform} lab.  \hfill\lv{3}
+  \item Return \code{nullptr} to delete a whole qualifying subtree, decided by its
+        aggregate: prune (\probref{c02-prune}) is the template.                    \hfill\lv{3}
+  \item Return \code{nullptr} \emph{and} record the orphan as a new tree root:
+        delete-and-return-forest (\probref{c02-delete-forest}).                    \hfill\lv{4}
+  \item Do not mutate -- \emph{assemble} a tree from descriptions/traversals:
+        \probref{c02-create-tree}, construct-from-pre+in (practice).               \hfill\lv{3}
+  \item Decide equality \emph{up to} a set of flips -- compare flip-invariant
+        multiset signatures: \probref{c02-flip-eq}.                                \hfill\lv{4}
+  \item Layout transformation -- the tree is read-only but the \emph{output grid}
+        is built by recursion: print in a matrix (\probref{c02-print}).            \hfill\lv{3}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c02-transform-pitfalls}
+
+\begin{warningbox}[Pitfall 1 -- swapping values instead of pointers]
+An ``invert'' that copies $\mathit{val}$ between nodes quietly fails on
+non-full trees and any rebuild that must keep structure. A flip is a pointer
+exchange (\defref{c02-flip}); touch the $\mathit{val}$ field and you have changed
+the problem.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: permutes \texttt{val}s -- happens to look right only on perfect trees}, language=C++, basicstyle=\ttfamily\small]
+void inv(TreeNode* r){                        // LC 226-style invert
+    if(!r) return;
+    std::swap(r->val, (r->left? r->left->val : r->val)); // messes values,
+    inv(r->left); inv(r->right);                          // not structure
+}                                             // FAILS once children differ in depth
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: one pointer swap per node; \thmref{c02-invert-invol} makes it total}, language=C++, basicstyle=\ttfamily\small]
+TreeNode* inv(TreeNode* r){
+    if(!r) return nullptr;
+    TreeNode* L = inv(r->left), *R = inv(r->right);
+    r->left = R; r->right = L;                 // swap the POINTERS
+    return r;
+}
+\end{lstlisting}
+
+\begin{warningbox}[Pitfall 2 -- rewriting before recursing (stale children)]
+Doing the parent's structural decision using a child's result \emph{before} the
+child has been transformed reads the old shape. \thmref{c02-rewrite-frame} is the
+rule: child-dependent rewrite goes \emph{after} the calls.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: decides from untransformed children, then recurses}, language=C++, basicstyle=\ttfamily\small]
+TreeNode* bad(TreeNode* v){
+    if(!v) return nullptr;
+    if(prune(v->left)) v->left = nullptr;      // child NOT yet rebuilt here
+    v->right = bad(v->right);                  // ordering is inconsistent
+    return bad(v->left);                       // double-walks, wrong shape
+}
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: recurse first, then rewrite from returned roots}, language=C++, basicstyle=\ttfamily\small]
+TreeNode* good(TreeNode* v){
+    if(!v) return nullptr;
+    v->left  = good(v->left);                  // new left root (or null)
+    v->right = good(v->right);                 // new right root (or null)
+    return keep(v) ? v : nullptr;              // decide on the FINISHED subtree
+}
+\end{lstlisting}
+
+\begin{warningbox}[Pitfall 3 -- forgetting to reattach the returned pointer]
+If you recurse for its side effects but never assign the result back into the
+child slot, deletions and rebuilds are silently lost -- the old edges survive.
+The contract (\defref{c02-return-newroot}) is \emph{assign then return}.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: calls dfs but discards what it returned}, language=C++, basicstyle=\ttfamily\small]
+void leak(TreeNode* v){
+    if(!v) return;
+    dfs(v->left); dfs(v->right);               // results thrown away:
+    if(delete_me(v)) { /* forgot v->parent->x = nullptr; */ }
+}
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: caller plugs the returned root back into the slot}, language=C++, basicstyle=\ttfamily\small]
+TreeNode* dfs(TreeNode* v){
+    if(!v) return nullptr;
+    v->left  = dfs(v->left);                   // <-- reattach
+    v->right = dfs(v->right);                  // <-- reattach
+    return delete_me(v) ? nullptr : v;         // parent reattaches THIS
+}
+\end{lstlisting}
+
+
+\subsection{Problem Lab (fully solved)}
+
+The ladder runs from a read-only layout build (\probref{c02-print}) and a
+from-scratch reconstruction (\probref{c02-create-tree}) up to two genuine pointer
+rewrites: equality-up-to-flips (\probref{c02-flip-eq}) and the delete-and-split
+summit of the section (\probref{c02-delete-forest}).
+
+\solvedproblem{c02-print}{Print Binary Tree}{LeetCode 655}
+  {https://leetcode.com/problems/print-binary-tree/}{LC Medium L3}
+  {recursive layout, index arithmetic, output-grid construction}
+
+\begin{problemstatement}[Print Binary Tree]
+Given the root of a binary tree, build an $m\times n$ matrix of strings showing a
+\emph{formatted layout}. Let $h$ be the tree height (edges root$\to$deepest leaf).
+Then $m=h+1$ rows and $n=2^{h+1}-1$ columns. The root sits in the top middle,
+\code{res[0][(n-1)/2]}. A node shown at row $r$, column $c$ places its left child
+at row $r+1$, column $c-2^{\,h-r-1}$, and its right child at column
+$c+2^{\,h-r-1}$. Every cell not occupied by a node holds \code{""}.
+Constraints: $1\le n_{\text{nodes}}\le 2000$,
+values $\in[0,200]$, $h\le 14$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+A fair first attempt: figure out the row/column of each node by hand on a 3-level
+tree, then read off the pattern.
+\peek{This is a \emph{layout transformation} -- the tree is read-only but you
+\emph{build an output structure} by recursion (\secref{c02-transform}, last twist).}
+\nudge{Precompute $h$ once so every cell index is closed-form; the recursion just
+writes $\mathit{val}$ at $(r,c)$ and recurses to $(r{+}1,\,c\pm 2^{h-r-1})$.}
+\fullhint{Allocate the full \code{""} grid, run one $\bigO{n}$ DFS that fills it,
+return the grid. The full build is below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Nothing here rewires the tree; the object being \emph{constructed} is the string
+matrix. The whole task is: for each node, know its $(\text{row},\text{col})$ in the
+grid. Row is simply its depth. Column follows the midpoint-split rule: the root
+takes the middle column and each level halves the horizontal gap, so a node's two
+children sit symmetrically $\pm 2^{h-r-1}$ away. Because the offsets depend on the
+\emph{global} height, you must know $h$ before placing anything.
+
+\solstep{Key Observations}
+\begin{observation}
+The grid is a fixed size $m\times n=(h+1)\times(2^{h+1}-1)$ determined by $h$
+alone; precompute $h$ with the bottom-up height of \secref{c02-bottomup}, then fill.
+\end{observation}
+\begin{observation}
+Column of a node is not its inorder index -- it is $\text{parent\_col}\mp
+2^{h-\text{row}-1}$, so a node's depth \emph{and} its parent's column are the two
+pieces of state to carry down (a top-down carry, \secref{c02-topdown}).
+\end{observation}
+\begin{observation}
+$h\le14\Rightarrow n\le 2^{15}-1=32767$ columns and $m\le15$ rows, at most
+$\sim4.9\times10^{5}$ cells -- allocating the grid up front with \code{""} is cheap
+and lets filling be pure writes with no resizing.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Do an inorder traversal and number the columns $0,1,2,\dots$.}{Inorder
+index ignores \emph{depth}: two different trees with the same inorder sequence get
+different required layouts (the offset halves each level), so inorder columns land
+nodes in the wrong cells.}
+\deadend{Recompute each node's column from scratch by counting the path of
+left/right choices from the root.}{Correct -- the column is a signed sum of powers
+of two -- but $O(nh)$ and fiddly; carrying $(r,c)$ down in one DFS collapses it to
+$\bigO{n}$ with one subtraction per edge.}
+\aha{Carry $(r,c)$ as parameters: place $\mathit{val}$ at $(r,c)$, recurse left to
+$(r{+}1,c-2^{h-r-1})$ and right to $(r{+}1,c+2^{h-r-1})$.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} recompute column per node & signed power-of-two sum from root & $O(nh)$ & \tle \\
+2 & \lv{3} carry $(r,c)$ down & one DFS after precomputing $h$ & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 is right-but-slow; rung 2 reuses the same formula, memoised in the call
+arguments.
+
+\solstep{Solution}
+Compute $h$. Allocate \code{res} as $(h+1)$ rows of $(2^{h+1}-1)$ empty strings.
+Call \code{place(root, 0, (n-1)/2, h)}: write \code{to\_string(v->val)} at
+\code{res[r][c]}, then recurse on the two children at the offset columns. Return
+\code{res}. (See \figref{c02-invert} for the tree; the filled grid is in the trace.)
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By induction on depth. The root is placed at $(0,(n-1)/2)$ as required. Assume a
+node $v$ is at the correct \code{res[r][c]}; \code{place} writes its left child at
+column $c-2^{h-r-1}$ in row $r+1$ and right child at $c+2^{h-r-1}$ -- exactly the
+problem's placement rule -- so the child lands correctly. Every non-null node is
+visited once and written to its rule-mandated cell; cells never written stay
+\code{""}. Hence the matrix equals the specified layout.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Print Binary Tree (LeetCode 655) -- carry (row, col) down}, label={lst:c02-print}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    int height(TreeNode* v) {                    // bottom-up height (\secref{c02-bottomup})
+        return v ? 1 + max(height(v->left), height(v->right)) : -1;
+    }
+    void place(TreeNode* v, int r, int c, int h,
+               vector<vector<string>>& res) {
+        if (!v) return;
+        res[r][c] = to_string(v->val);
+        int off = (1 << (h - r - 1));            // 2^(h-r-1)
+        place(v->left,  r + 1, c - off, h, res);
+        place(v->right, r + 1, c + off, h, res);
+    }
+public:
+    vector<vector<string>> printTree(TreeNode* root) {
+        int h = height(root), n = (1 << (h + 1)) - 1;   // 2^(h+1)-1 cols
+        vector<vector<string>> res(h + 1, vector<string>(n, ""));
+        place(root, 0, (n - 1) / 2, h, res);
+        return res;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[On $R$ -- $h=2$, so $m=3$ rows, $n=2^{3}-1=7$ cols; root at col 3]
+\begin{center}\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{@{}c|c|c|c|c|c|c|c@{}}
+\toprule
+row 0 & . & . & . & \textbf{1} & . & . & .\\
+row 1 & . & \textbf{2} & . & . & . & \textbf{3} & .\\
+row 2 & \textbf{4} & . & \textbf{5} & . & . & . & \textbf{6}\\
+\bottomrule
+\end{tabular}\end{center}
+Root $1@ (0,3)$. Offset at $r{=}0$ is $2^{2-0-1}=2$: so $2@(1,1)$, $3@(1,5)$.
+Offset at $r{=}1$ is $2^{0}=1$: $4@(2,0)$, $5@(2,2)$, and $3$'s lone right child
+$6@(2,6)$ (its left slot stays empty). Dots are \code{""}. \ac
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ to fill ($n_{\text{nodes}}$ writes) plus $\bigO{n}$ for the height
+pass; space $\bigO{m\cdot 2^{h}}$ for the grid -- at $h\le14$ that is $\le 4.9\times10^{5}$
+cells, well inside memory. Stack $\bigO{h}$, and $h\le14$ here so no recursion-depth
+risk (unlike the general skewed trees later).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{0.34\linewidth} p{0.60\linewidth}@{}}
+\toprule
+\textbf{Edge case} & \textbf{What the code does} \\
+\midrule
+Single node & $h=0$, $n=1$: \code{res[0][0]} = value, offset shift $2^{-1}$ never
+used (no children). \\
+Skewed chain & still fills correctly; only the used cells get strings. \\
+Node value $0$ & \code{to\_string(0)="0"} is truthy-as-text -- never confuse the
+empty cell \code{""} with \code{"0"}. \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Use \code{int off = 1 << (h-r-1)} \emph{with parentheses}: \code{1 << h - 1} parses
+as \code{1 << (h-1)} (shift binds looser than \code{-}) -- a silent off-by-one power
+of two. Also keep \code{""} (empty string) distinct from a value's string; a node
+of value $0$ must print \code{"0"}, not stay blank.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item When the output is a \emph{structure} you build by recursion, carry the
+        target coordinates down -- memoise placement in the arguments.
+  \item Precompute any \emph{global} quantity (here $h$) the index formula needs;
+        one cheap pass up front keeps the filling DFS pure writes.
+  \item ``Read the tree, write something else'' is a transformation of the
+        \emph{output}, not the pointers -- the same (r,c) carry is a top-down
+        (\secref{c02-topdown}) pattern wearing a construction hat.
+\end{enumerate}
+\end{insightbox}
+
+% ---------------------------------------------------------------------
+\solvedproblem{c02-create-tree}{Create Binary Tree From Descriptions}{LeetCode 2196}
+  {https://leetcode.com/problems/create-binary-tree-from-descriptions/}{LC Medium L3}
+  {reconstruction, hash-indexed nodes, root-by-in-degree}
+
+\begin{problemstatement}[Create Binary Tree From Descriptions]
+You are given \code{descriptions}, a list of triples $[\,\mathit{parent},\mathit{child},
+\mathit{isLeft}\,]$ meaning ``\code{child} is the left ($\mathit{isLeft}=1$) or right
+($0$) child of \code{parent}.'' All node values are distinct and the triples define
+exactly one valid binary tree. Build it and return its root. $1\le|\text{descriptions}|\le10^{4}$,
+values $\in[1,10^{5}]$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+A fair first attempt: ignore the tree for a moment and ask how to \emph{find the
+root} from the triples alone.
+\peek{This is a rebuild (\defref{c02-mutate-rebuild}) -- the input is a
+\emph{description}, so you allocate fresh nodes rather than editing any given tree.}
+\nudge{Every non-root node appears in the \code{child} slot exactly once; the root
+never appears as a child. How do you find the one node absent from the child set?}
+\fullhint{Index nodes by value in a hashmap (create-on-demand), attach children,
+record which values are children, and the value present as a parent but absent
+from the child set is the root. Build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The triples arrive in arbitrary order, so you cannot scan once and assume a parent
+exists yet -- you must be able to fetch-or-create a node by value. A valid binary
+tree has exactly one node of in-degree $0$: the root. Everything else is decided
+once you (a) materialise nodes lazily by value and (b) know which value is the
+unique non-child.
+
+\solstep{Key Observations}
+\begin{observation}
+A \code{unordered\_map<int,TreeNode*>} with ``create if absent'' makes the order of
+processing triples irrelevant: parent and child are each resolved through the map,
+so the same node object is reused wherever its value reappears.
+\end{observation}
+\begin{observation}
+The root is the only value that appears as a $\mathit{parent}$ but never as a
+$\mathit{child}$; tracking the set of child-values finds it in one pass over the map.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Treat the triples like an edge list and root a DFS from $\mathit{descriptions}[0][0]$.}{The
+first triple's parent need not be the tree's root -- it could itself be some other
+node's child -- so you would return a non-root node as the answer.}
+\deadend{Sort the triples by value and build top-down.}{Sorting gains nothing: the
+root is defined by \emph{not being anyone's child}, a set-membership fact, not an
+ordering one.}
+\aha{Realise the root is exactly the node with in-degree $0$; a child-set plus the
+key set of created nodes exposes it directly.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} test each node as root & validate a full build per candidate & $O(n^2)$ & \tle \\
+2 & \lv{3} child-set + hashmap & root = the value never a child & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 rebuilds the tree for every suspected root; rung 2 reads the answer off the
+in-degree-$0$ node in one pass.
+
+\solstep{Solution}
+Maintain \code{node} (value $\to$ pointer, created on demand) and \code{isChild}
+(set of child values). For each triple resolve parent and child through
+\code{node}, insert the child value into \code{isChild}, and wire
+\code{p->left}/{\code{->right}$=c$}. Finally return \code{node[r]} where $r$ is the
+unique key not in \code{isChild}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Create-on-demand makes \code{node[x]} the \emph{same} object for every occurrence of
+value $x$, so each triple attaches the correct existing nodes; distinct values give
+each node at most one parent, and the input is promised valid, so no node is
+overwritten. In a tree every node except the root is a child of exactly one parent,
+so the child set contains all values but the root. The keys of \code{node} are all
+values; their set difference is a singleton $\{r\}$, and $r$ is the root by
+in-degree $0$. Returning \code{node[r]} is therefore correct.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Create Binary Tree From Descriptions (LeetCode 2196) -- lazy node map + child set}, label={lst:c02-create-tree}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+public:
+    TreeNode* createBinaryTree(vector<vector<int>>& desc) {
+        unordered_map<int, TreeNode*> node;
+        unordered_set<int> isChild;
+        auto get = [&](int v) {                    // fetch-or-create by value
+            if (!node.count(v)) node[v] = new TreeNode(v);
+            return node[v];
+        };
+        for (auto& d : desc) {
+            TreeNode* p = get(d[0]);
+            TreeNode* c = get(d[1]);
+            isChild.insert(d[1]);
+            if (d[2]) p->left = c; else p->right = c;
+        }
+        for (auto& kv : node)
+            if (!isChild.count(kv.first)) return kv.second;   // in-degree 0
+        return nullptr;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ as descriptions (order shuffled): the root is the value absent from the child set]
+Triples: $[2,5,0],[1,2,1],[3,6,0],[1,3,0],[2,4,1]$. Child set $=\{2,5,6,3,4\}$.
+Created values $=\{1,2,3,4,5,6\}$. Only $1$ is a parent but never a child, so the
+map lookup for $1$ is returned -- and it carries $2$ left, $3$ right, matching
+$R$'s root. \ac
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ expected (hashmap/set operations, $n=|\text{descriptions}|$),
+space $\bigO{n}$ for the nodes plus the child set. No recursion, so stack is
+$\bigO{1}$ regardless of shape -- the safe default when the description could
+describe a deep chain.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{0.34\linewidth} p{0.60\linewidth}@{}}
+\toprule
+\textbf{Edge case} & \textbf{What the code does} \\
+\midrule
+Root appears only as a parent & never enters \code{isChild}, so it is the answer. \\
+Triples out of order & create-on-demand resolves parent/child regardless. \\
+Two-leaf, single-child mixes & distinct values forbid a node being its own
+ancestor; input is promised valid. \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Do not assume \code{node[]} is fully populated when you first see a parent -- that
+is exactly the bug create-on-demand cures. If the problem later asks you to
+\emph{transform} the built tree (invert, prune), you now have a real root and can
+run the \secref{c02-transform} skeleton over it; construction and transformation
+compose cleanly.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Rebuild by \emph{indexing nodes by value} with fetch-or-create; it erases
+        any dependence on the input's order.
+  \item ``Find the root'' is almost always ``find the in-degree-$0$ node'' -- one
+        set of children answers it.
+  \item Construction returns a root pointer just like a transformation does; the
+        recursion discipline (\defref{c02-return-newroot}) is shared even when the
+        build itself is iterative.
+\end{enumerate}
+\end{insightbox}
+
+
+% ---------------------------------------------------------------------
+\solvedproblem{c02-flip-eq}{Flip Equivalent Binary Trees}{LeetCode 951}
+  {https://leetcode.com/problems/flip-equivalent-binary-trees/}{LC Medium L4}
+  {structural equivalence, two-case recursion, value-uniqueness shortcut}
+
+\begin{problemstatement}[Flip Equivalent Binary Trees]
+A \emph{flip operation} picks one node and swaps its left and right child
+subtrees. Two trees are \emph{flip equivalent} if one can be turned into the other
+by a sequence of such flips. Given roots $a$ and $b$, return \code{true} iff they
+are flip equivalent. Node values are unique within each tree; $0\le$\,nodes$\le100$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 25 minutes]
+A fair first attempt: at a single node, ask what \code{flipEquiv} must check about
+the two children -- there are only two ways to pair them.
+\peek{This is an equivalence-under-flip test (\secref{c02-transform}, fifth twist):
+a shape question, but you build nothing -- you \emph{compare}.}
+\nudge{At matched nodes, either the children correspond straight or they
+correspond crossed (one flip). Write the recursion over those two pairings; the
+answer is the disjunction.}
+\fullhint{\code{flipEquiv}(a,b) is: values equal \textbf{and} either the two
+children match straight or they match crossed (one flip here). Uniqueness of
+values makes the short-circuit $\bigO{n}$. Build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Flips are independent per node and can be applied in any order (\thmref{c02-invert-invol}
+style argument), so the only question is local: when two nodes match in value, can
+we pair their children -- either left-with-left and right-with-right (no flip
+here), or left-with-right and right-with-left (a flip here)? That binary choice at
+every node is the whole problem. Uniqueness of values means at most one of the two
+pairings can ever succeed, which is what keeps the recursion linear.
+
+\solstep{Key Observations}
+\begin{observation}
+$a$ and $b$ are flip equivalent iff (both null) or (one null, values equal, and
+their children match either straight or crossed). Base: two nulls are equivalent,
+exactly one null is not.
+\end{observation}
+\begin{observation}
+Because values are unique, if the straight pairing holds the crossed pairing
+cannot (the child roots would carry the same two values in both orders only if
+they were equal), so short-circuiting the \code{||} visits each node $O(1)$ times.
+\end{observation}
+\begin{observation}
+No tree is mutated or built -- this decides \emph{equality up to flips} by
+comparing a flip-invariant (the multiset of child-subtree identities), matching the
+pattern card's third use (\defref{c02-flip}).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Canonicalise each tree by always flipping so the smaller-valued child is
+on the left, then compare structurally.}{Works, but it is two rebuilds plus a
+comparison -- more code and an $\bigO{n}$ allocation per tree, when a single
+in-place recursion decides the same thing with no extra memory.}
+\deadend{Compare heights and sizes to reject quickly.}{Necessary-not-sufficient:
+many non-equivalent trees share the height/size profile, so it only filters; it
+never proves equivalence.}
+\aha{The equivalence is defined \emph{recursively}, so test it recursively -- at
+each matched node just try the two child pairings and \code{or} them.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} enumerate flip subsets & try all $2^{n}$ flip choices & $O(2^{n}\!\cdot\!n)$ & \tle \\
+2 & \lv{4} two-case recursion & straight \textbf{or} crossed at each node & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 is the definition unrolled; rung 2 factors it -- the choice at a node is
+independent of the rest, so we branch once, not per subset.
+
+\solstep{Solution}
+Structural recursion \code{fe(a,b)}: return \code{true} if both nodes are null,
+\code{false} if exactly one is null or the values differ; otherwise \code{fe} is
+the disjunction of two pairings -- the \emph{straight} one, joining
+\code{fe(a->left, b->left)} with \code{fe(a->right, b->right)}, and the
+\emph{crossed} one, joining \code{fe(a->left, b->right)} with
+\code{fe(a->right, b->left)}. Short-circuit keeps it linear (Observation 2).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Induction on $\size(a)+\size(b)$. Base cases (both/null/value-mismatch) are
+immediate. Step, matched values: if a flip sequence $F$ makes $a\equiv b$, then at
+the roots either the root is not flipped by $F$ (so $a$'s left $\equiv$ $b$'s left
+and rights correspond) or it is flipped once at the root (crossed correspondence);
+in either case the relevant pairing holds and, by the inductive hypothesis, the
+matching recursive calls return \code{true}, so \code{fe} returns \code{true}.
+Conversely, if \code{fe} returns \code{true} via the straight pairing, apply the
+inductively-guaranteed flips inside each child subtree -- $a\to b$ with no root
+flip; via the crossed pairing, additionally flip the root -- a valid flip sequence.
+Hence \code{fe} is correct.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Flip Equivalent Binary Trees (LeetCode 951) -- straight-or-crossed recursion}, label={lst:c02-flip-eq}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+public:
+    bool flipEquiv(TreeNode* a, TreeNode* b) {
+        if (!a && !b) return true;                       // both empty
+        if (!a || !b || a->val != b->val) return false;  // shape/value mismatch
+        bool straight = flipEquiv(a->left,  b->left)
+                     && flipEquiv(a->right, b->right);
+        bool crossed  = flipEquiv(a->left,  b->right)
+                     && flipEquiv(a->right, b->left);    // one flip at this node
+        return straight || crossed;                      // short-circuits: O(n)
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ vs.\ $S$, where $S$ is $R$ with a single flip at node $2$ (its children become $5,4$)]
+Root: $\mathit{fe}(1,1)$ values equal. Straight pairing recurses
+$\mathit{fe}(2,2)$ and $\mathit{fe}(3,3)$. Node $3$ matches (both have lone right
+$6$) $\to$ \code{true}. At $\mathit{fe}(2,2)$: children are $(4,5)$ in $R$ and
+$(5,4)$ in $S$. Straight: $\mathit{fe}(4,5)$ = false (values differ). Crossed:
+$\mathit{fe}(4,4)\,\&\&\,\mathit{fe}(5,5)$ = true. So node $2$ returns true, hence
+the root's straight branch is true, hence the trees are flip equivalent -- one flip
+at node $2$ suffices. \ac
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$: uniqueness (Observation 2) means only one of \{straight,
+crossed\} can match, so the \code{||}/\code{\&\&} short-circuit prevents the naive
+$4$-branching; each node is visited a constant number of times. Space $\bigO{h}$
+stack. With $n\le100$ this is never near the limits, but the \emph{reason} it is
+linear (uniqueness) must be re-checked if values were allowed to repeat -- then
+both pairings may match and you get $O(2^{h})$ without memoisation on subtree
+identities.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{0.34\linewidth} p{0.60\linewidth}@{}}
+\toprule
+\textbf{Edge case} & \textbf{What the code does} \\
+\midrule
+Both empty & returns \code{true} at the base. \\
+One empty, one not & returns \code{false} (asymmetric). \\
+Identical trees & straight branch true everywhere, no flip needed. \\
+Perfect mirror & crossed branch fires at every node; still \emph{true}. \\
+Repeated values (not in constraints) & would need memo/canonical form -- noted
+in the complexity box. \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Comparing only the child \emph{values} at each node (does $\{a_L,a_R\}=\{b_L,b_R\}$
+as a set) is \emph{not} enough -- the subtrees under matched children must
+themselves be flip equivalent; recurse into them. Variant: ``minimum flips to make
+equivalent'' replaces the \code{||} with a $\min$ over the two pairings, adding $1$
+on the crossed branch -- same skeleton, counting instead of deciding.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Equal up to independent per-node choices'' problems collapse to a
+        recursion that tries each local choice and \code{or}/\code{min}s them.
+  \item A side-condition (value uniqueness) is often what turns an exponential
+        branch-and-bound into a linear scan -- name it, do not assume it.
+  \item Equivalence checks are transformations' cousins: the flip is the same
+        pointer swap (\defref{c02-flip}), here only imagined, never applied.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item If values are \emph{not} unique, memoise $\mathit{fe}$ on
+        $(\mathit{ptr}(a),\mathit{ptr}(b))$ (or canonical hash of each subtree) to
+        kill the exponential re-comparison of matched shapes.
+  \item Deep skewed input ($n$ up to $10^{5}$ variants exist) $\to$ the two-sided
+        recursion is $\bigO{h}$ stack: convert to an explicit pair-stack
+        $\{(a,b)\}$ worklist, pushing the two candidate pairings.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------------
+\solvedproblem{c02-delete-forest}{Delete Nodes And Return Forest}{LeetCode 1110}
+  {https://leetcode.com/problems/delete-nodes-and-return-forest/}{LC Medium L4}
+  {post-order rewire, return-new-root, orphan recording, set membership}
+
+\begin{problemstatement}[Delete Nodes And Return Forest]
+Given the root of a binary tree and a set of distinct values \code{toDelete},
+delete every node whose value is in the set (removing it and its parent edge). The
+children of a deleted node, if they survive, become roots of new trees. Return the
+list of roots of the resulting forest, in any order. $1\le$\,nodes$\le1000$,
+values in $[1,10000]$ distinct, $|\text{toDelete}|\le100$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 25 minutes]
+A fair first attempt: decide \emph{when} you know a node must be reported as a new
+forest root -- it is a child of a deleted node that was not itself deleted.
+\peek{This is the return-the-new-root contract (\defref{c02-return-newroot}) plus
+Pitfall 3: deletion is ``return \code{nullptr} to the parent''; a split is ``also
+record this surviving child as a root.''}
+\nudge{Process children \emph{first} (post-order, \thmref{c02-rewrite-frame}) so a
+deleted node's children already point at their rebuilt subtrees; then its
+non-null children are exactly the new roots.}
+\fullhint{\code{dfs(v)} reattaches \code{v->left=dfs(left)}, \code{v->right=dfs(right)};
+if $v$ is deleted, push its surviving children to the answer and return
+\code{nullptr}; else return $v$. After the call, push the root if it survived. Below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Deleting a node changes the pointer graph, so this is a genuine transformation --
+and it produces \emph{several} outputs (a forest), not one tree. Two facts drive
+the design: (i) a node's fate must be decided \emph{after} its children are
+processed, because a deleted node hands its (already-rebuilt) surviving children
+to the forest; (ii) the parent must be told the child vanished, which is exactly
+what ``return \code{nullptr} from the child call and assign it into the slot''
+does. Membership in \code{toDelete} should be $O(1)$ -- hash the set.
+
+\solstep{Key Observations}
+\begin{observation}
+A node becomes a forest root iff it survives and its parent is deleted (or it is
+the overall root and survives). So the answer $=$ survivors whose parent edge is
+cut, collected as we go.
+\end{observation}
+\begin{observation}
+Post-order is forced: only after \code{dfs} on both children do we know their
+final roots; if $v$ is then deleted, its current non-null children \emph{are} the
+new roots (their pointers already exclude deletions below them).
+\end{observation}
+\begin{observation}
+Reattaching the returned pointer (\code{v->left = dfs(v->left)}) is what actually
+severs a deleted grandchild -- forgetting it leaves dangling edges (Pitfall 3).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Pre-order: if $v$ is deleted, splice it out, then recurse.}{When you cut
+$v$ you do not yet know which of $v$'s descendants will also be deleted, so you
+record the \emph{wrong} children as forest roots (a child that is itself deleted
+would be reported). \thmref{c02-rewrite-frame} forbids a child-dependent rewrite
+before the children run.}
+\deadend{For each value in \code{toDelete}, do a full DFS to find and remove it.}{$O(n\cdot|\text{toDelete}|)$
+and awkward: after removing one node the parent pointers you relied on may already
+be gone; interleaved deletions corrupt the walk. One post-order pass handles all
+deletions at once in $\bigO{n}$.}
+\aha{Return the rebuilt subtree root; \code{nullptr} means ``I was deleted'', and a
+deleted node's surviving children are pushed to the forest on the way out.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} per-target full DFS & one pass to delete each value & $O(n\,k)$ & \tle \\
+2 & \lv{3} pre-order splice & cut then recurse & $O(n)$ & \textcolor{warningred}{\ding{55}\ \textbf{WA}} \\
+3 & \lv{4} post-order return-null & rebuild children, then decide & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 is the trap \thmref{c02-rewrite-frame} warns about (wrong forest roots);
+rung 3 fixes it by deciding after the children.
+
+\solstep{Solution}
+Hash \code{toDelete} into a set. Post-order \code{dfs(v)}: recurse and \emph{assign}
+both children; if $v$'s value is deleted, push each surviving (non-null) child to
+\code{forest} and return \code{nullptr}; else return $v$. Call it on the root and,
+if the returned root is non-null (root survived), push it. Return \code{forest}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Induction on $\size$ (post-order, \thmref{c02-postorder}). For $v=\nil$ return
+\code{nullptr}, correct. For internal $v$: by hypothesis \code{dfs} returns the
+root of the correctly-forested $\subtree(L)$ and $\subtree(R)$; assigning them in
+keeps $v$ attached to exactly the survivors that remain in its subtrees. If $v$ is
+\emph{not} deleted, $v$ is the root of the rebuilt $\subtree(v)$ -- return $v$
+(correct). If $v$ \emph{is} deleted, $\subtree(v)$ splits into the two already-rebuilt
+child trees; a non-null child root is by the inductive hypothesis the root of a
+maximal surviving subtree, so pushing precisely those (and returning
+\code{nullptr} to detach $v$ from its parent) yields the correct forest fragment.
+The top-level push adds the root's tree iff the root survived. Every surviving
+node is in exactly one reported tree (its nearest surviving ancestor whose parent
+edge was cut is the reported root), and no deleted node is a root -- so the
+collection is exactly the forest.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Delete Nodes And Return Forest (LeetCode 1110) -- post-order, return-new-root}, label={lst:c02-delete-forest}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    vector<TreeNode*> forest;
+    unordered_set<int> del;
+    TreeNode* dfs(TreeNode* v) {
+        if (!v) return nullptr;
+        v->left  = dfs(v->left);            // rebuild children FIRST (post-order)
+        v->right = dfs(v->right);           // reattach -> severed edges vanish
+        if (del.count(v->val)) {            // delete v: its survivors split off
+            if (v->left)  forest.push_back(v->left);
+            if (v->right) forest.push_back(v->right);
+            return nullptr;                 // tell parent to detach v
+        }
+        return v;                           // v survives as subtree root
+    }
+public:
+    vector<TreeNode*> delNodes(TreeNode* root, vector<int>& toDelete) {
+        del = unordered_set<int>(toDelete.begin(), toDelete.end());
+        if (dfs(root)) forest.push_back(root);   // root survived
+        return forest;
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ with toDelete containing $3$ (the highlighted chain $1\to3\to6$ in \figref{c02-running})]
+$\mathit{dfs}(1)$: left $=\mathit{dfs}(2)$ returns $2$ (children $4,5$ intact, $2$
+kept); right $=\mathit{dfs}(3)$: node $3$'s left is null, its right $=\mathit{dfs}(6)$
+$=6$; $3$ is deleted $\to$ push surviving child $6$ to forest, return \code{nullptr}.
+Back at $1$: \code{v->right=nullptr} severs the edge; $1$ kept, return $1$. The
+top-level call sees a non-null root, pushes $1$. Forest $=\{6,\,1\}$ -- the tree
+rooted at $1$ (now right-childless) and the orphaned singleton $6$. \ac
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (one post-order; each \code{del.count} is $O(1)$ expected), space
+$\bigO{n+|\text{toDelete}|}$ for the forest vector and hash set plus $\bigO{h}$
+stack. At $n\le1000$ no depth risk; a $10^{5}$-node chain would need the iterative
+form (hardening box).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}p{0.34\linewidth} p{0.60\linewidth}@{}}
+\toprule
+\textbf{Edge case} & \textbf{What the code does} \\
+\midrule
+Root deleted & top-level \code{dfs} returns \code{nullptr}; only its surviving
+children were pushed -- root not in forest. \\
+Delete a whole branch & its surviving leaves under it are pushed at the highest
+deleted node exactly once. \\
+Nothing deleted & every call returns its node; forest $=\{$root$\}$. \\
+Adjacently-deleted parent/child & child returns \code{nullptr} to parent first
+(post-order), so a deleted child is \emph{not} pushed by its deleted parent. \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Reporting forest roots in \emph{pre-order} (before children) double-counts: a node
+whose parent is deleted is a root \emph{only if it survives}, which you learn after
+processing it. Test adjacent deletions $\{p, \mathit{child}(p)\}$ -- a correct
+post-order push nothing for the deleted child, while a naive version pushes it.
+Variant: ``return the forest as a sorted list of root values'' just maps the answer
+through $\mathit{val}$; ``delete leaves only'' guards the push on childlessness.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A transformation that \emph{splits} the tree is still ``return the new
+        subtree root''; extra outputs are collected in a side list as you cut.
+  \item Post-order is not a style choice here -- child-dependent structural
+        decisions are only safe once the children are final (\thmref{c02-rewrite-frame}).
+  \item \code{nullptr}-as-signal is the whole deletion trick: the parent's
+        \code{child = dfs(child)} assignment does the surgery for free.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item $n$ grows to $10^{5}$ as a chain: $\bigO{h}$ recursion \textbf{RE}s. Use an
+        explicit-stack post-order (push $\{v,\text{visited}\}$, and on the second
+        visit assign children and apply the delete rule) so the ``children first''
+        order survives without the call stack.
+  \item If the same node objects must be \emph{reused} elsewhere, \code{delete} the
+        removed nodes (LeetCode hands you ownership, so it is optional there, but
+        not in your own code) -- or leaks accumulate exactly where the edges were
+        cut.
+\end{itemize}
+\end{hardeningbox}
+
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Does your recursion \emph{return the (new) subtree root} and does the
+        caller \emph{assign} it back into the child slot? (If not, deletions and
+        rebuilds are silently lost -- Pitfall 3, \defref{c02-return-newroot}.)
+  \item Is your per-node rewrite placed on the right side of the recursion --
+        after the calls when it reads children, before them only when the parent
+        decides? (\thmref{c02-rewrite-frame})
+  \item Are you swapping \emph{pointers} or \emph{values}? (Invert must touch
+        pointers; \defref{c02-flip}.)
+  \item For a rebuild: have you found the root by in-degree $0$, and can you
+        fetch-or-create any node by value regardless of input order?
+        (\probref{c02-create-tree})
+  \item If you compare shapes under flips, did you recurse \emph{into} the
+        matched subtrees rather than just checking child values? (\probref{c02-flip-eq})
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Flip Binary Tree To Match Preorder Traversal}{LeetCode 971}
+    {https://leetcode.com/problems/flip-binary-tree-to-match-preorder-traversal/}{LC Medium L3}
+    {preorder walk where at each node you may swap children to match the target
+    sequence; count the flips, return $-1$ on impossibility -- the
+    parent-decides/pre-order side of \thmref{c02-rewrite-frame} with a global flip
+    counter (\probref{c02-flip-eq}'s mirror image).}
+  \practice{Maximum Binary Tree}{LeetCode 654}
+    {https://leetcode.com/problems/maximum-binary-tree/}{LC Medium L3}
+    {rebuild: the max of a range is the subtree root, left subarray builds the left
+    subtree, right subarray the right -- a construction returning the new root
+    (\defref{c02-mutate-rebuild}); monotonic-stack $\bigO{n}$ is the stretch.}
+  \practicehh{Construct Binary Tree from Preorder and Inorder Traversal}{LeetCode 105}
+    {https://leetcode.com/problems/construct-binary-tree-from-preorder-and-inorder-traversal/}{LC Medium L4}
+    {preorder gives the root, inorder splits into left/right extents; recurse with
+    index ranges and return the assembled root.}
+    {Hash the inorder values to indices for $O(1)$ splits; carry a moving preorder
+    pointer.}
+    {Guard the empty-range base case; the left subtree size is
+    $\mathit{inIdx}-\mathit{inLeft}$ -- compute it before recursing (compare
+    \probref{c02-create-tree}'s root-by-in-degree).}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 2.4 Structural transformation]
+Point the recursion at the tree: each call \emph{returns the new root} of the
+subtree it rebuilt (a node, or \code{nullptr} to delete, or a node plus an orphan
+pushed to a forest). Child-dependent rewrites go post-order, parent-decided ones
+pre-order (\thmref{c02-rewrite-frame}); flip $\ne$ move-values (\thmref{c02-invert-invol}).
+\selftest{
+  \item State the return-the-new-root contract and name the three things a call
+        can return (kept root, \code{nullptr}, root-plus-recorded-orphan).
+  \item Why must invert swap \emph{pointers}, not \emph{values}, and why is a
+        double invert the identity? (\thmref{c02-invert-invol})
+  \item Give one problem where the rewrite goes pre-order and one where it must go
+        post-order, and cite the deciding rule (\thmref{c02-rewrite-frame}).
+  \item In \probref{c02-delete-forest}, why does a pre-order report double-count a
+        node whose parent is also deleted?
+  \item Write the transform skeleton (\coderef{c02-transform-skeleton}) from memory,
+        marking SLOT 2 (rewrite) and SLOT 3 (return).
+}
+\end{recallbox}

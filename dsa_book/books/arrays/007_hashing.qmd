@@ -1,0 +1,1180 @@
+# Hashing & Counting {#sec-hash}
+
+<!--
+Author-facing provenance (not rendered): mirrors array_book ch.3 "Hashing & Counting".
+Lessons A1-A5 + patterns P1-P5 per PLAN.md line for chapter 7. The HTML comment above is the
+only place a local path may appear, and it must never reach the rendered page.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** ch. 11 (hash tables: direct addressing, chaining, the division and multiplication methods, universal hashing, open addressing, and the simple-uniform-hashing analysis) · **CPH** ch. 4 (C++ `set`, `map`, `unordered_set`, `unordered_map`: what each guarantees) · **Erickson** *Algorithms*, the "Hash Tables" lecture notes (universal hashing and why a random hash function defeats any fixed input) · **Misra and Gries** (1982), "Finding repeated elements" (the $k$-counter generalisation of majority voting) · **Python docs** and **PEP 456** (`dict`/`set` behaviour, SipHash string hashing) · Codeforces blogs 62393 and 60737 (anti-hash tests, custom hashes, `gp_hash_table`).
+
+**Coverage:** hash sets and maps · buckets, load factor, chaining versus open addressing, rehashing · expected versus amortised versus worst case · frequency array versus `unordered_map` versus `map` versus sorted array · anti-hash tests and seeded custom hashes · hashable keys (tuples, packed integers, pair hashes) · complement lookups and the query-before-insert rule · grouping by a transformed key and $\binom{c}{2}$ pair counting · existence, distinct counts and latest-index maps · Boyer–Moore voting and its $n/(k{+}1)$ generalisation (Misra–Gries) · set membership with run starts · remainder-to-index maps · five patterns with two solved problems each.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Say what "expected $O(1)$" means for a hash lookup, what the *worst case* actually is, and who is able to force it on you.
+- Choose correctly between a frequency array, `unordered_map`, `map`, and a sorted array + binary search, and justify the choice in one sentence.
+- Defend a C++ contest submission against an anti-hash test with a seeded custom hash, and explain why Python needs no such defence for string keys.
+- Write the one-pass "seen-so-far" complement lookup without the self-pair bug, and explain precisely why the query must come before the insert.
+- Turn any "when do two objects match?" rule into a **key** — $a_i - i$, $a_i \bmod k$, a sorted tuple — and count groups with a single `Counter` pass.
+- Prove and implement Boyer–Moore voting in $O(1)$ memory, for majorities above $n/2$ and above $n/3$, including the verification pass that makes the $n/3$ version honest.
+- Answer "is it present?" and "which remainder did I see before?" from a set or a remainder-index map in one pass.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter, defaultdict
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr007_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-hash-why}
+
+::: {.callout-note title="In plain words"}
+A hash table is a machine for remembering *which things you have seen* and answering "have I seen this before?" in one glance, whatever the number of things. You put the question down as a **key** — a number, a pair, a whole row of a matrix — and the table answers instantly: present? how many times? at which index? Hashing is how $O(n^2)$ "compare every pair" problems quietly become $O(n)$ "look it up" problems, with no sorting and no clever window.
+:::
+
+Here is the interview-shaped argument. Someone hands you $n = 10^5$ numbers and asks whether any two sum to a target. The direct reading of the definition — try every pair — runs about five billion pair checks ($\binom{10^5}{2} \approx 5\cdot10^9$): far past the budget of @sec-cx-budget. Now change the question you actually ask. Instead of "is there a $j$ with $a_j = t - a_i$?" (a search through the array), keep everything you have seen in a **hash set** and ask "is the value $t - a_i$ in my set?" (a single lookup). Same answers, a hundred thousand lookups, one pass. The pairs did not stop existing; the hash table turned "search the array for a partner" into "look the partner up by its value", and a lookup by value costs about as much as reading one array cell.
+
+The two chapters before this one gave you two of the three great array summarisers: one pass with running state (@sec-arr-scan) and a table of prefix sums (@sec-pref). The hash table is the third, and the only one that works when **the interesting key is not an index**. You have already used one without looking inside: counting subarrays by their sum in @sec-pref-hash kept prefix sums in a map. This chapter opens the box. "How many times has this exact value appeared?" "Which prefix remainder did I last see?" "Have I visited this board position before?" — the value, not the position, is what you are counting, and the value range may be $10^9$ or negative or a *tuple*. A frequency array (@sec-arr-p5) can only index a small non-negative range; a hash table indexes *anything you can hash*.
+
+**Where hash tables live in real systems.** Almost everywhere. Every Python `dict` and `set` is one; every JSON document you parse lands in one. Databases answer `GROUP BY` and `COUNT(DISTINCT)` with hash tables, and a *hash join* — build a hash table on the small table's key, stream the big table against it — is one of the two ways real engines join tables at all. Redis and Memcached are effectively one big hash table keyed by strings. Web crawlers keep a "seen URLs" set to deduplicate the web. Compilers and interpreters *intern* identifiers so comparing two names is pointer equality. Git looks up every object by the hash of its content. Game engines and chess programs hash board positions (Zobrist hashing) to run repetition detection and caches. The approximations you meet at internet scale — Bloom filters for "probably seen this URL", HyperLogLog for "roughly how many distinct users" — are hash structures that gave up exactness for memory. Distributed engines such as Spark compute "count per key" over huge data by *hash-partitioning*: every record with the same key is sent to the same machine, which then counts locally — the grouping idea of @sec-hash-keys at cluster scale. This chapter is the interview half of that story. String fingerprints (rolling hashes) get their own treatment in the strings part of the book, and questions that need *sorted* keys — the nearest key, the $k$-th smallest — stay with `map` and trees (@sec-lang-cpp).
+
+**How the chapter is built.** Part A is five lessons: the machine and its guarantees (A1), how contest setters attack it and how to armour yours (A2), and then the three question shapes you will meet again and again — complements (A3), keys (A4), and counting without a table at all (A5). Part B is five patterns with two fully solved, stress-tested problems each. The next chapter, @sec-tp, answers several of the same questions a different way: when the array is sorted, two pointers find a partner with no extra memory, and knowing which tool fits is half of many interview answers. @sec-sw then puts a hash map *inside* a moving window.
+
+::: {#fig-hash-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "q": (0.0, 0.0, "question about x", "indigo"),
+        "k": (7.6, 0.0, "key: t-x, a[i]-i, x mod p", "violet"),
+        "t": (7.6, -2.4, "hash table", "cyan"),
+        "a": (0.0, -2.4, "seen? how many? where?", "green"),
+    }, [("q", "k", "rewrite"), ("k", "t", "look up"), ("t", "a", "O(1) expected")], w=5.2, h=0.9)
+V.show(draw)
+```
+
+The whole chapter in one line. Each pattern rewrites "search the array for a partner" as "look up one key", and the table answers in expected constant time. The skill is choosing the key.
+
+:::
+
+## Part A — Lessons
+
+## A1. Hash sets and hash maps: expected O(1), collisions, and what to use instead {#sec-hash-sets}
+
+::: {.callout-note title="In plain words"}
+The table is an array of **buckets**. A **hash function** squashes each key into a small integer, and the bucket number is that integer modulo the number of buckets. Keys that land in the same bucket are **collisions**; they are stored together in a little chain, and a lookup walks only its own chain. If keys spread evenly — they do, under the assumption mathematicians call *uniform hashing* — every chain stays a constant length, and "have I seen this?" costs one hash, one array read, and a couple of comparisons. That is the entire magic, and it is why the guarantee says *expected*.
+:::
+
+Walk one lookup of `key` in a table with $m$ buckets that stores $n$ keys:
+
+1. compute the hash code $h = \text{hash}(key)$ — a fixed cost per key (per character, for a string);
+2. find the bucket $b = h \bmod m$ — one division, or one bit-mask when $m$ is a power of two;
+3. walk the chain at `buckets[b]`, comparing each stored key with `key`.
+
+Steps 1 and 2 cost the same every time. Step 3 is the only variable part, and @fig-hash-chaining shows why it is short.
+
+::: {#fig-hash-chaining}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ch_keys, ch_m = [10, 22, 31, 4, 15, 28, 17], 8
+ch_b = [[] for _ in range(ch_m)]
+for k in ch_keys:
+    ch_b[k % ch_m].append(k)                 # bucket = key mod m (an int hashes to itself)
+assert ch_b[4] == [4, 28] and ch_b[7] == [31, 15] and sum(map(len, ch_b)) == len(ch_keys)
+
+
+def draw(ax, p):
+    for b in range(ch_m):
+        y = -b * 1.15
+        V.box(ax, p, 0, y, 1.0, 0.9, str(b), color="indigo", round_=False, filled=bool(ch_b[b]))
+        prev = 1.0
+        for j, k in enumerate(ch_b[b]):
+            x = 1.8 + j * 1.8
+            V.arrow(ax, p, prev, y + 0.45, x, y + 0.45, color="muted")
+            V.box(ax, p, x, y, 1.1, 0.9, str(k), color="amber" if len(ch_b[b]) > 1 else "green")
+            prev = x + 1.1
+    V.text(ax, p, 0.5, 1.4, "bucket", color="muted", size=10)
+    V.text(ax, p, 3.6, 1.4, "chain (keys in that bucket)", color="muted", size=10)
+    V.text(ax, p, 5.6, -4.15, "4 and 28 collide: both are 4 mod 8", color="amber", size=10, ha="left")
+    V.text(ax, p, 5.6, -7.6, "31 and 15 collide: both are 7 mod 8", color="amber", size=10, ha="left")
+V.show(draw)
+```
+
+Separate chaining with $m = 8$ buckets and seven integer keys. Each key goes to bucket `key mod 8`. A lookup for $28$ computes $28 \bmod 8 = 4$ and compares against at most the two keys of bucket $4$; it never looks at the other buckets.
+
+:::
+
+**Load factor and rehashing.** The expected chain length is $\alpha = n/m$, the **load factor**. A table keeps $\alpha$ bounded by growing: when $\alpha$ passes a threshold, it allocates a bucket array about twice as large and re-inserts every key (**rehashing**). C++'s `unordered_map` grows when $\alpha$ would exceed its `max_load_factor()`, which is $1.0$ by default; CPython's `dict` grows when it is about two-thirds full. One rehash copies the whole table, but the copies form a geometric series — the same argument as `push_back` in @sec-arr-vec and @sec-cx-amortized — so an insert costs **amortised** $O(1)$. Put together: a lookup or insert costs $O(1 + \alpha) = O(1)$ *expected*, where "expected" is over how the hash codes happen to spread, and the occasional rehash is paid for by the cheap inserts around it.
+
+**Chaining versus open addressing.** There are two ways to store colliding keys. **Separate chaining** (@fig-hash-chaining, and libstdc++'s `unordered_map`) hangs a linked list off each bucket. **Open addressing** (CPython's `dict` and `set`, and most fast contest tables) stores every key directly in the bucket array; a key whose slot is taken *probes* further slots in a fixed sequence until it finds a free one, and a lookup follows the same sequence until it finds the key or an empty slot. Open addressing has no per-node allocations, so it is friendlier to the cache, but it must keep the table well below full, because probe sequences grow quickly as $\alpha$ approaches $1$. For someone *using* a hash table the two behave the same: expected $O(1)$, worst case $O(n)$.
+
+To make this concrete, here is a whole chained hash set built from Python lists. Write one like it once; afterwards no hash table is a black box.
+
+```{python}
+#| label: arr-hash-a1-chained
+class ChainedSet:
+    """A hash set from scratch: m buckets, each bucket a list (its chain)."""
+
+    def __init__(self, m=8):
+        self.buckets = [[] for _ in range(m)]
+        self.n = 0
+
+    def _chain(self, key):
+        return self.buckets[hash(key) % len(self.buckets)]
+
+    def __contains__(self, key):
+        return key in self._chain(key)          # walk ONE chain, not the whole table
+
+    def add(self, key):
+        chain = self._chain(key)
+        if key in chain:
+            return
+        chain.append(key)
+        self.n += 1
+        if self.n > len(self.buckets):          # load factor above 1: double and rehash
+            old = [k for c in self.buckets for k in c]
+            self.buckets = [[] for _ in range(2 * len(self.buckets))]
+            for k in old:
+                self._chain(k).append(k)
+
+
+for _ in range(300):                            # behaves exactly like set()
+    ops = [random.randint(-30, 30) for _ in range(random.randint(0, 60))]
+    mine, ref = ChainedSet(), set()
+    for x in ops:
+        mine.add(x)
+        ref.add(x)
+    assert mine.n == len(ref) and all((y in mine) == (y in ref) for y in range(-35, 36))
+
+spread = ChainedSet()                           # ordinary keys: chains stay short
+for x in random.sample(range(10**9), 5000):
+    spread.add(x)
+assert spread.n / len(spread.buckets) <= 1.0
+assert max(map(len, spread.buckets)) <= 12      # the longest of thousands of chains
+
+attack = ChainedSet()                           # keys that are all multiples of 2^20
+for i in range(1000):
+    attack.add(i * 2**20)                       # every bucket count here divides 2^20
+assert max(map(len, attack.buckets)) == 1000    # ... so all 1000 keys share ONE chain
+print("chained set OK")
+```
+
+The last experiment is the whole danger of hashing in one line. The table ends with $1024$ buckets, but every key is a multiple of $2^{20}$, so every key is $0 \bmod 1024$ and lands in bucket $0$: one chain of length $1000$, and each insert walked the entire chain before appending. CPython's real `dict` is not hurt by this particular pattern, because its probe sequence mixes in the high bits of the hash; the toy table above uses only the low bits. @sec-hash-anti shows the same attack against C++.
+
+**What the standard containers promise.** C++ `unordered_map`/`unordered_set` and Python `dict`/`set` all give expected $O(1)$ lookup, insert and erase. The differences that matter in practice:
+
+- **Iteration order.** Python's `dict` iterates in **insertion order**, a language guarantee since Python 3.7. Python's `set` and C++'s `unordered_*` iterate in an **unspecified** order, which can change after a rehash. Never print "the first key" of an unordered container and expect the same answer on another machine.
+- **Changing a container while iterating it.** In Python, adding or removing a `dict` key during a `for` loop over it raises `RuntimeError`. In C++, an insert that triggers a rehash invalidates every iterator, and using one afterwards is undefined behaviour. Erase inside a loop with `it = m.erase(it)`.
+- **Reading a missing key.** C++ `m[k]` *inserts* a default value when `k` is absent; Python `d[k]` raises `KeyError` (a `defaultdict` inserts, like C++). @sec-hash-complement comes back to this.
+
+The guarantee's dark corner: **all keys can collide.** The worst case of one lookup is $\Theta(n)$, so a whole pass over a table can cost $\Theta(n^2)$ — and someone who *knows your hash function* can choose keys that force it, exactly as the multiples of $2^{20}$ did above. For integers, libstdc++'s `std::hash` is the identity and the bucket count is a prime taken from a fixed table, so keys chosen as multiples of that prime all share one bucket. This is not hypothetical: on Codeforces, solutions get **hacked** this way (@sec-hash-anti). Python is safer for strings, whose hashes are randomised per process (SipHash, PEP 456), but a Python `int` still hashes to (almost) itself.
+
+**The four-way choice** you should be able to state on demand:
+
+::: {#fig-hash-choose}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    cells = [
+        ["structure", "lookup", "key order", "use it when"],
+        ["freq[v] array", "O(1) always", "by value", "keys small, >= 0"],
+        ["unordered_map", "O(1) expected", "none", "any hashable keys"],
+        ["map (tree)", "O(log n)", "sorted", "need nearest / k-th"],
+        ["sorted + binary", "O(log n)", "sorted", "data never changes"],
+    ]
+    V.grid(ax, p, cells, colors={(0, c): "indigo" for c in range(4)}, cell_w=1.6)
+V.show(draw)
+```
+
+The whole decision in one table. Only the first row is a guaranteed $O(1)$; only the last two give you keys in sorted order (@sec-lang-python, @sec-lang-cpp).
+
+:::
+
+A frequency array (@sec-arr-p5) is the special case where the universe is small: values in $[0, 10^6]$ cost $O(10^6)$ memory and give exact $O(1)$ with *no* hashing at all — better constants than any hash map, and nothing for an adversary to attack. As soon as keys are negative, large, sparse, or composite (pairs, strings, rows of a matrix), pay for the hash. When you need order between keys — "the largest key below $x$", "the $k$-th smallest" — a hash table cannot help at all, because it deliberately scatters neighbouring keys; that is `map`'s job.
+
+**Keys must not change.** A key is filed under the bucket of its hash *at insertion time*. If the key changed afterwards, its hash would change too, and lookups would search the wrong bucket. Python prevents this: `list`, `dict` and `set` are unhashable, so you hash the `tuple` of a row, or a `frozenset`. C++ prevents it differently: the keys inside `set`, `map` and the unordered containers are `const`, so to "change" a key you erase it and insert the new one.
+
+**Keys made of two numbers.** Python hashes a tuple `(a, b)` out of the box, and its tuple hash depends on the order of the parts. C++ has no `std::hash` for `pair`, so you either use `map<pair<int,int>, V>` (pairs are comparable, so the tree works with no extra code), pack the pair into one 64-bit integer, or write a hash. The tempting recipe `hash(a) ^ hash(b)` is a bad hash: it gives $(a, b)$ and $(b, a)$ the same code, and sends every pair $(x, x)$ to $0$.
+
+```{python}
+#| label: arr-hash-a1-pairs
+pairs = [(x, x) for x in range(100)]
+assert len({hash(a) ^ hash(b) for a, b in pairs}) == 1           # XOR: all 100 pairs -> one code
+assert hash(3) ^ hash(5) == hash(5) ^ hash(3)                    # ... and (a, b) ~ (b, a)
+assert len({(a << 32) | b for a, b in pairs}) == 100             # packing keeps them apart
+assert hash((1, 2)) != hash((2, 1))                              # Python's tuple hash is ordered
+print("pair keys OK")
+```
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+// Pack a pair of ints into one 64-bit key: different pairs give different keys.
+struct PairHash {
+    size_t operator()(const pair<int, int>& q) const {
+        uint64_t a = (uint32_t)q.first, b = (uint32_t)q.second;
+        return hash<uint64_t>()((a << 32) | b);   // for hacked judges, mix it as in A2
+    }
+};
+
+int countDistinctPairs(const vector<pair<int, int>>& v) {
+    unordered_set<pair<int, int>, PairHash> s(v.begin(), v.end());
+    return (int)s.size();
+}
+```
+
+When both parts are small and non-negative, packing by arithmetic works too: `(long long)a * (B + 1) + b` with `B` the largest possible `b`. Do the multiplication in `long long` — `a * (B + 1)` in `int` overflows as soon as the product passes about $2.1\cdot10^9$ (@sec-arr-cost).
+
+The smallest useful hashing program, and the one the next lessons grow from, answers "are there two equal values?":
+
+```{python}
+#| label: arr-hash-a1-demo
+def has_dupes_set(a):                 # one pass, expected O(n)
+    seen = set()
+    for x in a:
+        if x in seen:
+            return True
+        seen.add(x)
+    return False
+
+def has_dupes_scan(a):                # the O(n^2) reading of "any two equal?"
+    for i in range(len(a)):
+        if a[i] in a[:i]:             # list search, not set membership
+            return True
+    return False
+
+for _ in range(600):
+    a = [random.randint(0, 20) for _ in range(random.randint(1, 30))]
+    assert has_dupes_set(a) == has_dupes_scan(a)
+assert has_dupes_set([1, 2, 3, 1]) is True
+assert has_dupes_set([1, 2, 3]) is False
+print("a1 demo OK")
+```
+
+## A2. Anti-hash tests and custom hashes on Codeforces {#sec-hash-anti}
+
+::: {.callout-note title="In plain words"}
+A contest setter cannot break your *logic*, so they may attack your *containers*. An **anti-hash test** is an input built to make your `unordered_map` crawl: every key lands in one bucket, every lookup walks one long chain, and a solution that should run in $O(n)$ takes $\Theta(n^2)$ and times out. The defence is to stop using a hash function the attacker can predict: scramble every key with a strong mixing function, seeded from the clock so the person writing the test cannot know the seed.
+:::
+
+**Why `int` keys are the fragile ones.** In libstdc++ (the GCC standard library most judges use), the hash of an integer is the integer itself, and `unordered_map` chooses its bucket counts from a fixed, public list of primes. Both facts are visible to anyone, so an attacker can predict the bucket count $P$ the table will have once it holds $n$ keys and send $n$ multiples of $P$: $x_k = k \cdot P$. Every one of them is $0 \bmod P$, so all of them sit in one bucket — one chain of length $n$, and $\Theta(n^2)$ work to build it. The Codeforces blog [Blowing up unordered_map, and how to stop getting hacked on it](https://codeforces.com/blog/entry/62393) builds exactly this test (with $P = 126271$ for recent GCC versions) and shows ordinary `unordered_map` solutions slowing to many seconds on it. Codeforces allows *hacks* — other contestants submitting extra tests against your code — and after the contest those tests can be added to the problem, so this matters even if you never take part in a hacking round.
+
+::: {#fig-hash-anti-bars}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+MASK64 = (1 << 64) - 1
+
+
+def _mix64(x):
+    x = (x + 0x9E3779B97F4A7C15) & MASK64
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & MASK64
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & MASK64
+    return x ^ (x >> 31)
+
+
+ab_m, ab_seed = 13, 987654321
+ab_keys = [ab_m * k for k in range(1, 27)]                       # 26 multiples of the bucket count
+ab_plain = [0] * ab_m
+ab_mixed = [0] * ab_m
+for x in ab_keys:
+    ab_plain[x % ab_m] += 1                                      # identity hash
+    ab_mixed[_mix64(x + ab_seed) % ab_m] += 1                # seeded scramble
+assert ab_plain[0] == 26 and max(ab_mixed) <= 6
+
+
+def draw(ax, p):
+    V.bars(ax, p, ab_plain, 0, 6.2, height=4.0, colors={0: "red"})
+    V.text(ax, p, 1.2, 10.6, "identity hash: all 26 keys in bucket 0", color="red", size=10, ha="left")
+    V.bars(ax, p, ab_mixed, 0, 0, height=4.0 * max(ab_mixed) / 26, colors={i: "green" for i in range(ab_m)})
+    V.text(ax, p, 0.0, 2.3, "splitmix64 with a secret seed: spread out", color="green", size=10, ha="left")
+V.show(draw)
+```
+
+The same 26 keys, all multiples of the bucket count $13$, filed into $13$ buckets. With the identity hash (top) every key is $0 \bmod 13$, so one bucket holds the whole table. After a seeded `splitmix64` scramble (bottom) the keys spread out, and no bucket holds more than a handful. Both rows use the same vertical scale.
+
+:::
+
+The three standard responses:
+
+1. **Use `map`.** $O(\log n)$ per operation, *guaranteed*: a balanced tree does not care how the keys were chosen. At $n \le 2\cdot10^5$, $\log_2 n \approx 18$, and a tree solution usually fits the time limit.
+2. **Armour the hash.** Pass every key through `splitmix64` (a well-tested 64-bit mixing function) after adding a seed read from the clock at run time. The attacker would need to know your seed to compute which keys collide:
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+struct CustomHash {
+    static uint64_t splitmix64(uint64_t x) {
+        x += 0x9e3779b97f4a7c15ULL;
+        x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+        return x ^ (x >> 31);
+    }
+    size_t operator()(uint64_t x) const {
+        static const uint64_t SEED =
+            chrono::steady_clock::now().time_since_epoch().count();
+        return splitmix64(x + SEED);
+    }
+};
+
+unordered_map<long long, int, CustomHash> cnt;   // same interface, unpredictable buckets
+```
+
+3. **`__gnu_pbds::gp_hash_table`** (GCC's policy-based data structures; "gp" stands for general probing, an open-addressing table). It is often noticeably faster than `unordered_map`, but its default integer hash is just as predictable, so contestants use it *with* a custom hash like the one above.
+
+What does **not** help: `reserve(n)` (it removes the rehash cost, but the bucket count it picks is just as predictable), and switching from `int` to `long long` keys (`std::hash<long long>` is the identity too).
+
+Model the collision in Python so it stops being mysterious — everything is one modulo:
+
+```{python}
+#| label: arr-hash-anti-demo
+MASK = (1 << 64) - 1
+
+
+def splitmix64(x):                             # the C++ mixer above, in Python
+    x = (x + 0x9E3779B97F4A7C15) & MASK
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & MASK
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & MASK
+    return x ^ (x >> 31)
+
+
+P = 126271                                     # the bucket count used in the CF blog
+attack = [k * P for k in range(1, 2001)]
+plain = Counter(x % P for x in attack)         # model: int hash = identity, bucket = hash mod P
+assert len(plain) == 1 and plain[0] == 2000    # one bucket holds every key
+
+mixed = Counter(splitmix64(x + 20240611) % P for x in attack)
+assert max(mixed.values()) <= 3                # the same keys, spread over ~2000 buckets
+print("anti-hash demo OK")
+```
+
+**And Python?** For `str` and `bytes` keys, Python's `hash()` is SipHash with a random per-process seed (PEP 456), so nobody writing test data can predict the bucket layout. Integer keys are another story: on 64-bit CPython, `hash(x)` is $x$ reduced modulo the prime $2^{61}-1$, so it is predictable, and colliding integer sets *can* be constructed. CPython's probing mixes in the high bits of the hash, which makes simple patterns like "multiples of $2^k$" harmless, and attacks on Python `int` keys are rare on judges — but "rare" is not "impossible". If you suspect one, add your own seeded mixing (`hash((x ^ SEED) * C)`), or sort.
+
+The interview version of this lesson is one sentence: *hashing gives expected $O(1)$ under the assumption that keys spread evenly; an adversary who knows your hash function can break that assumption, and the fixes are a guaranteed $O(\log n)$ tree or a secret, randomised hash.*
+
+## A3. Complement lookups: seen-so-far maps {#sec-hash-complement}
+
+::: {.callout-note title="In plain words"}
+Many problems ask about a *partner* value: "another number that sums with this one to $t$", "a previous prefix whose remainder matches", "the same value but sooner". The pattern is identical: as you scan, keep everything you have already passed in a map or set; for the current item, compute its **complement** and look that up. Never search the array — search your memory of it.
+:::
+
+The two-pass version is the safe first step: build `pos = {value: index}` over the whole array, then for each $i$ ask whether $t - a_i$ lives at some $j \ne i$. It works, but note the `j != i` — if $t = 2a_i$ the complement *is* the current element, and you must exclude pairing a value with itself. The one-pass version makes the exclusion structural instead of a condition: **query the "seen so far" table, then insert yourself into it.**
+
+```text
+seen = {}                     # summarises exactly the range [0, i)
+for i, x in enumerate(a):
+    if t - x in seen:         # partner is strictly BEFORE i ...
+        return seen[t - x], i
+    seen[x] = i               # ... so answer first, then join the range
+```
+
+The order of the two statements *is* the correctness argument. When the query runs, `seen` holds only indices $< i$, so a returned pair is automatically two different elements. On `a = [3, 3], t = 6`, the first `3` is stored at index $0$ and the second `3` finds it: $(0, 1)$. Swap the two lines and the first `3` stores itself and then finds itself: $(0, 0)$, an element paired with itself. This one-line swap is exactly what an interviewer is checking when they say "walk me through $[3, 3]$".
+
+**Counting instead of finding.** To count *how many* pairs $i < j$ have $a_i + a_j = t$, keep counts instead of indices and use the same order: first add the number of earlier partners, then count yourself.
+
+```text
+cnt = {}                      # value -> how many times seen in [0, i)
+for x in a:
+    ans += cnt.get(t - x, 0)  # every earlier copy of t - x pairs with this x
+    cnt[x] = cnt.get(x, 0) + 1
+```
+
+Each pair is counted exactly once — at its right end — and the self-pair cannot happen for the same reason as before.
+
+**Reading a key that may be missing.** In C++, `cnt[k]` on an `unordered_map` **inserts** `k` with value `0` when it was absent. Reading `cnt[t - x]` in the loop above therefore stores every complement you ever *asked about*: the map grows by up to $n$ useless entries, and `cnt.size()` no longer means "distinct values seen". Read with `cnt.find(k)` or `cnt.count(k)`, which never insert. Python has the same fork in a different shape: `d[k]` raises `KeyError` for a missing key, while `d.get(k, 0)` answers with a default and changes nothing.
+
+```{python}
+#| label: arr-hash-a3-demo
+def pair_query_then_store(a, t):      # the correct one-pass order
+    seen = {}
+    for i, x in enumerate(a):
+        j = seen.get(t - x)           # query first: seen holds indices < i only
+        if j is not None:
+            return (j, i)
+        seen[x] = i                   # ... and only now join the range
+    return None
+
+def pair_store_then_query(a, t):      # insert first: the self-pair bug
+    seen = {}
+    for i, x in enumerate(a):
+        seen[x] = i
+        j = seen.get(t - x)           # x itself may satisfy the complement
+        if j is not None:
+            return (j, i)
+    return None
+
+assert pair_query_then_store([3, 3], 6) == (0, 1)
+assert pair_store_then_query([3, 3], 6) == (0, 0)   # the first cell paired with itself
+assert pair_query_then_store([2, 7, 11, 15], 9) == (0, 1)
+
+
+def count_pairs(a, t):                # how many i < j with a[i] + a[j] == t
+    cnt, ans = {}, 0
+    for x in a:
+        ans += cnt.get(t - x, 0)      # earlier partners only
+        cnt[x] = cnt.get(x, 0) + 1    # ... then count yourself
+    return ans
+
+
+for _ in range(500):
+    a = [random.randint(-5, 5) for _ in range(random.randint(0, 12))]
+    t = random.randint(-6, 6)
+    brute = sum(1 for i in range(len(a)) for j in range(i + 1, len(a)) if a[i] + a[j] == t)
+    assert count_pairs(a, t) == brute
+assert count_pairs([3, 3, 3], 6) == 3                # three copies: C(3, 2) pairs
+print("a3 demo OK")
+```
+
+## A4. Grouping by a key: canonical forms, signatures, transformed values {#sec-hash-keys}
+
+::: {.callout-note title="In plain words"}
+The second great hash question is not "is it there?" but **"who else is the same as me?"** — under some rule that is not literal equality. The move: define a **key** so that *two objects match ⇔ their keys are equal*, then a single counting pass groups everything for free. The art is entirely in choosing the key.
+:::
+
+**Why groups give pairs.** If $c$ objects share one key, every two of them match, so the group holds $\binom{c}{2} = c(c-1)/2$ matching pairs. "Count the pairs that match under rule $R$" therefore becomes one counting pass over the keys and one sum, `sum(c * (c - 1) // 2 for c in Counter(keys).values())`, with no nested loop. This is the frequency idea of @sec-arr-p5 pointed at keys instead of raw values. There is also a streaming form that never needs the second sum: walking left to right, the element with key $q$ forms one new pair with each earlier element of key $q$, so `ans += cnt[q]; cnt[q] += 1` — the counting form of A3, with "partner" replaced by "same key".
+
+Three kinds of key cover almost everything:
+
+- **Transformed value.** A word's anagram class is keyed by its sorted letters `"".join(sorted(w))`, or by its 26 letter counts as a tuple — its *signature*: two words have the same signature exactly when one is a rearrangement of the other. Two positions $i < j$ satisfy $a_j - a_i = j - i$ (Same Differences, @sec-hash-p2-a) exactly when $a_i - i = a_j - j$, so the key is the value *minus its own index* (@fig-hash-keys). Such keys can be negative or large, which a hash table does not mind and a frequency array cannot handle without an offset.
+- **Modular key.** $a \equiv b \pmod k$ exactly when $a \bmod k = b \bmod k$, so the key is the remainder. "Sum divisible by $k$" questions — subarray sums (@sec-pref-hash), pairs whose sum is divisible by $k$, the remainder map of @sec-hash-p5-b — reduce to counting or locating collisions among $k$ remainder classes.
+- **Canonical form.** When several representations stand for one object, choose one fixed representative and use it as the key: a sorted tuple for an unordered collection, a fraction $(p, q)$ reduced by $\gcd(p, q)$ with $q > 0$ for a slope, the lexicographically smallest rotation of a necklace. "Equal under your rule" becomes "identical key", which is all a hash table can ever test.
+
+::: {#fig-hash-keys}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+fk_a = [3, 5, 1, 4, 6, 6]
+fk_keys = [x - i for i, x in enumerate(fk_a, start=1)]       # a_i - i, 1-based
+fk_cnt = Counter(fk_keys)
+fk_pairs = sum(c * (c - 1) // 2 for c in fk_cnt.values())
+assert fk_keys == [2, 3, -2, 0, 1, 0] and fk_pairs == 1      # CF 1520D's first sample
+
+
+def draw(ax, p):
+    shared = {i: "green" for i, q in enumerate(fk_keys) if fk_cnt[q] > 1}
+    V.array(ax, p, fk_a, y=2.2, label="a", colors=dict(shared), index=False)
+    for i in range(len(fk_a)):
+        V.text(ax, p, i + 0.5, 3.55, str(i + 1), size=9, color="muted")
+    V.array(ax, p, fk_keys, y=0, label="a - i", colors=dict(shared), index=False)
+    V.text(ax, p, 6.4, 0.5, "keys 0 and 0 match: positions 4 and 6, one pair", color="green", size=10, ha="left")
+V.show(draw)
+```
+
+Grouping by a transformed key on $a = [3, 5, 1, 4, 6, 6]$ (positions numbered from $1$ above the cells). The rule $a_j - a_i = j - i$ looks like it compares two positions, but rewritten as $a_i - i = a_j - j$ it compares two *keys*. Only positions $4$ and $6$ share a key, so the answer is one pair.
+
+:::
+
+In code, the keys must be hashable (A1): in Python an `int`, `str`, `tuple` of hashables or `frozenset`; in C++ a built-in type, a packed 64-bit integer, or a `pair`/`vector` inside an ordered `map`.
+
+```{python}
+#| label: arr-hash-a4-demo
+def anagram_groups(words):
+    by = defaultdict(list)
+    for w in words:
+        by["".join(sorted(w))].append(w)   # sorted word = the signature
+    return {k: v for k, v in by.items()}
+
+g = anagram_groups(["eat", "tea", "tan", "ate", "nat", "bat"])
+assert sorted(g["aet"]) == ["ate", "eat", "tea"]
+assert sorted(g["ant"]) == ["nat", "tan"]
+assert g["abt"] == ["bat"]
+
+
+def pairs_by_groups(keys):            # count, then C(c, 2) per group
+    return sum(c * (c - 1) // 2 for c in Counter(keys).values())
+
+
+def pairs_streaming(keys):            # one pass: pair with every earlier equal key
+    cnt, ans = Counter(), 0
+    for q in keys:
+        ans += cnt[q]
+        cnt[q] += 1
+    return ans
+
+
+for _ in range(500):
+    keys = [random.randint(-3, 3) for _ in range(random.randint(0, 15))]
+    brute = sum(1 for i in range(len(keys)) for j in range(i + 1, len(keys)) if keys[i] == keys[j])
+    assert pairs_by_groups(keys) == pairs_streaming(keys) == brute
+print("a4 demo OK")
+```
+
+## A5. Counting without a map: Boyer–Moore voting {#sec-hash-vote}
+
+::: {.callout-note title="In plain words"}
+Sometimes the question only asks for a value that appears *more than half* the time (or more than a third), and a full frequency table is overkill — an $O(n)$ map just to report one value. **Voting** keeps one candidate and one counter. Two *different* values cancel each other out, like two opposing voters leaving the room together; whatever is left standing after all the cancellations is the only value that could have had a majority. Two variables, $O(1)$ memory, one pass.
+:::
+
+**Why cancelling works.** Suppose value $x$ occupies more than half of a multiset of size $n$. Remove any two elements that are *different from each other*. At most one of the two is a copy of $x$, so $x$ loses at most one copy while the total shrinks by two — and $x$ still occupies more than half of what remains. Keep removing distinct pairs until no two different values are left: everything left is a copy of one value, and that value must be $x$, because $x$ never drops to half. The counter loop performs exactly such a sequence of removals without storing anything:
+
+```text
+cand, count = None, 0
+for x in a:
+    if count == 0:   cand, count = x, 1   # nobody standing: x stands
+    elif x == cand:  count += 1           # agree: one more copy of cand stands
+    else:            count -= 1           # disagree: x and one copy of cand leave together
+```
+
+At every moment, `count` copies of `cand` are "standing", and every other element read so far has left the room in a distinct pair. @fig-hash-anim-vote runs it.
+
+::: {#fig-hash-anim-vote}
+
+```{python}
+#| echo: false
+bm_a = [1, 3, 3, 3, 2, 3, 1]
+bm_cand, bm_count, bm_frames, bm_caps = None, 0, [], []
+for i, x in enumerate(bm_a):
+    if bm_count == 0:
+        bm_cand, bm_count = x, 1
+        what = f"count was 0, so {x} becomes the candidate"
+    elif x == bm_cand:
+        bm_count += 1
+        what = f"{x} agrees with the candidate: count + 1"
+    else:
+        bm_count -= 1
+        what = f"{x} differs: it cancels one copy of {bm_cand}"
+    bm_frames.append((i, bm_cand, bm_count))
+    bm_caps.append(f"i = {i}, x = {x}: {what}; now cand = {bm_cand}, count = {bm_count}")
+assert (bm_cand, bm_count) == (3, 1) and bm_a.count(3) * 2 > len(bm_a)
+
+
+def bm_frame(ax, p, k):
+    i, cand, count = bm_frames[k]
+    colors = {j: "muted" for j in range(i)}
+    colors[i] = "indigo"
+    V.array(ax, p, bm_a, colors=colors, pointers=[(i, "x", "indigo", "top")])
+    V.box(ax, p, 8.0, 0.05, 1.8, 0.9, f"cand {cand}", color="green")
+    V.box(ax, p, 10.2, 0.05, 1.8, 0.9, f"count {count}", color="amber")
+
+
+V.animate(bm_frame, len(bm_frames), captions=bm_caps, interval=1100)
+del i, x, what                # keep the chapter's namespace clean
+```
+
+Boyer–Moore voting on $[1, 3, 3, 3, 2, 3, 1]$, where $3$ fills four of seven cells. The first $3$ cancels the lone $1$, the count reaches zero, and the next $3$ becomes the candidate. From then on the disagreements $2$ and $1$ only lower the count, never to zero, and the majority value is the candidate at the end.
+
+:::
+
+**Two honest asterisks.** First, the result is a *candidate*, not an answer. The guarantee is only "*if* a majority exists, it is `cand`". When the statement promises a majority (LC 169, @sec-hash-p4-a), you return it directly. Otherwise you must **verify** with a second pass, `a.count(cand) > n // 2`: on $[1, 2, 3, 3, 3, 2, 2]$ the loop ends with candidate $3$, yet $3$ appears $3$ times out of $7$ — no majority exists at all. The verification pass still uses $O(1)$ extra memory; the advantage over a map was always memory, never time.
+
+Second, one candidate is enough only for the threshold $n/2$. **More than $n/3$** can be achieved by *two* values at once, so you keep two candidates with two counters, and when an element matches neither and both counters are positive, you remove *three* distinct elements at once (the element and one copy of each candidate). The same argument shows a value above $n/3$ can never be cancelled out, so it is always one of the two survivors — but the survivors may include a value that is *not* above $n/3$, so the verification pass is now mandatory (@sec-hash-p4-b).
+
+**The general rule (Misra–Gries).** To find every value that appears more than $n/(k{+}1)$ times, keep at most $k$ candidates with counters; when a new value matches none and all $k$ slots are full, decrement every counter (that removes $k{+}1$ distinct elements). At most $k$ values can exceed $n/(k{+}1)$, and every one of them is guaranteed to survive as a candidate; a verification pass removes the impostors. The proof is one line: each decrement round removes $k{+}1$ elements, so there are at most $n/(k{+}1)$ rounds, and a value with more copies than rounds cannot be emptied. Boyer–Moore is the case $k = 1$, Majority Element II is $k = 2$. The code below checks the guarantee on thousands of random arrays.
+
+**Other $O(1)$-memory counters.** The same "summarise without a table" idea gives a few classic tricks. If an array holds the numbers $0..n$ with one missing, the missing number is $\frac{n(n+1)}{2} - \sum a$, or the XOR of $0..n$ with the XOR of the array (equal values cancel under XOR, the aggregate idea of @sec-arr-p1). If $n+1$ numbers from $1..n$ contain exactly one value twice and every other value once, the duplicate is $\sum a - \frac{n(n+1)}{2}$. When the repeated value may appear *many* times (LC 287), the sum trick fails, and the $O(1)$-memory solution treats the array as a linked structure and finds a cycle — a technique for a later chapter. In C++, compute these sums in `long long` (@sec-arr-cost).
+
+```{python}
+#| label: arr-hash-a5-demo
+def majority_candidate(a):
+    cand, count = None, 0
+    for x in a:
+        if count == 0:
+            cand, count = x, 1
+        elif x == cand:
+            count += 1
+        else:
+            count -= 1
+    return cand
+
+
+def make_majority(m, others):             # m appears len(others) + 1 times: a strict majority
+    a = [m] * (len(others) + 1) + others
+    random.shuffle(a)
+    return a
+
+
+for _ in range(500):
+    m = random.randint(0, 5)
+    others = [v for v in (random.randint(0, 6) for _ in range(12)) if v != m]
+    a = make_majority(m, others)
+    assert Counter(a)[m] * 2 > len(a) and majority_candidate(a) == m
+
+no_major = [1, 2, 3, 3, 3, 2, 2]
+assert majority_candidate(no_major) == 3 and no_major.count(3) * 2 <= len(no_major)  # verify says no
+
+
+def misra_gries(a, k):                    # candidates for "more than n/(k+1) times"
+    cnt = {}                              # never more than k keys
+    for x in a:
+        if x in cnt:
+            cnt[x] += 1
+        elif len(cnt) < k:
+            cnt[x] = 1
+        else:                             # x and one copy of each candidate leave together
+            for y in list(cnt):
+                cnt[y] -= 1
+                if cnt[y] == 0:
+                    del cnt[y]
+    return set(cnt)
+
+
+for _ in range(3000):
+    a = [random.randint(1, 5) for _ in range(random.randint(0, 20))]
+    k = random.randint(1, 4)
+    cands = misra_gries(a, k)
+    heavy = {v for v, c in Counter(a).items() if c * (k + 1) > len(a)}
+    assert len(cands) <= k and heavy <= cands             # no real winner is ever lost
+    assert {v for v in cands if a.count(v) * (k + 1) > len(a)} == heavy   # verify = exact
+print("a5 demo OK")
+```
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that say "use me", a boxed template with its invariant, and its complexity. Then two problems are solved completely: the statement, the one observation that unlocks it, a brute force refined step by step into the pattern, Python stress-tested against the brute force, matching C++, the cost of each form, and the edge cases. Where the map or set changes in a way worth watching, the last form carries a step board.
+
+## Pattern 1: Complement lookups {#sec-hash-p1}
+
+**Where we are.** The lessons explained what a hash table promises and how to protect it. The patterns ask it one question each, ordered by what the key is: the exact partner of a value (this pattern), a key computed from each element (Pattern 2), only whether a value was seen, or seen recently (Pattern 3), a case where the table can be dropped altogether (Pattern 4), and membership of neighbouring values and remainders (Pattern 5).
+
+**Recognise it.** The statement pairs *this* element with *some other* element whose value is fixed by it: "two numbers that sum to the target", "a partner $k - x$", "a difference of exactly $d$". The array is **not sorted** (if it were, or if you may sort it, @sec-tp offers a memory-free alternative), and $n$ around $10^5$ rules out checking every pair. The giveaway is often "return the indices" or "count the pairs": the answer needs positions or multiplicities, and a map remembers both by value.
+
+::: {.callout-important title="Template"}
+Keep a table of what you have passed; for each new item, compute the partner it would need and look *that* up.
+
+```text
+seen = {}                        # value -> index (or value -> count)
+for i, x in enumerate(a):
+    if want(x) in seen:          # query covers ONLY indices < i
+        answer = use(seen[want(x)], i)
+    seen[x] = i                  # only now does x enter the table
+```
+
+**Invariant.** When the query runs at position $i$, `seen` summarises exactly the range $[0, i)$ — every earlier value, no later one, and never $i$ itself. That single sentence is the whole correctness argument against self-pairing. Store indices to *find* a pair, counts to *count* pairs (A3).
+:::
+
+**Complexity.** Time $O(n)$ expected — one hash and one probe per element. Space $O(n)$ for the table. In C++ on adversarial input, either swap the table for a `map` (everything becomes $O(\log n)$, guaranteed) or armour the hash (@sec-hash-anti).
+
+::: {#fig-hash-anim-twosum}
+
+```{python}
+#| echo: false
+ts_a, ts_t = [3, 8, 11, 2, 7, 15], 9
+ts_seen, ts_frames, ts_caps, ts_ans = {}, [], [], None
+for i, x in enumerate(ts_a):
+    need = ts_t - x
+    if need in ts_seen:
+        ts_ans = (ts_seen[need], i)
+        ts_caps.append(f"i = {i} ({x}): need {need}, seen at index {ts_seen[need]}: answer ({ts_seen[need]}, {i})")
+        ts_frames.append((i, dict(ts_seen), ts_seen[need]))
+        break
+    ts_caps.append(f"i = {i} ({x}): need {need}, not seen yet; remember {x} -> {i}")
+    ts_frames.append((i, dict(ts_seen), None))
+    ts_seen[x] = i
+assert ts_ans == (3, 4) and ts_a[3] + ts_a[4] == ts_t
+
+def ts_frame(ax, p, k):
+    i, seen, hit = ts_frames[k]
+    colors = {j: "muted" for j in seen.values()}
+    colors[i] = "indigo"
+    if hit is not None:
+        colors[hit] = "green"
+    V.array(ax, p, ts_a, colors=colors, pointers=[(i, f"need {ts_t - ts_a[i]}", "indigo", "top")],
+            note="seen: {" + ", ".join(f"{v}: {j}" for v, j in seen.items()) + "}")
+
+V.animate(ts_frame, len(ts_frames), captions=ts_caps, interval=1100)
+del i, x, need                # keep the chapter's namespace clean
+```
+
+Two Sum with target $9$ on $[3, 8, 11, 2, 7, 15]$. Each element asks the map for its one possible partner, $9 - x$, and only then adds itself. The map holds everything to the left (grey), so the pair $(2, 7)$ is found the moment its *second* element, $7$, is read.
+
+:::
+
+{{< include ../problems/lc-0001-two-sum/problem.qmd >}}
+
+[**From one pair to using each element once.** Two Sum stops at the first pair. Max Number of K-Sum Pairs keeps pairing, and each element may be used once, so the map holds counts and the pairs consume them.]{.flow-bridge}
+
+
+{{< include ../problems/lc-1679-max-number-of-k-sum-pairs/problem.qmd >}}
+
+## Pattern 2: Grouping by a transformed key {#sec-hash-p2}
+
+**From partners to groups.** In Pattern 1 each element had exactly one partner value. When the match rule is not plain equality, rewrite it so that matching elements share a **key**, and the map groups them.
+
+**Recognise it.** Two objects "match" under a rule that is *not* literal equality — equal differences $a_j - a_i = j - i$, anagrams, equal rows and columns, sums divisible by $k$ — and the question counts matching pairs or groups. The tell is an equation mixing **value and position**, or equality of two *whole sequences*: that is a key waiting to be extracted (@sec-hash-keys).
+
+::: {.callout-important title="Template"}
+Extract a key per object so that matching under the rule **is** equality of keys; then one counting pass groups everything, and group sizes convert straight into pair counts.
+
+```text
+cnt = {}                             # key -> how many so far
+for x in a:
+    cnt[key(x)] += 1                 # or: ans += cnt[key(x)] first, then ++
+answer = sum(c * (c - 1) // 2 for c in cnt.values())
+```
+
+**Invariant.** After processing $[0, i)$, `cnt[k]` is exactly the number of elements among the first $i$ whose key is $k$.
+:::
+
+**Complexity.** Time $O(n)$ expected — the $\binom{n}{2}$ pair loop collapses into $\binom{c}{2}$ per group, computed in one sweep of the map. Space $O(n)$ for the groups. The key computation must be $O(1)$-ish for this to pay; a *sorted* signature key costs an extra log factor per object (@sec-lang-python).
+
+{{< include ../problems/cf-1520d-same-differences/problem.qmd >}}
+
+[**From a number key to a sequence key.** Same Differences keys each index by one integer, $a_i - i$. Equal Row and Column Pairs keys a whole row, and a tuple is a valid key.]{.flow-bridge}
+
+
+{{< include ../problems/lc-2352-equal-row-and-column-pairs/problem.qmd >}}
+
+## Pattern 3: Distinct values and nearby duplicates {#sec-hash-p3}
+
+**From counting matches to asking whether one exists.** Pattern 2 counted pairs inside groups. Many questions only ask whether a value was seen at all, or seen recently, and a set, or a map to the last index, answers that.
+
+**Recognise it.** The question is about *existence* rather than counting: "are there two equal values?", "how many distinct?", "the same value within $k$ indices?" A set answers "have I seen this *at all*"; a map to the **latest index** answers "have I seen it *recently*" — one lookup replaces an entire scan of the past (@sec-hash-complement's table with time attached).
+
+::: {.callout-important title="Template"}
+```text
+seen = set()                         # or: last = {}   value -> newest index
+for i, x in enumerate(a):
+    if answer(x in seen):            # or: i - last.get(x, -inf) <= k
+        return yes
+    seen.add(x)                      # or: last[x] = i
+return no                            # distinct count: len(seen) at the end
+```
+
+**Invariant.** Before position $i$, the structure summarises exactly the values of $[0, i)$ — as a set, or as each value's most recent position (which is all any distance question can use).
+:::
+
+**Complexity.** Time $O(n)$ expected, space $O(\text{distinct})$. The sorting alternative is $O(n\log n)$ guaranteed and worth stating in interviews as the no-adversary fallback (@sec-hash-anti).
+
+{{< include ../problems/cses-1621-distinct-numbers/problem.qmd >}}
+
+[**From ever to recently.** Distinct Numbers only asks whether a value was seen at all. Contains Duplicate II asks whether it was seen within $k$ indices, so the set becomes a map to the latest index.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0219-contains-duplicate-ii/problem.qmd >}}
+
+## Pattern 4: Majority voting {#sec-hash-p4}
+
+**From a table to two variables.** Every pattern so far stored one entry per distinct value. When the question is which value fills more than a fixed fraction of the array, cancelling pairs of different values finds it with $O(1)$ memory and no table at all.
+
+**Recognise it.** The question is "which value appears **more than a fixed fraction** of the time?" — above $n/2$, above $n/3$. The map in your hand would answer it in $O(n)$ space, but a *guaranteed* fraction is leverage: you can settle the question with one or two candidate counters and $O(1)$ memory (@sec-hash-vote). When you see "given that it always exists, find the majority in $O(1)$ space", the answer is Boyer–Moore cancellation, and the interview is really testing whether you can *prove* the survivor is the majority.
+
+::: {.callout-important title="Template"}
+```text
+cand, count = None, 0                    # threshold n/(k+1): keep k counters
+for x in a:
+    if count == 0:   cand, count = x, 1  # slot empty: adopt x
+    elif x == cand:  count += 1          # agree: reinforce
+    else:            count -= 1          # disagree: cancel one pair
+return cand                              # n/2 version: guaranteed
+# n/3 version: two seats, then count BOTH survivors again - never skip it
+```
+
+**Invariant.** After any prefix, exactly `count` copies of `cand` are "standing": every other element of the prefix has been removed in a pair of two *different* values. A value with more than $n/2$ copies cannot be removed completely, because each removal takes at most one of its copies together with one other element, and there are fewer than $n/2$ other elements.
+:::
+
+**Complexity.** Time $O(n)$, space $O(1)$ — versus the map's $O(n)$ space. The $n/3$ variant keeps two candidates and needs one extra counting pass, so it is still $O(n)$ time and $O(1)$ space. If a majority is not promised, add the verification pass even for $n/2$.
+
+{{< include ../problems/lc-0169-majority-element/problem.qmd >}}
+
+[**From one seat to two.** Above $n/2$ there is at most one winner, so one candidate is enough. Above $n/3$ there can be two, so the vote keeps two candidates, and a counting pass to verify them becomes mandatory.]{.flow-bridge}
+
+
+{{< include ../problems/lc-0229-majority-element-ii/problem.qmd >}}
+
+## Pattern 5: Set membership and remainders {#sec-hash-p5}
+
+**From counting to membership.** The last pattern asks the simplest question, is this in my collection?, about things that are not indices: the neighbours $x \pm 1$ of a value, or the remainder of a prefix sum.
+
+**Recognise it.** The move is a single question — *is this value (this remainder, this state) in my collection?* — asked $O(n)$ times about things that are **not indices**: neighbours $x-1$, $x+1$ of a value; a prefix sum's residue class modulo $p$. A sorted array answers membership in $O(\log n)$, a hash set in expected $O(1)$; when the collection is "all values that exist", membership *is* the algorithm.
+
+::: {.callout-important title="Template"}
+```text
+s = set(a)                                   # everything that exists
+for x in something:
+    if x - 1 in s: ...                       # amortisation test / neighbour probe
+
+last = {0: -1}                               # remainder -> LATEST index seen
+pref = 0
+for i, x in enumerate(a):
+    pref = (pref + x) % p
+    q = last.get((pref - need) % p)          # the complement, mod p
+    ...
+    last[pref] = i
+```
+
+**Invariant.** In the membership form, `s` never changes — it is the set of values that exist — and a walk starts only at a value whose predecessor is missing. In the remainder form, when the query at $i$ runs, `last[r]` is the greatest index $j < i$ whose prefix remainder is $r$; keeping only the latest is exactly what a *shortest*-window question wants.
+:::
+
+**Complexity.** Both forms are $O(n)$ expected time and $O(n)$ space. The trap in the membership form is believing the inner `while` makes it quadratic. A walk starts only at the *bottom* of a run, so each value is stepped over by exactly one walk, and all the walks together take at most $n$ steps — an amortised argument like the one in @sec-cx-amortized. @fig-hash-anim-runs shows it. The remainder form has one C++ trap: `%` of a negative number is negative there, so normalise with `((x % p) + p) % p` before using the result as a key.
+
+::: {#fig-hash-anim-runs}
+
+```{python}
+#| echo: false
+lr_a = [100, 4, 200, 1, 3, 2]
+lr_s = sorted(set(lr_a))                       # drawn in sorted order so runs are visible
+lr_frames, lr_caps, lr_best, lr_steps = [], [], 0, 0
+for x in lr_a:                                 # visit values in the input's order
+    if x - 1 in lr_s:
+        lr_frames.append((x, [], lr_best))
+        lr_caps.append(f"{x}: {x - 1} is present, so {x} is not a run start - skip it")
+        continue
+    run = [x]
+    while run[-1] + 1 in lr_s:
+        run.append(run[-1] + 1)
+    lr_steps += len(run)
+    lr_best = max(lr_best, len(run))
+    lr_frames.append((x, run, lr_best))
+    lr_caps.append(f"{x}: {x - 1} is missing, so walk up: {', '.join(map(str, run))} (length {len(run)}); best = {lr_best}")
+assert lr_best == 4 and lr_steps == len(set(lr_a))   # every value walked exactly once
+
+
+def lr_frame(ax, p, k):
+    x, run, best = lr_frames[k]
+    colors = {lr_s.index(v): "green" for v in run}
+    colors.setdefault(lr_s.index(x), "amber")
+    V.array(ax, p, lr_s, colors=colors, index=False, label="set, sorted",
+            pointers=[(lr_s.index(x), f"x = {x}", "indigo", "top")])
+    V.box(ax, p, 7.0, 0.05, 2.2, 0.9, f"best {best}", color="green")
+
+
+V.animate(lr_frame, len(lr_frames), captions=lr_caps, interval=1300)
+del x, run                    # keep the chapter's namespace clean
+```
+
+Longest Consecutive Sequence on $[100, 4, 200, 1, 3, 2]$ (the set is drawn sorted only so that runs sit side by side; the algorithm never sorts). Values with a present predecessor (amber) are skipped in $O(1)$; only run bottoms walk upward (green). In input order the walks cover $100$, then $200$, then $1, 2, 3, 4$: six steps for six values.
+
+:::
+
+{{< include ../problems/lc-0128-longest-consecutive-sequence/problem.qmd >}}
+
+[**From neighbouring values to remainders.** Longest Consecutive asks whether $x - 1$ is present. Make Sum Divisible by P asks for the latest prefix with a given remainder modulo $p$: the remainder idea of @sec-pref-p2, with a shortest-length twist.]{.flow-bridge}
+
+
+{{< include ../problems/lc-1590-make-sum-divisible-by-p/problem.qmd >}}
+
+**Looking back.** Every pattern did the same two things: it chose a key, and it asked the table one question about that key before updating it. The partner $t - x$ (Pattern 1), a computed group key such as $a_i - i$ (Pattern 2), a value or its latest index (Pattern 3), a neighbour $x - 1$ or a prefix remainder (Pattern 5). The *order* of the question and the update carried the correctness each time: query before insert, keep only the latest index, verify after voting. Pattern 4 showed the one case where a promise about the input lets you drop the table altogether. From here on, these lookups become single steps inside bigger algorithms: @sec-tp trades the table for sortedness, and @sec-sw keeps a frequency map of a moving window.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Two numbers that sum to $t$", "count pairs with sum $k$", unsorted input | Complement lookup on a seen map (query, then insert) | @sec-hash-p1 |
+| Rule mixes value and position ($a_j - a_i = j - i$), anagrams, equal rows, equal remainders | One key per element, then $\binom{c}{2}$ per group | @sec-hash-p2 |
+| "Distinct", "contains duplicate", "same value within $k$ indices" | Set, or a map to the latest index | @sec-hash-p3 |
+| A value occurs more than $n/2$ or $n/3$ times; "$O(1)$ extra space" | Voting; verify unless existence is promised | @sec-hash-p4 |
+| "Consecutive values", "does $x - 1$ exist?", $O(n)$ required, unsorted | Set, and walk only from run starts | @sec-hash-p5 |
+| Subarray sum divisible by $p$, shortest or longest such window | Remainder → latest (or earliest) index map | @sec-hash-p5 |
+| Keys are small non-negative integers (up to about $10^6$) | Frequency array, no hashing | @sec-arr-p5 |
+| Need the nearest key, the $k$-th smallest, or keys in order | `map` or sorting, not a hash table | @sec-hash-sets |
+| C++ on a judge with hacks, integer keys, large $n$ | Seeded custom hash, or `map`, or sort | @sec-hash-anti |
+| Input sorted (or sortable) and memory matters | Two pointers instead of a table | @sec-tp |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Inserting before querying** in a complement lookup. The element pairs with itself; $[3, 3]$ with $t = 6$ returns $(0, 0)$. Query the seen map, *then* join it (@sec-hash-complement, @sec-hash-p1-a).
+- **C++ `cnt[x]` used as a lookup.** `operator[]` inserts a zero entry when `x` is absent, so reading complements quietly grows the map and `cnt.size()` stops meaning "distinct values seen". Look up with `find` or `count` (@sec-hash-complement).
+- **XOR-combining the two halves of a pair hash.** `h(a) ^ h(b)` gives $(a, b)$ and $(b, a)$ the same code and sends every $(x, x)$ to $0$. Pack both halves into one 64-bit value, or use `map<pair<int,int>, V>` (@sec-hash-sets).
+- **Relying on the iteration order of `unordered_map` or `set`.** It is unspecified and can change after a rehash. If you need an order, sort the keys or use `map`; only Python's `dict` promises insertion order (@sec-hash-sets).
+- **`unordered_map<int, …>` on a judge with hacks.** The integer hash is the identity and the bucket counts come from a public list of primes, so a test of multiples of one prime puts every key in one bucket. Use a seeded `splitmix64` hash, `map`, or sorting; `reserve` and `long long` keys do *not* help (@sec-hash-anti).
+- **Treating a voting candidate as an answer.** Without a promise that a majority exists, the survivor may be a value that is not a majority at all: $[1, 2, 3, 3, 3, 2, 2]$ ends with candidate $3$ and has no majority. Count the candidates again before returning them (@sec-hash-vote, @sec-hash-p4-b).
+- **Two-seat voting with the tests in the wrong order.** Checking "is a seat empty?" before "does $x$ match a seat?" can put the same value in both seats and lose a real answer: on $[1, 1, 2, 2, 2]$ the answer $\{1, 2\}$ shrinks to $\{2\}$. Test matches first (@sec-hash-p4-b).
+- **A list (or other mutable object) as a key.** Python refuses with `TypeError: unhashable type`; hash `tuple(row)` instead. In C++, `unordered_map<vector<int>, …>` does not compile without a custom hash; `map<vector<int>, …>` does (@sec-hash-sets, @sec-hash-p2-b).
+- **C++ `%` on a negative number** returns a negative remainder, so `(pref - rem) % p` can produce a key that never matches. Normalise with `((x % p) + p) % p` (@sec-hash-p5-b).
+- **Overflow in complements and packed keys.** With $|a_i|, |t| \le 10^9$, `t - a[i]` reaches $2\cdot10^9$ and overflows `int`; packing `a * (B + 1) + b` overflows unless computed in `long long` (@sec-arr-cost, @sec-hash-p1-a).
+- **Choosing a hash map when the values are tiny, or an array when they are huge.** Values up to about $10^6$ fit a frequency array, which is faster and cannot be attacked; values up to $10^9$, negatives or tuples need a hash map (@sec-arr-p5, @sec-hash-sets).
+:::
+
+## Exercises
+
+**1. [E] What is the difference between "expected $O(1)$" and "amortised $O(1)$" for one `unordered_map` insert, and which of the two can an adversary break?**
+
+::: {.callout-note collapse="true" title="Solution"}
+*Amortised* is about resizing: an occasional insert rehashes the whole table, but the copies form a geometric series, so $n$ inserts cost $O(n)$ in total *whatever the keys are*. *Expected* is about collisions: a lookup walks one chain whose expected length is the load factor, assuming the hash codes spread evenly. An adversary cannot change the resizing arithmetic, but one who knows the hash function can choose keys that all collide and break the "expected" part, making each operation $\Theta(n)$ (@sec-hash-sets, @sec-hash-anti).
+:::
+
+**2. [E] Turn the one-pass Two Sum of @sec-hash-p1-a into "count the pairs $i < j$ with $a_i + a_j = t$". What changes in the map, and what stays?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The map stores **counts** instead of indices: `ans += cnt.get(t - x, 0)`, then `cnt[x] = cnt.get(x, 0) + 1`. You no longer stop at the first hit, and you no longer need positions. What stays is the order: the query must come before the update, otherwise each $x$ with $2x = t$ counts itself as a partner. Space is still $O(n)$. The code is `count_pairs` in @sec-hash-complement.
+:::
+
+**3. [E] Run the store-then-query version of Two Sum on `a = [3, 3]`, `t = 6`. What does it return, and why is that illegal?**
+
+::: {.callout-note collapse="true" title="Solution"}
+At $i = 0$ it stores `3 -> 0`, then looks up $6 - 3 = 3$, finds index $0$, and returns $(0, 0)$: the first element paired with itself, although the statement requires two different indices. The legal answer is $(0, 1)$. With query-then-store the map holds only indices strictly before the cursor, so a self-pair cannot occur (@sec-hash-complement).
+:::
+
+**4. [E] CF 1520D counts pairs $i < j$ with $a_j - a_i = j - i$. Show that the key $a_i - i$ counts exactly these pairs, and compute the answer for $[1, 2, 3, 4]$ and for $[3, 5, 1, 4, 6, 6]$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$a_j - a_i = j - i$ rearranges to $a_j - j = a_i - i$, so a pair qualifies exactly when the two keys are equal; each qualifying pair lies inside one key group, and each group of size $c$ contributes $\binom{c}{2}$. For $[1, 2, 3, 4]$ (1-based) every key is $0$, so the answer is $\binom{4}{2} = 6$. For $[3, 5, 1, 4, 6, 6]$ the keys are $2, 3, -2, 0, 1, 0$, and only the two $0$s match: answer $1$, as in @fig-hash-keys (@sec-hash-keys, @sec-hash-p2-a).
+:::
+
+**5. [E] Contains Duplicate II on $[10, 11, 10, 11, 10]$: what is the answer for $k = 1$ and for $k = 2$, and what does the latest-index map hold when each run stops?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$k = 1$: `False`, because equal values are always exactly $2$ apart. The scan runs to the end, and the map holds `{10: 4, 11: 3}` — one entry per distinct value, each at its latest position. $k = 2$: `True` at $i = 2$, where `last[10] = 0` and $2 - 0 \le 2$. The function returns before storing index $2$, so the map then holds `{10: 0, 11: 1}` (@sec-hash-p3-b).
+:::
+
+**6. [E] Run the two-seat vote of @sec-hash-p4-b by hand on $[1, 2, 3, 1, 2, 3, 1, 2]$. Which values survive, and what does the verification pass return?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$1$ takes seat one and $2$ takes seat two. $3$ matches neither and both seats are occupied, so both counters drop to $0$ (the seats keep their old values). The next $1$ *matches* seat one's stored value and raises its counter to $1$; the next $2$ does the same for seat two. The second $3$ cancels both again, and the final $1$ and $2$ bring both counters back to $1$. The survivors are $1$ and $2$. Verification: $n = 8$, $\lfloor 8/3 \rfloor = 2$; $1$ and $2$ occur $3$ times each, so both qualify, and $3$ (twice) does not. Answer $\{1, 2\}$ (@sec-hash-vote, @sec-hash-p4-b).
+:::
+
+**7. [E] Run Boyer–Moore on $[1, 2, 3, 3, 3, 2, 2]$. What candidate does it return, and what does the verification pass say?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The `(cand, count)` states are $(1,1), (1,0), (3,1), (3,2), (3,3), (3,2), (3,1)$, so the candidate is $3$. Verification: $3$ occurs $3$ times and $3 > 7/2$ is false, so there is **no** majority; $2$ also occurs $3$ times. Without the recount the function would return $3$, which is wrong. A candidate is only "the majority *if* one exists" (@sec-hash-vote, @sec-hash-p4-a).
+:::
+
+**8. [E] The threshold is "more than $n/5$". How many counters does the voting scheme need, and is the verification pass optional?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Four. Threshold $n/(k{+}1)$ needs $k$ counters: at most four values can each exceed $n/5$, and each decrement round removes five distinct elements, so a value with more than $n/5$ copies always survives. The verification pass is mandatory, because the four survivors may include values far below $n/5$ that simply never got cancelled (@sec-hash-vote).
+:::
+
+**9. [E] A Python hash set uses the bucket `hash(x) % m`. For integer keys, `hash(x) == x` for small non-negative $x$. With $m = 8$ and keys $0, 8, 16, 24$, where does each key go, and what does a lookup of $32$ cost?**
+
+::: {.callout-note collapse="true" title="Solution"}
+All four keys are $0 \bmod 8$, so all land in bucket $0$ and form one chain of length $4$. A lookup of $32$ also hashes to bucket $0$ and compares against all four keys before answering "absent". This is the toy table of @sec-hash-sets; CPython's real `set` mixes the high bits of the hash into its probe sequence, which spreads this particular pattern out, but the lesson — predictable hash plus chosen keys equals one long chain — is the same as the C++ attack (@sec-hash-anti).
+:::
+
+**10. [M] Why does @sec-hash-p2-b key rows by `tuple(row)` rather than by a joined string? When would a string key give a wrong answer?**
+
+::: {.callout-note collapse="true" title="Solution"}
+A tuple compares element by element, so two keys are equal exactly when the rows are equal. A string key is equal only if the *encoding* is unambiguous. Joining without a separator breaks that: `"".join(map(str, [1, 23]))` and `"".join(map(str, [12, 3]))` are both `"123"`, so two different rows would be counted as equal. With a separator that cannot occur inside a value, such as `","` for integers, the string key is correct but costs an extra conversion of every number to text. The tuple is simpler and needs no argument (@sec-hash-keys).
+:::
+
+**11. [M] Longest Consecutive Sequence: an interviewer claims the inner `while` makes it $O(n^2)$. Give the rebuttal, and say which part of it needs a *set* rather than a list.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A walk starts only at a value $x$ with $x - 1$ absent, that is, at the bottom of a run, and it steps through exactly that run. Runs do not overlap, so every value is stepped over by exactly one walk, and the walks take at most $n$ steps in total; the outer loop adds $n$ more. Both the start test and every step of the walk are membership queries; with a set each is $O(1)$ expected, with a list each is $O(n)$ and the whole algorithm really becomes quadratic (@sec-hash-p5-a).
+:::
+
+**12. [M] Make Sum Divisible by P keeps the *latest* index per remainder. What question would an *earliest*-index map answer instead?**
+
+::: {.callout-note collapse="true" title="Solution"}
+For a window ending at $i$, the left boundary is the stored index $j$, and the window length is $i - j$. The latest $j$ gives the shortest window, which is what LC 1590 asks for. The earliest $j$ gives the *longest* window ending at $i$ whose sum has the required remainder — the question of "longest subarray with sum divisible by $p$" or LC 525 (longest subarray with equal numbers of $0$s and $1$s, where the key is the running balance). Same map, opposite extreme; storing the wrong one is a classic wrong answer (@sec-hash-p5-b).
+:::
+
+**13. [M] A C++ solution tests `if (cnt[k - x] > 0)` on an `unordered_map<int, int> cnt`. Besides the real counts, what does `cnt` contain after the loop, and what can go wrong because of it?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Every value `k - x` that was ever asked about, stored with count $0$ — `operator[]` inserted each one. The map can hold up to twice as many entries as needed, which means more memory and more rehashing. Anything that later reads `cnt.size()` as "number of distinct values seen", or iterates the map expecting only real values, now gets wrong results. Use `find` or `count` for the test (@sec-hash-complement).
+:::
+
+**14. [M] Count subarrays whose sum equals $k$ (negatives allowed), as in @sec-pref-hash. Which pattern of this chapter is that, and what is the "partner" of the prefix sum $P_j$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+It is a complement lookup (Pattern 1) applied to prefix sums instead of array values. A subarray $[i, j)$ has sum $k$ exactly when $P_j - P_i = k$, so the partner of $P_j$ is the value $P_j - k$, and the answer adds the number of earlier prefixes with that value — a *count* map, queried before inserting $P_j$, and seeded with $P_0 = 0$ (the empty prefix). Make Sum Divisible by P (@sec-hash-p5-b) is the same idea with remainders and the latest index instead of a count (@eq-pref-hash).
+:::
+
+**15. [M] Python randomises the hash of strings per process (PEP 456). Name one consequence for attackers and one for your own code.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Attackers cannot precompute string keys that collide in your `dict`, because the bucket layout depends on a seed chosen when the process starts. Your own code: `hash("abc")` differs between runs, so never save a `hash()` value to a file, send it to another process, or use it as a stable identifier — use `hashlib` (for example SHA-256) for anything that must be reproducible. Setting the environment variable `PYTHONHASHSEED` makes the seed fixed, which is useful only for debugging (@sec-hash-anti).
+:::
+
+**16. [M] You must remove duplicates from $10^9$ URLs on one machine with 16 GB of memory. A set of the full strings does not fit. Propose a hash-based plan and estimate its memory.**
+
+::: {.callout-note collapse="true" title="Solution"}
+At roughly $100$ bytes per URL, the strings alone are about $100$ GB. Option 1: keep only a 64-bit hash of each URL — $8$ bytes each, about $8$ GB of raw keys (more with table overhead). Two different URLs collide with probability about $n^2 / 2^{65} \approx 0.03$ for $n = 10^9$, so a rare false "duplicate" is possible. Option 2: a **Bloom filter** at about $10$ bits per item, $10^{10}$ bits $\approx 1.25$ GB, which never misses a real duplicate but occasionally reports a new URL as seen (about $1\%$ at that size). Option 3, if exactness is required: split the URLs into files by the first bits of their hash, so equal URLs land in the same file, and deduplicate each file in memory one at a time. All three rest on the membership idea of @sec-hash-p3.
+:::
+
+**17. [M] In Max Number of K-Sum Pairs (@sec-hash-p1-b), what happens when $x = k - x$? Does the count map handle it, and why could an index map (one index per value) not answer this problem?**
+
+::: {.callout-note collapse="true" title="Solution"}
+When $x = k/2$, the partner of $x$ is another copy of $x$. The count map pairs the incoming $x$ only with a *stored, unspent* copy — a different element — and decrements it, so $c$ copies of $k/2$ produce $\lfloor c/2 \rfloor$ pairs and no element is used twice. An index map stores one position per value, which is enough to say whether *a* pair exists but cannot say how many disjoint pairs can be formed: that question is about multiplicities, which is exactly what counts store.
+:::
+
+**18. [H] No hash table is allowed: $n \le 2\cdot10^5$, count pairs $i < j$ with $a_j - a_i = j - i$. Give a guaranteed $O(n \log n)$ solution.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Compute the keys $a_i - i$, sort them, and scan the sorted list: each maximal run of $c$ equal keys contributes $\binom{c}{2}$. Correctness: sorting puts equal keys next to each other, and the pairs counted are exactly the pairs of equal keys, as in exercise 4. Cost: $O(n \log n)$ for the sort and $O(n)$ for the scan, with no hashing and so nothing an adversary can attack. Here $a_i \le n$ also bounds the keys to $[1 - n, n - 1]$, so a frequency array with offset $n$ gives a guaranteed $O(n)$ solution too (@sec-hash-keys, @sec-hash-p2-a).
+:::
+
+**19. [H] The two-seat vote of @sec-hash-p4-b tests "does $x$ match a seat?" *before* "is a seat empty?". Show with $[1, 1, 2, 2, 2]$ that the opposite order is wrong, and explain why.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Correct order: $1$ takes seat one, the second $1$ matches it (count $2$), $2$ takes seat two, and the next two $2$s match it. Survivors $1, 2$; with $n = 5$ the threshold is $\lfloor 5/3 \rfloor = 1$, so both qualify (counts $2$ and $3$). Empty-first order: $1$ takes seat one; the second $1$ sees seat two empty and takes it, so **both seats hold $1$**; the first $2$ matches neither seat and cancels both; the next two $2$s fill both seats. Survivors $2, 2$: the real answer $1$ was lost, and no verification pass can bring it back, because verification only removes impostors. The argument "every heavy value survives" needs each seat to hold a *different* value; testing matches first guarantees that (@sec-hash-vote).
+:::
+
+**20. [H] Prove the Misra–Gries guarantee: with $k$ counters, every value occurring more than $n/(k{+}1)$ times is among the survivors.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Call a step where the incoming value matches no candidate and all $k$ counters are positive a *decrement round*. Such a round removes $k{+}1$ elements' worth of count — the incoming element and one unit from each counter — and every unit of count was put there by one array element, so at most $n/(k{+}1)$ rounds can happen. Now take a value $v$ with $f > n/(k{+}1)$ occurrences. Each occurrence of $v$ either adds $1$ to $v$'s counter (a match or an adoption) or is itself discarded in a round; and $v$'s counter loses $1$ only in a round. So at the end, $v$'s counter is at least $f - (\text{number of rounds}) > 0$, which means $v$ holds a seat. The `misra_gries` stress test in @sec-hash-vote checks this on random arrays (@sec-hash-vote).
+:::
+
+**21. [H] An adversary controls the input but not your language. Compare default Python and default C++: who is exposed, to which keys, and what is the simplest fix in each?**
+
+::: {.callout-note collapse="true" title="Solution"}
+C++ with `unordered_map<int, …>` or `unordered_map<long long, …>` is fully exposed: the integer hash is the identity and the bucket counts come from a public list, so multiples of one prime collide. Fix: a custom hash (splitmix64 plus a clock seed), or `map`, or sorting. Python is protected for `str` and `bytes` keys by SipHash with a random seed. Python `int` keys hash predictably ($x$ modulo $2^{61} - 1$ on 64-bit builds), so colliding sets can in principle be built, although the probing scheme defeats simple patterns and such tests are rare. Fix if needed: hash a seeded transformation of each integer, or sort (@sec-hash-anti).
+:::
+
+## Interview questions
+
+**1. What does "expected $O(1)$" mean for a hash lookup, what is the worst case, and who can force it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A lookup costs one hash computation plus a walk along one bucket's chain (or probe sequence), whose expected length is the load factor $n/m$; the table keeps that below a constant by resizing, so the expected cost is $O(1)$ *if the hash codes spread evenly*. The worst case is every key in one bucket: $\Theta(n)$ per operation and $\Theta(n^2)$ for a pass. Anyone who knows your hash function can force it by choosing colliding keys — on Codeforces, multiples of libstdc++'s bucket-count prime. Defences: a seeded custom hash, a balanced tree (`map`), or sorting (@sec-hash-sets, @sec-hash-anti).
+:::
+
+**2. In one sentence each: when do you use a frequency array, `unordered_map`, `map`, and a sorted array with binary search?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A frequency array when keys are small non-negative integers (guaranteed $O(1)$, nothing to attack). `unordered_map` for arbitrary hashable keys when you only ask "present? how many? where?". `map` as soon as you need order between keys — the next larger key, the smallest, a range of keys. A sorted array with binary search when the data is built once and never changes, which is compact and guaranteed $O(\log n)$ (@sec-hash-sets).
+:::
+
+**3. How do hash tables resolve collisions, and how do Python's `dict` and C++'s `unordered_map` differ?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Two families. **Separate chaining** keeps a list per bucket; libstdc++'s `unordered_map` works this way and grows when the load factor would pass `max_load_factor()` (default $1.0$). **Open addressing** stores keys in the bucket array itself and probes further slots on a collision; CPython's `dict` and `set` work this way and grow at about two-thirds full. Both give expected $O(1)$ and worst case $O(n)$. Python's `dict` also guarantees insertion-order iteration; `unordered_map` guarantees no order (@sec-hash-sets).
+:::
+
+**4. You write C++ for a contest with hacks and $n \le 2\cdot10^5$ integer keys. How do you protect the hash map, and what does each part do?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Give the map a custom hash: add a seed taken from `chrono::steady_clock` at run time, then mix with `splitmix64`. The mixing makes keys that are multiples of a prime land in unrelated buckets; the seed means the attacker cannot compute the mapping when writing the test. `reserve(n)` is still useful for speed (no rehashing during the fill), but it is not a defence, because the bucket count it picks is predictable. The safe alternatives are `map` (guaranteed $O(\log n)$) or sorting (@sec-hash-anti).
+:::
+
+**5. Two Sum in one pass: why must the complement query come *before* the insert? Give an input that breaks the other order.**
+
+::: {.callout-note collapse="true" title="Answer"}
+The invariant is "the map holds only indices strictly before the cursor", which makes $i \ne j$ automatic. Insert-first breaks it for any element that is its own complement: on $[3, 3]$ with $t = 6$, index $0$ stores `3 -> 0`, then queries $6 - 3 = 3$, finds itself, and reports $(0, 0)$. The correct answer is $(0, 1)$ (@sec-hash-complement, @sec-hash-p1-a).
+:::
+
+**6. In C++, what is the difference between `cnt[x]`, `cnt.find(x)` and `cnt.count(x)`? Which one changes the map?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`cnt[x]` returns a reference to the value for `x`, *inserting* `x` with a default value (`0`) if it was absent — so a mere read can grow the map. `cnt.find(x)` returns an iterator to the entry or `cnt.end()`, and `cnt.count(x)` returns $0$ or $1$; neither inserts. In a lookup-heavy loop, write `auto it = cnt.find(want); if (it != cnt.end()) …` and insert only where you mean to (@sec-hash-complement).
+:::
+
+**7. A statement asks for pairs $i < j$ with $a_j - a_i = j - i$. Design the key and justify that it counts exactly the wanted pairs.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Move everything with $j$ to one side: $a_j - j = a_i - i$. So the key is $a_i - i$, a pair qualifies exactly when its two keys are equal, and the answer is $\sum \binom{c}{2}$ over the key groups, or `ans += cnt[key]; cnt[key] += 1` in one streaming pass. The keys can be negative, which is fine for a hash map (CF 1520D, @sec-hash-keys, @sec-hash-p2-a).
+:::
+
+**8. How do you count pairs (row $r$, column $c$) of an $n \times n$ grid that are equal as sequences, in Python and in C++?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Python: `Counter(tuple(row) for row in grid)`, then add the count of each column's tuple — $O(n^2)$ expected, since each tuple is built and hashed in $O(n)$. C++: `std::hash` has no specialisation for `vector<int>`, so either write one or use `map<vector<int>, int>`, which works out of the box because vectors compare lexicographically; that costs $O(n)$ per comparison and $O(n^2 \log n)$ in total, which is fine for $n \le 200$ (LC 2352, @sec-hash-p2-b).
+:::
+
+**9. Prove that Boyer–Moore returns the majority when one exists.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Each `count -= 1` removes two *different* elements: the incoming one and one standing copy of the candidate. A value $x$ with more than $n/2$ copies loses at most one copy per removal, and each removal also uses up one of the fewer than $n/2$ other elements, so copies of $x$ can never all be removed. At the end, the standing elements are copies of one value, so that value is $x$ (@sec-hash-vote).
+:::
+
+**10. When is the verification pass after voting mandatory? Give an input where skipping it gives a wrong answer.**
+
+::: {.callout-note collapse="true" title="Answer"}
+It can be skipped only when the statement promises that a majority exists (LC 169). It is mandatory whenever existence is not promised, and always for the $n/3$ version (LC 229), because the two survivors may include a value below the threshold. Example: $[1, 2, 3, 3, 3, 2, 2]$ ends with candidate $3$, which occurs $3$ times out of $7$ — not a majority. Note what verification *cannot* do: it removes impostors but cannot recover a lost winner; with the tests in the right order no winner is ever lost (@sec-hash-vote, @sec-hash-p4-b).
+:::
+
+**11. Longest Consecutive Sequence is $O(n)$ despite a nested `while`. Explain why, and name the two things the argument depends on.**
+
+::: {.callout-note collapse="true" title="Answer"}
+A walk starts only at a value whose predecessor is missing — the bottom of a run — and steps through that run only. Runs are disjoint, so each value is stepped over by exactly one walk, and the walks total at most $n$ steps. The argument depends on (1) $O(1)$ membership, so a *set* rather than a list, and (2) the start test: without it, every value would walk to the top of its run, which is quadratic for one long run (@sec-hash-p5-a).
+:::
+
+**12. Make Sum Divisible by P: why does the *latest* index per remainder give the *shortest* window, and how is "you may not remove the whole array" enforced?**
+
+::: {.callout-note collapse="true" title="Answer"}
+For a window ending at $i$ that needs left prefix remainder $r$, the window length is $i - j$ for the stored index $j$; the latest $j$ minimises it. The whole array corresponds to $j = -1$ (the empty prefix, seeded as `last[0] = -1`) and $i = n - 1$. When the total is not divisible, that window *is* found: at $i = n - 1$ the prefix remainder equals the total's remainder, so the wanted remainder is $0$, which `last[0] = -1` supplies, giving length $n$. The final `best if best < n else -1` rejects it; and when the total is divisible, the function returned $0$ before the scan (@sec-hash-p5-b).
+:::
+
+**13. Why does C++ need `((x % p) + p) % p` while Python does not?**
+
+::: {.callout-note collapse="true" title="Answer"}
+C++'s `%` truncates toward zero, so the result takes the sign of the dividend: `-7 % 3 == -1`. Python's `%` takes the sign of the divisor, so `-7 % 3 == 1`. A remainder used as a map key or array index must be in $[0, p)$, so in C++ you normalise it; otherwise `-1` and `2`, which are the same class modulo $3$, become different keys and lookups silently miss (@sec-hash-p5-b).
+:::
+
+**14. Contains Duplicate II: hash map, sliding window set, or sorting? Compare them.**
+
+::: {.callout-note collapse="true" title="Answer"}
+The latest-index map is $O(n)$ expected time and stores one entry per distinct value. A window set of the last $k$ values is also $O(n)$ expected time and stores at most $k$ values, which is better when $k$ is small. Sorting (value, index) pairs and checking neighbours with equal values is $O(n \log n)$ guaranteed and immune to hash attacks. In an interview, give the map and mention the other two; on a judge with hacks in C++, prefer the sorted version or a custom hash (@sec-hash-p3-b, @sec-hash-anti).
+:::
+
+**15. Why can a hash table not answer "the largest key smaller than $x$"?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A good hash function deliberately scatters keys, so neighbouring keys land in unrelated buckets; nothing in the table records which keys are close in value. Finding the predecessor would mean scanning every key, $O(n)$. A balanced search tree (`std::map`, `std::set` with `lower_bound`) or a sorted array with binary search answers it in $O(\log n)$ (@sec-hash-sets).
+:::
+
+## Summary
+
+<!-- The callout-important below is copied into the Cheat Sheets appendix: make it stand alone. -->
+
+::: {.callout-important title="Templates to remember"}
+- **Complement lookup:** for each `x`, look up `t - x` in the seen map, *then* insert `x`. Store indices to find a pair, counts to count pairs. $O(n)$ expected.
+- **Grouping by a key:** rewrite "when do two objects match?" as equality of a key — $a_i - i$, $a_i \bmod k$, a sorted tuple — then `ans += cnt[key]; cnt[key] += 1`, or $\sum \binom{c}{2}$ over the groups. $O(n)$ expected.
+- **Existence and recency:** a set answers "seen before?"; a map `last[x] = i` answers "seen within $k$ steps?"; `len(set(a))` counts distinct values.
+- **Voting:** for threshold $n/(k{+}1)$ keep $k$ candidates; match a seat first, else fill an empty seat, else decrement all. Verify by counting unless a winner is promised. $O(n)$ time, $O(k)$ space.
+- **Membership walks:** `s = set(a)`; walk upward only from values with `x - 1` absent. $O(n)$ total.
+- **Remainder map:** `last = {0: -1}`; at each `i`, look up `(pref - need) mod p`, then store `last[pref] = i`. Latest index gives the shortest window, earliest gives the longest.
+- **C++ armour:** `unordered_map<long long, V, CustomHash>` with splitmix64 and a clock seed; or `map`; or sort.
+:::
+
+- A hash table is the array summariser keyed on **values**: it answers "present? how many? where?" for keys that are negative, huge or composite, which no index-based table can (@sec-hash-sets).
+- "Expected $O(1)$" rests on two separate arguments: resizing is amortised and cannot be attacked; short chains rely on keys spreading evenly, and an adversary who knows the hash can break that (@sec-hash-anti).
+- Every pattern is "ask the table, then update it", and the **order** of the two steps is the correctness argument: query before insert, keep the latest index, verify after voting (@sec-hash-complement).
+- Counting matching pairs is grouping in disguise: find a key that is equal exactly when two objects match, and the pairs are $\binom{c}{2}$ per group (@sec-hash-keys).
+- Voting replaces the table by a few counters when the answer is promised to be frequent; it produces *candidates*, and only a promise or a second pass turns them into answers (@sec-hash-vote).
+- Keys must be hashable and must not change: tuples in Python; built-in types, packed 64-bit integers or ordered `map`s in C++; never an XOR-combined pair (@sec-hash-sets).
+- Sign and size still matter: normalise remainders in C++, compute complements and packed keys in `long long`, and use a frequency array when the values are small (@sec-arr-cost, @sec-arr-p5).
+- When the input is sorted, or order between keys matters, a hash table is the wrong tool: two pointers (@sec-tp) or a tree are better.
+
+## Practice ladder
+
+Ordered by concept, from complements to remainders. None of these is solved in the book; each one adds a small twist to a solved problem of this chapter.
+
+::: {.practice}
+- [CSES 1640 · Sum of Two Values](https://cses.fi/problemset/task/1640) — Two Sum with 1-based positions and up to $2\cdot10^5$ values; on CSES, check that your C++ hash map survives.
+- [LC 2006 · Count Number of Pairs With Absolute Difference K](https://leetcode.com/problems/count-number-of-pairs-with-absolute-difference-k/){difficulty="Easy"} — complement counting with two partners, $x - k$ and $x + k$.
+- [LC 454 · 4Sum II](https://leetcode.com/problems/4sum-ii/){difficulty="Medium"} — store all sums of two lists, then look up complements of the other two.
+- [CF 1931D · Divisible Pairs](https://codeforces.com/problemset/problem/1931/D){rating="1300"} — the complement is a *pair* of remainders: $(-a_i \bmod x,\ a_i \bmod y)$.
+- [LC 1512 · Number of Good Pairs](https://leetcode.com/problems/number-of-good-pairs/){difficulty="Easy"} — $\binom{c}{2}$ with the value itself as the key.
+- [LC 2364 · Count Number of Bad Pairs](https://leetcode.com/problems/count-number-of-bad-pairs/){difficulty="Medium"} — the Same Differences key $a_i - i$, counting the complement of the good pairs.
+- [CF 1974C · Beautiful Triple Pairs](https://codeforces.com/problemset/problem/1974/C){rating="1400"} — keys with one position masked out, combined with inclusion–exclusion.
+- [LC 205 · Isomorphic Strings](https://leetcode.com/problems/isomorphic-strings/){difficulty="Easy"} — a canonical form: replace each letter by the index of its first occurrence.
+- [LC 217 · Contains Duplicate](https://leetcode.com/problems/contains-duplicate/){difficulty="Easy"} — the set question with an early exit.
+- [CF 1454B · Unique Bid Auction](https://codeforces.com/problemset/problem/1454/B){rating="800"} — counts plus the position of the smallest value that occurs once.
+- [CF 1702C · Train and Queries](https://codeforces.com/problemset/problem/1702/C){rating="1100"} — store the first and the last index of each value.
+- [CSES 1141 · Playlist](https://cses.fi/problemset/task/1141) — the latest-index map drives a window's left edge.
+- [LC 2780 · Minimum Index of a Valid Split](https://leetcode.com/problems/minimum-index-of-a-valid-split/){difficulty="Medium"} — find the dominant value by voting, then scan prefix counts.
+- [LC 1157 · Online Majority Element In Subarray](https://leetcode.com/problems/online-majority-element-in-subarray/){difficulty="Hard"} — majority queries on ranges: candidates plus positions per value and binary search.
+- [CF 1514D · Cut and Stick](https://codeforces.com/problemset/problem/1514/D){rating="2000"} — the frequency of a range's most common value decides the answer; random sampling or a majority structure finds it.
+- [CF 1676F · Longest Strike](https://codeforces.com/problemset/problem/1676/F){rating="1300"} — the longest run of consecutive values that each occur at least $k$ times.
+- [CF 977F · Consecutive Subsequence](https://codeforces.com/problemset/problem/977/F){rating="1700"} — consecutive values *in index order*: a map `best[x] = best[x - 1] + 1`.
+- [LC 525 · Contiguous Array](https://leetcode.com/problems/contiguous-array/){difficulty="Medium"} — a running balance as the key and the *earliest* index per key for the longest window.
+- [CF 1426D · Non-zero Segments](https://codeforces.com/problemset/problem/1426/D){rating="1500"} — a set of prefix sums that is cleared whenever a repeated prefix forces a cut.
+:::
+
+## Further reading
+
+- [Open Data Structures (Python edition), ch. 5: Hash Tables](https://opendatastructures.org/ods-python/5_Hash_Tables.html) — chained and linear-probing hash tables built from scratch, with the analysis of their expected cost; the next step after @sec-hash-sets' toy table.
+- [Jeff Erickson, *Algorithms* lecture notes: Hash Tables](https://jeffe.cs.illinois.edu/teaching/algorithms/notes/05-hashing.pdf) — universal hashing and the proof that a randomly chosen hash function gives expected $O(1)$ on *every* input, the theory behind the seeded hash of @sec-hash-anti.
+- [Antti Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf) — the data-structures chapter covers `set`, `map` and their unordered versions, and times them against plain sorting, as in @sec-hash-sets.
+- [USACO Guide: Hash Maps](https://usaco.guide/gold/hashmaps) — contest use of hash maps, anti-hash tests, custom hashes and `gp_hash_table`, with practice problems.
+- [Python documentation: mapping types (`dict`)](https://docs.python.org/3/library/stdtypes.html#mapping-types-dict) — the official behaviour of `dict`, including insertion-order iteration and which keys are hashable.
+- [PEP 456: Secure and interchangeable hash algorithm](https://peps.python.org/pep-0456/) — why Python moved string hashing to SipHash with a random seed, and the `PYTHONHASHSEED` switch.
+- [Wikipedia: Boyer–Moore majority vote algorithm](https://en.wikipedia.org/wiki/Boyer%E2%80%93Moore_majority_vote_algorithm) — the algorithm, its correctness argument and the need for a second pass, matching @sec-hash-vote.
+- [Wikipedia: Misra–Gries heavy hitters algorithm](https://en.wikipedia.org/wiki/Misra%E2%80%93Gries_heavy_hitters_algorithm) — the $k$-counter generalisation used for "more than $n/(k{+}1)$" and in streaming systems.

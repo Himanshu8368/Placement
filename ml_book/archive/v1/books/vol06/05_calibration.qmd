@@ -1,0 +1,95 @@
+---
+title: "Calibration and proper scoring"
+---
+
+# Calibration and proper scoring
+
+**Reference question.** When is a predicted probability a probability, and which scores punish a false one?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Calibration | Among examples with predicted probability $p$, the fraction of positive labels is about $p$. |
+| Refinement | How much the predictions vary. A constant $\bar{y}$ can be calibrated and useless. |
+| Proper score | A score minimized in expectation by reporting the true conditional probability. Log loss and squared error on the probability (Brier) are proper. |
+| Improper | Accuracy at a threshold can prefer a miscalibrated score that ranks well. |
+| Fix | Fit the probability model, then recalibrate on data that did not choose the model class. |
+
+## Theory
+
+Classification pipelines often emit scores that are not probabilities: margins from a linear model, leaf fractions from a tree grown for Gini, or logits from a network trained long past the point where the probabilities sharpened into 0 and 1. Decisions that need expected cost need probabilities. Ranking the positive class above the negative class needs only an order. The metric has to match the need.
+
+A proper scoring rule makes the truthful conditional probability the optimal report. Log loss is harsh in the tails: predicting $10^{-6}$ when the event happens costs about $13.8$ nats, while predicting $0.5$ costs $\log 2$. That harshness is correct when a confident mistake is expensive, and it is unstable when your model is wrongly confident. The Brier score $(p - y)^2$ is proper and milder.
+
+Calibration diagrams bin the predictions. Inside a bin, the average prediction should match the average label. A model can be calibrated and have no discrimination, or discriminate well and be miscalibrated. Report both: a calibration plot and a proper score, plus a ranking metric if ranking is the decision.
+
+## Derivation
+
+For binary $Y$ and a reported probability $q$, expected log loss given $X=x$ is
+
+$$-p \log q - (1-p)\log(1-q), \quad p = P(Y=1 \mid X=x).$$
+
+The derivative in $q$ is $-p/q + (1-p)/(1-q)$, zero at $q = p$, and the second derivative is positive. So log loss is proper. The Brier score $p(1-q)^2 + (1-p)q^2$ has derivative zero at $q = p$ as well.
+
+If you pass a score $s$ through a fitted map $q = \sigma(a + b s)$ using a validation set, you are fitting a one-dimensional logistic regression. That map can repair monotone miscalibration. It cannot create information that was not in $s$.
+
+## Code
+
+```python
+import numpy as np
+
+def brier(p, y):
+    p = np.asarray(p, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    return float(np.mean((p - y) ** 2))
+
+def reliability_bins(p, y, n_bins=5):
+    p = np.asarray(p, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    rows = []
+    for i in range(n_bins):
+        mask = (p >= edges[i]) & (p < edges[i + 1] if i < n_bins - 1 else p <= edges[i + 1])
+        if np.any(mask):
+            rows.append((float(p[mask].mean()), float(y[mask].mean()), int(mask.sum())))
+    return rows
+```
+
+## Experiment
+
+**Hypothesis.** If the true probability is $p(x) = \sigma(2x)$ and you report $q = \sigma(8x)$, the reports are overconfident: reliability bins pull toward the corners relative to the diagonal, and log loss is worse than for $q = p$.
+
+**Protocol.** Draw $x \sim \mathcal{N}(0, 1)$, $y \sim \mathrm{Bernoulli}(p(x))$, $n = 4000$. Compare $q = p$ and $q = \sigma(8x)$ by log loss, Brier score, and a 5-bin reliability table. Also compare a constant $q = \bar{y}$.
+
+**Metric.** The two scores and the bin gaps $\bar{q} - \bar{y}$.
+
+**Decision rule.** The true $p$ must win on log loss. The overconfident $q$ should show bin average predictions more extreme than bin frequencies. The constant should be better calibrated than the overconfident model and worse as a ranking of risk. If you only report accuracy at 0.5, you may miss this; that is part of the lesson.
+
+## Project
+
+**Deliverable.** Take the logistic regression from earlier in the volume, emit probabilities, and build a reliability table on a validation set. Fit a temperature or an affine logistic map on that validation set only if the table is bent, and quote a final test score once.
+
+**Constraints.** The test set does not choose the map.
+
+**Rubric.** You state whether the downstream decision needs probabilities or only a ranking, and you include the matching metric.
+
+## Depth tracks
+
+**Beginner.** Compute Brier score for a constant 0.5 and for a constant equal to the base rate, on a sample with base rate 0.1.
+
+**University.** Run the overconfidence experiment.
+
+**Research.** Show on paper that accuracy is not a proper scoring rule: give two reported probabilities where the wrong one wins on expected accuracy at threshold 0.5. A simple discrete $p$ is enough.
+
+## Failure modes
+
+- Temperature-scaling on the test set.
+- Treating a high accuracy on an imbalanced problem as calibration.
+- Clipping probabilities to exactly 0 or 1 before log loss, which makes the score infinite at the first mistake.
+
+## See also
+
+Volume 07 for threshold choice under costs. Volume 12 if a token probability is later treated as a calibrated chance; it usually is not.

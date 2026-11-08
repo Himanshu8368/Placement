@@ -1,0 +1,871 @@
+﻿% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  Chapter 16 review -- the 15-station revision contract.
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\defref/\exref/\figref/\propref.  No derivations.
+%  Summit: CF 1062E Company -- LCA of a range via RMQ on tin + binary
+%  lifting.  Sample verified against the live CF statement (n=11,
+%  parents 1 1 3 3 3 4 2 7 7 6; 5 queries; output "4 1 / 8 1 / 1 0 /
+%  11 3 / 8 1").
+%  Exports prob:c11-summit, lst:c11-summit, lst:c11-kit.
+% =====================================================================
+
+\chaptersection{Chapter 16 Summary}
+
+One sentence: \emph{a fixed root turns every pair of nodes into a unique
+hinge---the LCA---and three machines (the walk, the Euler-tour RMQ, the
+binary-lifting table) answer ``where is the hinge?'' in
+\(O(h)\)/\(O(1)\)/\(O(\log n)\); once you have the hinge, distances,
+on-path tests, depth-bucket counts, and route-position queries all
+become one arithmetic expression.} Chapter~13 made the subtree fold
+queryable; Chapter~16 makes the \emph{pair} queryable. Every row below
+is a pointer, not a re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.22\linewidth} p{0.50\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement} & \textbf{Where} \\
+\midrule
+Chain property & Common ancestors of \(u,v\) = ancestors of \(\lca(u,v)\); a single chain. & \propref{c11-chain} \\
+Two-phase walk & Equalise depths, lockstep up; first agreement is \(\ell\); \(O(h)\). & \secref{c11-idea} \\
+Euler--RMQ reduction & \(\lca(u,v) = \arg\min\) depth on the \(2n{-}1\) tour between \(\mathit{first}(u)\) and \(\mathit{first}(v)\); sparse table gives \(O(1)\). & \thmref{c11-eulerthm}, \defref{c11-spq} \\
+Binary lifting table & \(\code{up}[v][j] = \code{up}[\code{up}[v][j{-}1]][j{-}1]\); \(O(\log n)\) climb and LCA. & \defref{c11-up} \\
+Aggregated lifting & \(\code{agg}[v][j]\) carries an associative payload; path aggregate in \(O(\log n)\). & \thmref{c11-agg} \\
+Distance identity & \(\dist(u,v) = \depth(u)+\depth(v)-2\depth(\ell)\). & \thmref{c11-distf} \\
+On-path test & \(w \in \mathit{path}(u,v) \iff \dist(u,w)+\dist(w,v)=\dist(u,v)\). & \propref{c11-onpath} \\
+Subtree interval & \(u \preceq v \iff \tin(u)\le\tin(v)\le\tout(u)\); counts = binary search. & \propref{c11-interval} \\
+Depth buckets & Sorted \(\tin\) per depth; subtree count in \(O(\log n)\) via two searches. & \secref{c11-paths} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter.}}
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.27\linewidth} l l >{\raggedright\arraybackslash}p{0.26\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Prep} & \textbf{Query} & \textbf{Code} \\
+\midrule
+Naive walk & \(O(n)\) DFS & \(O(h)\) & \coderef{c11-naive} \\
+Euler tour + sparse table & \(O(n\log n)\) & \(O(1)\) & \coderef{c11-euler}, \coderef{c11-sparse} \\
+Binary lifting (build/climb/LCA) & \(O(n\log n)\) & \(O(\log n)\) & \coderef{c11-build}, \coderef{c11-lcalift} \\
+CSES 1135 (Distance Queries) & \(O(n\log n)\) & \(O(\log n)\) & \coderef{c11-1135-soln} \\
+CSES 1687 (Company Queries I) & \(O(n\log n)\) & \(O(\log k)\) & \coderef{c11-1687-soln} \\
+CF 1304E (route + parity) & \(O(n\log n)\) & \(O(\log n)\) & \coderef{c11-1304e-soln} \\
+CF 208E (depth buckets) & \(O(n\log n)\) & \(O(\log n)\) & \coderef{c11-208e-soln} \\
+Path aggregate by strides & \(O(n\log n)\) & \(O(\log n)\) & \coderef{c11-pathagg} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that
+matches. It decides \emph{which of this chapter's three LCA machines}
+the problem is asking for---and hands off what this chapter does
+\emph{not} own: dynamic path updates (Ch.~19/20/22 HLD).
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You need the LCA, or a measurement that uses it.  Which machine?
+  |
+  |-- h small, or q tiny (one-off / LC 236 / LC 1483)?
+  |     +-- naive walk (16.1, lst:c11-naive); O(h), no build.
+  |
+  |-- tree STATIC, q large, ONLY need LCA (CSES 1135)?
+  |     +-- Euler tour + sparse table (16.2, lst:c11-euler +
+  |        lst:c11-sparse); O(1) query, idempotent combine.
+  |
+  |-- need k-th ancestor, distance, on-path, OR log is fast enough?
+  |     +-- binary lifting (16.3, lst:c11-lcalift); O(log) per query.
+  |        (Contest default: most flexible, simplest to extend.)
+  |
+  |-- need an AGGREGATE along the path (max/min/sum/xor)?
+  |     +-- aggregated lifting (16.4, thm:c11-agg, lst:c11-pathagg).
+  |        Associative op? Use two accumulators on the two arms.
+  |        Idempotent? Overlapping blocks also work (sparse trick).
+  |
+  |-- query NAMES a SET of vertices (LCA of k nodes)?
+  |     +-- RMQ-on-tin: sort by tin, LCA(set) = LCA(min-tin, max-tin).
+  |        Segment tree over tin for range argmin/argmax -> Summit.
+  |
+  |-- values CHANGE between queries (dynamic)?
+  |     +-- NOT this chapter -- HLD (Ch.~22) + segment tree (Ch.~19/20).
+  |        Static tables rot; no pre-merged jump survives an update.
+  |
+  +-- distance DISTRIBUTION over all pairs?
+        +-- NOT this chapter -- centroid (Ch.~24). Per-query LCA
+            is too slow when you need O(n^2) pairs.
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Forgetting \code{return par} at the end of
+        lifting-LCA.} The descending loop stops with \(u,v\) one level
+        below \(\ell\); returning \(u\) gives a child---silent off-by-one
+        on ancestor-pair tests (\coderef{c11-lcalift}).
+  \item \textbf{Dropping the \code{if(u==v)} shortcut after
+        equalising.} With \(u=v\) the inequality-loop never fires;
+        without the shortcut the \code{par} return is wrong by one edge
+        (\coderef{c11-lcalift}).
+  \item \textbf{Swapping RMQ endpoints.} The span is
+        \([\min(\mathit{first}(u),\mathit{first}(v)),\;
+         \max(\ldots)]\); feeding \((17,14)\) instead of \((14,17)\)
+        gives garbage (\thmref{c11-eulerthm}).
+  \item \textbf{Overlapping blocks for non-idempotent ranges.} The
+        sparse-table two-block trick requires \(x \oplus x = x\): fine
+        for min/max/gcd, \emph{corrupt} for sum/xor/count
+        (\defref{c11-spq}).
+  \item \textbf{\(\mathit{LOG}\) one short.} Need \(2^{\mathit{LOG}} >
+        n\); with \(n \le 2\cdot10^{5}\), \(\mathit{LOG}=18\) fails---19
+        is the minimum. Bitloops and the table second index must both
+        reach \(\mathit{LOG}\) (\defref{c11-up}).
+  \item \textbf{Sentinel discipline.} Node~0 must exist in the arrays
+        (\(\depth[0]=0\), \(\code{up}[0][j]=0\)); otherwise overshoots
+        read a real vertex (\coderef{c11-build}).
+  \item \textbf{Forests treated as trees.} CF~208E's father array has
+        multiple roots: forget the super-root~0 or the \(p > \depth(v)\)
+        guard and DFS misses components (\coderef{c11-208e-soln}).
+  \item \textbf{Tin/tout convention cross-wired.} ``\(\tout(v) =\) last
+        stamp inside \(v\)'s subtree'' and ``\(\tout(v) =\) exit-time
+        tick'' are both valid---neither works mixed
+        (\propref{c11-interval}).
+  \item \textbf{Stack depth on a chain.} Every build here is a DFS on
+        up to \(2\cdot10^{5}\) nodes; the iterative two-phase rewrite
+        from Ch.~12's \coderef{c09-iter} is production-necessary.
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter
+drilled. Diagnose top-down---every leaf names the training problem.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=56mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 4mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=8mm and 4mm of verdict] (tle) {\textbf{TLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {returning \(u\) instead of \code{par[u]} in lifting-LCA; dropping
+     the \(u{=}v\) shortcut; off-by-one in \(\tout\) convention
+     (\probref{c11-cousins}, \coderef{c11-lcalift})};
+  \node[l, below left=1mm and 2mm of wa.south] (wa2)
+    {RMQ span endpoints swapped; using overlapping blocks for sum/xor
+     (\thmref{c11-eulerthm}, \defref{c11-spq})};
+  \node[l, below=5mm of tle] (tle1)
+    {naive walk on a chain \(h{=}n\); scanning subtree per query
+     instead of bucket + binary search (\coderef{c11-naive},
+     \probref{c11-cousins})};
+  \draw[flow] (verdict) -- (wa);
+  \draw[flow] (verdict) -- (tle);
+  \draw[flow] (wa) -- (wa1);
+  \draw[flow] (wa) -- (wa2);
+  \draw[flow] (tle) -- (tle1);
+\end{tikzpicture}
+\caption*{WA: the hinge returns a child, or the RMQ window is inverted.
+TLE: the walk pays \(O(h)\) on a chain, or the per-query scan ignores
+the bucket structure. RE: \(\mathit{LOG}\) too small causes array
+overflow on deep trees.}
+\end{figure}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 16 at a glance]
+\textbf{Definitions.} \(\ancestors(v)\): route to root, self included;
+\(\lca(u,v)\): deepest common element; \(\lca(u,v)=u \iff u \preceq v\);
+\(\code{par}(r) = 0\) sentinel.
+
+\medskip
+\textbf{Walk.} Lift deeper to equal depth, lockstep; \(O(h)\).
+Check \(h\) before building tables.
+
+\medskip
+\textbf{Euler-RMQ.} \(\mathit{tour}\): enter + each return, \(2n{-}1\)
+slots; \(\mathit{first}(v)\): first slot. \(\lca = \arg\min\) depth on
+\([\mathit{first}(u)..\mathit{first}(v)]\). Sparse table over tour
+depth: query = two overlapping \(2^j\)-windows;
+\(j = \lfloor\log_2 \mathit{len}\rfloor\).
+\(O(n\log n)\) prep / \(O(1)\) query.
+
+\medskip
+\textbf{Lifting.} \(\code{up}[v][j] = \code{up}[\code{up}[v][j{-}1]][j{-}1]\);
+climb \(k\): jump bits low\(\to\)high. LCA: equalise, shortcut,
+descend high\(\to\)low on \emph{inequality}, return \code{par}.
+\(O(n\log n)\) / \(O(\log)\). Ancestry: \(\tin(a) \le \tin(v) \le
+\tout(a)\).
+
+\medskip
+\textbf{Paths.} \(\dist(u,v) = \depth u + \depth v - 2\depth\ell\);
+\(w \in \mathit{path}(u,v) \iff \dist(u,w)+\dist(w,v)=\dist(u,v)\);
+\(k\)-th route node: climb from nearer end. Aggregates: second table
+\(\code{agg}[v][j]\), merge into accumulator during climbs.
+
+\medskip
+\textbf{Translation.} ``boss \(k\) above'' \(\to\) climb.
+``distance / via / route'' \(\to\) hinge identity.
+``same-generation relatives under ancestor'' \(\to\) lift + depth-bucket
+\(\cap\) interval (CF~208E). ``LCA of a SET of \(k\) nodes'' \(\to\)
+sort by tin, LCA(min-tin, max-tin) (Summit).
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 16 kit: the lifting machine, complete and production-shaped}, label={lst:c11-kit}]
+struct LCA {   // binary lifting, 0-sentinel, iterative DFS
+    int n, LOG; vector<vector<int>> adj;
+    vector<array<int,20>> up;
+    vector<int> dep, tin, tout; int tmr=0;
+    LCA(int n):n(n),LOG(1),adj(n+1),up(n+1),dep(n+1),tin(n+1),tout(n+1){
+        while((1<<LOG)<=n) LOG++;}
+    void addEdge(int a,int b){adj[a].push_back(b);adj[b].push_back(a);}
+    void build(int r=1){
+        vector<int> par(n+1),it(n+1,0),stk{r};
+        up[r].fill(0);dep[r]=0;par[r]=0;tin[r]=++tmr;
+        while(!stk.empty()){int v=stk.back();
+            if(it[v]<(int)adj[v].size()){int u=adj[v][it[v]++];
+                if(u==par[v])continue;
+                par[u]=v;dep[u]=dep[v]+1;tin[u]=++tmr;
+                up[u][0]=v;for(int j=1;j<LOG;j++)up[u][j]=up[up[u][j-1]][j-1];
+                stk.push_back(u);
+            }else{tout[v]=tmr;stk.pop_back();}}}
+    int climb(int v,int k)const{
+        for(int j=0;j<LOG&&v;j++)if(k>>j&1)v=up[v][j];return v;}
+    bool isAnc(int a,int v)const{
+        return tin[a]<=tin[v]&&tin[v]<=tout[a];}
+    int lca(int u,int v){
+        if(dep[u]<dep[v])swap(u,v);
+        u=climb(u,dep[u]-dep[v]);if(u==v)return u;
+        for(int j=LOG-1;j>=0;j--)if(up[u][j]!=up[v][j]){u=up[u][j];v=up[v][j];}
+        return up[u][0];}
+    int dist(int u,int v){int w=lca(u,v);return dep[u]+dep[v]-2*dep[w];}
+    bool onPath(int w,int u,int v){
+        return dist(u,w)+dist(w,v)==dist(u,v);}
+};
+// recognition: "k above"->climb; "ancestor?/inside subtree?"->isAnc;
+// "distance/via/route"->lca()+dist(); updates->NOT this kit: Ch.22.
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the
+chapter. Cover the marked line, reproduce from memory, then check the
+answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- the naive walk (from lst:c11-naive)}]
+int lca_walk(int u, int v) {
+    while (depth[u] > depth[v]) u = par[u];   // equalise u
+    while (depth[v] > depth[u]) v = par[v];   // equalise v
+    while (u != v) { u = par[u]; v = par[v]; } // lockstep
+    return u;                                   // first agreement
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: no preprocessing; \(O(h)\) worst case.
+Correct for small~\(h\) or tiny~\(q\); otherwise TLE on a chain.
+This is the template that 16.2 and 16.3 accelerate.}
+
+\begin{lstlisting}[caption={Drill 2 -- sparse-table RMQ query (from lst:c11-sparse)}]
+int rmq_query(int l, int r) {               // min index in [l, r]
+    int j = 31 - __builtin_clz(r - l + 1); // floor(log2(len))
+    int a = st[j][l], b = st[j][r-(1<<j)+1];
+    return (dep_tour[a] <= dep_tour[b]) ? a : b;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: two overlapping windows of size~\(2^j\).
+The overlap is harmless ONLY because min is idempotent. For sums/xors,
+this trick is WRONG---use a segment tree or a disjoint sparse table
+instead (\defref{c11-spq}).}
+
+\begin{lstlisting}[caption={Drill 3 -- lifting LCA (from lst:c11-lcalift)}]
+int lca_lift(int u, int v) {
+    if (dep[u] < dep[v]) swap(u, v);
+    u = climb(u, dep[u] - dep[v]);
+    if (u == v) return u;                     // the shortcut
+    for (int j = LOG-1; j >= 0; j--)
+        if (up[u][j] != up[v][j]) { u = up[u][j]; v = up[v][j]; }
+    return up[u][0];                          // the par
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the loop stops with \(u,v\) as \emph{children}
+of~\(\ell\). Both lines (\code{if(u==v)} and \code{return up[u][0]}) are
+the two most-frequently dropped lines in contest submissions
+(\coderef{c11-lcalift}).}
+
+\begin{lstlisting}[caption={Drill 4 -- path aggregate (from lst:c11-pathagg)}]
+int path_query(int u, int v, int l) {    // l = lca(u,v)
+    int res = val[l];                    // fold hinge value
+    int cur = u, k = dep[u] - dep[l];
+    for (int j = 0; j < LOG; j++)
+        if (k & (1<<j)) { res = op(res, agg[cur][j]); cur = up[cur][j]; }
+    cur = v; k = dep[v] - dep[l];
+    for (int j = 0; j < LOG; j++)
+        if (k & (1<<j)) { res = op(res, agg[cur][j]); cur = up[cur][j]; }
+    return res;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the hinge's own value is folded FIRST (the
+two arms \emph{exclude} the landing vertex). Associativity is all
+\(\oplus\) needs---no commutativity, no idempotence
+(\thmref{c11-agg}, \exref{c11-aggrun}).}
+
+\begin{lstlisting}[caption={Drill 5 -- depth-bucket query (from lst:c11-208e-soln)}]
+// Query (v, p): count nodes at depth dep[v] in subtree(w) minus v
+int w = climb(v, p);                     // p-th ancestor
+int d = dep[v];
+int lo = lower_bound(bucket[d].begin(), bucket[d].end(), tin[w]) - bucket[d].begin();
+int hi = upper_bound(bucket[d].begin(), bucket[d].end(), tout[w]) - bucket[d].begin();
+answer = hi - lo - 1;                    // subtract v itself
+\end{lstlisting}
+\noindent{\scriptsize Key: \(\mathit{bucket}[d]\) is \emph{sorted by
+construction} (DFS stamps tins in order). The \(-1\) excludes~\(v\).
+The guard \code{if(p > dep[v]) return 0} must precede the
+\code{climb} call (\probref{c11-cousins}).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers---4 fully solved in-section,
+practice entries, one Summit, ten mixed. Tick \emph{only} after an
+unaided solve; a hinted attempt counts as half.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.24\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 16.2 -- Euler tour + RMQ}} \\
+S16.2.1 & Distance Queries & CSES 1135 & \lv{3} Euler tour, sparse table, \(\dist\) formula & \(2n{-}1\) tour; RMQ for LCA; distance is one expression & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 16.3 -- binary lifting}} \\
+S16.3.1 & Company Queries I & CSES 1687 & \lv{3} \(k\)-th ancestor via bit decomposition & \(\code{up}\)-table; sentinel; \(-1\) on overshoot & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 16.4 -- lifting an aggregate}} \\
+S16.4.1 & 1-Trees and Queries & CF 1304E & \lv{4} distances + parity + \(k\)-th node on route & Edge used \emph{exactly once}; only \(d_2, d_3\); parity check & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 16.5 -- distances, buckets}} \\
+S16.5.1 & Blood Cousins & CF 208E & \lv{4} lifting + depth buckets + tin interval & Forest (super-root); guard; range binary search & \(\square\) \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+S16 & Company & CF 1062E & \lv{5} RMQ-on-tin + LCA + segment tree & LCA of set = LCA(extremes by tin); remove extreme & \(\square\) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day~1 internalises the hinge concept and the naive
+walk; day~2 builds the \(2n{-}1\) tour and sparse table; day~3
+constructs the \(\code{up}\)-table and solves lifting problems; day~4
+extends to aggregates and routes; day~5 is the Summit.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 16.1 & verify \exref{c11-census} by hand on~\(T\); write \coderef{c11-naive} cold; LC~236 (Ch.1 revisit); trace \(\lca(8,10)\) walk \\
+2 & Read + do 16.2 & build the \(2n{-}1\) tour table on~\(T\) by hand; verify \(\mathit{first}[\cdot]\); solve CSES~1135 end-to-end \\
+3 & Read + do 16.3 & fill the \(\code{up}\)-table on~\(T\) (\exref{c11-uptab}); CSES~1687; write \coderef{c11-lcalift} from memory \\
+4 & Read + do 16.4+16.5 & \exref{c11-aggrun} (max on path); CF~1304E; \exref{c11-cousinsrun} (bucket queries); CF~208E \\
+5 & Summit + revise & CF~1062E; walk the decision flowchart; 10 mixed problems (first 3 minimum) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates---each row names the \emph{skill} the tier
+unlocks.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.34\linewidth}p{0.38\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+\lv{2}--\lv{3} \ \(\bigstar\bigstar\bigstar\)
+  & LC~236, CSES~1135, CSES~1687
+  & you can build the tour table or the \(\code{up}\)-table from a DFS, and answer \(\lca\)/\(k\)-th-ancestor without hints \\
+\lv{4} \ \(\bigstar\bigstar\bigstar\bigstar\)
+  & CF~1304E, CF~208E
+  & you combine lifting + distances + interval queries; recognise when a path question needs the hinge split \\
+\lv{5} \ \(\bigstar\bigstar\bigstar\bigstar\bigstar\)
+  & CF~1062E (Summit), CF~587C, CF~629E
+  & you layer RMQ-on-tin + range-argmin/max + LCA on a set; handle forest input + edge-case guards \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+Every entry is ``one of the three machines + one twist.'' Each line
+collapses a problem family onto a listing already in the chapter.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``LCA of a SET of~\(k\) nodes'' (CF~1062E, CSES~1688)
+        \(\to\) sort by~\(\tin\); the set's LCA is the LCA of the nodes
+        with minimum and maximum \(\tin\)
+        (\propref{c11-interval} as the proof key).
+  \item ``Distance \(a\)-\(b\) with one edge MUST be used'' (CF~1304E)
+        \(\to\) three candidate distances + parity check
+        (\thmref{c11-distf}, \probref{c11-1304e}).
+  \item ``\(k\)-th ancestor / boss \(k\) above'' (CSES~1687, LC~1483)
+        \(\to\) bit-decomposition climb
+        (\coderef{c11-climb}, \defref{c11-up}).
+  \item ``Count same-depth nodes in ancestor's subtree'' (CF~208E)
+        \(\to\) climb + bucket + binary search
+        (\coderef{c11-208e-soln}, \propref{c11-interval}).
+  \item ``Max/min/sum/xor along a path'' (CSES~2134 static)
+        \(\to\) aggregated lifting, two arms merge at hinge
+        (\thmref{c11-agg}, \coderef{c11-pathagg}).
+  \item ``\(k\)-th node on route \(u \to v\)'' (CF~587C preview)
+        \(\to\) distance + hinge split + \(k\)-th ancestor
+        (\propref{c11-onpath}, \secref{c11-aggregates}).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+Ten entries from CF~1800 to CF~2400. Each refuses to say ``LCA''
+directly---recognise the hinge from the \emph{measurement} the problem
+requests.
+
+\begin{mixedset}
+  \practice{Tree Reconstruction}{CF 178B3 (Div.~3 E)}
+    {https://codeforces.com/contest/178/problem/B3}{CF 1800 L3}
+    {Multiple DFS-order queries on a static tree; identify parent-child
+     from \(\tin/\tout\) range containment---this chapter's
+     \propref{c11-interval} as a decision procedure.}
+  \practice{Tree}{CF 191C}
+    {https://codeforces.com/problemset/problem/191/C}{CF 1900 L3}
+    {Paths on a tree: given~\(k\) routes \((a_i,b_i)\), count how many
+     times each edge is traversed. Difference at \(\ell_i = \lca(a_i,b_i)\);
+     one subtree-sum DFS finishes in \(O(n{+}k)\)
+     (\thmref{c11-distf}).}
+  \practice{Wizards and Roads}{CF 16D}
+    {https://codeforces.com/problemset/problem/16/D}{CF 1900 L4}
+    {Detect bridges via DFS lowlink; the ``is this tree edge
+     bridgeable?'' test uses \(\tin/\tout\) interval containment
+     exactly as \propref{c11-interval} does.}
+  \practice{Alice and the Tree}{CF 1702G2}
+    {https://codeforces.com/problemset/problem/1702/G2}{CF 2000 L4}
+    {XOR of values along a path \(u \to v\): compute via
+     \(\mathit{xor}(\mathit{root},u) \oplus
+     \mathit{xor}(\mathit{root},v) \oplus \mathit{val}(\ell)\)---
+     \thmref{c11-agg} with \(\oplus = \mathrm{xor}\).}
+  \practice{A and B and Team Training}{CF 519E}
+    {https://codeforces.com/problemset/problem/519/E}{CF 2100 L4}
+    {``How many pairs have the same \(k\)-th ancestor?''---depth-bucket
+     counting via lifting, exactly the CF~208E pattern
+     (\coderef{c11-208e-soln}) with the bucket on both sides.}
+  \practice{Minimum Incompatibility}{CF 609E}
+    {https://codeforces.com/problemset/problem/609/E}{CF 2100 L4}
+    {Second-MST via max-on-path: add edge \((u,v)\) to the MST, find
+     the heaviest edge on the \(u \to v\) path (\thmref{c11-agg} with
+     \(\max\)), swap.}
+  \practice{Persistent Bookcase}{CF 466E}
+    {https://codeforces.com/problemset/problem/466/E}{CF 2100 L5}
+    {LCA queries on a tree built incrementally; offline queries reduce
+     to \coderef{c11-lcalift} after the tree is complete.}
+  \practice{Duff in the Army}{CF 587C}
+    {https://codeforces.com/problemset/problem/587/C}{CF 2200 L5}
+    {Shortest path through army bases on a tree: LCA + distance
+     (\thmref{c11-distf}) + \(k\)-th-node-on-route
+     (\coderef{c11-climb}).}
+  \practice{Tree Queries}{CF 629E}
+    {https://codeforces.com/problemset/problem/629/E}{CF 2300 L5}
+    {Ancestor-path queries: ``is~\(u\) an ancestor of~\(v\)?'' +
+     ``path passes through which special nodes?''
+     \(\tin/\tout\) interval + bucket counting
+     (\propref{c11-interval}).}
+  \practice{Blood Cousins Returns}{CF 246E}
+    {https://codeforces.com/problemset/problem/246/E}{CF 2400 L5}
+    {Extended cousin counting with multiple depth constraints: the
+     CF~208E bucket+climb pattern combined with DSU-on-tree for
+     per-node answers (\probref{c11-cousins}, Ch.~17 forward-cite).}
+\end{mixedset}
+
+\chaptersection{The Summit -- CF 1062E Company}
+
+\begin{notebox}[Why this is the chapter top rope]
+Sections 16.1--16.5 each solve one query per pair~\((u,v)\). The Summit
+asks a \emph{set} question: given a range~\([l,r]\) of \(r{-}l{+}1\)
+vertices, which single vertex to \emph{remove} so the LCA of the
+remaining has maximum depth? The key reduction uses this chapter's
+\(\tin/\tout\) machinery: \(\lca(\text{set}) =
+\lca(\text{min-tin},\text{max-tin})\), so the problem becomes ``find
+the two extreme \(\tin\)-vertices in a range, then test removing each
+extreme.'' The segment tree for range-argmin/argmax is \chref{c13}'s tool;
+the LCA inside it is \emph{this} chapter's.
+\end{notebox}
+
+\solvedproblem{c11-summit}{Company}{Codeforces 1062E}
+  {https://codeforces.com/problemset/problem/1062/E}{CF 2300 L5}
+  {LCA of a set via tin-extremes, segment tree for range argmin/argmax, binary lifting, remove-one optimization}
+
+\begin{problemstatement}[CF 1062E Company]
+A company of~\(n\) employees forms a rooted tree (employee~1 is the
+CEO, root).~\(q\) queries: each gives a range~\([l,r]\)---employees
+\(l, l{+}1, \ldots, r\) are involved. The project manager is the
+deepest common ancestor (= LCA) of all involved employees. Remove
+\emph{exactly one} employee from the range so that the LCA of the
+remaining employees is as \emph{deep} as possible. Output which
+employee to remove and the maximum depth achievable.
+
+\textbf{Input.} \(n\)~\(q\); then \(n{-}1\) integers
+\(p_2, p_3, \ldots, p_n\) (the boss of each employee); then \(q\) lines
+\((l_i, r_i)\). \(2 \le n, q \le 10^5\).
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+11 5
+1 1 3 3 3 4 2 7 7 6
+4 6
+4 8
+1 11
+9 11
+8 11
+
+Output:
+4 1
+8 1
+1 0
+11 3
+8 1
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, 45 minutes]
+\peek{How do you compute the LCA of a SET of~\(k\) nodes? Hint:
+sort them by~\(\tin\); what happens if you take the LCA of the first
+and last?}
+\nudge{The segment tree stores (min-tin, max-tin) in each interval.
+For the ``remove one'' variant, also query for the \emph{second}
+extreme: second-min and second-max. Only removing an extreme vertex
+can change the LCA of the set.}
+\fullhint{For each range~\([l,r]\): find \(a = \arg\min\;\tin\) and
+\(b = \arg\max\;\tin\) in the range. The LCA of the whole range =
+\(\lca(a,b)\). To remove one vertex: try removing~\(a\) (compute
+\(\lca(\text{second-min}, b)\)) or removing~\(b\) (compute
+\(\lca(a, \text{second-max})\)); pick whichever gives deeper LCA.
+Output the removed vertex and the new depth. Total \(O((n+q)\log n)\).}
+\end{attemptgate}
+
+\solstep{Understanding}
+The set~\(\{l, l{+}1, \ldots, r\}\) (consecutive vertex indices) has
+its LCA determined by the two vertices with extreme DFS-entry times.
+This is the ``LCA of a set'' reduction:
+\[
+  \lca(v_1, \ldots, v_k)
+  \;=\; \lca\!\bigl(\arg\min_i\;\tin(v_i),\;
+                     \arg\max_i\;\tin(v_i)\bigr).
+\]
+The proof uses \propref{c11-interval}: if~\(u\) has the smallest
+\(\tin\) and~\(w\) the largest, then every other~\(v_i\) has
+\(\tin(u) \le \tin(v_i) \le \tin(w)\), so all~\(v_i\)'s are in
+\(\lca(u,w)\)'s subtree. Removing one vertex changes the extremes only
+if that vertex \emph{is} an extreme---hence try removing the min-tin
+or the max-tin vertex.
+
+\solstep{Key Observations}
+\begin{observation}
+The LCA of a set = LCA of the min-tin and max-tin elements. This
+turns a \(k\)-way query into one pair query, answering in \(O(\log n)\)
+via binary lifting.
+\end{observation}
+\begin{observation}
+Removing a non-extreme vertex does NOT change the LCA (the extremes
+still bracket the same set). So the optimal removal is always one of
+the two extremes.
+\end{observation}
+\begin{observation}
+Second-min and second-max \(\tin\) in the range give the two candidate
+LCAs after removal. A segment tree storing (min, max, second-min,
+second-max) in each node answers all four in \(O(\log n)\) per range
+query.
+\end{observation}
+
+\solstep{Think It Through}
+\begin{thinkbox}
+\deadend{Compute LCA of all~\(k\) vertices by pairwise LCA iteration}
+{Correct for one query, but \(O(k)\) per query; \(O(nq)\) worst case.}
+\deadend{Sort by tin, take first and last---no segment tree}
+{Works only if the set is pre-sorted; here the set changes per query
+(range of indices, not DFS order). You need a \emph{range} data
+structure.}
+\aha{Segment tree over~\(\{1, \ldots, n\}\) storing min/max/second-
+min/second-max of~\(\tin[\cdot]\). Per query: four values from the
+tree in \(O(\log n)\); one LCA call in \(O(\log n)\). Total
+\(O((n+q)\log n)\).}
+\end{thinkbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1062E: segment tree on tin + binary lifting LCA}, label={lst:c11-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX=100002, LOG=18;
+vector<int> adj[MX];
+int up[MX][LOG], dep[MX], tin[MX], tout[MX], tmr;
+void dfs(int v,int p){
+    tin[v]=++tmr; up[v][0]=p;
+    for(int j=1;j<LOG;j++) up[v][j]=up[up[v][j-1]][j-1];
+    for(int c:adj[v]){dep[c]=dep[v]+1;dfs(c,v);}
+    tout[v]=tmr;
+}
+int lca(int u,int v){
+    if(dep[u]<dep[v])swap(u,v);
+    int d=dep[u]-dep[v];
+    for(int j=0;j<LOG;j++)if(d&(1<<j))u=up[u][j];
+    if(u==v)return u;
+    for(int j=LOG-1;j>=0;j--)if(up[u][j]!=up[v][j]){u=up[u][j];v=up[v][j];}
+    return up[u][0];
+}
+struct Node{int mn1,mn2,mx1,mx2;};
+int n;
+vector<int> rk; // rk[tin[i]]=i
+Node merge_nodes(Node a, Node b){
+    int c[4]={a.mn1,b.mn1,a.mn2,b.mn2};
+    sort(c,c+4,[](int x,int y){return tin[x]<tin[y];});
+    int d[4]={a.mx1,b.mx1,a.mx2,b.mx2};
+    sort(d,d+4,[](int x,int y){return tin[x]>tin[y];});
+    return {c[0],c[1],d[0],d[1]};
+}
+Node tr[4*MX];
+void build(int o,int l,int r){
+    if(l==r){tr[o]={l,l,l,l};return;}
+    int m=(l+r)/2;build(2*o,l,m);build(2*o+1,m+1,r);
+    tr[o]=merge_nodes(tr[2*o],tr[2*o+1]);
+}
+Node query(int o,int l,int r,int ql,int qr){
+    if(ql>r||qr<l) return {0,0,0,0};
+    if(ql<=l&&r<=qr) return tr[o];
+    int m=(l+r)/2;
+    return merge_nodes(query(2*o,l,m,ql,qr),query(2*o+1,m+1,r,ql,qr));
+}
+int main(){
+    int q; scanf("%d%d",&n,&q);
+    for(int i=2;i<=n;i++){int p;scanf("%d",&p);adj[p].push_back(i);}
+    tin[0]=1e9; dep[1]=0; dfs(1,0); build(1,1,n);
+    while(q--){
+        int l,r; scanf("%d%d",&l,&r);
+        if(l==r){printf("%d %d\n",l,dep[1]);continue;}
+        Node nd=query(1,1,n,l,r);
+        int mn=nd.mn1,mx=nd.mx1;
+        int cmn=nd.mn2,cmx=nd.mx2;
+        int lca_a=lca(cmn,mx); // remove mn
+        int lca_b=lca(mn,cmx); // remove mx
+        if(dep[lca_a]>=dep[lca_b])
+            printf("%d %d\n",mn,dep[lca_a]);
+        else
+            printf("%d %d\n",mx,dep[lca_b]);
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CF 1062E: n=11, parents 1 1 3 3 3 4 2 7 7 6; 5 queries]
+Tree: \(1\!\to\!\{2,3\}\), \(3\!\to\!\{4,5,6\}\), \(4\!\to\!\{7\}\),
+\(2\!\to\!\{8\}\), \(7\!\to\!\{9,10\}\), \(6\!\to\!\{11\}\).
+Depths: \(d=(0,1,1,2,2,2,3,2,4,4,3)\).
+
+Q1\;(4,6): set~\(\{4,5,6\}\). All have parent~3.
+\(\lca(4,5,6)=3\), depth~1. Remove any: remaining LCA still~3.
+Output \texttt{4 1}. \checkmark
+
+Q2\;(4,8): set~\(\{4,5,6,7,8\}\).
+\(\lca(4,5,6,7,8)=1\) (node~8 in subtree~2, rest in subtree~3).
+Remove~8: \(\lca(4,5,6,7)=3\), depth~1. Remove others: LCA=~1.
+Best: remove~8, depth~1. Output \texttt{8 1}. \checkmark
+
+Q3\;(1,11): set~\(=\{1,\ldots,11\}\). Node~1 is in the set,
+so \(\lca(\text{all})=1\), depth~0. Remove any vertex leaves~1.
+Output \texttt{1 0}. \checkmark
+
+Q4\;(9,11): set~\(\{9,10,11\}\).
+\(\lca(9,10)=7\), \(\lca(9,11)=\lca(10,11)=3\).
+Remove~11: LCA(9,10)~=~7, depth~3. Remove~9 or~10: LCA~=~3, depth~1.
+Best: remove~11, depth~3. Output \texttt{11 3}. \checkmark
+
+Q5\;(8,11): set~\(\{8,9,10,11\}\).
+\(\lca(8,9,10,11)=1\), depth~0.
+Remove~8: \(\lca(9,10,11)=3\), depth~1.
+Remove others: LCA stays~1, depth~0.
+Best: remove~8, depth~1. Output \texttt{8 1}. \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Preprocessing: \(O(n\log n)\) (up-table via one DFS) + \(O(n)\)
+(segment-tree build). Per query: \(O(\log n)\) (segment tree gives
+four extremes) + \(O(\log n)\) (two LCA calls). Total
+\(O((n+q)\log n)\). Memory: \(O(n\log n)\) for lifting + \(O(n)\) for
+segment tree. At \(n,q \le 10^5\): roughly 20\,MB. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}[The ``remove one'' analysis]
+Only removing a \(\tin\)-\emph{extreme} vertex can change the set LCA.
+If the range has \(r{-}l{+}1 = 2\) (just two vertices), removing either
+leaves a singleton whose LCA is itself---output the correct vertex.
+\end{warningbox}
+\begin{warningbox}[The segment-tree identity for empty entries]
+The merge function uses~\(\tin[0]\) for ``empty'' entries when a range
+query spans fewer than four vertices. Set~\(\tin[0] = 10^9\) so the
+dummy never wins an argmin. Forgetting this gives RE or WA on
+singleton ranges.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways --- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{LCA of a set = LCA of the two extremes by~\(\tin\).}
+        The proof is \propref{c11-interval}: the min-tin and
+        max-tin bracket the entire set's DFS window, so their common
+        ancestor covers everyone (\probref{c11-summit}).
+  \item \emph{Removing a non-extreme preserves the LCA.} The extremes
+        are the only ``bottleneck'' vertices; the second-extreme gives
+        the post-removal LCA without rescanning.
+  \item \emph{This chapter's machine + \chref{c13}'s segment tree =
+        set-LCA queries in~\(O(\log n)\).} The handoff: this chapter
+        owns the LCA + tin/tout; \chref{c13} owns the range-min structure.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Generalises}: any ``aggregate over a set of vertices
+        via LCA'' (LC~1483, CF~1702G2, CF~629E) uses the same
+        extremes-by-tin reduction; the combiner (max, xor, count)
+        rides on the aggregate table from \thmref{c11-agg}.
+  \item \textbf{Chapter~16's five sections form one pipeline}: DFS
+        \(\to\) tin/tout/depth \(\to\) up-table \(\to\) LCA \(\to\)
+        distance/path/aggregate/set. The Summit is the first problem
+        that requires \emph{all five} layers simultaneously.
+  \item \textbf{Alternatives}: Euler-tour RMQ (\thmref{c11-eulerthm})
+        gives \(O(1)\) LCA inside the segment tree---slightly faster
+        at the cost of a second sparse-table build.  A virtual tree
+        (Ch.~26) solves the same set queries but is overkill for
+        single-range problems.
+\end{itemize}
+\end{hardeningbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled through Chapter~16. Chapters~1--15's rows are
+carried forward; this chapter's are appended. Pointers only.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.21\linewidth} l c p{0.25\linewidth} p{0.17\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Lv} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapters 1--15 -- carried forward} \\
+Rooted-view DFS & 12 & \lv{2} & ``how deep / tall / many below'' & \coderef{c09-dfs3} \\
+Iterative two-phase DFS & 12 & \lv{3} & ``chain may be deep'' & \coderef{c09-iter} \\
+\(\tin/\tout\) flattening & Ch.5 & \lv{2} & ``is~\(u\) an ancestor of~\(v\)?'' & \chref{c24} \\
+Subtree fold (DP template) & 13 & \lv{3} & ``one answer per node, bottom-up'' & \thmref{c10-subtree-template} \\
+Rerooting & 15 & \lv{4} & ``for every root'' & \chref{c20} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 16 -- new this chapter} \\
+Naive walk & 16.1 & \lv{2} & ``LCA, few queries, small~\(h\)'' & \coderef{c11-naive} \\
+Euler tour + sparse table & 16.2 & \lv{3} & ``static, huge~\(q\), \(O(1)\) LCA'' & \coderef{c11-euler}, \coderef{c11-sparse} \\
+Binary lifting & 16.3 & \lv{3} & ``\(k\)-th ancestor / distance / default'' & \coderef{c11-build}, \coderef{c11-lcalift} \\
+Aggregated lifting & 16.4 & \lv{4} & ``max/sum/xor along a path'' & \thmref{c11-agg}, \coderef{c11-pathagg} \\
+Depth buckets & 16.5 & \lv{4} & ``same-depth in subtree'' & \coderef{c11-208e-soln} \\
+Set-LCA via tin-extremes & Summit & \lv{5} & ``LCA of~\(k\) nodes / range'' & \coderef{c11-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c24} (Ch.~5, Euler Tour \& Subtree Flattening) ---
+        backward: owns the entry-only \(\tin/\tout\) convention that
+        \propref{c11-interval} restates; this chapter's
+        \(2n{-}1\) tour (\defref{c11-tour}) is a different object,
+        contrasted explicitly in~16.2.
+  \item \chref{c09} (Ch.~12, Tree Metrics) --- backward: the
+        rooted-view DFS \coderef{c09-dfs3} is the setup pass for every
+        table here; \(\depth\) is the currency the distance formula
+        spends.
+  \item \chref{c10} (Ch.~13, Tree DP) --- backward:
+        \thmref{c10-subtree-template} and \secref{c10-distance}
+        are the fold and pair-at-LCA harvest that this chapter makes
+        \emph{queryable}; the segment tree in the Summit is \chref{c13}'s
+        tool.
+  \item \chref{c20} (Ch.~15, Rerooting) --- backward: CSES~1136's
+        ``sum of distances from every node'' combines Ch.~15's
+        reroot-every-node pattern with \thmref{c11-distf}.
+  \item \chref{c26} (Ch.~9, Cartesian Trees) --- the \emph{reverse}
+        reduction (RMQ \(\to\) LCA \(\to\) Cartesian tree) lives
+        there; this chapter owns the forward direction.
+  \item Ch.~19/20/22 (segment trees, lazy, HLD) --- forward: the
+        answer to ``what when the values change.''
+  \item Ch.~24 (centroid decomposition) --- forward: distance
+        \emph{distributions} over all pairs.
+  \item Ch.~26 (virtual trees) --- forward: compresses a \(k\)-node
+        set via sort-by-tin + LCA of adjacent pairs; this chapter's
+        \thmref{c11-distf} and lifting are the inner loop.
+\end{itemize}
+
+\begin{lastword}[Last Word --- Chapter 16]
+\emph{``Chapter~13 made the tree compute; Chapter~16 makes it answer
+questions about pairs. The hinge is free: one DFS fixes it, and every
+path question becomes arithmetic.''}
+
+\medskip
+The whole chapter is one object (the LCA) served by three machines
+(walk, tour+RMQ, lifting) and measured by three formulas (distance,
+on-path, subtree-interval). The walk is honest and cheap for
+small~\(h\) (\coderef{c11-naive}); the tour converts \(\lca\) into a
+range-min on a \(2n{-}1\) array (\thmref{c11-eulerthm}), and the
+sparse table makes it \(O(1)\) (\defref{c11-spq}); lifting replaces
+\emph{steps} by \emph{strides} (\defref{c11-up}), giving \(O(\log n)\)
+per query plus the ability to carry aggregates (\thmref{c11-agg}) and
+test ancestry (\propref{c11-interval}). The distance theorem
+(\thmref{c11-distf}) is the simplest payoff---one subtraction after
+one LCA---and it unlocks the route-parity check (CF~1304E) and the
+depth-bucket count (CF~208E). The Summit layers them all: set-LCA
+reduction + segment-tree RMQ + binary lifting + distance arithmetic.
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{The hinge is free information.} Any path question splits
+        at~\(\ell\) into two ancestor-climbs; pay \(O(\log n)\) once,
+        answer any pair query without re-DFS.
+  \item \emph{Idempotence determines your data structure.} Sparse table
+        (overlapping blocks) only for min/max/gcd; lifting
+        (non-overlapping jumps) for sum/xor/count/associative
+        (\thmref{c11-agg}).
+  \item \emph{LCA of a set = LCA of the tin-extremes.} This
+        reduction (proved in~\probref{c11-summit}) converts every
+        ``group ancestor'' question into one pair query.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: always verify~\(\mathit{LOG}\)
+against the constraint bound before coding; check the \(u{=}v\)
+shortcut and the \code{return par} in every lifting-LCA implementation;
+and when a problem says ``for every pair in the subtree,'' reach for
+buckets and \(\tin/\tout\) before brute-forcing---the
+\probref{c11-cousins} pattern is one binary search away.
+
+\medskip
+\textbf{Next:} \chref{c28} (DSU-on-tree) takes the depth-bucket idea
+and makes subtree queries with \emph{per-node answers} run in
+\(O(n\log n)\) total. Ch.~19/20 (segment trees) and Ch.~22 (HLD) then
+make the path queries \emph{dynamic}, answering the question this
+chapter deliberately defers: what happens when the values change
+between queries.
+\end{lastword}

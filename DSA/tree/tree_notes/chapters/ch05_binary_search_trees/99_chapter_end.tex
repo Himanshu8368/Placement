@@ -1,0 +1,868 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  Chapter 7 review -- the 15-section revision contract (chapter_end.txt).
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\propref/\defref/\exref/\figref. No derivations.
+%  Summit: LC Hard 315 Count of Smaller Numbers After Self
+%  (a size-augmented BST reads each rank on one descent -- then the height
+%   rot turns that descent into O(n^2), the cliffhanger into Chapter 8).
+% =====================================================================
+
+\chaptersection{Chapter 7 Summary}
+
+Four sections, one invariant: \emph{left $<$ node $<$ right, recursively}. That promise turns a
+binary tree into its own search index. The property view (7.1) fixes the invariant, proves inorder
+$\equiv$ sorted, and warns that validation must carry bounds, not compare children; the edit view
+(7.2) makes insert a failed search and delete a three-case splice around the inorder successor; the
+query view (7.3) rides the sorted line for ranks and rebuilds the whole tree from \emph{one} preorder
+scan; the container view (7.4) hands all of it to \code{std::set}/\code{std::map} and shows the
+interval problems that are one \code{lower\_bound} away. Every entry below is a pointer, not a
+re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.25\linewidth} p{0.47\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement (with conditions)} & \textbf{Where} \\
+\midrule
+BST property & Every node's whole left subtree is smaller and its whole right subtree larger;
+  the invariant is \emph{recursive bounds}, not a child comparison. & \defref{c05-prop} \\
+Inorder $\equiv$ sorted & A tree is a BST \textbf{iff} its inorder lists keys strictly increasing --
+  a two-way tool (query it, or validate it). & \thmref{c05-inorder} \\
+One-descent search & Search/insert-point cost $\bigO{h}$: each comparison discards a whole subtree.
+  & \propref{c05-search} \\
+Bounds validation & Carry $(\mathit{lo},\mathit{hi})$ down the tree; a node beating only its children
+  is \textbf{not} sufficient (the trap tree). & \thmref{c05-bounds} \\
+Delete three cases & Leaf: detach; one child: bypass; two children: copy the inorder successor and
+  delete it (it has no left child). & \thmref{c05-delete} \\
+Order statistics & $k$th smallest $=$ $k$th inorder emission ($\bigO{h+k}$); successor $=$ right-then
+  left-most, else backtrack; min gap $=$ adjacent inorder neighbours. & \propref{c05-kth}, \defref{c05-succ} \\
+Preorder rebuild & A BST is uniquely rebuilt from \emph{one} preorder array by bound descent -- the
+  BST replaces the second traversal with a comparison. & \thmref{c05-preorder} \\
+Container $\bigO{\log n}$ & \code{set}/\code{map} are red-black BSTs: find/insert/erase/
+  lower/upper-bound all $\bigO{\log n}$, height guaranteed $\le 2\log_2(n{+}1)$. & \propref{c05-logn} \\
+Interval management & An ordered \code{map} keyed by start localises every interval overlapping
+  $[L,R)$ to two descents plus one step-back. & \thmref{c05-interval} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter -- descend, edit, ride the order.}}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.19\linewidth} l l p{0.29\linewidth} p{0.155\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Time} & \textbf{Memory} & \textbf{When to use (deciding phrase)} & \textbf{Code} \\
+\midrule
+Search / insert-point descent
+  & $\bigO{h}$ & $\bigO{1}$
+  & ``a BST is given -- does $x$ exist, where does it go?''
+  & \coderef{c05-search} \\
+Bound-descent validation
+  & $\bigO{n}$ & $\bigO{h}$
+  & ``is this a \emph{valid} BST?'' (not a child test)
+  & \coderef{c05-validate} \\
+Three-case delete + splice
+  & $\bigO{h}$ & $\bigO{h}$
+  & ``remove a key, keep it a BST''
+  & \coderef{c05-delcode} \\
+Preorder rebuild
+  & $\bigO{n}$ & $\bigO{h}$
+  & ``build the BST from one preorder array''
+  & \coderef{c05-build} \\
+Ordered-map interval set
+  & $\bigO{\log n + k}$ & $\bigO{m}$
+  & ``add/query/remove intervals online''
+  & \coderef{c05-range} \\
+Summit: size-augmented BST rank
+  & $\bigO{nh}$ & $\bigO{n}$
+  & ``count smaller to the right -- per-insert rank''
+  & \coderef{c05-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches. It decides \emph{which
+one-descent tool} the ordered tree hands you -- a follower never scans a tree whose shape already
+answered the question.
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You have a BINARY SEARCH TREE (or can make one). What do you need?
+  |
+  |-- does a key exist / where would it go?
+  |     +-- one descent, compare-and-step, O(h)                 [7.1, LC 700]
+  |     +-- stop at null = absent; stop at match = return node
+  |
+  |-- IS the whole thing a valid BST?
+  |     +-- carry (lo,hi) down; NEVER compare a node to children only   [7.1]
+  |     +-- streaming inorder vs predecessor is the equal-cost twin      [LC 98 -> Ch3]
+  |
+  |-- edit the key set (insert / delete)
+  |     +-- insert = plant at the failed search                          [7.2, LC 701]
+  |     +-- delete: 0/1 child -> detach|bypass; 2 children -> successor  [7.2, LC 450]
+  |
+  |-- an ORDERED question (rank, closest, min gap, count in range)
+  |     +-- ride inorder with a counter / a prev variable, exit early    [7.3, LC 530]
+  |     +-- rebuild from ONE preorder array by bound descent             [7.3, LC 1008]
+  |
+  |-- keys change OVER TIME and you must stay sorted / track intervals
+  |     +-- std::set/std::map: lower_bound/upper_bound, O(log n)          [7.4, LC 729]
+  |     +-- disjoint intervals as map start->end: add/query/remove       [7.4, LC 715]
+  |
+  +-- the height IS the problem (sorted inserts -> chain, O(n) descents)
+      +-- balance it: AVL / red-black / treap  -> Chapter 8 [c06];
+        dense integer ranks -> Fenwick [c14]; array range ops -> segtree [c13].
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Validating with a local child comparison.} Checking $\mathit{left}<v<\mathit{right}$
+        per node passes the trap tree of \figref{c05-trap}. Carry $(\mathit{lo},\mathit{hi})$ or
+        compare to the inorder predecessor (\thmref{c05-bounds}, Trap~1).
+  \item \textbf{Seeding bounds with \code{int} extremes under strict tests.} A root equal to
+        \code{INT\_MIN} fails its own sentinel; widen to \code{long} or use nullable bounds
+        (\thmref{c05-bounds}, Trap~2).
+  \item \textbf{Scanning both subtrees for a membership/insert question.} The invariant lets one
+        comparison discard a subtree; recursing into both is the $\bigO{n}$ scan again
+        (\propref{c05-search}, Trap~3).
+  \item \textbf{In two-child delete, unlinking the successor \emph{node} by hand.} It may sit at
+        \code{root->right} and \emph{can} have a right child; copy its \emph{value} and recurse
+        (\thmref{c05-delete}, Trap~1).
+  \item \textbf{Forgetting the absent key on delete/insert.} The null base case must rebuild pointers
+        unchanged -- test keys not present (\probref{c05-delete}, Trap~2).
+  \item \textbf{Rebuilding a BST from two orders, or re-sorting to answer a query.} One preorder plus
+        the bound parser suffices (\thmref{c05-preorder}); a BST \emph{is} its sorted inorder, so do
+        not sort it again (\probref{c05-construct}, Trap~1).
+  \item \textbf{Right recursion \code{build(INT\_MAX)} in the preorder parser.} The right child must
+        inherit the \emph{enclosing} bound, not infinity, or it swallows an ancestor's node
+        (\thmref{c05-preorder}, Trap~2).
+  \item \textbf{Assuming the library merged your intervals.} \code{map} keeps keys ordered; keeping
+        intervals disjoint-and-merged is \emph{your} algorithm's job (\thmref{c05-interval}, Trap~3).
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled. Diagnose top-down -- every
+leaf names the training problem.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=58mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 6mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=1mm of verdict] (tle) {\textbf{TLE}};
+  \node[b, below left=8mm and 1mm of verdict, xshift=30mm] (re) {\textbf{RE}};
+  \node[b, below right=8mm and 6mm of verdict] (mle) {\textbf{MLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {local child-check calls the trap tree a BST (\thmref{c05-bounds}); two-child delete hand-splices
+     the successor and corrupts a link (\probref{c05-delete}); min-gap scans non-adjacent pairs
+     (\probref{c05-construct}); interval add forgets to merge so a query misses coverage
+     (\probref{c05-range})};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {a per-node two-subtree search instead of one descent (\propref{c05-search}); rebuilding needs a
+     needless $\bigO{n\log n}$ sort (\thmref{c05-preorder}); the Summit's BST degrades to a chain on
+     sorted input -- $\bigO{n^2}$, the Chapter-8 cliffhanger (\probref{c05-summit})};
+  \node[l, below right=1mm and 2mm of re.south] (re1)
+    {dereferencing \code{cur->left} before checking \code{cur} null (\probref{c05-search}); recursing
+     a full inorder on a $\bigO{n}$-deep chain (\secref{c05-queries}); \code{int} bound sentinel
+     overflow at \code{INT\_MIN} (\thmref{c05-bounds})};
+  \node[l, below right=1mm and 2mm of mle.south] (mle1)
+    {materialising the inorder vector for a single query (\propref{c05-kth}); leaking the deleted node
+     without re-pointing its parent (\probref{c05-delete})};
+  \draw[flow] (verdict) -- (wa); \draw[flow] (verdict) -- (tle);
+  \draw[flow] (verdict) -- (re); \draw[flow] (verdict) -- (mle);
+  \draw[flow] (wa) -- (wa1); \draw[flow] (tle) -- (tle1);
+  \draw[flow] (re) -- (re1); \draw[flow] (mle) -- (mle1);
+\end{tikzpicture}
+\caption*{Chapter~7 verdict tree -- only the failures this chapter's problems can produce.}
+\end{figure}
+
+\medskip
+\noindent Backup table (same content, terse):
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llp{0.42\linewidth}l@{}}
+\toprule
+\textbf{Verdict} & \textbf{Usual cause} & \textbf{One-line fix} & \textbf{Trained in} \\
+\midrule
+WA  & local BST validation    & carry $(\mathit{lo},\mathit{hi})$ down      & \thmref{c05-bounds} \\
+WA  & two-child delete splice  & copy successor value, recurse            & \probref{c05-delete} \\
+WA  & interval query false-neg & merge on add; one-interval coverage test  & \probref{c05-range} \\
+TLE & both-subtree search      & one compare, one child                    & \propref{c05-search} \\
+TLE & chain BST at Summit      & balance (\chref{c06}) or merge-sort/Fenwick & \probref{c05-summit} \\
+RE  & null deref in descent    & test \code{cur} before \code{cur->left}    & \probref{c05-search} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 7 at a glance]
+\textbf{One invariant.} $\text{left}<\text{node}<\text{right}$ \emph{recursively} (\defref{c05-prop}).
+It makes the inorder walk the sorted line (\thmref{c05-inorder}), so every search/insert/delete/rank
+question is a single root-to-leaf descent of cost $\bigO{h}$ (\propref{c05-search}).
+
+\medskip
+\textbf{Two reflexes.} \emph{Validate} with inherited bounds, never a child comparison
+(\thmref{c05-bounds}); \emph{delete} a two-child node by copying its inorder successor (left-most of
+the right subtree, so it has $\le 1$ child) and recursing (\thmref{c05-delete}).
+
+\medskip
+\textbf{Three views of the running BST $B$.} Sorted line $1,3,4,6,7,8,10,13,14$ answers kth/min-gap/
+successor (\secref{c05-queries}, \exref{c05-prop-run}); preorder $8,3,1,6,4,7,10,14,13$ regenerates
+$B$ by bound descent (\thmref{c05-preorder}, \exref{c05-queries-run}); the same keys in a
+\code{std::set} answer every container query in $\bigO{\log n}$ (\secref{c05-contests}).
+
+\medskip
+\textbf{The cliffhanger.} Cost is written in $h$, not $n$. Sorted inserts make $h=n$ -- a linked list.
+\code{std::set}/\code{map} dodge it by balancing (\propref{c05-logn}); when you cannot use them,
+Chapter~8 (\chref{c06}) is the cure the Summit (\probref{c05-summit}) begs for.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 7 code kit: search, validate, insert, kth, container bound}, label={lst:c05-kit}]
+#include <bits/stdc++.h>
+using namespace std;
+struct TreeNode { int val; TreeNode *left, *right;
+                  TreeNode(int v) : val(v), left(nullptr), right(nullptr) {} };
+
+// (1) Search / insert-point -- one descent.                        [7.1]
+TreeNode* searchBST(TreeNode* r, int v) {
+    while (r != nullptr && r->val != v) r = (v < r->val) ? r->left : r->right;
+    return r;                                   // null == absent == the insertion parent's child
+}
+// (2) Validate by inherited bounds -- NOT a child comparison.      [7.1]
+bool valid(TreeNode* r, long lo, long hi) {
+    if (r == nullptr) return true;
+    if (r->val <= lo || r->val >= hi) return false;
+    return valid(r->left, lo, r->val) && valid(r->right, r->val, hi);
+}
+// (3) Insert -- plant a leaf at the failed search.                 [7.2]
+TreeNode* insertBST(TreeNode* r, int v) {
+    if (r == nullptr) return new TreeNode(v);
+    if (v < r->val) r->left  = insertBST(r->left,  v);
+    else            r->right = insertBST(r->right, v);
+    return r;
+}
+// (4) kth smallest -- streaming inorder with a live counter.       [7.3]
+int kthSmallest(TreeNode* r, int& k) {
+    if (r == nullptr) return -1;
+    int L = kthSmallest(r->left, k); if (L != -1) return L;
+    if (--k == 0) return r->val;
+    return kthSmallest(r->right, k);            // O(h + k): stops at the kth emission
+}
+// (5) Container descent -- the library's lower_bound is search.    [7.4]
+//   set<int> s; auto it = s.lower_bound(x);   // first key >= x, O(log n)
+//   if (it != s.begin()) --it;                 // step back -> floor / predecessor
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter. Cover the key line,
+reproduce it from memory, then check the answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- search descent (from \coderef{c05-search})}]
+TreeNode* cur = root;
+while (cur != nullptr && /* FILL: cur->val != val */)
+    cur = /* FILL: (val < cur->val) ? cur->left : cur->right */;
+return cur;
+\end{lstlisting}
+\noindent{\scriptsize Key: \emph{one} comparison decides the child -- never recurse into both; that
+discards a whole subtree for free (\propref{c05-search}).}
+
+\begin{lstlisting}[caption={Drill 2 -- bounds validation (from \coderef{c05-validate})}]
+bool validRange(TreeNode* r, long lo, long hi) {
+    if (!r) return true;
+    if (/* FILL: r->val <= lo || r->val >= hi */) return false;
+    return validRange(r->left, lo, /* FILL: r->val */)
+        && validRange(r->right, /* FILL: r->val */, hi);
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: each child inherits a \emph{tighter} interval; the local child check misses
+ancestor bounds (\thmref{c05-bounds}, \figref{c05-trap}).}
+
+\begin{lstlisting}[caption={Drill 3 -- two-child delete splice (from \coderef{c05-delcode})}]
+TreeNode* succ = root->right; while (succ->left) succ = succ->left;   // left-most
+root->val = succ->val;                                                // copy the KEY
+root->right = /* FILL: deleteNode(root->right, succ->val) */;         // delete successor
+\end{lstlisting}
+\noindent{\scriptsize Key: the successor is left-most so it has \emph{no left child} -- its own
+deletion is the easy case; copy a value, never unlink a subtree by hand (\thmref{c05-delete}).}
+
+\begin{lstlisting}[caption={Drill 4 -- preorder rebuild (from \coderef{c05-build})}]
+TreeNode* build(int hi) {
+    if (i == a.size() || /* FILL: a[i] > hi */) return nullptr;       // subtree ends, DON'T consume
+    TreeNode* node = new TreeNode(a[i++]);
+    node->left  = build(node->val);                                   // left keys < node->val
+    node->right = build(/* FILL: hi */);                              // right keeps the ENCLOSING bound
+    return node;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the right subtree is bounded by the caller's ceiling, not infinity
+(Trap~2); one scan regenerates the tree (\thmref{c05-preorder}).}
+
+\begin{lstlisting}[caption={Drill 5 -- interval coverage query (from \coderef{c05-range})}]
+bool queryRange(int left, int right) {
+    auto it = m.upper_bound(left);
+    if (it == m.begin()) return false;
+    --it;                                    // the ONLY interval starting <= left
+    return /* FILL: it->second >= right */;  // it must alone cover [left,right)
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: merged-disjoint intervals mean coverage needs \emph{one} interval; two
+\code{upper\_bound} calls localise everything (\thmref{c05-interval}).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, 4 practice, one Summit, five mixed.
+Tick \emph{only} after an unaided solve; a hinted attempt counts as half. Cite by name and number --
+URLs appear once, in the solved and practice entries.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.24\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.1 -- property \& searching}} \\
+W7.1.1 & Search in a BST & LC 700 & \lv{2} one-descent search & return the \emph{node}, not a bool; never scan & $\square$ \\
+P7.1.2 & Two Sum IV (BST) & LC 653 & \lv{2} sorted line + two pointers & distinct nodes sum to target; don't flatten blindly & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.2 -- insertion \& deletion}} \\
+W7.2.1 & Delete Node in a BST & LC 450 & \lv{3} three-case + successor splice & two-child case; absent key is a no-op & $\square$ \\
+P7.2.2 & Insert into a BST & LC 701 & \lv{3} failed-search plant & attach at the null link; any valid spot accepted & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.3 -- queries \& order statistics}} \\
+W7.3.1 & Construct BST from Preorder & LC 1008 & \lv{3} bound-descent parser & right child inherits enclosing bound & $\square$ \\
+P7.3.2 & Min Absolute Difference & LC 530 & \lv{2} streaming inorder & answer is an \emph{adjacent} gap & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.4 -- contests (containers)}} \\
+W7.4.1 & Range Module & LC 715 & \lv{4} ordered-map interval set & half-open; merge on add; one-interval query & $\square$ \\
+P7.4.2 & My Calendar I & LC 729 & \lv{3} interval overlap test & free iff neighbours don't straddle $[start,end)$ & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+S7 & Count of Smaller Numbers After Self & LC 315 & \lv{5} size-augmented BST rank & read rank off left-subtree counts; mind the chain & $\square$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day 1 fixes the invariant and the descent; day 2 the edit mechanic; day 3 the
+ordered queries and the rebuild; day 4 the containers and intervals; day 5 the Summit. Solve in this
+order even where it differs from section order -- each day's tool is already in hand the day before.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 7.1 & trace search for $7$ and $5$ on $B$ (\exref{c05-prop-run}); LC 700; LC 653; hand-validate the trap tree \\
+2 & Read + do 7.2 & delete $3$ then $6$ from $B$ (\exref{c05-del-run}); LC 450; LC 701; write the splice cold \\
+3 & Read + do 7.3 & rebuild $B$ from its preorder (\exref{c05-queries-run}); LC 1008; LC 530 \\
+4 & Read + do 7.4 & run the Range Module script (\exref{c05-contest-run}); LC 715; LC 729 \\
+5 & Summit + revise & LC 315 with the size-augmented BST; walk the decision flowchart on five questions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks, not just a rating
+bucket.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.36\linewidth}p{0.34\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+$\lv2$ \ $\bigstar\bigstar$
+  & LC 700, 653, 530
+  & you trust the invariant: one descent, one sorted line, adjacent-gap answers \\
+$\lv3$ \ $\bigstar\bigstar\bigstar$
+  & LC 450, 701, 1008, 729, 436, 109
+  & edit under the rule (splice), rebuild from one order, and book intervals \\
+$\lv4$ \ $\bigstar\bigstar\bigstar\bigstar$
+  & LC 715, 220, 352
+  & engineer a whole interval algebra on an ordered map; window-by-value with a \code{multiset} \\
+$\lv5$ \ $\bigstar\bigstar\bigstar\bigstar\bigstar$
+  & LC 315 (Summit)
+  & augment the BST for rank \emph{and} see its height become the enemy \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+Order is a disguise; each line collapses a family onto the one descent the invariant buys. No new
+theory -- just where the sorted line is already hiding.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``does $x$ exist? / where goes $x$?'' $\longrightarrow$ one root-to-leaf descent
+        (\propref{c05-search}, \probref{c05-search}).
+  \item ``is this a valid BST?'' (LC 98) $\longrightarrow$ bounds descent, not a child test
+        (\thmref{c05-bounds}) -- fully solved in \chref{c03}.
+  \item ``insert a key'' (LC 701) $\longrightarrow$ a search that stops and plants (\defref{c05-insert}).
+  \item ``delete a key'' (LC 450) $\longrightarrow$ three cases around the inorder successor
+        (\thmref{c05-delete}, \probref{c05-delete}).
+  \item ``$k$th smallest'' (LC 230) $\longrightarrow$ the $k$th inorder emission
+        (\propref{c05-kth}, done in \chref{c03}).
+  \item ``smallest difference between any two keys'' (LC 530) $\longrightarrow$ adjacent inorder
+        neighbours (\coderef{c05-mindiff}).
+  \item ``add $1$ to every key $\ge$ some value / greater-tree sums'' (LC 538) $\longrightarrow$ a
+        \emph{reverse} inorder (right-node-left) accumulating the suffix.
+  \item ``reconstruct the BST from one preorder'' (LC 1008) $\longrightarrow$ bound-descent parser
+        (\thmref{c05-preorder}, \probref{c05-construct}).
+  \item ``add/query/remove intervals online'' (LC 715, 352, 729) $\longrightarrow$ an ordered map keyed
+        by start, localising the overlap set (\thmref{c05-interval}, \probref{c05-range}).
+  \item ``find the right interval: least start $\ge$ my end'' (LC 436) $\longrightarrow$ \code{map} of
+        starts + \code{lower\_bound} -- the floor/ceiling kit (\defref{c05-oset}).
+  \item ``$\exists$ two keys within $k$ indices and value diff $\le$ $t$?'' (LC 220) $\longrightarrow$
+        a \code{set} window and \code{lower\_bound($x-t$)}: closest value in a moving frame.
+  \item ``count smaller to the right'' (LC 315) $\longrightarrow$ rank read off a size-augmented BST --
+        the same inorder-index idea, then the height bites (\probref{c05-summit}).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+These refuse to name their pattern; decide \emph{which descent or sorted-line query} you need before
+opening the code. A hint tells you the shape of the answer, never the tool.
+
+\begin{mixedset}
+  \practice{Convert BST to Greater Tree}{LeetCode 538}
+    {https://leetcode.com/problems/convert-bst-to-greater-tree/}{LC Medium L3}
+    {Replace every key by itself $+$ all \emph{larger} keys. The larger keys are the ones to your
+    \emph{right} in the sorted line, so walk inorder \emph{backwards} (right, node, left) carrying a
+    running sum -- the mirror of the min-gap inorder of \coderef{c05-mindiff}. One traversal, $\bigO{h}$
+    extra space, no array: the tree already knows its own suffix sums.}
+  \practice{Contains Duplicate III}{LeetCode 220}
+    {https://leetcode.com/problems/contains-duplicate-iii/}{LC Hard L4}
+    {Need $|a-b|\le t$ between two values within $k$ positions apart. Slide a window of the last $k$
+    values in a \code{set}; for a new $x$ ask whether any stored value lies in $[x-t,\,x+t]$ -- that is
+    \code{lower\_bound($x-t$)} existing and $\le x+t$ (\defref{c05-oset}). Value-order in a moving
+    frame: the container descent again, not an index structure.}
+  \practice{Find Right Interval}{LeetCode 436}
+    {https://leetcode.com/problems/find-right-interval/}{LC Medium L3}
+    {For each interval, find the index of the interval with the \emph{smallest start $\ge$ its end}.
+    Put starts in a \code{map} start$\to$index and answer each query with \code{lower\_bound(end)} --
+    the ceiling of \propref{c05-search} wearing a \code{map}. Sorting alone loses the original indices;
+    the ordered map keeps both.}
+  \practice{Data Stream as Disjoint Intervals}{LeetCode 352}
+    {https://leetcode.com/problems/data-stream-as-disjoint-intervals/}{LC Hard L4}
+    {Intervals arrive one value at a time and must be merged with neighbours they touch. Keep the
+    disjoint intervals in a \code{map} keyed by start exactly as \coderef{c05-range} does; \code{addNum(v)}
+    is an \code{addRange(v, v+1)} -- the union-and-merge logic of \thmref{c05-interval} with a
+    one-point range. The return list is a linear scan of the map you already maintain.}
+  \practice{Convert Sorted List to Binary Search Tree}{LeetCode 109}
+    {https://leetcode.com/problems/convert-sorted-list-to-binary-search-tree/}{LC Medium L3}
+    {Build a \emph{height-balanced} BST from a sorted linked list. The reverse idea: the sorted line
+    \emph{becomes} a tree by halving (middle node is the root -- \thmref{c05-inorder} run backwards to
+    construct). Finding the middle of a list is slow, so take them in inorder order with a moving
+    pointer. The contrast with \secref{c05-contests}: keeping the tree balanced \emph{is} the task,
+    the one the plain insertion BST cannot guarantee (\chref{c06}).}
+  \practice{Increasing Order Search Tree}{LeetCode 897}
+    {https://leetcode.com/problems/increasing-order-search-tree/}{LC Easy L2}
+    {Rake the tree right-leaning so the inorder walk emits the keys in order: visit,
+    rewire, keep descending -- \thmref{c05-inorder} executed as construction, with
+    the same tail-carrying walk as \coderef{c05-mindiff}.}
+  \practice{My Calendar II}{LeetCode 731}
+    {https://leetcode.com/problems/my-calendar-ii/}{LC Medium L3}
+    {A booking is allowed unless some instant already lies inside two intervals: keep
+    ordered endpoints and sweep them in \code{lower\_bound} order counting
+    overlaps -- the book-and-merge discipline of \thmref{c05-interval} with a running
+    counter, or \coderef{c05-range}'s difference count over the endpoints.}
+  \practice{Remove Interval}{LeetCode 1272}
+    {https://leetcode.com/problems/remove-interval/}{LC Medium L3}
+    {An ordered set of disjoint intervals minus one cut: reach the first block that
+    could touch the cut with \code{lower\_bound}, erase forward while inside the
+    window, split the two that merely overlap its ends -- \propref{c05-search}'s
+    descent on interval starts rather than plain keys.}
+  \practice{Time Based Key-Value Store}{LeetCode 981}
+    {https://leetcode.com/problems/time-based-key-value-store/}{LC Medium L3}
+    {Append-only versions per key: each key owns a sorted line of timestamps, so
+    \code{get} is one \code{upper\_bound} for the latest stamp not exceeding the
+    asked one -- \propref{c05-search}'s descent transplanted from the tree onto a
+    vector.}
+  \practice{Create Sorted Array through Instructions}{LeetCode 1649}
+    {https://leetcode.com/problems/create-sorted-array-through-instructions/}{LC Hard L4}
+    {Insert each number into a sorted stream paying $\min(\text{less},\text{greater})$:
+    you need counts-below and counts-above per step, so augment by value domain --
+    the rank reading of \propref{c05-kth} inverted, a Fenwick over compressed keys
+    (\chref{c14}) or a size-kept treap with \chref{c06}'s guaranteed height.}
+\end{mixedset}
+
+
+
+\chaptersection{The Summit -- LC 315 Count of Smaller Numbers After Self}
+
+\begin{notebox}[Why this is the chapter's top rope]
+Sections 7.1--7.4 all \emph{spend} the invariant to make one descent answer a question: does $x$
+exist, where does it go, what is its rank. The Summit asks the rank \emph{repeatedly}, once per
+element, and \emph{online} -- for every $a_i$, how many already-seen elements to its right are
+strictly smaller? Read it right-to-left and that is ``how many keys currently \emph{in my BST} are
+smaller than $a_i$,'' which is exactly the $k$th-smallest machinery of \propref{c05-kth} \emph{in
+reverse}: insert as you go and read each value's rank off the structure. To do that you must
+\term{augment} every node with its left-subtree size -- the first taste of storing aggregate data in
+a BST. And here the chapter's running fear becomes real: the descent that reads a rank costs
+$\bigO{h}$, and if the input is (near-)sorted the tree rots into a chain, every rank costs $\bigO{n}$,
+and the whole thing is $\bigO{n^2}$ -- precisely the cliffhanger Chapter~8 (\chref{c06}) resolves, and
+the reason a Fenwick tree (\chref{c14}) or a merge-split is the ``serious'' answer at
+$n\le 10^5$. Solve it as a BST to \emph{feel} why balancing matters.
+\end{notebox}
+
+\solvedproblem{c05-summit}{Count of Smaller Numbers After Self}{LeetCode 315}
+  {https://leetcode.com/problems/count-of-smaller-numbers-after-self/}{LC Hard L5}
+  {size-augmented BST, online rank query by left-subtree counts, right-to-left insertion, height degeneration}
+
+\begin{problemstatement}[Count of Smaller Numbers After Self]
+Given an integer array \code{nums}, return an array \code{counts} where \code{counts[i]} is the number
+of elements \textbf{strictly smaller} than \code{nums[i]} that appear to its \textbf{right} in
+\code{nums}. $1\le n\le 5\cdot 10^{4}$ and $-10^{4}\le \text{nums}[i]\le 10^{4}$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 45 minutes]
+A fair first attempt is the $\bigO{n^2}$ double loop (for each $i$, count smaller to the right) -- it
+is correct but times out. The upgrade is to keep the ``seen so far'' in a \emph{sorted} structure and
+ask its rank.
+\peek{Process right to left so every element you have already handled is one that lies to the right of
+the current one. If those lived in a BST, what would you need each node to remember to answer ``how
+many are smaller than $x$?'' in one descent?}
+\nudge{Store at each node the number of nodes in its \emph{left} subtree (including duplicate counts).
+When inserting $x$, walk down: going \emph{right} past a node means that node and its whole left
+subtree are all $<x$, so add them to a running total; going left just enlarges a left-subtree count.
+The total when you place $x$ is exactly the count of smaller elements already seen.}
+\fullhint{Insert each value right-to-left into a BST whose nodes carry \code{leftSize} (count strictly
+in the left subtree) and \code{dup}. Descend for $x$: on $x<\text{node}$ do
+\code{node->leftSize++} and go left; on $x>\text{node}$ add \code{node->leftSize + node->dup} to a
+local \code{smaller} and go right; on equality add \code{node->leftSize} and bump \code{dup}. The
+\code{smaller} when you plant $x$ is \code{counts[i]}. Correct; $\bigO{nh}$, worst-case $\bigO{n^2}$
+on sorted input -- see the ladder for the robust AC. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The naive loop is $\bigO{n^2}$: for each index, scan everything to its right. The insight is to make
+the ``already seen'' set answer a \emph{rank} query -- how many stored keys are $<x$ -- in
+sublinear time, which is exactly what an \emph{ordered} structure offers. Going right-to-left turns
+``elements to the right of $i$'' into ``elements inserted before $i$,'' so a single insert-and-count
+descent per element builds every answer. A plain BST cannot \emph{count} smaller in one descent unless
+each node knows its left-subtree size -- so we augment it (\defref{c05-prop} extended with one integer
+per node). The catch the whole chapter has circled: the descent costs $\bigO{h}$, and $h$ is not
+yours to control.
+
+\solstep{Key Observations}
+\begin{observation}
+Right-to-left processing makes the running structure hold precisely the elements that are to the
+\emph{right} of the current one, so ``count smaller already present'' $=$ ``count smaller after self.''
+\end{observation}
+\begin{observation}
+If every node stores \code{leftSize} (keys strictly in its left subtree, duplicates counted) then
+during an insert descent, each time we step \emph{right} past a node we pass a whole block of keys
+known to be smaller -- add \code{leftSize + dup}; each step \emph{left} grows some \code{leftSize}. The
+accumulated sum at planting time is the rank of the new key. (The mirror of \propref{c05-kth}.)
+\end{observation}
+\begin{observation}
+The rank descent is $\bigO{h}$, and $h$ depends on insertion order. Feeding $5\cdot10^{4}$ elements
+in (near-)sorted order makes the BST a chain: $\bigO{h}=\bigO{n}$ per insert, $\bigO{n^2}$ total --
+the exact failure \secref{c05-contests} promised and \chref{c06} prevents.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Sort a copy and binary-search each element's index for its rank.}
+{Sorting gives rank among \emph{all} elements, but you need rank among those \emph{to the right} that
+have \emph{already been passed}. A static sort cannot express ``so far,'' and adjusting the order
+loses the positional split. The query is inherently online -- you must insert incrementally.}
+\deadend{Keep seen values in a sorted \code{vector} and \code{lower\_bound} the rank.}
+{Reading the rank is $\bigO{\log n}$ but \emph{inserting} into a vector is $\bigO{n}$ (a shift), so the
+total is again $\bigO{n^2}$. You traded one quadratic for another; the point of a BST is an insertion
+that is $\bigO{h}$ \emph{and} a rank that is $\bigO{h}$ at once.}
+\aha{A size-augmented BST: one descent per element simultaneously \emph{inserts} it and \emph{reads}
+how many stored keys are smaller, by summing left-subtree sizes passed while going right. Correct in
+$\bigO{nh}$ -- and the reason it is not always fast enough is the chapter's cliffhanger, the height.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} double loop & scan right for each $i$ & $O(n^2)$ & \tle \\
+2 & \lv{3} sorted vector + \code{lower\_bound} & rank is fast, insert is a shift & $O(n^2)$ & \tle \\
+3 & \lv{4} size-augmented BST & insert and rank in one $\bigO{h}$ descent & $O(n\,h)$ & \tle\ on sorted \\
+4 & \lv{5} balanced: merge-sort split / Fenwick & divide\&conquer or index ranks & $O(n\log n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 3 is the \emph{chapter's} solution -- the one that uses everything here -- and its honest verdict
+is ``correct, elegant, worst-case quadratic,'' which is exactly the lesson the chapter wants you to
+feel. Rung 4 leaves this chapter: merge-sort counting (\chref{c01}) and the Fenwick tree over
+coordinate-compressed values (\chref{c14}) both hit $\bigO{n\log n}$ because they refuse to let a
+descent's length depend on input order.
+
+\solstep{Solution}
+Process \code{nums} from the last element to the first, inserting each into a BST whose nodes store
+\code{leftSize} (number of stored keys strictly in the left subtree) and \code{dup} (copies at this
+key), plus \code{left}/\code{right} pointers. During \code{insert(x)} carry a running \code{smaller}.
+At a node: if $x$ is smaller, increment that node's \code{leftSize} (a new key is joining its left
+side) and descend left; if $x$ is larger, add \code{node.leftSize + node.dup} to \code{smaller} (all
+those keys are smaller than $x$) and descend right; if equal, add \code{node.leftSize} and increment
+\code{dup}. Planting $x$ at a null link ends the descent; \code{smaller} is then \code{counts[i]}.
+(Rung 4 gives the guaranteed-$\bigO{n\log n}$ variant.)
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Augmented-BST rank equals count of smaller keys already inserted]
+\emph{Invariant:} each node's \code{leftSize} equals the number of inserted keys strictly less than
+that node's key that fall in its left subtree (counting multiplicity below it), maintained because we
+increment \code{leftSize} on exactly the descents that route a new smaller key leftward. Consider the
+descent inserting $x$ and let $S$ be the multiset of keys already in the tree. Split $S$ by the first
+node on the search path where a stored key $>\!x$ forces us left: every key we passed while going
+\emph{right} (each such node's whole left subtree \emph{and} its duplicates, all $<$ that node $<$ the
+next ancestor we turned right at $\ldots <$ $x$'s position) is counted by \code{leftSize+dup}; at the
+parent we turn left at, its own left-subtree keys $\le$ are added only when they are $<x$. By
+\defref{c05-prop}, the keys added to \code{smaller} are precisely those $<x$ (going right means the
+passed node's key $<x$ and its left subtree is even smaller), and no key $\ge x$ is ever added (we
+never route a $\ge x$ key right past itself; equality adds only the left subtree, excluding
+duplicates). When $x$ is planted, every existing key $<x$ has been accounted for exactly once and
+none $\ge x$ has, so \code{smaller}$=|\{y\in S: y<x\}|$. Processing right-to-left, $S$ is exactly the
+elements after index $i$, so the written \code{counts[i]} is the number of strictly smaller elements to
+the right. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Count of Smaller Numbers After Self -- size-augmented BST (LeetCode 315, rung 3; correct but $O(n^2)$ worst case on sorted input)}, label={lst:c05-summit}]
+class Solution {
+    struct Node {
+        int val, leftSize = 0, dup = 1;     // leftSize = keys strictly in left subtree (w/ multiplicity)
+        Node *left = nullptr, *right = nullptr;
+        Node(int v) : val(v) {}
+    };
+    // Insert x; accumulate into 'smaller' the count of stored keys < x.
+    void insert(Node*& cur, int x, int& smaller) {
+        if (cur == nullptr) { cur = new Node(x); return; }   // planted: 'smaller' is this rank
+        if (x < cur->val) {
+            cur->leftSize++;                 // a smaller key is joining cur's left side
+            insert(cur->left, x, smaller);
+        } else if (x > cur->val) {
+            smaller += cur->leftSize + cur->dup;   // passed node + its left subtree are all < x
+            insert(cur->right, x, smaller);
+        } else {                                     // x == cur->val: left keys count, dups do not
+            smaller += cur->leftSize;
+            cur->dup++;
+        }
+    }
+public:
+    vector<int> countSmaller(vector<int>& nums) {
+        Node* root = nullptr;
+        int n = (int)nums.size(); vector<int> res(n);
+        for (int i = n - 1; i >= 0; --i) {          // right-to-left: 'seen' == elements after i
+            int smaller = 0;
+            insert(root, nums[i], smaller);
+            res[i] = smaller;
+        }
+        return res;
+    }
+};
+\end{lstlisting}
+\begin{notebox}[The rung-4 guaranteed answer, for the record]
+Coordinate-compress \code{nums} to ranks $1..n$, then scan \emph{left-to-right} keeping a Fenwick tree
+of seen frequencies: \code{counts[i] = query(rank[i]-1)} (how many smaller already seen), but since we
+need \emph{after} self, instead scan \emph{right-to-left}: \code{counts[i] = sum of frequencies at
+indices $<$ rank[i]}, then add $1$ at rank[i]. Each update/query is $\bigO{\log n}$, total
+$\bigO{n\log n}$ worst case, immune to input order. That robustness is the balanced BST's job done by
+an array index -- \chref{c14}. Equivalently, a merge-sort that counts cross-half smaller pairs
+(\chref{c01}) is $\bigO{n\log n}$ with no tree at all.
+\end{notebox}
+
+\solstep{Trace}
+\begin{tracebox}[Official example \code{nums = [5,2,6,1]}]
+Process right-to-left.
+\begin{itemize}[nosep,leftmargin=1.3em]
+  \item $i=3$, $x=1$: tree empty $\Rightarrow$ plant, \code{smaller}$=0$. \code{res[3]=0} \checkmark
+  \item $i=2$, $x=6$: root $1$; $6>1$ so \code{smaller}$+=0+1=1$; go right (null), plant.
+        \code{res[2]=1} \checkmark (only $1$ is after and smaller).
+  \item $i=1$, $x=2$: $2>1$ so \code{smaller}$+=1$ (node $1$: leftSize $0{+}$dup $1$); go right to
+        node $6$; $2<6$ so \code{6->leftSize}$=1$; go left null, plant. \code{res[1]=1} \checkmark
+        (among $6,1$ only $1<2$).
+  \item $i=0$, $x=5$: $5>1$ \code{smaller}$+=1$; at node $6$: $5<6$ so \code{6->leftSize}$=2$; go left to
+        node $2$: $5>2$ \code{smaller}$+=0+1=1\Rightarrow2$; go right null, plant. \code{res[0]=2}
+        \checkmark (among $2,6,1$ the smaller-than-$5$ are $2,1$).
+\end{itemize}
+Result $[2,1,1,0]$ -- matches the reference. \checkmark Each insertion walked one descent, summing the
+left-subtree sizes it passed going right.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n\cdot h}$: one rank-descent per element, each $\bigO{h}$ where $h$ is the BST height.
+Best/average (random order) $h=\bigO{\log n}$ gives $\bigO{n\log n}$; \textbf{worst case} $h=\bigO{n}$
+on sorted or reverse-sorted input gives $\bigO{n^2}$ -- which at $n=5\cdot10^{4}$ is $\approx2.5\cdot10^{9}$
+operations and \tle. Space $\bigO{n}$ for the tree. This is the whole chapter's thesis made concrete:
+the algorithm is a $\bigO{h}$-per-element idea, so its fate \emph{is} the height. The rung-4 Fenwick /
+merge-split variants are $\bigO{n\log n}$ \emph{regardless} of order -- the balance guarantee you would
+get ``for free'' from a red-black BST (\chref{c06}) or sidestep entirely with an array-indexed engine
+(\chref{c14}).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Sorted ascending input & every insert goes right, $h=n$ -- $\bigO{n^2}$; the TLE the notebox flags \\
+All-equal elements & insertions hit the \code{dup} branch; counts stay $0$ (nothing strictly smaller) \\
+Negative values & comparison-based, sign-agnostic; only the descent shape matters \\
+Single element & planted at once, \code{res[0]=0} \\
+Reverse-sorted & chain again but balanced-free; worst case like ascending \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to break the augmented BST: (i) adding only \code{leftSize} (forgetting \code{dup}) when going
+right -- you under-count equal-keyed elements that are nonetheless smaller than the \emph{next} value;
+(ii) incrementing \code{leftSize} on an equality (it is not in the left subtree) -- duplicates must bump
+\code{dup}, not a subtree size; (iii) processing \emph{left}-to-right -- you need the seen set to be the
+elements \emph{after} the current, which only right-to-left gives. \emph{Variants / the real fix:} the
+merge-sort count (divide on index, count cross pairs while merging, \chref{c01}) or a Fenwick tree on
+coordinate-compressed values (\chref{c14}) both guarantee $\bigO{n\log n}$; a self-balancing BST with a
+\code{size} field (\chref{c06}) is the third way -- the point being that \emph{someone} must keep $h$
+logarithmic, whether rotations, a divide-and-conquer, or an array index.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Augment the node, and a descent answers more.} One integer (\code{leftSize}) turns
+        \propref{c05-search}'s yes/no walk into a \emph{rank} query -- the same idea as every order-
+        statistic tree.
+  \item \emph{Online rank needs an online structure.} The ``seen so far'' set must insert fast
+        \emph{and} read rank fast; only a (balanced) BST does both at $\bigO{\log n}$ -- a vector fails
+        on insert, a sort fails on order.
+  \item \emph{The height is the whole cost.} The BST solution is correct and still worst-case quadratic
+        -- the clearest possible argument for Chapter~8. Every $\bigO{h}$ in this chapter silently
+        assumed $h$ stays small; here it is the difference between \ac{} and \tle.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Guaranteed $\bigO{n\log n}$}: the Fenwick-tree solution (notebox) is the interview
+        follow-up -- same right-to-left rank idea, but an array index cannot rot. Full Fenwick theory
+        is \chref{c14}.
+  \item \textbf{Balanced BST}: attaching the same \code{size} field to a red-black or treap tree keeps
+        $h=\bigO{\log n}$ \emph{by construction}, so the $\bigO{nh}$ becomes $\bigO{n\log n}$ without
+        changing the algorithm -- the promise \propref{c05-logn} made and \chref{c06} keeps.
+  \item \textbf{Generalises}: this is ``inversions count'' (\chref{c01}) and ``range after update'' in
+        disguise; the augmentation technique recurs whenever a query needs a subtree aggregate, e.g.\ the
+        Euler-tour flatten of \chref{c24}.
+\end{itemize}
+\end{hardeningbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled so far -- cumulative through Chapter~7. Chapters~1--6's rows are carried
+forward; Chapter~7's rows are appended. Pointers only, never prose.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} l c p{0.27\linewidth} p{0.16\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Level} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapters 1--6 -- carried forward} \\
+Adjacency list + parent-guard DFS & 1.1 & \lv1 & edge list given, not pointers & \coderef{c01-build} \\
+Three-slot DFS (pre/in/post) & 3.1 & \lv1 & a node sequence in a named order & \coderef{c03-dfs} \\
+Rebuild a tree from two traversals & 3.3 & \lv3 & inorder + preorder/post given & \coderef{c03-build} \\
+Root: parent, depth, size, height & 4.2 & \lv3 & undirected edges, need above/below & \coderef{c04-root} \\
+Stamp $\tin/\tout$; $O(1)$ ancestor test & 5.1 & \lv2 & ``is $u$ above $v$?'' / DFS-order listing & \coderef{c24-stamp} \\
+Rebuild adj, read root, certify & 6.1 & \lv3 & edge list / parent array, valid tree? & \coderef{c25-build} \\
+Union-find pre-look (tree? components?) & 6.3 & \lv2 & ``is it a tree / how many provinces'' & \coderef{c25-uf} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 7 -- new this chapter} \\
+One-descent search / insert-point & 7.1 & \lv2 & ``a BST is given -- does/where does $x$ go?'' & \coderef{c05-search} \\
+Bound-descent validation & 7.1 & \lv3 & ``is this a \emph{valid} BST?'' & \coderef{c05-validate} \\
+Three-case delete + successor splice & 7.2 & \lv3 & ``remove a key, keep it a BST'' & \coderef{c05-delcode} \\
+Order statistics by streaming inorder & 7.3 & \lv2 & kth / min-gap / successor on the sorted line & \coderef{c05-mindiff} \\
+Preorder rebuild by bound descent & 7.3 & \lv3 & ``build the BST from one preorder array'' & \coderef{c05-build} \\
+Ordered-map interval set (\code{set/map}) & 7.4 & \lv4 & ``add/query/remove intervals online'' & \coderef{c05-range} \\
+Size-augmented BST rank (Summit) & Summit & \lv5 & ``count smaller to the right -- per-insert rank'' & \coderef{c05-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c02}, \chref{c03} -- backward: the \code{TreeNode} struct, recursion, and the three
+        traversal orders (we \emph{use} inorder as the sorted line, \thmref{c05-inorder}, never
+        re-derive it); Validate BST, BST Iterator, Kth Smallest and Recover BST are \emph{fully solved}
+        in \chref{c03} (\probref{c03-kth-smallest}) and only referenced here.
+  \item \chref{c06} -- forward: the whole point of the running fear. AVL, red-black and treap trees keep
+        $h=\bigO{\log n}$ so every descent in this chapter is guaranteed fast; the Summit
+        (\probref{c05-summit}) is the case that proves you need it.
+  \item \chref{c14}, \chref{c13} -- forward: Fenwick and segment trees answer the \emph{same} rank and
+        range-count questions over dense integer keys with array locality and no pointers; \secref{c05-contests}
+        says when each wins, and the Summit's notebox hands its robust form to \chref{c14}.
+  \item \chref{c24} -- Range Sum of BST and Trim a BST live in that chapter's mixed set; we build the
+        descent they lean on but do not re-link their URLs.
+  \item \chref{c01} -- Convert Sorted Array/List to BST, and the merge-sort inversion count, share the
+        ``balanced by construction'' idea the plain insertion BST lacks (\probref{c05-construct} is its
+        one-order cousin).
+\end{itemize}
+
+\begin{lastword}[Last Word -- Chapter 7]
+\emph{``Chapters 2 and 3 walked trees that kept no promises; this chapter installed a rule inside the
+shape and discovered the tree could then \textbf{answer for itself}.''}
+
+\medskip
+A BST is a binary tree that \emph{knows its own inorder} (\thmref{c05-inorder}). From that one
+invariant (\defref{c05-prop}) everything in this chapter is a corollary: search, insert, and delete
+are a single compare-and-step descent (\propref{c05-search}, \thmref{c05-delete}); every ordered
+question -- rank, successor, closest, minimum gap, count-in-range -- is a walk of the sorted line with
+an early exit (\propref{c05-kth}); a whole tree can be \emph{regenerated} from one traversal because
+the bounds rule plays the role of the second array (\thmref{c05-preorder}); and the standard library's
+\code{set}/\code{map} are simply this structure, already balanced, so an interval problem is two
+\code{upper\_bound} calls away (\propref{c05-logn}, \thmref{c05-interval}).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Descend, never scan.} If the tree is ordered, a comparison discards a subtree; any routine
+        that visits both children on a membership/rank question has thrown the invariant away
+        (\propref{c05-search}).
+  \item \emph{Validate and rebuild with inherited bounds.} Both the child-comparison trap
+        (\thmref{c05-bounds}) and the preorder parser's right-recursion bug (Trap~2) are the
+        \emph{same} mistake -- forgetting that a node answers to all its ancestors, not just its parent.
+  \item \emph{Cost is written in $h$, and $h$ is not free.} Every $\bigO{h}$ here becomes $\bigO{n}$ the
+        moment keys arrive sorted -- the Summit (\probref{c05-summit}) is quadratic \emph{for this
+        reason}, and that is the honest cliffhanger, not a footnote.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: on any BST problem, first ask ``does one comparison decide the
+child?'' -- if yes, you have $\bigO{h}$; write the deletion splice and the bound-descent rebuild from
+memory once each, because they are the two pointer puzzles every later tree data structure reuses;
+and reach for \code{std::set}/\code{std::map} before hand-rolling, then \emph{prove to yourself} that
+the height is not your problem -- because the instant it is, you are writing Chapter~8.
+
+\medskip
+\textbf{Next:} \chref{c06} takes the fragility this chapter exposed and \emph{removes} it. A tree that
+balances itself -- AVL rotations, red-black colour invariants, treap priorities -- guarantees the very
+$\bigO{\log n}$ descent we have been spending all chapter long, so that ``insert a million sorted keys''
+and ``count smaller to the right'' stop being traps and start being operations.
+\end{lastword}

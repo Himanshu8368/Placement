@@ -1,0 +1,180 @@
+% =====================================================================
+%  20.5  When Lazy Propagation Strains               sec:c15-strains
+%  Exports: prop:c15-boundary  lst:c15-nocompose
+%  NO solvedproblem here (by design): keeps the in-section solved count
+%  at four (295A, 817F, 915E, 620E) -- this is a WORKED boundary section.
+%  Teaches the expressiveness line of the lazy model: an update is lazy-
+%  usable only if (a) two pending updates compose into one transform and
+%  (b) that transform rewrites the node's AGGREGATE from the aggregate
+%  alone.  Range chmin/chmax/modulo break (b) -- forward-cite Ch.23 beats
+%  (\chref{c29}); NO beats code here.  CF 438D (modulo + max-prune) is
+%  ALREADY LINKED by Ch.19 (ch13/05 L515) -- re-treated here IN PROSE only,
+%  never re-linked.  Static-vs-dynamic: sparse table (\(\secref{c13-static}\))
+%  and persistence (\(\chref{c19}\)) are forward-cited, not built.
+%  Shared running array A = (3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2).
+%  Worked failure uses two arrays X=(3,2,4,5), Y=(5,5,2,2) that share the
+%  same (sum,max)=(14,5) but react DIFFERENTLY to a chmin(4) tag.
+% =====================================================================
+\section{When Lazy Propagation Strains}\label{sec:c15-strains}
+
+\begin{previouslybox}[Three sections gave you a tag algebra; this one draws its border]
+Sections~\(\secref{c15-core}\)--\(\secref{c15-trees}\) built a single idea: fold an update into a node's aggregate, stash a \emph{pending transform} for the children, and compose stashes so a node stays correct no matter how many updates land on it before anyone looks.  That machinery is total \emph{only} for updates that behave.  Here we ask, sharply, \emph{which} updates do -- and name the two families that do not, so that when you meet them you stop trying to force a lazy tag and reach for the right structure instead.  Nothing new is coded here; this section is a boundary, not a toolbox.
+\end{previouslybox}
+
+\begin{topicintro}
+A lazy tag is legitimate only when two things hold at once.  First, the pending transforms must be \term{closed under composition}: update \(g\) then update \(h\), applied to any single element, must equal \emph{one} transform \(\tau(g,h)\) of the same representable kind -- \(\secref{c15-compose}\) gave the affine and assign/flip instances.  Second, and more demanding, that one transform must rewrite the node's \term{aggregate} \emph{as a function of the aggregate alone}: a range-add turns a node's sum into \(\mathit{sum}+d\cdot\mathit{len}\) using only the stored sum and length; an assign turns it into \(v\cdot\mathit{len}\) using only the length.  Range \(\mathit{chmin}\) (``\(a_i\leftarrow\min(a_i,x)\)''), range \(\mathit{chmax}\), and range modulo satisfy the first, or fail it, \emph{but they all fail the second} -- you cannot recompute a node's sum after clamping its elements without knowing how the elements were distributed.  Those live in \term{segment-tree beats} (Ch.~23, \(\chref{c29}\)) or plain max-pruned descent, not in the lazy model.
+
+\textbf{Prerequisites.} \(\secref{c15-compose}\)'s closure/order law and \(\secref{c15-core}\)'s \code{apply}-folds-the-aggregate contract; Ch.~19's \(\secref{c13-combine}\) (a node stores a \emph{record}, not a scalar) and \(\secref{c13-search}\) (descend-to-prune).  This section is the last in the chapter and reads like a catalogue of what the previous four deliberately excluded.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state the two conditions an update must meet to be a lazy tag, and check them on a candidate; \hfill\lv{4}
+  \item show concretely why range \(\mathit{chmin}\) cannot fold a sum from \((\mathit{sum},\max)\) alone; \hfill\lv{4}--\lv{5}
+  \item place range modulo (CF~438D) at the prune-vs-lazy boundary Ch.~19 already drew; \hfill\lv{4}
+  \item choose correctly among lazy tree, beats, BIT, sparse table, and persistent tree. \hfill\lv{4}--\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``the update refuses to become one clean pending value'']
+\reckey{you write the fold and it needs an \emph{array}, not a number: ``the sum after clamping every element at \(x\)'' is unanswerable from the sum; the operation is \emph{data-dependent} (its effect varies per element); a prototype pending tag silently requires you to also store second-maximum, counts, or a gcd.}
+\recuse{
+  \item range \(\mathit{add}\) / \(\mathit{assign}\) / affine \((\times,\!+)\) / flip / xor on a \emph{sum, max, min, or mask} aggregate -- all of \(\secref{c15-core}\)--\(\secref{c15-trees}\);
+  \item a genuinely static query set (no updates) -- go to Ch.~21's sparse table instead (\(\chref{c19}\), \(\secref{c19-sparse}\)); the static/offline boundary discussion sits in Ch.~19 (\(\secref{c13-static}\)).
+}
+\recnotuse{
+  \item range \(\mathit{chmin}(x)\) / \(\mathit{chmax}(x)\) / modulo / ``divide each element'' / range \(\gcd\)-assign mixtures -- \term{segment-tree beats}, Ch.~23 (\(\chref{c29}\));
+  \item ``the update only ever touches elements above a threshold'' but you do \emph{not} need history -- descend and prune on a stored \(\max\) (the CF~438D pattern, Ch.~19);
+  \item ``answer queries about any \emph{past} version'' -- persistence, Ch.~21 (\(\chref{c19}\)).
+}
+One-line test: \emph{can a node, using only the fields it already stores, produce its new aggregate after the update?  If not, no lazy tag will ever be correct -- you are past the boundary.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The boundary, stated formally}
+% ---------------------------------------------------------------
+
+\begin{proposition}{The two duties of a lazy-able update}{c15-boundary}
+Let a node store an aggregate \(F\) and support pending tags drawn from a set \(\mathcal{T}\) of element-transforms.  Range updates by \(\mathcal{T}\) can be propagated lazily (a single tag per node, \(\bigO{\log n}\) per op) \emph{only if} both hold:
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item[\textbf{(C1)}] \textbf{Closure.} There is an operation \(\circ\) on \(\mathcal{T}\) with identity such that applying tag \(\tau\) then tag \(\sigma\) to any element equals applying \(\sigma\circ\tau\) -- i.e.\ two debts compress to one of the same kind (\(\secref{c15-compose}\)).
+  \item[\textbf{(C2)}] \textbf{Aggregate-closure.} There is a function \(\Phi\) with \(\mathit{new}\,F=\Phi(F,\mathit{len},\tau)\) that gives the post-update aggregate \emph{from the stored aggregate alone}, with no reference to individual elements.
+\end{enumerate}
+Range \(\mathit{add}\), \(\mathit{assign}\), affine, flip, and xor satisfy both for the matching \(F\).  Range \(\mathit{chmin}\), \(\mathit{chmax}\), and modulo satisfy \textbf{(C1)} (they compose) but violate \textbf{(C2)} for \(F=\mathit{sum}\) -- hence they are not lazy-usable as a scalar tag.
+\end{proposition}
+\begin{proofbox}
+(C1) is the monoid law of \(\thmref{c15-compose}\).  For (C2), \(\mathit{add}(d)\) gives \(\mathit{sum}\!\mapsto\!\mathit{sum}+d\cdot\mathit{len}\) and \(\mathit{assign}(v)\) gives \(\mathit{sum}\!\mapsto\!v\cdot\mathit{len}\) -- both functions of the stored \(F\) and \(\mathit{len}\), so the fold is well defined.  For range \(\mathit{chmin}(x)\) on a sum, the new sum is \(\sum_i\min(a_i,x)\), which depends on \emph{how many} \(a_i\) exceed \(x\) and their values.  The worked trace below exhibits two arrays with identical \((\mathit{sum},\max)\) whose post-\(\mathit{chmin}\) sums differ, so no \(\Phi(\mathit{sum},\max,x)\) exists: the fold would have to output two different numbers from one input, a contradiction.  Beats escapes by enlarging \(F\) to \((\mathit{sum},\max,\mathit{second\text{-}max},\mathit{count}_{\max})\) so that when \(\mathit{second\text{-}max}<x\le\mathit{max}\) the clamp touches \emph{only} the maximum, making a \(\Phi\) exist -- but that is a strictly bigger structure and a different amortised argument (Ch.~23, \(\chref{c29}\)).  Two \(\mathit{chmin}\)'s compose (\(\min(\min(a,x),y)=\min(a,\min(x,y))\)) and \(\mathit{chmin}\) with \(\mathit{add}\) closes as \(a\mapsto\min(a,x)+d=a\mapsto\min(a+d,x+d)\), so \textbf{(C1)} genuinely holds; the failure is purely \textbf{(C2)}.
+\end{proofbox}
+
+\begin{comparisonbox}[Lazy-able vs.\ past-the-boundary, for a \(\mathbf{sum}\) aggregate]
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.24\linewidth} c c l@{}}
+\toprule
+\textbf{Range update} & \textbf{(C1)} compose & \textbf{(C2)} fold & \textbf{Lives in}\\
+\midrule
+\(a_i \mathrel{+}= d\) & yes & yes & \(\secref{c15-core}\) \\
+\(a_i \times =\, m,\; \mathrel{+}= c\) & yes (order) & yes & \(\secref{c15-compose}\) \\
+\(a_i := v\) & yes (override) & yes & \(\secref{c15-assign}\) \\
+\(a_i := 1-a_i\) / xor & yes (\(\mathit{flip}^2\!=\!\mathit{id}\)) & yes & \(\secref{c15-compose}\) \\
+\midrule
+\(a_i := \min(a_i, x)\) & yes & \textbf{no} & beats \(\chref{c29}\) \\
+\(a_i := \max(a_i, x)\) & yes & \textbf{no} & beats \(\chref{c29}\) \\
+\(a_i := a_i \bmod x\) & no \((\bmod\!\circ\!\bmod\neq\text{one})\) & \textbf{no} & max-prune \(\secref{c13-search}\) \\
+\bottomrule
+\end{tabular}\end{center}
+\end{comparisonbox}
+
+% ---------------------------------------------------------------
+\subsection{Worked: a \(\mathit{chmin}\) tag that cannot act}
+% ---------------------------------------------------------------
+
+Take the running array's first block.  Let a lazy node own the four cells \(X=(3,2,4,5)\) and store the record \((\mathit{sum},\max)=(14,5)\) -- the ``add one field for free'' many solvers reach for when they try to bolt \(\mathit{chmin}\) onto a sum-tree.  Now a \emph{different} instance of the same node could own \(Y=(5,5,2,2)\), which happens to share the exact same stored aggregate \((\mathit{sum},\max)=(14,5)\).  A single range-\(\mathit{chmin}(4)\) update lands on the node while it is dirty and must be folded without descending.  Here is what ``fold from the aggregate'' is being asked to do:
+
+\begin{tracebox}[two arrays, one stored aggregate, one tag, two different answers]
+\textbf{Node aggregate stored:} \(\mathit{sum}=14,\ \max=5\).\\[2pt]
+\textbf{Instance \(X=(3,2,4,5)\).} \(\mathit{chmin}(4)\Rightarrow(3,2,4,4)\), new \(\mathit{sum}=13\).\\
+\textbf{Instance \(Y=(5,5,2,2)\).} \(\mathit{chmin}(4)\Rightarrow(4,4,2,2)\), new \(\mathit{sum}=12\).\\[2pt]
+Both \(X\) and \(Y\) present the node as \((\mathit{sum},\max)=(14,5)\) and both receive the same tag \(\mathit{chmin}(4)\), yet the true post-update sums are \(13\) and \(12\).  Any \(\Phi(14,5,4)\) must be a single number -- it cannot be both.  Therefore no aggregate-closed fold exists: the only correct move is to \emph{descend} (defeating laziness) or to store more (beats).  \(\Box\)
+\end{tracebox}
+
+\begin{lstlisting}[caption={the tempting-but-broken attempt: a scalar min-tag cannot fold the sum, so apply() is forced to descend}, label={lst:c15-nocompose}]
+// Trying to make range-chmin "lazy" on a sum-tree.  This FAILS (C2).
+// node stores only  sum[v], mx[v],  and a pending clamp  tag[v] = cap.
+void apply_clamp(int v, int cap) {
+    // We would like:  sum[v] = ???   using only sum[v], mx[v], cap.
+    if (mx[v] <= cap) { tag[v] = min(tag[v], cap); return; }  // no-op case ok
+    // mx[v] > cap: some elements change, but HOW MANY and BY HOW MUCH
+    // is not in (sum, mx).  For X=(3,2,4,5) only the 5 drops (sum 13);
+    // for Y=(5,5,2,2) both 5s drop (sum 12).  Same (sum,mx), different sum.
+    // => there is no closed-form update of sum[v].  We must descend,
+    // which is exactly the O(n) behaviour lazy propagation was to avoid.
+    descend_and_fix_leaves(v, cap);   // not lazy anymore
+}
+// Why it also is not a clean tag: clamp then add composes as
+//   min(a, cap) + d  ==  min(a + d, cap + d)   (still one clamp+add), fine for
+// (C1); but the *aggregate* still needs the second-maximum and the count of
+// the maximum to be recomputable -> that enlarged record IS segment-tree beats
+// (Ch.23), not the scalar lazy tag this chapter builds.
+\end{lstlisting}
+
+\noindent The listing is deliberately left \emph{broken}: its \code{apply\_clamp} has no valid body for the interesting case.  That gap is the definition of the boundary.  Fill the record with \((\mathit{second\_max},\mathit{count}_{\max})\) and a smarter push that only descends when \(\mathit{second\_max}<\mathit{cap}\le\mathit{max}\), and you have derived segment-tree beats from scratch -- which is precisely what Chapter~23 (\(\chref{c29}\)) does, with the amortised \(\bigO{\log n\log\log A}\)-style potential argument we will \emph{not} reproduce here.
+
+% ---------------------------------------------------------------
+\subsection{What actually handles each strain}
+% ---------------------------------------------------------------
+
+\paragraph{Range chmin / chmax: beats.}
+The clamp family is \term{segment-tree beats} -- the max/second-max/count record with the ``only touch the strict maximum'' descent, forward-cited to Ch.~23 (\(\chref{c29}\)) and \emph{not} implemented in this chapter.  The lesson that \emph{is} ours: recognise that a \(\mathit{chmin}\) on a sum-tree is outside the lazy model, so do not spend an hour debugging an \code{apply} that cannot exist.
+
+\paragraph{Range modulo: the prune, not the tag (CF 438D).}
+``Replace every \(a_i\) in \([l,r]\) by \(a_i\bmod x\)'', alongside range sum and point set, is CF~438D -- and its URL is \emph{Chapter~19's}, already linked there with the honest verdict ``it is not lazy propagation; it descends into nodes whose \(\max\ge x\) and fixes leaves on the way down.''  We re-treat it here in prose only (never re-linked, per the anti-repetition rule) to file it on the correct side of the boundary: a modulo does \emph{not} even satisfy \textbf{(C1)} (two mods are not one clean transform of a stored-parameter family), and it collapses \(\max\) unpredictably, so there is no node you can stay at -- you must descend and prune on \(\max\), leaning on the fact that each element is reduced \(\bigO{\log}\) times.  Same tree record \((\sum,\max)\) as beats, a different reason it is not lazy.
+
+\paragraph{Range add + range sum without pushes.}
+For the \emph{pure} invertible case of \(\secref{c15-core}\) there is a well-known bottom-up, \term{push-free} formulation: carry the added values on the path and fold them into answers with an accumulated offset, never storing a per-node tag at all -- closely related to Ch.~18's difference-BIT (\(\chref{c14}\)).  Note it, cite it, and reach for it only when your operation is a lone invertible add; the instant an assign or flip co-exists you \emph{want} the explicit tag of \(\secref{c15-compose}\), because push-free bookkeeping does not survive non-invertible composition.
+
+\paragraph{Static versus dynamic versus historical.}
+If nothing ever changes between build and read, a lazy tree is wasted effort: a \term{sparse table} answers range idempotent-merge queries (\(\min,\max,\gcd\)) in \(\bigO{1}\) after \(\bigO{n\log n}\) build -- this is the sparse table, built in Ch.~21 (\(\chref{c19}\), \(\secref{c19-sparse}\)); the static-versus-dynamic boundary discussion is Ch.~19's (\(\secref{c13-static}\)).  If you must read \emph{past versions} after updates, that is \term{persistence} -- Ch.~21 (\(\chref{c19}\)), where each update path-copies nodes rather than tags them; a lazy tag and persistence mix awkwardly (a tag lives in no single version), so they are usually kept apart.
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: forcing \(\mathit{chmin}\) into a scalar tag]
+The section's whole point.  If your \code{apply} needs a second-maximum, a count, or ``the list of elements above the threshold,'' you have left the lazy model.  Stop and switch structures (beats, \(\chref{c29}\)) instead of hacking the aggregate.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: composing in the wrong direction at the boundary]
+Near-composable pairs (\(\mathit{chmin}\) with \(\mathit{add}\)) \emph{do} close under \textbf{(C1)} but only with a careful direction: ``clamp then add'' is \(\min(a,x)+d=\min(a+d,x+d)\); ``add then clamp'' is \(\min(a+d,x)\) -- different families.  Mixing them up gives answers that match on monotone samples and fail the moment an add and a clamp share a dirty node.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: reaching for lazy where a BIT already fits (or vice-versa)]
+Range-add + range-sum is the one territory Ch.~18's difference-BIT and this chapter's lazy tree both cover -- a BIT is shorter and faster there.  Use lazy only when the update is non-invertible (assign/flip/mask) or the aggregate is non-invertible (\(\mathbf{OR}\), \(\gcd\), max).  Choosing lazy for a pure sum-add is extra code for no gain; choosing BIT for an assign is simply wrong.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Where to Drill Next}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Can your pending update be written as \emph{one} function of a single element?  If not, (C1) fails.
+  \item Given only a node's stored fields, its length, and the update parameter, can you print the new aggregate?  If not, (C2) fails -- not lazy.
+  \item Are you about to store a second-maximum or a count-of-max to rescue the fold?  That is beats (\(\chref{c29}\)), not this chapter.
+  \item Is the array actually static across queries?  Then use a sparse table (Ch.~21, \(\secref{c19-sparse}\)).
+\end{itemize}
+\end{stuckbox}
+
+Related in the mixed set (drilled by name, not re-linked here): the modulo/prune task CF~438D sits with Ch.~19; genuine beats clamps are Chapter~23's mixed set.  This section's job is recognition, so its drills are the four in-section solves above read \emph{backwards}: for each, name the two duties \textbf{(C1)}/\textbf{(C2)} and identify the aggregate that makes the fold close.
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c15-compose}\) owns the closure/order law this section's \textbf{(C1)} generalises; \(\secref{c15-core}\)--\(\secref{c15-trees}\) own the four compliant update families catalogued above.  Chapter~19 (\(\chref{c13}\)) owns CF~438D (linked, \(\secref{c13-search}\) first-\(\ge x\) prune) and the static/offline boundary discussion (\(\secref{c13-static}\)); the sparse table itself is Ch.~21's (\(\chref{c19}\), \(\secref{c19-sparse}\)).  Chapter~18 (\(\chref{c14}\)) owns the difference-BIT that shares the pure range-add/sum case.  Forward: clamps to beats (\(\chref{c29}\)); version queries to persistence (\(\chref{c19}\)); path decomposition to HLD (\(\chref{c16}\)).
+
+\begin{recallbox}[Section 20.5 in 10 seconds]
+An update is lazy-usable only if it \textbf{(C1)} composes into one representable tag \emph{and} \textbf{(C2)} rewrites the node aggregate from the aggregate alone.  add/assign/affine/flip/xor pass both.  \(\mathit{chmin}/\mathit{chmax}\) pass (C1) but fail (C2) -- the \(X=(3,2,4,5)\) vs \(Y=(5,5,2,2)\) trace shows identical \((\mathit{sum},\max)=(14,5)\) giving different post-clamp sums, so no \(\Phi\) exists.  Modulo fails both and is the max-\emph{prune} (CF~438D, Ch.~19).  Fixes live elsewhere: bigger record \(\to\) beats (\(\chref{c29}\)); no updates \(\to\) sparse table (Ch.~21, \(\secref{c19-sparse}\)); past versions \(\to\) persistence (\(\chref{c19}\)); pure invertible add \(\to\) difference BIT (\(\chref{c14}\)).
+\selftest{
+  \item State (C1) and (C2) in one sentence each, and say which one \(\mathit{chmin}\) violates.
+  \item Give two arrays with the same \((\mathit{sum},\max)\) that answer range-\(\mathit{chmin}(4)\) differently.
+  \item Why does a modulo fail even the composition duty, and what descent replaces the tag?
+  \item Which structure enlarges the node record to \((\mathit{sum},\max,\mathit{2nd},\mathit{cnt})\), and is it in this chapter?
+  \item When is a difference-BIT the better choice than this chapter's lazy tree, and when is it wrong?
+}
+\end{recallbox}

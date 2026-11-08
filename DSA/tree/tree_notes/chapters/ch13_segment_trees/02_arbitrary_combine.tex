@@ -1,0 +1,615 @@
+% =====================================================================
+%  19.2  Arbitrary Combines and Tuple Nodes          sec:c13-combine
+%  Exports: def:c13-identity  thm:c13-subarray
+%           lst:c13-combine  lst:c13-1190-soln  fig:c13-submerge
+%  Running numbers agree with 00_opener (fig:c13-tree + fold table).
+%    On the opener's all-non-negative A the max-subarray monoid collapses
+%    to the total: best(A) = sum(A) = 49, pref = suff = 49 -- a cross-check.
+%  CSES 1190 sample (live-verified on cses.fi): n=5 m=3, a=(1,2,-3,5,-1);
+%    each line "k x" SETS a[k]=x then prints the WHOLE-array max subarray
+%    sum (empty subarray allowed, so the answer is >= 0):
+%      2 6  -> 9 ;  3 1 -> 13 ;  2 -2 -> 6.
+%    Hand-traced root tuples: after (2,6) root=(8,9,8,9); after (3,1)
+%    root=(12,13,12,13); after (2,-2) root=(4,5,5,6).  best = 9,13,6.
+%  Ch.6 (ch06_balanced_trees/03_treaps.tex) forward-points here for the
+%    (total,pref,suff,best) monoid; this section PAYS that debt as a WORKED
+%    example.  The CSES 1190 URL stays linked in Ch.6 -- we do NOT re-link it
+%    (urlsweep only inspects CF/LC families, so the cses.fi duplicate is
+%    tracked by hand; see the roster NOTE in ch13.tex).
+% =====================================================================
+\section{Arbitrary Combines and Tuple Nodes}\label{sec:c13-combine}
+
+\begin{previouslybox}[Ch.~6 owed us this exact four-field record]
+Chapter~6 built implicit treaps and, at the edge of \(\secref{c06-treaps}\),
+remarked that swapping a treap node's scalar \(\mathit{sum}\) for the
+four-tuple \((\mathit{total},\mathit{pref},\mathit{suff},\mathit{best})\) turns
+the structure into a maximum-subarray machine -- ``exactly the CSES~1190
+practice,'' it said, pointing forward to this chapter.  Chapter~18, meanwhile,
+closed by admitting that its Fenwick tree can only fold an \emph{invertible}
+accumulator.  Both pointers land on one idea, which is the subject here: a
+segment tree's node need not store a single number at all.  Whatever
+\(\mathcal{M}\) you can compute from two children in \(\bigO{1}\) -- a scalar, a
+gcd, or a four-field record -- the \(\bigO{\log n}\) skeleton of
+\(\secref{c13-core}\) is unchanged.  That freedom is precisely what a BIT
+cannot buy.
+\end{previouslybox}
+
+\begin{topicintro}
+Every operation in \(\secref{c13-core}\) leaned on a single promise: node
+\(v\) stores \(\mathcal{M}\) applied to its whole interval, and a parent is
+recomputed as \(\mathcal{M}(\text{left},\text{right})\).  We used
+\(\mathcal{M}\in\{\text{sum},\min,\max\}\).  Nothing in the skeleton cares
+\emph{which} fold it is -- so long as \(\mathcal{M}\) is \term{associative} and
+carries an \term{identity} element, and so long as a parent can be rebuilt from
+its two children alone.  The interesting cases break that last habit: some
+answers are not a single number but a small \term{record}.  The flagship is the
+\term{maximum subarray sum}: the best contiguous block inside an interval is
+\emph{not} a function of the two children's bests alone -- you must also know
+each child's best \emph{prefix} and \emph{suffix} and its total, so four numbers
+travel together and merge in \(\bigO{1}\).
+
+\textbf{Prerequisites.} \(\secref{c13-core}\) (the three recursions, heap
+layout, canonical cover).  The running array \(A\) and its fold table from the
+opener (\(\figref{c13-tree}\)).  The identity-element idea from
+\(\defref{c13-node}\)'s discussion.  Nothing else -- the merge is the only thing
+that changes.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state the merge-and-identity contract and check it for any candidate
+        fold; \hfill\lv{3}
+  \item design a \emph{tuple} node -- decide which fields must travel so a
+        parent is rebuildable from children -- for max subarray, gcd, and
+        ``count of the range maximum''; \hfill\lv{4}
+  \item write the \(\bigO{1}\) max-subarray merge from memory and prove it; \hfill\lv{4}
+  \item solve point-set + whole-array max-subarray end to end (worked on
+        CSES~1190); \hfill\lv{4}
+  \item explain why an \emph{order-sensitive} (non-commutative) merge forces the
+        recursive query and quietly breaks a careless iterative one
+        (\(\secref{c13-iter}\)). \hfill\lv{4}--\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``the answer needs more than one number per node'']
+\reckey{the range query is a \emph{fold that is not a single scalar}: maximum
+subarray sum, longest run of equal/good elements, ``number of occurrences of
+the range maximum'', a gcd/AND that must also report a count; the combine is
+\emph{associative but not invertible} and \emph{not commutative} (left-to-right
+order matters); the phrase ``after each update, report the best contiguous
+segment / longest valid block in the whole array''.}
+\recuse{
+  \item the aggregate is a tuple rebuilt in \(\bigO{1}\) from two children -- this
+        section's design skill; ship the extra fields down the node;
+  \item the fold is a plain \(\min/\max/\gcd/\text{sum}/\text{xor}\) scalar --
+        still this section's contract, just a one-field node (\(\secref{c13-core}\));
+  \item the combine reads left-to-right and swapping the two halves changes it
+        (max prefix \(\ne\) max suffix) -- use the recursive
+        \(\coderef{c13-query}\) which returns cover pieces in order.
+}
+\recnotuse{
+  \item you only need range \emph{sum}/\emph{count} under point writes -- a BIT
+        (\(\chref{c14}\)) is smaller and faster; the tuple node is overkill;
+  \item the update mutates a whole \emph{interval} -- lazy tags, Ch.~20
+        (\(\chref{c15}\)); here every write is a single position;
+  \item the combine's per-node cost is not \(\bigO{1}\) (a \emph{sorted list} of
+        children, say) -- that is Ch.~21's merge-sort tree (\(\chref{c19}\)), a
+        different, heavier object.
+}
+One-line test: \emph{can you rebuild a parent from its two children in constant
+time -- even if the parent's value is a four-field record?  If yes, the
+\(\log n\) skeleton solves it; only the node's contents changed.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The Merge Contract, Restated for Anything}
+% ---------------------------------------------------------------
+
+\secref{c13-core} proved the three recursions under one hypothesis, never used
+except through \(\mathcal{M}\).  Say it out loud so it can be checked against
+any new fold.
+
+\begin{definition}{Identity element and the merge contract}{c13-identity}
+A fold on a segment tree is a set \(S\) of \emph{node values} (which may be
+tuples, not just numbers), a binary \term{merge} \(\mathcal{M}:S\times S\to S\),
+and a distinguished \term{identity} \(e\in S\) such that for all \(x\in S\),
+\(\mathcal{M}(x,e)=\mathcal{M}(e,x)=x\) and \(\mathcal{M}\) is
+\term{associative}, \(\mathcal{M}(a,\mathcal{M}(b,c))=\mathcal{M}(\mathcal{M}(a,b),c)\).
+The tree is correct provided additionally that \(\mathcal{M}(\text{left},
+\text{right})\) equals the aggregate of the concatenated interval -- i.e.\ a
+parent is a function of its two children \emph{only}.  Representative contracts:
+\(\text{sum}:e{=}0\); \(\min:e{=}+\infty\); \(\max:e{=}{-}\infty\);
+\(\gcd:e{=}0\); \(\text{xor}:e{=}0\); bitwise \(\text{AND}:e{=}\)all-ones.
+\end{definition}
+
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}l l l l@{}}
+\toprule
+\textbf{Fold \(\mathcal{M}\)} & \textbf{Node type \(S\)} & \textbf{Identity \(e\)} & \textbf{Rebuild parent from children?}\\
+\midrule
+sum                  & \(\mathbb{Z}\)          & \(0\)        & \(L{+}R\) -- yes \\
+\(\min/\max\)        & \(\mathbb{Z}\)          & \(\pm\infty\) & elementwise \(\min/\max\) -- yes \\
+\(\gcd\)             & \(\mathbb{Z}_{\ge0}\)   & \(0\)        & \(\gcd(L,R)\) -- yes \\
+bitwise AND / OR     & \([0,2^{30})\)          & all-ones / \(0\) & \(L\,\&\,R\) / \(L\,|\,R\) -- yes \\
+\textbf{max subarray} & \((\mathbb{Z}^4)\)      & \((0,0,0,0)\) & four-field merge \(\thmref{c13-subarray}\) -- yes \\
+\textbf{count of max} & \((\text{val},\text{cnt})\) & \((-\infty,0)\) & winner \(+\) summed ties -- yes \\
+\bottomrule
+\end{tabular}\end{center}
+
+\noindent The bottom two rows are \defref{c13-identity}'s punchline: the node is
+a \emph{record}, yet \(\mathcal{M}\) stays \(\bigO{1}\), so
+\thmref{c13-merge}'s \(\bigO{n}\)/\(\bigO{\log n}\) bounds carry over verbatim.
+A Fenwick tree cannot host either: \(\gcd\), AND, and ``count of the maximum''
+have no inverse, and the max-subarray record is not even a single accumulator to
+difference.  This is the gap Ch.~18 named and \(\secref{c13-iter}\) tabulates.
+
+The skeleton is literally \secref{c13-core}'s -- only the leaf value, the
+\(\mathcal{M}\) line, and the identity constant move.  We show the max-subarray
+instantiation as the reusable template.
+
+\begin{lstlisting}[caption={the max-subarray node and its O(1) merge: this is the whole "new" idea}, label={lst:c13-combine}]
+struct Node {                 // every field >= 0 except tot (empty allowed)
+    long long tot, pref, suff, best;
+};
+Node mergeNode(const Node& L, const Node& R){   // order matters: L then R
+    Node x;
+    x.tot  = L.tot + R.tot;                      // whole sum
+    x.pref = max(L.pref, L.tot + R.pref);        // best prefix: inside L, or all L + R's
+    x.suff = max(R.suff, R.tot + L.suff);        // best suffix: inside R, or all R + L's
+    x.best = max({L.best, R.best, L.suff + R.pref}); // cross = L.suffix + R.prefix
+    return x;
+}
+Node leaf(long long v){                          // single value, empty subarray allowed
+    return { v, max(0LL,v), max(0LL,v), max(0LL,v) };
+}
+Node ID = {0, 0, 0, 0};                          // identity e for this monoid
+\end{lstlisting}
+
+% ---------------------------------------------------------------
+\subsection{The Flagship: Maximum Subarray Sum}
+% ---------------------------------------------------------------
+
+\begin{theorem}{The four-field merge is correct}{c13-subarray}
+For an interval \(I\), let its node be \((\mathit{tot},\mathit{pref},
+\mathit{suff},\mathit{best})\) where \(\mathit{tot}=\sum_{i\in I}a_i\),
+\(\mathit{pref}\) (resp.\ \(\mathit{suff}\)) is the maximum sum of a prefix
+(resp.\ suffix) of \(I\), and \(\mathit{best}\) the maximum sum of any
+contiguous subarray of \(I\), all three allowing the \emph{empty} block (sum
+\(0\)).  Writing \(I=LR\) as the concatenation of a left half \(L\) and right
+half \(R\), the four fields of \(I\) are exactly \(\coderef{c13-combine}\)'s \code{mergeNode}.  Hence \(\mathcal{M}\) is associative with
+identity \((0,0,0,0)\), and a segment tree of these nodes answers whole-array
+max subarray as \(t_1.\mathit{best}\) and range max subarray by folding the
+canonical cover \emph{left-to-right}.
+\end{theorem}
+\begin{proofbox}
+\textbf{Fields.} \(\mathit{tot}\) is additive.  A prefix of \(LR\) either lies
+wholly in \(L\), or is all of \(L\) plus a prefix of \(R\); the best such sum is
+\(\max(L.\mathit{pref},\,L.\mathit{tot}+R.\mathit{pref})\).  Suffix is symmetric.
+A contiguous subarray of \(LR\) lies (i) wholly in \(L\), (ii) wholly in \(R\),
+or (iii) straddles the boundary -- and a straddling block is a suffix of \(L\)
+joined to a prefix of \(R\), of best sum \(L.\mathit{suff}+R.\mathit{pref}\);
+taking the max of the three gives \(\mathit{best}\).  The empty-block convention
+keeps \(\mathit{pref},\mathit{suff},\mathit{best}\ge 0\), which makes
+\(e=(0,0,0,0)\) absorb: \(\max(L.\mathit{pref},L.\mathit{tot})=L.\mathit{pref}\)
+because a prefix can always extend to the whole (so \(\mathit{pref}\ge
+\mathit{tot}\)), and \(\max(L.\mathit{best},L.\mathit{suff})=L.\mathit{best}\)
+because a suffix is a subarray.\ \textbf{Associativity.} Both groupings compute
+the true four fields of the three-way concatenation \(A\,B\,C\), since each only
+depends on the represented interval; equal inputs give equal outputs, so
+\(\mathcal{M}\) associates.\ \textbf{Range queries.} The canonical cover of
+\([l,r]\) is \(\bigO{\log n}\) intervals in left-to-right order; folding them with
+this (order-aware) \(\mathcal{M}\) reassembles the aggregate of \([l,r]\).
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  A subarray of a merged interval is of exactly
+three kinds -- left-only, right-only, or crossing -- and the crossing one is
+``a suffix glued to a prefix,'' so those two numbers must travel with the total.
+Four fields is the \emph{minimum} that closes under merging: two fields
+(\(\mathit{best}\) and \(\mathit{tot}\)) are not enough, because a good crossing
+block needs to know each half's best edge, not just its best interior.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape]
+  \node[boxnode, primaryblue, align=center, minimum width=32mm, font=\scriptsize] (L) at (0,0)
+    {\(L=(4,7,4,7)\)\\ \tiny tot,pref,suff,best};
+  \node[boxnode, primaryblue, align=center, minimum width=32mm, font=\scriptsize] (R) at (4.8,0)
+    {\(R=(4,5,4,5)\)\\ \tiny tot,pref,suff,best};
+  \node[boxnode, successgreen, align=center, minimum width=34mm, font=\scriptsize, line width=1pt] (P) at (2.4,-2.4)
+    {\(P=(8,9,8,9)\)\\ \tiny merged record, best \(=9\)};
+  \draw[flow] (L.south) -- (P.north west);
+  \draw[flow] (R.south) -- (P.north east);
+  \node[annot, align=left, font=\scriptsize] at (7.0,-1.1)
+    {\(tot\!=\!4{+}4{=}8\)\\ \(pref\!=\!\max(7,4{+}5){=}9\)\\ \(suff\!=\!\max(5,4{+}4){=}8\)\\ \(best\!=\!\max(7,5,4{+}5){=}9\)};
+  \node[annot, font=\scriptsize] at (2.3,0.9) {\(LR=[\,1,6,-3\;|\;5,-1\,]\)};
+\end{tikzpicture}
+\caption{One merge, on the worked example's state after the first update
+(\(A=[1,6,-3,5,-1]\)): the left half \(L=[1,6,-3]\) has record
+\((4,7,4,7)\) and the right half \(R=[5,-1]\) has \((4,5,4,5)\); their merge
+carries a total of \(8\), best prefix \(9\) (all of \(L\)'s \(4\) plus \(R\)'s
+prefix \(5\)), best suffix \(8\), and best interior \(9\) -- the crossing block
+\([1,6,-3,5]\).  The tree's \(\mathit{best}\) is therefore \(9\).}
+\label{fig:c13-submerge}
+\end{figure}
+
+% ---------------------------------------------------------------
+\subsection{Worked Example: CSES 1190 Subarray Sum Queries}
+% ---------------------------------------------------------------
+
+This is a \emph{worked} example: \(\secref{c13-core}\) solved a range-\(\min\)
+query with a scalar node; here the node is a tuple and we ask only for the
+\emph{whole-array} maximum subarray after each write -- the minimal window onto
+the monoid, and the one Ch.~6 owed.  (Folding an arbitrary \([l,r]\) with the
+same merge is the natural extension, taken up by the gcd practice
+\(\lv{3}\) below.)
+
+\begin{problemstatement}[CSES 1190 Subarray Sum Queries]
+An array of \(n\) integers, indexed \(1..n\).  There are \(m\) updates; each
+line has two integers \(k,x\): set the value at position \(k\) to \(x\).
+\emph{After each update}, print the maximum subarray sum of the whole array.
+The \emph{empty} subarray is allowed, so the answer is always \(\ge 0\).
+
+\textbf{Input.} \(n,m\le 2\cdot10^5\); \(x_i,x\in[-10^9,10^9]\) (values may be
+\emph{negative}); \(1\le k\le n\).
+
+\textbf{Output.} One line per update: the maximum subarray sum after that update.
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+5 3
+1 2 -3 5 -1
+2 6
+3 1
+2 -2
+
+Output:
+9
+13
+6
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 40 minutes]
+Re-scan the array for its best subarray after each update via Kadane is
+\(\bigO{n}\) per query, \(\bigO{nm}=4\cdot10^{10}\) worst case -- \tle.  The
+update is a single position, so only the \(\log n\) nodes on that position's
+path can change; the trick is to store \emph{enough} in each node to recompute
+a parent in \(\bigO{1}\).
+\peek{is \(\mathit{best}\) alone enough to rebuild a parent?}
+\nudge{no -- a better block can straddle the children's boundary, so you must
+also carry the best prefix, best suffix, and total.  That is
+\thmref{c13-subarray}'s four-field record.}
+\fullhint{Ship \(\coderef{c13-combine}\): node \(=(\mathit{tot},\mathit{pref},
+\mathit{suff},\mathit{best})\), leaf \(=\) \code{leaf(v)}, merge \(=\)
+\code{mergeNode}.  Build once, then each update is
+\code{update(1,1,n,k,x)} and the answer is \code{t[1].best}.  Use
+\code{long long} (sums reach \(2\cdot10^{14}\)).  The full program follows.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The object we maintain is not ``the answer'' but a \emph{record} whose merge is
+the answer.  Because the record closes under \(\code{mergeNode}\)
+(\thmref{c13-subarray}), a set at position \(k\) is repaired by re-folding only
+the ancestors of leaf \(k\) -- the identical \(\bigO{\log n}\) walk of
+\(\coderef{c13-update}\), with \(\min\) swapped for the tuple merge.  The
+whole-array query is free: it is \(t_1.\mathit{best}\).  Negative values are the
+reason the empty-block convention matters -- a record of all-negative leaves
+still reports \(\mathit{best}=0\).
+
+\solstep{Key Observations}
+\begin{observation}
+\(\mathit{best}\) is not a \emph{scalar fold}: it is a \emph{function} of four
+numbers, and dropping any one of them (say \(\mathit{suff}\)) makes the parent
+un-rebuildable -- the straddling block would have no price.
+\end{observation}
+\begin{observation}
+The merge is \textbf{not commutative}: \(\code{mergeNode}(L,R)\ne
+\code{mergeNode}(R,L)\) in general (prefix and suffix trade places).  A range
+query must combine the cover pieces left-to-right, and a careless iterative
+query that sums an unordered multiset of pieces is wrong -- the caution
+\(\secref{c13-iter}\) and \(\secref{c13-static}\) both flag.
+\end{observation}
+\begin{observation}
+Values \(\ge 10^9\) in absolute value, \(n=2\cdot10^5\): \(\mathit{tot}\) can
+reach \(2\cdot10^{14}\).  Every field is \code{long long}; an \code{int}
+\(\mathit{tot}\) is the signature overflow WA.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Store just (sum, best) per node}
+{Two children each with a fine \(\mathit{best}\) can hide a better block that
+crosses their boundary, and \((\mathit{sum},\mathit{best})\) cannot express it:
+the crossing block's sum depends on how much of the left's tail and right's head
+are usable, which is lost.  Add \(\mathit{pref}\) and \(\mathit{suff}\) -- four
+fields is the closure.}
+\deadend{Recompute the whole array with Kadane after each update}
+{\(\bigO{n}\) per update turns \(\bigO{m}\) updates into \(\bigO{nm}\), and the
+\(4\cdot10^{10}\) product in the constraints says \tle.  The tree's promise --
+touch only the \(\log n\) ancestors -- is what we are paying \(4n\) memory for.}
+\deadend{Initialise \(\mathit{best}\) to the leaf value even when negative}
+{CSES~1190 \emph{allows the empty subarray}; forcing non-empty would print a
+negative best for an all-negative array instead of \(0\).  Clamp
+\(\mathit{pref},\mathit{suff},\mathit{best}\) to \(\ge0\) at the leaf
+(\code{leaf}).}
+\aha{A node is a record, not a number.  Carry \((\mathit{tot},\mathit{pref},
+\mathit{suff},\mathit{best})\); merge three cases for \(\mathit{best}\) and a
+max of two for each edge field; a point write re-folds \(\log n\) ancestors and
+the whole-array answer is \(t_1.\mathit{best}\).}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.21\linewidth} p{0.31\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ Kadane per update & rescan whole array after each set & \(\bigO{nm}\) & \tle \\
+2 & \lv{3}\ scalar node & store \((\mathit{sum},\mathit{best})\) only & -- & wrong (no cross) \\
+3 & \lv{4}\ \textbf{tuple node} & four-field record, \(\coderef{c13-combine}\) & \(\bigO{(n{+}m)\log n}\) & \ac \\
+4 & \lv{4}\ multiset \(+\) prefix sums & Kadane-as-prefix-difference over \(\mathit{prefmin}\) & \(\bigO{m\log n}\) & passes, delicate \\
+5 & \lv{5}\ lazy / segment-beats & overkill; writes are single positions & -- & wrong tool \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~4 is a real alternative -- max subarray equals
+\(\max_r(\mathit{pref}(r)-\min_{l<r}\mathit{pref}(l))\), maintained with a
+balanced structure over prefix sums -- but it re-derives the same four fields
+by hand and is far more error-prone than the tree.
+
+\solstep{Solution}
+Ship the \(\secref{c13-core}\) skeleton unchanged; set \(S\) to the four-field
+record and \(\mathcal{M}\) to \(\coderef{c13-combine}\)'s \code{mergeNode}.
+\code{build(1,1,n)} once; per update \code{update(1,1,n,k,x)} then print
+\code{t[1].best}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Invariant.} For every node \(v\) owning \(I_v\), \(t_v\) is
+\(\coderef{c13-combine}\)'s record of \(I_v\). \emph{Init:} leaves hold
+\(\code{leaf}(a_i)\), correct by definition; internal nodes are built bottom-up
+as \(\code{mergeNode}\) of two correct children, which \thmref{c13-subarray} shows
+is correct for the concatenation.  \emph{Maintain:} \(\code{update}\) rewrites
+leaf \(k\) and recomputes each ancestor as \(\code{mergeNode}\) of its (still
+correct) children -- off-path nodes are untouched, so the invariant holds
+everywhere.  \textbf{Answer:} \(t_1\) records \([1,n]\), so \(t_1.\mathit{best}\)
+is the maximum subarray sum of the whole array, empty block included.  \textbf{Bounds:}
+depth \(\le\lceil\log_2 n\rceil{+}1\) gives \(\bigO{\log n}\) per
+update with \(\bigO{1}\) merges; \code{long long} bounds every field by
+\(2\cdot10^{14}\), inside range.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CSES 1190 full solution (whole-array max subarray under point sets, tuple node)}, label={lst:c13-1190-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+struct Node { long long tot, pref, suff, best; };
+int n, m; long long a[MX]; Node t[4*MX];
+
+Node leaf(long long v){
+    return { v, max(0LL,v), max(0LL,v), max(0LL,v) };
+}
+Node mergeNode(const Node& L, const Node& R){
+    Node x;
+    x.tot  = L.tot + R.tot;
+    x.pref = max(L.pref, L.tot + R.pref);
+    x.suff = max(R.suff, R.tot + L.suff);
+    x.best = max({L.best, R.best, L.suff + R.pref});
+    return x;
+}
+void build(int v, int tl, int tr){
+    if (tl == tr) { t[v] = leaf(a[tl]); return; }
+    int tm = (tl + tr) / 2;
+    build(2*v, tl, tm); build(2*v+1, tm+1, tr);
+    t[v] = mergeNode(t[2*v], t[2*v+1]);
+}
+void update(int v, int tl, int tr, int pos, long long val){
+    if (tl == tr) { t[v] = leaf(val); return; }
+    int tm = (tl + tr) / 2;
+    if (pos <= tm) update(2*v,   tl,   tm, pos, val);
+    else           update(2*v+1, tm+1, tr, pos, val);
+    t[v] = mergeNode(t[2*v], t[2*v+1]);
+}
+int main(){
+    scanf("%d%d", &n, &m);
+    for (int i = 1; i <= n; i++) scanf("%lld", &a[i]);
+    build(1, 1, n);
+    while (m--){
+        int k; long long x; scanf("%d%lld", &k, &x);
+        update(1, 1, n, k, x);
+        printf("%lld\n", t[1].best);       // whole-array max subarray sum
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace the Official Sample}
+\begin{tracebox}[CSES 1190 on the 5-leaf tree, tuple node]
+Start \(A=[1,2,-3,5,-1]\).  Records (leaves \(\to\) root):
+\(L_1{=}(1,1,1,1),L_2{=}(2,2,2,2),L_3{=}(-3,0,0,0),L_4{=}(5,5,5,5),L_5{=}(-1,0,0,0)\);
+\([1,2]{=}(3,3,3,3)\), \([1,3]{=}(0,3,0,3)\), \([4,5]{=}(4,5,4,5)\),
+root \([1,5]{=}(4,5,4,5)\) so initial best \(=5\) (not printed).
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \texttt{2 6}: set \(a_2{=}6\).  \([1,2]{=}(7,7,7,7)\),
+        \([1,3]{=}(4,7,4,7)\), root \(=\code{merge}((4,7,4,7),(4,5,4,5)){=}(8,9,8,9)\).
+        Print \(\mathit{best}=9\).
+  \item \texttt{3 1}: set \(a_3{=}1\).  \(L_3{=}(1,1,1,1)\), \([1,3]{=}(8,8,8,8)\),
+        root \(=\code{merge}((8,8,8,8),(4,5,4,5)){=}(12,13,12,13)\).  Print \(13\).
+  \item \texttt{2 -2}: set \(a_2{=}-2\).  \(L_2{=}(-2,0,0,0)\), \([1,2]{=}(-1,1,0,1)\),
+        \([1,3]{=}\code{merge}((-1,1,0,1),(1,1,1,1)){=}(0,1,1,1)\),
+        root \(=\code{merge}((0,1,1,1),(4,5,4,5)){=}(4,5,5,6)\).  Print \(6\).
+\end{itemize}
+Printed \texttt{9 13 6} -- the official output.  Each set touched three
+ancestors on a \(5\)-leaf tree and re-folded them with the same merge.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(\bigO{n}\) build, \(\bigO{\log n}\) per update (\(m\) updates):
+\(\lesssim 2\cdot10^5 + 2\cdot10^5\cdot18\approx 3.8\cdot10^6\) merges, each a
+handful of \code{long long} ops -- a fraction of the \(1.00\) s limit.  Memory
+\(4n\) nodes \(\times\,32\) bytes \(\approx 25.6\) MB (limit \(512\) MB).
+\textbf{AC}.  The tuple makes each merge \(\sim4\times\) the scalar min-tree's,
+invisible next to the \(\log n\) win over \(\bigO{nm}\).
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.30\linewidth} p{0.38\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+all negative & empty block must win & \code{leaf} clamps \(\mathit{pref/suff/best}\!\ge\!0\); answer \(0\) \\
+single leaf \(n{=}1\) & no internal nodes & \(t_1=\)leaf, best \(=\max(0,a_1)\) \\
+best crosses \(>\!1\) nodes & \(\mathit{best}\) not from interiors & cross term \(\mathit{suff}{+}\mathit{pref}\) in merge \\
+large magnitudes & overflow & every field \code{long long} \\
+set to same value & re-fold is a no-op & ancestors recomputed identically \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Ship the minimum closing set.}  Ask: ``which quantities, kept
+        per node, let me rebuild a parent in \(\bigO{1}\)?''  For max subarray that
+        is \(\{\mathit{tot},\mathit{pref},\mathit{suff},\mathit{best}\}\); a field
+        you omit is a block shape you cannot price.
+  \item \textbf{Fix the empty-vs-non-empty contract before coding.}  It sets the
+        leaf clamps and the identity.  CSES~1190 allows empty \((e=(0,0,0,0))\);
+        the SPOJ GSS family does not (leaves can be negative, identity differs).
+  \item \textbf{Merge in order.}  \(\code{mergeNode}\) is not commutative; when
+        a range query folds cover pieces, fold strictly left-to-right.
+  \item \textbf{Widen every field.}  \(\mathit{tot}\) is a sum over \(n\)
+        \(10^9\)-magnitude values; if \(\mathit{tot}\) overflows, so does every
+        field built from it.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Other Combines Worth Wiring Once}
+% ---------------------------------------------------------------
+
+The same four-field discipline generalises.  Two more records, each an
+\(\bigO{1}\)-merge the BIT cannot host, are worth having in the kit:
+
+\term{Count of the range maximum.}  Node \((\mathit{val},\mathit{cnt})\):
+\(\mathit{val}=\max\), \(\mathit{cnt}=\) how many times it is attained.  Merge:
+take the larger \(\mathit{val}\); on a tie, add the counts.  Identity
+\((-\infty,0)\).  This answers ``how many \(1\)s in the longest bitonic run''
+style questions and appears in the mixed set.
+
+\term{Greatest common divisor of a range, with a point write.}  Node is a scalar
+\(\gcd\), merge \(\gcd(L,R)\), identity \(0\) (\(\gcd(x,0)=x\)).  A pure \(\gcd\)
+is \emph{not} invertible, so the Fenwick tree is out -- this is the smallest
+non-\(\min/\max\) fold that justifies a segment tree over a BIT; CF~359D below
+drills it.
+
+\begin{lstlisting}[caption={swap the fold in O(1) lines: gcd-range and count-of-max, same skeleton}, label={lst:c13-gcdcount}]
+// gcd-range (identity 0): reuse build/update/query with M = __gcd, e = 0
+// count of range maximum (identity (-INF, 0)):
+struct Node2 { int val, cnt; };
+Node2 merge2(Node2 L, Node2 R){
+    if (L.val > R.val) return L;
+    if (R.val > L.val) return R;
+    return { L.val, L.cnt + R.cnt };      // tie: keep value, sum counts
+}
+\end{lstlisting}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: assuming the merge is commutative]
+\(\code{mergeNode}(L,R)\ne\code{mergeNode}(R,L)\): the cross term uses
+\(L.\mathit{suff}+R.\mathit{pref}\), which flips when the halves swap.  A query
+that folds cover nodes in an arbitrary order, or an iterative two-ended query
+that forgets which accumulator is the left one, returns a wrong best.  The
+recursive \(\coderef{c13-query}\) returns pieces in order for free -- lean on it.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: under- or over-shrinking the record]
+Two fields is not enough (no crossing block); neither is storing all
+\(\bigO{\text{len}}\) subarray sums (kills the \(\bigO{1}\) merge).  The four-field
+record is the \emph{minimal set closed under merging}.  Derive it by asking which
+subarray shapes a parent can form; do not cargo-cult.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: identity with the wrong sign]
+For \(\max\)-based records the identity field is the \(\min\) possible value, not
+\(0\).  A count-of-max node with identity \((0,0)\) makes \(\max\) over an empty
+branch report value \(0\); use \((-\infty,0)\).  Likewise the empty-block
+\(\mathit{best}=0\) here is a deliberate convention, not a free choice.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: \code{int} inside the record]
+\(\mathit{tot}\) (and hence \(\mathit{pref},\mathit{suff},\mathit{best}\)) is a
+sum of \(n\) values up to \(10^9\).  \(\texttt{int}\) overflows near \(2\cdot
+10^{9}\); every field must be \code{long long}.  This passes small samples and
+fails max tests -- a silent WA.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Did every field of the record get its own merge line (four, not three)?
+  \item Is the leaf's empty-block clamp consistent with the identity you chose?
+  \item Are you folding range cover pieces strictly left-to-right?
+  \item Is each field \code{long long} where a sum can reach \(2\cdot10^{14}\)?
+  \item Could your parent be rebuilt from children \emph{alone} -- or did you
+        hide a needed quantity in the interval's length?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Interesting Array}{CF 482B}
+    {https://codeforces.com/problemset/problem/482/B}
+    {CF 1800 L4}
+    {Satisfy \(m\) constraints of the form ``bitwise AND of \(a[l..r]\) equals
+     \(q\)'' by reconstructing \emph{any} valid array.  Set each cell to the OR
+     of every \(q\) covering it, then \textbf{verify} by rebuilding a tree with
+     \(\mathcal{M}=\)AND, identity \(=\)all-ones (\(2^{30}{-}1\)), and answering
+     each range-AND.  This is the same skeleton with a fold Ch.~18's BIT cannot
+     serve (AND has no inverse); \(\coderef{c13-combine}\)'s discipline of
+     ``pick \(\mathcal{M}\) and \(e\), keep the recursions'' is the whole task.}
+  \practice{Pair of Numbers}{CF 359D}
+    {https://codeforces.com/problemset/problem/359/D}
+    {CF 2000 L3}
+    {Find the longest window \([l,r]\) whose every element is divisible by some
+     element already inside it -- i.e.\ \(\gcd(a[l..r])=\min(a[l..r])\).  The
+     array is \textbf{static}, so build a \(\gcd\)-tree (identity \(0\)) or a
+     sparse table and two-pointer / binary-search the maximal span starting at
+     each index.  Wiring \(\mathcal{M}=\gcd\) into
+     \(\coderef{c13-build}\)--\(\coderef{c13-query}\) is the drill; then ask why
+     a BIT is disqualified (no inverse for \(\gcd\)).}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c13-core}\) owns the three recursions this section only re-points at a
+new \(\mathcal{M}\).  Chapter~6 (\(\secref{c06-treaps}\)) is the treap mirror of
+the very same four-field record -- the debt is now paid.  Chapter~18
+(\(\chref{c14}\)) owns the invertible folds we deliberately give up.  Forward:
+\(\secref{c13-search}\) turns a \emph{sum}-tree into a search by descending it;
+\(\secref{c13-iter}\) shows the iterative query and why a non-commutative merge
+(ours!) is awkward there; \(\secref{c13-static}\) collects the static folds
+(gcd, AND) where a sparse table may beat the tree.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 19.2 in 10 seconds]
+A segment-tree node may store a \textbf{tuple}, not just a number -- anything
+whose parent is an \(\bigO{1}\) function of its two children (a
+\defref{c13-identity}-legal associative, identity-bearing \(\mathcal{M}\)).
+Maximum subarray ships \((\mathit{tot},\mathit{pref},\mathit{suff},\mathit{best})\)
+and merges by three cases for \(\mathit{best}\) plus a max-of-two for each edge
+field (\thmref{c13-subarray}); identity \((0,0,0,0)\) (empty allowed).  The merge
+is \textbf{associative but not commutative} -- fold cover pieces left-to-right.
+GCD, bitwise AND and count-of-max are the other no-inverse folds a BIT cannot
+host.  Worked: CSES~1190 (\(\coderef{c13-1190-soln}\)), best \(=t_1.\mathit{best}\).
+\selftest{
+  \item Which four quantities close the max-subarray record, and why is three not enough?
+  \item State the identity for gcd, for bitwise AND, and for max subarray (empty allowed).
+  \item Why can a Fenwick tree answer none of them?
+  \item A range query folds cover nodes -- in what order, and what breaks if you do not?
+  \item On the opener's non-negative \(A\), why does \(\mathit{best}=\mathit{tot}=49\)?
+}
+\end{recallbox}

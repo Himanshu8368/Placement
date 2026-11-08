@@ -1,0 +1,569 @@
+% =====================================================================
+%  19.3  Searching the Tree                        sec:c13-search
+%  Exports: thm:c13-descend  lst:c13-descend  lst:c13-kthseg
+%           lst:c13-1179-soln  fig:c13-descend  prob:c13-dining
+%  Solved: CF 1179C Serge and Dining Room (2200), live-verified.
+%    Reduction: for a value v a dish of price v survives the queue iff the
+%    suffix-sum S(v)=sum_{u>=v}(#dishes(u) - #pupils(u)) > 0; the answer is
+%    the LARGEST such v, else -1.  Segment tree over values 1..1e6 storing
+%    (sum, best=max suffix) and a DESCEND to the largest positive suffix.
+%    Samples (verbatim from CF):
+%      1) n=1 m=1 a=[1] b=[1] q=1 "1 1 100" -> 100
+%      2) n=1 m=1 a=[1] b=[1] q=1 "2 1 100" -> -1
+%      3) 4 6 / a=1 8 2 4 / b=3 3 6 1 5 2 / q=3 (1 1 1),(2 5 10),(1 1 6)
+%         -> 8 / -1 / 4   (hand-traced: max-positive-suffix value)
+%  Running numbers agree with 00_opener (fig:c13-tree).
+% =====================================================================
+\section{Searching the Tree}\label{sec:c13-search}
+
+\begin{previouslybox}[Ch.~18 found answers by lifting; here we descend]
+Chapter~18 closed its order-statistics section (\(\secref{c14-order}\)) with a
+question ``which position is the \(k\)-th set bit?'' answered by \emph{lifting}
+up the Fenwick tree -- a run of \(\text{lowbit}\)-sized hops that accumulates a
+prefix until it is about to overshoot.  The very same search lives inside a
+segment tree, but walks it \emph{downward}: start at the root, decide at every
+node which child holds the answer, and recurse into just that one child.  No
+range query, no canonical cover -- the tree is read as a decision procedure.
+This section makes that exact move three times (first prefix \(\ge\) target,
+\(k\)-th by counts, first element \(>x\)) and then spends it on a 2200-rated
+CF problem whose answer is a threshold on a suffix sum.
+\end{previouslybox}
+
+\begin{topicintro}
+A segment tree stores, at each node, an aggregate of its interval.  \emph{Query}
+folds \(O(\log n)\) of those aggregates to answer a question about a
+\emph{given} range.  \term{Descending} the tree asks the opposite kind of
+question: \emph{which} range is the answer -- ``the first position whose prefix
+sum reaches \(T\),'' ``the value of the \(k\)-th element,'' ``the first element
+in \([l,r]\) greater than \(x\).''  Each is phrased as a predicate \(P(\mathit{node})\)
+computable from a node's stored aggregate, decided top-down: at node \(v\) with
+children \(L,R\), test whether the answer lies in \(L\) using only \(L\)'s
+aggregate; if not, spend \(L\)'s aggregate to re-target and go to \(R\).  Because
+exactly one child is entered per level, the walk is \(\bigO{\log n}\) -- the same
+cost as a query, but it \emph{finds} the boundary instead of summing a range the
+caller already knew.
+
+\textbf{Prerequisites.} \(\secref{c13-core}\) (heap layout, node aggregates).
+\(\secref{c13-combine}\) (a node may store a \emph{record}, which is exactly what
+a descend predicate reads).  Ch.~18's \(\secref{c14-order}\) lifting as the
+contrasting search.  Ch.~1's binary search for the mental model: a descend is
+binary search where the ``midpoint test'' is a node aggregate in \(O(1)\).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item write \code{first\_prefix\_ge} and \code{kth} descends from memory and
+        state the monotonicity each needs; \hfill\lv{3}--\lv{4}
+  \item re-solve Ch.~18's \(k\)-th problem as a tree descend and compare the two
+        walks line by line; \hfill\lv{4}
+  \item design a node record whose aggregate \emph{drives} a top-down search
+        (sum+best-suffix, count, max); \hfill\lv{4}--\lv{5}
+  \item solve CF~1179C end to end -- a point update and a threshold answer in
+        \(\bigO{\log V}\) each. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``which position, found by walking down'']
+\reckey{``the smallest \(i\) with prefix sum \(\ge T\)'' (needs monotone
+prefixes); ``the \(k\)-th smallest / \(k\)-th active element''; ``the first
+element of \([l,r]\) exceeding \(x\)''; ``the largest threshold \(v\) for which
+some suffix aggregate stays positive''; any answer that is a \emph{position or
+value to be located}, not a fixed range to be folded -- especially paired with
+point updates so a prefix array cannot be reused.}
+\recuse{
+  \item a threshold on a running sum/count/max, found top-down -- this section;
+  \item the predicate is monotone along the index (once true stays true), so a
+        single-child descent is well-defined;
+  \item the answer must reflect interleaved point updates -- the tree is the
+        dynamic analogue of Ch.~1's static binary search.
+}
+\recnotuse{
+  \item you already know the range and only need its fold -- that is a plain
+        \(\coderef{c13-query}\), \(\secref{c13-core}\); no descent;
+  \item the predicate is \emph{not} monotone in the index (a ``first local
+        maximum'' style test) -- descend cannot commit to one child; reframe or
+        binary-search-on-the-answer instead;
+  \item no updates, pure static \(k\)-th in a range -- Ch.~21's merge-sort or
+        persistent tree (\(\chref{c19}\)) answers in \(O(\log n)\) per query
+        with \(O(1)\) amortised build effort.
+}
+One-line test: \emph{the answer is an index or value you must locate under a
+monotone predicate, and the array changes -- descend the tree, \(\log n\) steps.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The Descend Template}
+% ---------------------------------------------------------------
+
+Every search below is one shape.  A node \(v\) owns \([l,r]\), splits at
+\(mid\), and stores an aggregate that tells us \emph{whether the target lies in
+the left child}.  If it does we recurse left with the target unchanged; if not
+we recurse right having \emph{consumed} the left child's contribution.
+
+\begin{lstlisting}[caption={first position whose running prefix sum reaches target: a left-vs-right commit}, label={lst:c13-descend}]
+// SUM tree: sum[v] = A[l]+..+A[r].  Requires all A[i] >= 0 so that the
+// prefix sums are non-decreasing (else "first >= target" is ill-defined).
+int first_prefix_ge(int v, int l, int r, long long target){
+    if (l == r) return l;                        // accumulated >= target here
+    int mid = (l + r) / 2;
+    if (sum[2*v] >= target)                      // answer inside the left half
+        return first_prefix_ge(2*v,   l,   mid,   target);
+    return first_prefix_ge(2*v+1, mid+1, r, target - sum[2*v]); // consume left
+}
+// call first_prefix_ge(1, 1, n, T); O(log n): one child entered per level
+\end{lstlisting}
+
+\begin{lstlisting}[caption={k-th active element by counts -- Ch.18 lifting, re-done as a descend}, label={lst:c13-kthseg}]
+// COUNT tree: cnt[v] = # active positions in [l,r].  Positions sorted by value.
+int kth(int v, int l, int r, long long k){       // 1-based; needs k <= cnt[1]
+    if (l == r) return l;                        // the l-th value is the k-th active
+    int mid = (l + r) / 2;
+    if (cnt[2*v] >= k)                           // k-th already in the left block
+        return kth(2*v,   l,   mid,   k);
+    return kth(2*v+1, mid+1, r, k - cnt[2*v]);   // skip the left block's count
+}
+\end{lstlisting}
+
+\begin{theorem}{A monotone predicate descends in \(\bigO{\log n}\)}{c13-descend}
+Suppose a node's stored aggregate suffices to decide, for any target, whether
+the sought position lies in its left or right child (and, when it lies right, to
+recompute the target from the left child's aggregate).  If the predicate
+``the answer is \(\le i\)'' is monotone in \(i\), then a single top-down walk of
+\(\le\lceil\log_2 n\rceil{+}1\) steps, entering one child per level, returns the
+answer.  Its cost equals that of a range query but uses none of its branching:
+there is exactly one recursive call at each node.
+\end{theorem}
+\begin{proofbox}
+Monotonicity guarantees the target region is a contiguous prefix (or suffix), so
+the left-vs-right test never needs to search both children: at \(v\), the left
+child's aggregate is a faithful summary of every position \(\le mid\) (by
+\defref{c13-node}'s contract -- a parent, hence the answer's predicate, is a
+function of child aggregates).  Entering only the child that can contain the
+boundary preserves the invariant ``the answer is inside the current node'' while
+shrinking the interval by half; after \(\le\lceil\log_2 n\rceil{+}1\) halvings the
+interval is a single leaf, which \emph{is} the answer.  The re-target
+(\(\mathit{target}-\text{left aggregate}\)) keeps the predicate correct in the
+child because the child only knows about its own positions.
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  A range query is binary search's ``sum this
+interval''; a descend is binary search's ``which interval.''  Ch.~18's lifting
+does the same job from the \emph{leaf upward} by \(\text{lowbit}\) jumps; the tree
+descend does it \emph{root downward} by midpoint choices.  They agree because
+both are reading the same dyadic partition -- one from the array's binary
+indices, one from the tree's shape.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape]
+  \node[boxnode, primaryblue, minimum size=8mm, font=\scriptsize] (r)  at (0,3)   {\([1..8]\)};
+  \node[boxnode, difforange,  minimum size=8mm, font=\scriptsize] (la) at (-2.4,1.6){\([1..4]\)};
+  \node[boxnode, successgreen,minimum size=8mm, font=\scriptsize] (rb) at (2.4,1.6) {\([5..8]\)};
+  \node[boxnode, gray, minimum size=7mm, font=\scriptsize] (la1) at (-3.6,0.2){\([1..2]\)};
+  \node[boxnode, gray, minimum size=7mm, font=\scriptsize] (la2) at (-1.2,0.2){\([3..4]\)};
+  \node[boxnode, successgreen, minimum size=7mm, font=\scriptsize] (rb1) at (1.2,0.2){\([5..6]\)};
+  \node[boxnode, successgreen, minimum size=7mm, font=\scriptsize] (rb2) at (3.6,0.2){\([7..8]\)};
+  \draw[flow] (r)--(la); \draw[flow] (r)--(rb);
+  \draw[flow, gray!40] (la)--(la1); \draw[flow, gray!40] (la)--(la2);
+  \draw[flow] (rb)--(rb1); \draw[flow] (rb)--(rb2);
+  \node[annot, font=\scriptsize, text=difforange, anchor=east] at (-2.4,2.4) {rejected};
+  \node[annot, font=\scriptsize, text=successgreen, anchor=west] at (2.4,2.4) {taken};
+  \node[annot, align=center, font=\scriptsize] at (0,-1.1)
+    {left aggregate \(<\) target \(\Rightarrow\) go right,\\ consume the left, re-target by \(T-\mathit{sum}[\mathit{left}]\)};
+\end{tikzpicture}
+\caption{One step of a descend.  At node \([1..8]\) the left child \([1..4]\)'s
+aggregate fails the predicate (its running count/sum does not reach the target),
+so the whole left subtree is discarded \emph{at once} and we commit to
+\([5..8]\), subtracting the left's contribution.  Three such commits resolve an
+eight-leaf tree to a leaf -- that is \(\log_2 8=3\) decisions.}
+\label{fig:c13-descend}
+\end{figure}
+
+% ---------------------------------------------------------------
+\subsection{Three Descends, One Idea}
+% ---------------------------------------------------------------
+
+\term{First prefix \(\ge\) target.} \(\coderef{c13-descend}\), on a sum tree, all
+values \(\ge0\).  This is the dynamic binary search over a prefix array -- Ch.~5's
+\(\propref{c24-prefix}\) idea rebuilt to survive point updates.
+
+\term{\(k\)-th by counts.} \(\coderef{c13-kthseg}\), on a tree of counts: the same
+code Ch.~18 wrote as a lowbit lift, now a midpoint descend.  Feed it a multiset
+(``insert/delete a value; what is the \(k\)-th smallest?'') by storing at each leaf
+whether/how-many of that value are present.
+
+\term{First element \(>x\) in \([l,r]\).} Descend a \(\max\)-tree: at \(v\), if
+\(\mathit{mx}[\text{left}]\le x\) the left holds no candidate so go right; else go
+left, and prune any node fully outside \([l,r]\) or with \(\mathit{mx}\le x\).  It
+returns the leftmost position of \([l,r]\) whose value exceeds \(x\) in
+\(\bigO{\log n}\) -- the engine behind ``next greater in a range'' sweeps.
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 1179C Serge and Dining Room}
+% ---------------------------------------------------------------
+
+\solvedproblem{c13-dining}{Serge and Dining Room}{CF 1179C}
+  {https://codeforces.com/problemset/problem/1179/C}{CF 2200}
+  {max-suffix segment tree over values + descend to the largest positive suffix; point updates on dish and pupil counts}
+
+\begin{problemstatement}[CF 1179C Serge and Dining Room]
+There are \(n\) dishes with prices \(a_1..a_n\) and \(m\) pupils in a queue with
+budgets \(b_1..b_m\) (values \(\le 10^6\)).  Each pupil, in queue order, buys the
+\emph{most expensive} dish he can afford (each dish has one copy; once bought it
+is gone); if he can afford none he leaves.  Serge, who can afford anything, buys
+the \emph{most expensive remaining} dish after the whole queue has been served,
+or gets nothing if no dish remains.  Process \(q\) point updates:
+\texttt{1 i x} set dish \(a_i:=x\); \texttt{2 i x} set pupil \(b_i:=x\).  After
+\emph{each} update, print the price of the dish Serge would buy, or \(-1\).
+
+\textbf{Input.} \(n,m\le 3\cdot10^5\); \(1\le a_i,b_i,x\le 10^6\); \(q\le 3\cdot10^5\).
+
+\textbf{Output.} One line per update.
+
+\textbf{Examples.}
+\begin{verbatim}
+Input:               Output:      Input:          Output:   Input:
+1 1                  100          1 1             -1        4 6
+1                                 1                        1 8 2 4
+1                                 1                        3 3 6 1 5 2
+1 1 100                          2 1 100                  3
+                                                             1 1 1
+                                                             2 5 10
+                                                             1 1 6
+Output (3rd):
+8
+-1
+4
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself one sitting]
+Simulating the queue per update is \(\bigO{(n+m)\log}\) \emph{times} \(q\) -- far
+too slow, and the queue order makes a naive multiset greedy miss the point.
+Reframe away from \emph{which pupil takes which dish} and onto \emph{at each
+price level, do dishes outnumber the pupils who can afford that price or more?}
+\peek{a dish priced \(v\) is grabbed only by pupils with budget \(\ge v\); so
+look at the values from high to low.}
+\nudge{for a value \(v\), let \(D_{\ge}(v)\) be the number of dishes of price
+\(\ge v\) and \(P_{\ge}(v)\) the pupils with budget \(\ge v\).  The number of
+dishes priced \(\ge v\) left for Serge is \(S(v)=D_{\ge}(v)-P_{\ge}(v)\).  Serge
+gets the \textbf{largest \(v\) with \(S(v)>0\).}  \(S\) is a \emph{suffix sum}.}
+\fullhint{Build a tree over \emph{values} \(1..V\) (\(V=10^6\)) where leaf \(u\)
+holds \(\mathit{delta}[u]=\#\text{dishes}(u)-\#\text{pupils}(u)\).  Each node
+stores \(\mathit{sum}=\sum\mathit{delta}\) and \(\mathit{best}=\max\) suffix-sum.
+An update moves one dish/pupil: adjust \(\mathit{delta}\) at two values (point
+updates).  The answer is the \emph{largest value with positive suffix-sum}, found
+by a \(\bigO{\log V}\) \textbf{descend}: prefer the right child (larger values)
+when its \(\mathit{best}>0\), else go left carrying the right child's sum.  If the
+root's \(\mathit{best}\le0\) the answer is \(-1\).  Full program below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Fix a price \(v\).  Consider the dishes of price \(\ge v\): a pupil takes one of
+them exactly when his budget is \(\ge v\) (he can afford such a dish, and greedily
+prefers expensive).  So the count of price-\(\ge v\) dishes \emph{still on the
+shelf} once everyone is served is \(S(v)=D_{\ge}(v)-P_{\ge}(v)\), independent of
+the exact pairing.  Serge takes the most expensive survivor, i.e.\ the largest
+\(v\) that still has one left: the largest \(v\) with \(S(v)\ge 1\) \emph{and} a
+dish at exactly \(v\).  Because \(S(v)-S(v{+}1)=\mathit{delta}[v]\) and a
+strict-positive suffix already forces a dish at the boundary \(v\), the answer is
+precisely \(\max\{v: S(v)>0\}\).  Now \(S(v)\) is the suffix sum of
+\(\mathit{delta}\) at \(v\), and \(\max\) over suffix sums is a node record -- this
+section's descend, driven by \((\mathit{sum},\mathit{best})\).
+
+\solstep{Key Observations}
+\begin{observation}
+The queue \emph{order} never matters.  Only the \emph{multiset} of budgets and of
+prices does -- greedy ``most expensive affordable'' makes the count argument
+\(S(v)=D_{\ge}(v)-P_{\ge}(v)\) exact.  This is why a value-indexed tree, not a
+position-indexed one, is the right object.
+\end{observation}
+\begin{observation}
+\(\mathit{best}\) = \emph{maximum suffix sum} is the record that makes a search
+possible: a plain sum cannot tell you \emph{where} a suffix first goes positive.
+The pair \((\mathit{sum},\mathit{best})\) is the minimal closing record for a
+``largest positive suffix'' query -- a \(\secref{c13-combine}\) idea in service of
+a \(\secref{c13-search}\) search.
+\end{observation}
+\begin{observation}
+The update is \emph{two} point writes: a dish moving \(a_i:\)old\(\to x\) does
+\(\mathit{delta}[\text{old}]-{=}1,\ \mathit{delta}[x]+{=}1\); a pupil does the
+opposite sign.  Both are \(\bigO{\log V}\) re-folds, then one \(\bigO{\log V}\)
+descend for the answer.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Simulate the queue with a sorted multiset of dishes each query}
+{Each simulation is \(\bigO{(n+m)\log}\) and there are \(q\) of them --
+\(9\cdot10^{10}\).  The multiset also re-does the whole greedy from scratch even
+though only one dish or pupil changed.}
+\deadend{Store a prefix-sum tree and binary-search \(S(v)>0\)}
+{A prefix-sum (in the value order used here, a \emph{suffix}-sum) tree answers a
+fold over a \emph{given} \(v\) in \(\log V\), but we need the largest \(v\)
+satisfying a predicate -- binary-searching over value-space with a \(\log V\) fold
+at each step is \(\bigO{\log^2 V}\).  The \((\mathit{sum},\mathit{best})\) descend
+does it in a single \(\bigO{\log V}\) walk.}
+\deadend{Use a Fenwick tree over the value counts}
+{A BIT stores sums and can lift to a \(k\)-th, but ``largest positive suffix
+sum'' needs the max-suffix \(\mathit{best}\) record, which has no inverse --
+the same no-inverse wall Ch.~18 hit.  The segment tree's extra field is exactly
+the point.}
+\aha{Index by \emph{value}, store \((\mathit{sum},\mathit{max\text{-}suffix})\),
+and \emph{descend} to the largest value whose suffix-sum is positive: prefer the
+bigger-value child when its \(\mathit{best}>0\), else fold the right child's sum
+into the accumulator and go left.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.22\linewidth} p{0.31\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ simulate queue & sorted dishes, greedy per query & \(\bigO{q(n{+}m)\log}\) & \tle \\
+2 & \lv{4}\ BIT of deltas \(+\) binary search & prefix fold per \(v\) & \(\bigO{q\log^2 V}\) & \tle-ish \\
+3 & \lv{4}\ sum-only segtree & no max-suffix field & \(\bigO{q\log^2 V}\) & slow \\
+4 & \lv{5}\ \textbf{\((\mathit{sum},\mathit{best})\) tree} & descend to largest positive suffix & \(\bigO{(n{+}q)\log V}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Solution}
+Tree over \(1..V\) (\(V=10^6{+}1\)).  Leaf \(u\): \(\mathit{sum}=\mathit{delta}[u]\),
+\(\mathit{best}=\mathit{delta}[u]\).  Merge (left \(A\)=smaller values, right
+\(B\)=larger): \(\mathit{sum}=A.\mathit{sum}+B.\mathit{sum}\);
+\(\mathit{best}=\max(B.\mathit{best},\ A.\mathit{best}+B.\mathit{sum})\) -- a suffix
+starts inside the right child, or uses all of the right plus a suffix of the left.
+Answer via \(\text{descend}\): from the root with accumulator \(\mathit{acc}=0\),
+if \(\mathit{best}[\text{right}]+\mathit{acc}>0\) go right (bigger values); else go
+left with \(\mathit{acc}+\mathit{sum}[\text{right}]\).  Print the leaf value, or
+\(-1\) when \(\mathit{best}[1]\le 0\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Record invariant.} For node over \([l,r]\), \(\mathit{best}=\max_{v\in[l,r]}
+\sum_{u=v}^{r}\mathit{delta}[u]\) (max suffix of the node) and
+\(\mathit{sum}=\sum_{u=l}^{r}\mathit{delta}[u]\).  Leaves are trivial; the merge
+cases cover ``suffix inside right child'' and ``all of right child plus a suffix of
+left child,'' the only shapes a suffix of \([l,r]\) can take.  \textbf{Answer:}
+\(S(v)=\sum_{u=v}^{V}\mathit{delta}[u]=\) (suffix from \(v\) at the root), so Serge's
+price is \(\max\{v:S(v)>0\}\).  \(\coderef{c13-1179-soln}\)'s \text{descend}
+maintains the invariant ``\(\mathit{best}[\mathit{node}]+\mathit{acc}>0\)'' (a
+positive suffix exists in this node once everything to its right, summed as
+\(\mathit{acc}\), is added) and at each step enters the unique child that can
+contain the \emph{largest} such \(v\): right if a positive suffix already lies
+there, else left with the right block's sum folded into \(\mathit{acc}\).  By
+\thmref{c13-descend} this is correct and \(\bigO{\log V}\); a non-positive root
+\(\mathit{best}\) means every \(S(v)\le0\), i.e.\ no survivor, giving \(-1\).
+\textbf{Updates:} each dish/pupil change is \(\pm1\) on two \(\mathit{delta}\)
+leaves, correctly re-folding their ancestors, so the record invariant holds for
+the next query.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1179C full solution: value-indexed (sum,max-suffix) tree + descend}, label={lst:c13-1179-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int V = 1000002;            // values 1..1e6 (+1 safety)
+const int MX = 300005;
+int n, m, q, a[MX], b[MX];
+int cD[V], cP[V];                 // dishes/pupils present at each value
+long long sum[4*V], best[4*V];
+
+void pull(int v){
+    sum[v]  = sum[2*v] + sum[2*v+1];
+    best[v] = max(best[2*v+1], best[2*v] + sum[2*v+1]); // max suffix: right, or right+left-suffix
+}
+void build(int v, int l, int r){
+    if (l == r) { sum[v] = cD[l] - cP[l]; best[v] = sum[v]; return; }
+    int mid = (l + r) / 2;
+    build(2*v, l, mid); build(2*v+1, mid+1, r); pull(v);
+}
+void add(int v, int l, int r, int pos, long long d){
+    if (l == r) { sum[v] += d; best[v] = sum[v]; return; }
+    int mid = (l + r) / 2;
+    if (pos <= mid) add(2*v, l, mid, pos, d);
+    else            add(2*v+1, mid+1, r, pos, d);
+    pull(v);
+}
+int descend(int v, int l, int r, long long acc){   // best[v]+acc > 0 is guaranteed
+    if (l == r) return l;
+    int mid = (l + r) / 2;
+    if (best[2*v+1] + acc > 0)                     // a positive suffix lives in the larger half
+        return descend(2*v+1, mid+1, r, acc);
+    return descend(2*v, l, mid, acc + sum[2*v+1]); // else fold the right block and go left
+}
+int main(){
+    scanf("%d%d", &n, &m);
+    for (int i=1;i<=n;i++){ scanf("%d",&a[i]); cD[a[i]]++; }
+    for (int i=1;i<=m;i++){ scanf("%d",&b[i]); cP[b[i]]++; }
+    build(1,1,V);
+    scanf("%d",&q);
+    while (q--){
+        int ty,i,x; scanf("%d%d%d",&ty,&i,&x);
+        if (ty==1){                                 // dish i : old a[i] -> x
+            cD[a[i]]--; add(1,1,V,a[i],-1);
+            cD[x]++;    add(1,1,V,x,+1);
+            a[i]=x;
+        } else {                                    // pupil i : old b[i] -> x
+            cP[b[i]]--; add(1,1,V,b[i],+1);
+            cP[x]++;    add(1,1,V,x,-1);
+            b[i]=x;
+        }
+        if (best[1] <= 0) printf("-1\n");
+        else printf("%d\n", descend(1,1,V,0));
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace the Third Official Sample}
+\begin{tracebox}[CF 1179C sample 3: dishes 1 8 2 4, pupils 3 3 6 1 5 2]
+Initial \(\mathit{delta}[u]=\#\text{dishes}(u)-\#\text{pupils}(u)\):
+\(\delta_1{=}0\), \(\delta_2{=}0\), \(\delta_3{=}{-}2\), \(\delta_4{=}{+}1\),
+\(\delta_5{=}{-}1\), \(\delta_6{=}{-}1\), \(\delta_8{=}{+}1\), else \(0\).  Suffix
+sums \(S(v)=\sum_{u\ge v}\delta_u\): \(S_8{=}1\), \(S_6{=}0\), \(S_5{=}{-}1\),
+\(S_4{=}0\), \(S_3{=}{-}2\).
+\textbf{Query \texttt{1 1 1}} (dish~1 stays \(1\)): deltas unchanged, largest
+positive \(S\) is \(S_8=1\) \(\Rightarrow\) Serge gets \(8\).  Output \(8\).
+\textbf{Query \texttt{2 5 10}} (pupil~5: \(5\to10\)): \(\delta_5{+}{=}1\to0\),
+\(\delta_{10}{-}{=}1\to-1\).  Now \(S_{10}{=}{-}1\), \(S_8{=}1{-}1{=}0\) and no suffix
+is positive -- the root \(\mathit{best}\le0\).  Output \(-1\).
+\textbf{Query \texttt{1 1 6}} (dish~1: \(1\to6\)): \(\delta_1{-}{=}1\to-1\),
+\(\delta_6{+}{=}1\to0\).  Recompute suffixes downward: \(S_8{=}0\) (the \(+1\) at
+\(8\) is cancelled by \(\delta_{10}{=}{-}1\)), then \(S_7{=}S_6{=}S_5{=}0\), and
+\(S_4{=}\delta_4{+}S_5{=}1{+}0{=}1{>}0\) while \(S_3{=}{-}2{+}1{=}{-}1\).  The
+largest value with a positive suffix is \(v=4\).  Output \(4\).
+Final outputs \texttt{8, -1, 4} -- the official answers.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Build \(\bigO{V}\) with \(V=10^6{+}2\) (about \(4\cdot10^6\) tree slots,
+\(\sim 64\) MB for two \code{long long} arrays -- inside \(256\) MB, but size the
+arrays \(4V\), not \(2V\)).  Per update: two point writes \(+\) one descend,
+each \(\bigO{\log V}\approx 20\); with \(q,n,m\le3\cdot10^5\) the total is
+\(\sim 1.2\cdot10^7\) operations -- \textbf{AC} at the \(4\) s limit.  The
+\(\mathit{delta}\) counts need only \(|{\cdot}|\le\max(n,m)\le3\cdot10^5\), so
+\code{int} suffices for the counts but \code{long long} for \(\mathit{sum}\) is
+harmless.
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Index by value, not position.}  The tree's leaves are the prices
+        \(1..V\); \(\mathit{delta}\) counts dishes minus pupils at each price.
+        A position-indexed tree would have to re-scan the queue.
+  \item \textbf{Two point writes per update.}  Forgetting the \emph{old} value's
+        decrement (or mishandling type~2's sign flip) is the classic WA.
+  \item \textbf{The \(\mathit{best}\) merge order.}  A suffix is ``right child
+        fully used, then a left suffix'': \(\mathit{best}=\max(B.\mathit{best},
+        A.\mathit{best}+B.\mathit{sum})\).  Swapping \(A,B\) silently answers the
+        wrong side.
+  \item \textbf{Guard \(\mathit{best}[1]\le0\) before descending.}  The descend
+        assumes a positive suffix exists; with none it returns a spurious value
+        instead of \(-1\).
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: descending a non-monotone predicate]
+\(\coderef{c13-descend}\) needs prefix sums monotone (all \(A[i]\ge0\)); with a
+negative element a ``first prefix \(\ge T\)'' can be followed by a smaller prefix,
+so ``commit to the left if it reaches \(T\)'' is no longer correct.  Check the
+monotonicity \thmref{c13-descend} requires before reusing a descend template.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: a sum-only tree where a record is required]
+Searching for ``largest positive suffix'' with a tree that stores only \(\mathit{sum}\)
+forces a second binary search over the value axis (\(\bigO{\log^2 V}\)) or fails.
+The \(\mathit{best}\) field is what buys the single \(\bigO{\log V}\) walk -- it is
+\(\secref{c13-combine}\)'s lesson: \emph{decide the node record from the search you
+need}.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: \(\bigO{\log^2}\) when \(\bigO{\log}\) is available]
+Wrapping a fold-based predicate in an outer binary search (as in ladder rung~2/3)
+is often \emph{correct} but a factor of \(\log\) too slow at \(3\cdot10^5\).
+The whole value of a descend is folding the search into one root-to-leaf walk.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: sign errors on the two value updates]
+Type~1 (dish) and type~2 (pupil) adjust \(\mathit{delta}\) with \emph{opposite}
+signs (a dish adds \(+1\) to its new price, a pupil subtracts \(1\) from his new
+budget's price because \(\mathit{delta}=\#\text{dishes}-\#\text{pupils}\)).  One
+wrong sign and every subsequent answer drifts -- pass samples, fail tests.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Is your predicate monotone along the value/axis you descend?
+  \item Which record field (count, sum, max-suffix, max) drives the left-vs-right
+        commit at each node?
+  \item Did you enter \emph{one} child per level (a search) rather than both (a
+        query)?
+  \item For CF~1179C: are the two \(\mathit{delta}\) point updates' signs correct
+        for the query type?
+  \item Is the tree sized \(4V\), and is \(\mathit{best}[1]\le0\) checked first?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Misha and Permutations Summation}{CF 501D}
+    {https://codeforces.com/problemset/problem/501/D}
+    {CF 2000 L4}
+    {Add two permutations by their lexicographic rank modulo \(n!\) -- via the
+     Lehmer / factorial code, whose every step is exactly a \emph{\(k\)-th by
+     counts} search over the set of not-yet-used values (digit \(i\) = how many
+     unused values are below \(p_i\); decode = the \(k\)-th unused value).
+     Do it \emph{both} ways: Ch.~18's frequency-BIT lowbit lift
+     (\(\secref{c14-order}\)) and this section's \(\coderef{c13-kthseg}\) tree
+     descend, and watch them trace the same dyadic path from opposite ends.}
+  \practice{Army Creation}{CF 813E}
+    {https://codeforces.com/problemset/problem/813/E}
+    {CF 2200 L5}
+    {Given types \(a_1..a_n\), answer online-obfuscated ranges \([l,r]\): the
+     largest army using \(\le k\) warriors of each type.  Reduce each type to a
+     running count and locate, inside \([l,r]\), how many positions are among the
+     first \(k\) copies of their type -- a threshold/``how far do I go before the
+     \(k{+}1\)-th copy appears'' search.  A segment tree over positions keyed by
+     that cut point, searched as in \(\secref{c13-search}\), answers each range in
+     \(\bigO{\log n}\) (the full offline/persistent treatment is Ch.~21).}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c13-core}\) supplies the aggregates a descend reads and
+\(\secref{c13-combine}\) the records (here \((\mathit{sum},\mathit{best})\)) that
+make a search possible.  Chapter~18's \(\secref{c14-order}\) is the twin search
+done by lowbit lifting -- practice CF~501D asks for both.  Chapter~1's
+\(\chref{c01}\) binary search is the static ancestor of \thmref{c13-descend}.
+Forward: \(\secref{c13-iter}\) re-implements a descend on the bottom-up \(2n\)
+tree (the commit test reads the same aggregates); \(\secref{c13-static}\) marks
+where a static \(k\)-th moves to Ch.~21's merge-sort/persistent trees
+(\(\chref{c19}\)).
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 19.3 in 10 seconds]
+A \textbf{descend} answers ``\emph{which} position'' instead of ``fold this
+range'': at each node, read one child's aggregate to decide whether the answer is
+left or right, commit to \emph{one} child, \(\bigO{\log n}\).  Requires a
+\textbf{monotone} predicate (\thmref{c13-descend}) and the right node record --
+sum for first-prefix-\(\ge\), counts for \(k\)-th, max for first-\(>x\).
+Ch.~18 lifts (leaf up), this descends (root down): same search, opposite ends.
+CF~1179C: index by value, store \((\mathit{sum},\mathit{max\text{-}suffix})\),
+descend to the largest positive suffix; \(\mathit{delta}[v]=\#\text{dishes}(v)-
+\#\text{pupils}(v)\), two point writes per update.
+\selftest{
+  \item Which three predicates do \coderef{c13-descend}, \coderef{c13-kthseg}, and
+        the max-tree ``first \(>x\)'' each require to be monotone?
+  \item State the \((\mathit{sum},\mathit{best})\) merge for a maximum-suffix record.
+  \item Why is a sum-only tree not enough to answer ``largest positive suffix'' in \(\log n\)?
+  \item In CF~1179C, why does a pupil change flip the sign of the \(\mathit{delta}\) writes?
+  \item How do Ch.~18's lowbit lifting and this descend trace the same path?
+}
+\end{recallbox}

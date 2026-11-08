@@ -1,0 +1,81 @@
+---
+title: "Schedules and normalization"
+---
+
+# Schedules and normalization
+
+**Reference question.** How do learning-rate schedules and normalization layers change the scale of training?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Schedule | A rule $\eta_t$. Common patterns are constant, step drops, and cosine decay. The rule is a knob. |
+| Warmup | A short increase from a tiny step, used when a large initial step is unstable, especially with adaptive methods or large batches. |
+| Normalization | A layer that recenters and rescales activations using batch or feature statistics, plus learned gain and bias. |
+| Train versus eval | Batch normalization uses batch statistics in training and a running estimate at evaluation. Forgetting the switch changes the function. |
+| Interaction | Normalization changes the effective step. Retune $\eta$ after you add it. Do not stack it on an old learning rate and interpret the crash as the data. |
+
+## Theory
+
+A schedule encodes the belief that the useful step size shrinks as you approach a minimum or as the gradient noise starts to dominate. Volume 02's stochastic-gradient chapter already said a constant step hovers in a neighborhood. Decay is how you leave the neighborhood. Decay too early and you freeze a bad solution. The validation loss, not the folklore, decides.
+
+Normalization makes the scale of activations less dependent on the scale of incoming weights. That often lets you use a larger step and deeper stacks. It also introduces a dependence across the batch, in batch normalization, so the function of one example depends on the other examples in the minibatch. At evaluation you must freeze the statistics or the prediction of a single deployed example is undefined or depends on its accidental neighbors.
+
+Layer normalization computes statistics per example and avoids that particular train-eval trap. It is a different function. Copying a recipe that used one of them into an architecture that used the other is a change of model, not a cleanup.
+
+## Derivation
+
+Batch normalization of a pre-activation $z$ in a batch replaces it by $\hat{z} = (z - \mu_B)/\sqrt{\sigma_B^2 + \epsilon}$ and then $\gamma \hat{z} + \beta$. The Jacobian with respect to $z$ includes the dependence of $\mu_B$ and $\sigma_B$ on $z$. A gradient that treats $\mu_B$ as constant is wrong. Library implementations include those terms. A hand implementation that forgets them can still train and will fail a strict gradient check.
+
+A step decay multiplies $\eta$ by a factor at fixed epochs. A cosine schedule sets $\eta_t = \eta_{\min} + \tfrac{1}{2}(\eta_{\max}-\eta_{\min})(1+\cos(\pi t/T))$ for a horizon $T$. Both are deterministic functions of the step index. Put $T$ in the config. Changing the number of epochs without changing $T$ changes the schedule.
+
+## Code
+
+```python
+import numpy as np
+
+def cosine_eta(t, t_max, eta_max, eta_min=0.0):
+    if t_max <= 0:
+        raise ValueError("t_max must be positive")
+    frac = min(max(t, 0), t_max) / t_max
+    return float(eta_min + 0.5 * (eta_max - eta_min) * (1 + np.cos(np.pi * frac)))
+```
+
+## Experiment
+
+**Hypothesis.** On a convex quadratic with added gradient noise, a cosine decay ends at a smaller radius than a constant step equal to $\eta_{\max}$, at matched step count, when $\eta_{\max}$ is large enough to hover.
+
+**Protocol.** The bowl $\kappa = 20$, plus isotropic Gaussian gradient noise of scale $0.05$. Compare constant $\eta_{\max}$ and cosine from $\eta_{\max}$ to 0.
+
+**Metric.** Radius at the final step, median over 20 seeds.
+
+**Decision rule.** Cosine should finish closer to the origin when the constant step visibly jitters. If both diverge, reduce $\eta_{\max}$. This is a sanity check of the schedule, not a claim about networks.
+
+## Project
+
+**Deliverable.** Two training curves for the small network: constant $\eta$ and cosine decay, with $\eta_{\max}$ chosen separately on validation for each. If you implement layer normalization, add a third curve and a new learning-rate sweep rather than reusing $\eta$.
+
+**Constraints.** Evaluation mode is irrelevant until you use batch statistics. If you do, the card must say how a single example is normalized at test time.
+
+**Rubric.** The curves share axes of data touches and validation loss. The schedule parameters sit in the config hash.
+
+## Depth tracks
+
+**Beginner.** Plot `cosine_eta` over 100 steps.
+
+**University.** Run the noisy quadratic comparison and the two network curves.
+
+**Research.** Explain the train-eval discrepancy of batch normalization in one formula, and name a failure mode in which a batch of size 1 at deployment has undefined variance.
+
+## Failure modes
+
+- A cosine period that assumes 100 epochs after you shortened the run to 20.
+- Leaving batch normalization in training mode at evaluation so the score depends on batch composition.
+- Adding normalization and three other changes in one run, then attributing the gain to all of them.
+
+## See also
+
+Volume 07 for early stopping, which can be viewed as a data-dependent schedule. Volume 11 for normalization inside convolutional nets.

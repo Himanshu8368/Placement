@@ -1,0 +1,302 @@
+### Problem: XOR on Segment {#sec-sqrt-p2-xorseg}
+
+::: {.p-statement}
+You are given an array $a_1, \ldots, a_n$ of non-negative integers (each $< 2^{20}$) and must answer $q$ queries of two kinds:
+
+- `1 l r` — print $\sum_{i=\ell}^{r} a_i$;
+- `2 l r x` — for every $i \in [\ell, r]$ set $a_i \leftarrow a_i \oplus x$ (bitwise XOR).
+
+Constraints: $1 \le n, q \le 10^{5}$, $0 \le a_i, x < 2^{20}$, $1 \le \ell \le r \le n$.
+
+Source: [CF 242E · XOR on Segment](https://codeforces.com/problemset/problem/242/E){.solved rating="2000"}
+
+Example — $a = [3, 10, 3]$: `1 1 3` prints $16$; `2 2 2 3` flips $a_2 = 10 \to 9$; `1 1 3` prints $15$; `2 1 3 1` flips every element once more ($3\!\to\!2,\,9\!\to\!8,\,3\!\to\!2$); `1 2 3` prints $10$. (Every figure is asserted against a copy-the-array oracle below.)
+:::
+
+::: {.p-intuition}
+A range **sum** is a combine, and a range **XOR-update** is not — XOR is neither adding nor multiplying a constant, so a plain lazy "add-tag" from @sec-sqrt-a2 does not describe it. The rescue is that XOR acts on each of the 20 bits *independently*: on bit $k$ it either leaves every value alone or **flips** that bit everywhere in the range, i.e. swaps "how many have bit $k$ set" with "how many have it clear". So if a block stores, per bit $k$, `bit[b][k]` = how many of its elements have that bit set, then XOR-ing a *whole* block by $x$ is just $O(1)$ bookkeeping — a per-block lazy XOR tag `tag[b]`, because "the block's bit-$k$ count after $\oplus\,\text{tag}$" is `bit[b][k]` when that tag bit is clear and `blocksize - bit[b][k]` when it is set. The block sum is then one weighted sum over 20 bits.
+:::
+
+::: {.p-approach}
+1. **Copy the array.** `2 l r x` XORs each element in place; `1 l r` sums the slice. $O(n)$ per query — the oracle.
+2. **Per-block bit counts + lazy XOR tag.** Whole blocks fold a range-XOR into `tag[b]` in $O(20)$ (really $O(1)$, tag the mask); a sum reads whole blocks via their 20 bit-counts (tag-adjusted) and touches only the $\le 2B$ edge cells one by one after pushing the tag. $O(n/B \cdot 20 + B)$ per query, $O(n/B + B)$ per update.
+
+**Invariant.** The true value of cell $i$ is `a[i] ^ tag[b]` where `b = i // B`; `bit[b][k]` counts set bits over the *untagged* base values `a[i]` in block $b$. A whole-block XOR updates only `tag[b]` (base array and `bit` untouched, still consistent); a partial XOR first pushes `tag[b]` into every `a[i]` of the block, clears the tag, edits the few cells, and rebuilds `bit[b]` once.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Copy the array
+
+::: {.form-next}
+Do the update and the sum by hand: XOR the elements of $[\ell, r]$ one at a time for a type-2 query, and add them up for a type-1 query. $O(n)$ per query — the oracle we diff the blocked structure against, since XOR has no associativity to lean on at this level.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+class XorBrute:
+    def __init__(self, a):
+        self.a = list(a)
+
+    def query_sum(self, l, r):              # l, r are 0-indexed inclusive
+        return sum(self.a[l:r + 1])
+
+    def xor_update(self, l, r, x):
+        for i in range(l, r + 1):
+            self.a[i] ^= x
+
+
+xb = XorBrute([3, 10, 3])
+assert xb.query_sum(0, 2) == 16
+xb.xor_update(1, 1, 3)
+assert xb.query_sum(0, 2) == 15
+xb.xor_update(0, 2, 1)
+assert xb.query_sum(1, 2) == 10
+```
+
+##### C++
+
+```cpp
+// brute force: materialise every XOR, O(n) per query
+struct XorBrute {
+    vector<int> a;
+    XorBrute(vector<int>& v) : a(v) {}
+    long long query_sum(int l, int r) {
+        long long s = 0;
+        for (int i = l; i <= r; ++i) s += a[i];
+        return s;
+    }
+    void xor_update(int l, int r, int x) {
+        for (int i = l; i <= r; ++i) a[i] ^= x;
+    }
+};
+```
+:::
+
+**Reading it line by line.** Nothing is clever here — a type-2 query is a Python loop over the slice, which at $n, q \le 10^{5}$ is up to $10^{10}$ XORs. Its whole purpose is to be an *unquestionably correct* mirror of the statement so the bit-count block answer can be stressed against it with updates and queries interleaved.
+
+#### Per-block bit counts with a lazy XOR tag
+
+::: {.form-next}
+Split into blocks of $B=\sqrt n$. Each block keeps `bit[b][k]` = how many base values have bit $k$ set, plus a lazy `tag[b]`. A range XOR applies `tag[b] ^= x` to whole blocks ($O(1)$) and pushes-then-edits the two edge blocks. A range sum adds whole blocks with $\sum_k \text{count}_k \cdot 2^k$ where $\text{count}_k$ is `bit[b][k]` or its complement by the tag bit, and reads edge cells as `a[i] ^ tag[b]`.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+x_a = [3, 10, 3, 7, 1, 12, 5, 9]
+
+
+def draw(ax, p):
+    V.array(ax, p, x_a, x=0.0, y=1.0, index=False,
+            regions=[(0, 3, "green", "block 0"),
+                     (3, 6, "indigo", "block 1"),
+                     (6, 8, "pink", "block 2")])
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-sqrt-p2-xorseg-sol
+BITS = 20
+
+
+class XorSeg:
+    def __init__(self, a, B=None):
+        self.n = len(a)
+        self.a = list(a)                         # base values, tag not folded in
+        self.B = B or max(1, int(round(self.n ** 0.5)))
+        self.nb = (self.n + self.B - 1) // self.B
+        self.bit = [[0] * BITS for _ in range(self.nb)]
+        self.tag = [0] * self.nb
+        for b in range(self.nb):
+            self._redo(b)
+
+    def _bounds(self, b):
+        return b * self.B, min(self.n, (b + 1) * self.B)
+
+    def _redo(self, b):
+        lo, hi = self._bounds(b)
+        for k in range(BITS):
+            self.bit[b][k] = 0
+        for i in range(lo, hi):
+            v = self.a[i]
+            for k in range(BITS):
+                if (v >> k) & 1:
+                    self.bit[b][k] += 1
+
+    def _push(self, b):
+        if self.tag[b]:
+            lo, hi = self._bounds(b)
+            t = self.tag[b]
+            for i in range(lo, hi):
+                self.a[i] ^= t
+            self.tag[b] = 0                      # base now reflects the tag
+
+    def _block_sum(self, b):
+        lo, hi = self._bounds(b)
+        size = hi - lo
+        t = self.tag[b]
+        s = 0
+        for k in range(BITS):
+            c = self.bit[b][k]
+            if (t >> k) & 1:
+                c = size - c                     # flipped: clears become sets
+            s += c * (1 << k)
+        return s
+
+    def query_sum(self, l, r):
+        total = 0
+        while l <= r:
+            b = l // self.B
+            lo, hi = self._bounds(b)
+            if lo == l and l + self.B - 1 <= r:  # a full block
+                total += self._block_sum(b)
+                l = hi
+            else:                                # edge cells read one by one
+                end = min(r, hi - 1)
+                t = self.tag[b]
+                for i in range(l, end + 1):
+                    total += self.a[i] ^ t
+                l = end + 1
+        return total
+
+    def xor_update(self, l, r, x):
+        while l <= r:
+            b = l // self.B
+            lo, hi = self._bounds(b)
+            if lo == l and l + self.B - 1 <= r:  # whole block: one tag flip
+                self.tag[b] ^= x
+                l = hi
+            else:                                # partial: push, edit, rebuild once
+                self._push(b)
+                end = min(r, hi - 1)
+                for i in range(l, end + 1):
+                    self.a[i] ^= x
+                self._redo(b)
+                l = end + 1
+
+
+xs = XorSeg([3, 10, 3], B=1)
+assert xs.query_sum(0, 2) == 16
+xs.xor_update(1, 1, 3)
+assert xs.query_sum(0, 2) == 15
+xs.xor_update(0, 2, 1)
+assert xs.query_sum(1, 2) == 10
+for _ in range(150):
+    n = random.randint(1, 70)
+    a = [random.randint(0, 2**20 - 1) for _ in range(n)]
+    fast = XorSeg(a, random.randint(1, n))
+    slow = XorBrute(a)
+    for _ in range(40):
+        typ = random.randint(1, 2)
+        l = random.randrange(n)
+        r = random.randrange(n)
+        if l > r:
+            l, r = r, l
+        if typ == 1:
+            assert fast.query_sum(l, r) == slow.query_sum(l, r)
+        else:
+            x = random.randint(0, 2**20 - 1)
+            fast.xor_update(l, r, x)
+            slow.xor_update(l, r, x)
+```
+
+##### C++
+
+```cpp
+struct XorSeg {
+    static const int BITS = 20;
+    vector<int> a;
+    vector<vector<int> > bit;
+    vector<int> tag;
+    int n, B, nb;
+    XorSeg(vector<int>& v) {
+        a = v;
+        n = (int)a.size();
+        B = max(1, (int)round(sqrt((double)max(n, 1))));
+        nb = (n + B - 1) / B;
+        bit.assign(nb, vector<int>(BITS, 0));
+        tag.assign(nb, 0);
+        for (int b = 0; b < nb; ++b) redo(b);
+    }
+    void redo(int b) {
+        int lo = b * B, hi = min(n, (b + 1) * B);
+        for (int k = 0; k < BITS; ++k) bit[b][k] = 0;
+        for (int i = lo; i < hi; ++i)
+            for (int k = 0; k < BITS; ++k)
+                if ((a[i] >> k) & 1) ++bit[b][k];
+    }
+    void push(int b) {
+        if (tag[b]) {
+            int lo = b * B, hi = min(n, (b + 1) * B);
+            for (int i = lo; i < hi; ++i) a[i] ^= tag[b];
+            tag[b] = 0;
+        }
+    }
+    long long block_sum(int b) {
+        int lo = b * B, hi = min(n, (b + 1) * B);
+        int size = hi - lo, t = tag[b];
+        long long s = 0;
+        for (int k = 0; k < BITS; ++k) {
+            int c = bit[b][k];
+            if ((t >> k) & 1) c = size - c;
+            s += (long long)c << k;
+        }
+        return s;
+    }
+    long long query_sum(int l, int r) {
+        long long total = 0;
+        while (l <= r) {
+            int b = l / B, lo = b * B, hi = min(n, (b + 1) * B);
+            if (lo == l && l + B - 1 <= r) { total += block_sum(b); l = hi; }
+            else {
+                int end = min(r, hi - 1), t = tag[b];
+                for (int i = l; i <= end; ++i) total += a[i] ^ t;
+                l = end + 1;
+            }
+        }
+        return total;
+    }
+    void xor_update(int l, int r, int x) {
+        while (l <= r) {
+            int b = l / B, lo = b * B, hi = min(n, (b + 1) * B);
+            if (lo == l && l + B - 1 <= r) { tag[b] ^= x; l = hi; }
+            else {
+                push(b);
+                int end = min(r, hi - 1);
+                for (int i = l; i <= end; ++i) a[i] ^= x;
+                redo(b);
+                l = end + 1;
+            }
+        }
+    }
+};
+```
+:::
+
+**Reading it line by line.** The block walk is @sec-sqrt-a1's edge–middle–edge on a new axis: `lo == l and l + B - 1 <= r` admits a block only when the *entire* block is inside $[\ell, r]$, otherwise those few cells are paid for one by one. The insight is that a lazy tag need not be an addition — here it is a **bitmask**, and `_block_sum` turns it into a count by complementing the set-bit counts whose tag bit is on, which is exactly "XOR swaps sets and clears". `_push` before a partial edit keeps the single-source-of-truth `true = a[i] ^ tag[b]` from ever holding two tags at once, and the one `_redo(b)` afterward re-derives the bit histogram from the freshly edited base array — @sec-sqrt-a3's "rebuild only the touched block" applied per write.
+
+:::
+
+::: {.p-complexity}
+**Copy the array:** $O(n)$ per query, $O(nq)$ overall. **Bit-count blocks:** with $B=\sqrt n$, a query is $O\!\big((n/B)\cdot 20 + B\big) = O(\sqrt n \cdot 20)$ and an update is $O(n/B + B\cdot 20)$ for the two rebuilt edge blocks; memory $O(nb \cdot 20) = O(n)$. The constant 20 (one pass over bits) is what makes a block summary answer a *sum* despite the update being a XOR. A range sum reaches $n \cdot 2^{20} \approx 10^{11}$, so block sums and query totals are `long long` (@sec-arr-size-trap).
+:::
+
+::: {.p-edge}
+- A block shorter than $B$ (the last one): `_bounds` clamps `hi` to `n`, so `size` and the complements stay right.
+- $x$ with bits only above the values' range (e.g. $x$ sets bit 19 when all $a_i$ fit in 3 bits): harmless — the tag flips counts that are all-zero or all-`size`, and `_block_sum` reproduces it.
+- Full-array XOR exactly covering an integer number of blocks: every block is "whole", no `_push`, so it is pure $O(nb)$ tag flips.
+- $n = 1$: one block, `B = 1`; the whole-array test `l + B - 1 <= r` fires on any non-empty query.
+:::
+
+::: {.practice}
+- [CF 13E · Holes](https://codeforces.com/problemset/problem/13/E){rating="2700"} — the sibling that rebuilds the touched block on a point write instead of tagging it (@sec-sqrt-p2-holes)
+- [LC 307 · Range Sum Query - Mutable](https://leetcode.com/problems/range-sum-query-mutable/){difficulty="Medium"} — the same edge–middle–edge block walk, but the summary is a single sum (@sec-sqrt-p1-mutable)
+:::

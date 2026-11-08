@@ -1,0 +1,389 @@
+% =====================================================================
+%  20.2  Composing Lazy Tags                           sec:c15-compose
+%  Exports: def:c15-identitytag  thm:c15-compose
+%           lst:c15-compose  lst:c15-affine  lst:c15-817-soln  prob:c15-mex
+%  Worked affine on A (opener grid): base t2[1..8] = 24.
+%    pending T = x -> 2x+1 on covered t2 -> t2 = 2*24 + 1*8 = 56.
+%    a LATER full-cover g = x -> 3x+5 composes: g.T = 3(2x+1)+5 = 6x+8,
+%    t2 = 3*56 + 5*8 = 208; check directly 6*24 + 8*8 = 144 + 64 = 208.
+%  CF 817F sample (live-verified on codeforces.com): q=3,
+%    1 3 4 / 3 1 6 / 2 1 3  ->  1 / 3 / 1  (hand-replayed in the trace).
+%  Tags here are on a bit x in {0,1}: assign-to-v overrides everything,
+%    flip*flip = identity, flip*assign v = assign (1-v).
+% =====================================================================
+\section{Composing Lazy Tags}\label{sec:c15-compose}
+
+\begin{previouslybox}[Two updates, one node, no push in between]
+Section~\(\secref{c15-core}\) kept exactly one pending \emph{add} per node, and two adds merge by summation -- the one case where composition was invisible.  This section is where lazy propagation gets its teeth: when a \emph{second}, structurally different update lands on a node that already carries a tag from the first, before anything was ever pushed, the two must fold into a \emph{single} correct tag.  Chapter~18 (\chref{c14}) could only ever add (its difference trick inverts one operation); here we take the updates a difference BIT must hand off -- \emph{assign}, \emph{flip} -- and the rule that governs them is composition order.
+\end{previouslybox}
+
+\begin{topicintro}
+A pending tag is a \term{transform} waiting to be applied to a node's children: it stands for ``everything I already folded into my aggregate, but you (children) still owe.''  If two updates \(g\) (older) then \(h\) (newer) both cover node \(v\) before a push, the children will eventually need \emph{one} transform that does \(g\) and then \(h\) -- the \term{composition} \(h\circ g\).  Writing \code{apply} correctly means knowing, for your tag type, (i) how one update folds into the node's aggregate, and (ii) how it \emph{merges} into the node's existing pending tag.  For a sum-of-adds tag (ii) was \(+\); for assign/flip it is the override-and-square-free rule below; for the affine pair \((\mathit{mul},\mathit{add})\) it is matrix-like and \emph{order-sensitive}.
+
+\textbf{Prerequisites.} \(\secref{c15-core}\)'s \code{apply}/\code{push}/\code{pull}; the running array \(A\) and its sum grid.  The idea that a fold over an empty thing is harmless (\(\secref{c13-core}\)'s identity element) -- reused here as the \emph{identity tag}.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state the identity tag for add / mul / assign / flip and why pushing it is a no-op; \hfill\lv{3}
+  \item compose assign with flip (override, and \(\mathit{flip}^2=\mathit{id}\)) and affine with affine, in the \emph{correct} order; \hfill\lv{4}
+  \item fold a two-field \((\mathit{mul},\mathit{add})\) tag into a node's sum and into its pending slot; \hfill\lv{4}
+  \item solve a mixed set/remove/invert input (CF~817F) and explain why a difference BIT cannot. \hfill\lv{4}--\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``different update types can stack on one node before you look'']
+\reckey{the query set mixes \emph{set}/\emph{assign} with \emph{add}/\emph{flip}/\emph{xor}, or mixes \emph{multiply} with \emph{add}; the brute force keeps a single ``pending'' field and gets the wrong answer once two \emph{different} updates touch the same node; any phrase like ``then negate everything in \([l,r]\)'' after ``set everything in \([l,r]\) to \(c\)''.}
+\recuse{
+  \item assign overrides add/flip -- the override rule below (CF~817F's set vs invert);
+  \item multiply \emph{then} add on a sum -- the affine pair, worked here;
+  \item a single non-commutative pair is enough to force ordering -- get it wrong and only cases where both updates hit one node fail (the classic weak-sample trap).
+}
+\recnotuse{
+  \item every update is the \emph{same} invertible add -- \(\secref{c15-core}\) or Ch.~18's difference BIT;
+  \item the two updates provably never co-occur on one node before a push -- composition is moot (rare; do not rely on it);
+  \item the update truly cannot be expressed as \emph{any} single transform (range \(\bmod\), range \(\mathit{chmin}\)) -- beats, Ch.~23 (\chref{c29}), \(\secref{c15-strains}\).
+}
+One-line test: \emph{if two updates of \emph{different} kinds can reach the same node while it is still dirty, you are in the composition regime -- define the merge and its order.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The identity tag and the composition law}
+% ---------------------------------------------------------------
+
+\begin{definition}{Identity tag}{c15-identitytag}
+The \term{identity tag} \(\mathit{id}\) is the pending value that, when \code{apply}-ed, leaves the node's aggregate unchanged and merges into an existing tag as a no-op.  Concretely: \(\mathit{add}\to 0\), \(\mathit{mul}\to 1\), \(\mathit{assign}\to\) ``none,'' \(\mathit{flip}\to\) ``off,'' \(\mathit{xor}\to 0\).  A freshly built (or freshly \code{push}ed) node carries \(\mathit{id}\).
+\end{definition}
+
+\begin{theorem}{Lazy tags form a (generally non-commutative) monoid}{c15-compose}
+Fix a node.  Let each supported update be a transform of a single element, and let a tag be the transform its children still owe.  Then there is a binary operation \(\circ\) (``do the right operand \emph{after} the left'') and an identity \(\mathit{id}\) such that:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \((\mathcal{T},\circ,\mathit{id})\) is a \term{monoid}: \(\circ\) is associative, \(\mathit{id}\circ\tau=\tau\circ\mathit{id}=\tau\).
+  \item A push of a composed tag equals pushing the two updates in order: applying tag \(\tau\circ\tau'\) to a child is the same as applying \(\tau'\) then \(\tau\) to it -- so the aggregate fold and the tag merge must use the \emph{same} \(\circ\).
+  \item When \(\circ\) is \textbf{not} commutative (affine, or set-after-flip vs flip-after-set in some encodings), the merge order is forced by \emph{chronological} order: the newer update is composed on the \emph{outside}.
+\end{itemize}
+\end{theorem}
+\begin{proofbox}
+Each supported update acts on an element as a function \(f\); the node's aggregate is a function \(F\) of its elements that the update rewrites in closed form.  A pending tag records the composite function \(f_{\text{new}}\circ\cdots\circ f_{\text{old}}\) still to be applied to the children -- composition of functions is associative with identity \(\mathrm{id}\), giving the monoid.  The two-fold requirement (2) is exactly \emph{well-definedness}: whether a child receives one merged \code{apply} or two sequential ones, the resulting \(F\) and grandchild tags match, because both compute the same composite function.  (3) is because function composition is order-sensitive in general: \(f\circ g\neq g\circ f\); the tag stored at \(v\) was laid down \emph{earlier} than the arriving update, so the arriving one must sit on the outside.
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  The tag is a little instruction you owe your children.  Owning two debts means rolling them into one instruction -- and if the order of the two instructions changes the outcome, you must roll them in the order you incurred them.  Forget that, and your samples pass while a hidden test where a \emph{set} is followed by a \emph{flip} on one clean node fails.
+
+% ---------------------------------------------------------------
+\subsection{The bit tags: assign overrides, flip squares away}
+% ---------------------------------------------------------------
+
+Represent a pending bit-transform by two fields: \(\mathit{setv}\in\{-1,0,1\}\) (\(-1\) = ``no assignment yet'') and \(\mathit{flip}\in\{0,1\}\).  The transform is: if \(\mathit{setv}\neq-1\) the value becomes \(\mathit{setv}\), then if \(\mathit{flip}\) it is toggled.
+
+\begin{lstlisting}[caption={compose a new update into an existing assign/flip tag (order: old first, then the new op)}, label={lst:c15-compose}]
+// tag = (setv in {-1 none, 0, 1}) then (flip in {0,1}); identity = {-1, 0}
+struct Tag { int setv, flip; };
+Tag identity(){ return (Tag){-1, 0}; }
+
+// a fresh ASSIGN(v) lands on top of pending tag t:
+//   "t happened, then set to v"  ==  "set to v"   (SET OVERRIDES the past)
+Tag merge_assign(Tag t, int v){
+    t.setv = v;                      // the assignment wins outright
+    t.flip = 0;                      // any pending flip is swallowed
+    return t;
+}
+// a fresh FLIP lands on top of pending tag t:
+//   flip . set(v) == set(1-v);   flip . flip == identity
+Tag merge_flip(Tag t){
+    if (t.setv != -1) t.setv ^= 1;   // flipping a known value: just change it
+    else              t.flip ^= 1;   // flipping a flip cancels; else arm one
+    return t;
+}
+// fold a tag into the node SUM over an interval of length len (1=present):
+long long fold(Tag g, long long cur, long long len){
+    if (g.setv != -1) cur = g.setv ? len : 0;   // assign makes it uniform
+    if (g.flip)       cur = len - cur;          // invert present<->absent
+    return cur;
+}
+\end{lstlisting}
+
+\begin{insightbox}[Two rules, memorised]
+\textbf{Assign overwrites.}  A \emph{later} assignment makes every earlier pending update irrelevant to the value: it becomes just ``set to \(v\).''  \textbf{Flip is its own inverse.}  Two flips on the same node cancel (\(\mathit{flip}\circ\mathit{flip}=\mathit{id}\)); a flip after a set is just a different set.  Those two facts alone settle every ``set / remove / invert'' problem (CF~817F, and the Summit \(\probref{c15-summit}\) later, where the flip-after-a-threshold is the whole trick).
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Worked: the affine pair, composed on \(A\)}
+% ---------------------------------------------------------------
+
+The affine tag does two jobs at once: \emph{multiply then add}, i.e. \(x\mapsto \mathit{mul}\cdot x+\mathit{add}\).  It is the canonical \emph{order-sensitive} composition.  A sum aggregate folds as \(t_v\leftarrow \mathit{mul}\cdot t_v+\mathit{add}\cdot\text{len}\).
+
+\begin{lstlisting}[caption={affine lazy tag: two pending scalars, composed newest-on-outside}, label={lst:c15-affine}]
+struct Aff { long long mul, add; };            // x -> mul*x + add   (mod MOD)
+Aff identity(){ return (Aff){1, 0}; }          // mul=1, add=0 leaves x fixed
+// apply NEW g AFTER pending f  =>  g . f  (order matters here!)
+Aff compose(Aff f, Aff g){
+    return (Aff){ (g.mul % MOD) * (f.mul % MOD) % MOD,
+                  ((g.mul % MOD) * (f.add % MOD) + g.add) % MOD };
+}
+// fold into node sum over an interval of length len, and update its tag:
+void apply(int v, long long len, Aff g){
+    t[v]   = ((g.mul % MOD) * t[v] + (g.add % MOD) * (len % MOD)) % MOD;
+    tag[v] = compose(tag[v], g);               // g is the later operation
+}
+\end{lstlisting}
+
+\begin{tracebox}[affine composition on \(A\): two full-cover updates on node \(t_2\) owning \(1..8\)]
+Base \(t_2=24\), length \(8\), pending \(\mathit{id}=(1,0)\).\\
+\textbf{Update 1} \(g_1: x\mapsto 2x+1\) covers \(t_2\) whole \(\Rightarrow\) fold: \(t_2=2\cdot24+1\cdot8=56\); \(\mathit{tag}=\text{compose}((1,0),g_1)=(2,1)\).\\
+\textbf{Update 2} \(g_2: x\mapsto 3x+5\) \emph{also} covers \(t_2\) (before any push) \(\Rightarrow\) fold: \(t_2=3\cdot56+5\cdot8=208\); tag \(=\text{compose}((2,1),g_2)\): \(\mathit{mul}=3\cdot2=6\), \(\mathit{add}=3\cdot1+5=8\) \(\Rightarrow(6,8)\).\\
+\textbf{Cross-check.} The children will owe the single transform \(x\mapsto6x+8\). Applying it to the \emph{original} interval sum directly: \(6\cdot24+8\cdot8=144+64=208=t_2\). \(\checkmark\)  Note \(\mathit{add}\): had we composed in the wrong order (\(g_1\circ g_2\)) we would get \(\mathit{mul}=6\) still but \(\mathit{add}=2\cdot5+1=11\), i.e.\ \(t_2=6\cdot24+11\cdot8=232\neq208\) -- an integer-sized wrong answer that passes no real test.
+\end{tracebox}
+
+\begin{warningbox}[Order: the arriving update is the OUTERMOST]
+If node \(v\) already owes transform \(f\) (older, already folded into \(t_v\)) and a new transform \(g\) arrives, the children must do \(f\) \emph{then} \(g\): the merged tag is \(g\circ f\), not \(f\circ g\).  In \(\coderef{c15-affine}\) that is why \code{compose(f, g)} computes \(g.\!f\).  For the commutative pairs (two adds, two flips) you cannot tell the difference from samples -- the bug is \emph{latent} until an affine/set test exposes it.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Boundary: where the difference BIT stops and lazy starts}
+% ---------------------------------------------------------------
+
+Chapter~18's difference Fenwick tree answers range-add \(+\) range-sum by storing \(d_i=a_i-a_{i-1}\) and prefix-summing: it works \emph{because} adding has an inverse (subtract the same amount), so a range is the difference of two prefixes.  The instant an update has \emph{no inverse}, the difference trick dies:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{assign} ``set \([l,r]\) to \(v\)'' -- there is no \(+/-\) that turns an unknown old value into \(v\); you must \emph{remember} \(v\) in a tag (\(\secref{c15-assign}\)).
+  \item \textbf{flip / xor} ``toggle membership over \([l,r]\)'' -- self-inverse but not an additive difference; \(\mathit{flip}^2=\mathit{id}\) is a \emph{composition} fact, exactly \(\thmref{c15-compose}\).
+  \item \textbf{multiply / affine} ``\(x\mapsto m\,x+c\)'' -- composes into two fields, not one invertible number (\(\coderef{c15-affine}\)).
+\end{itemize}
+This is the hand-off Ch.~18 promised and Ch.~20 discharges.  The one update shape the difference BIT \emph{still} beats lazy at is the plain invertible add/sum, where its smaller constant and \(n\) slots win -- know it, but it is no longer the frontier.  The genuine frontier -- updates with \emph{no} single-tag representation at all (range modulo CF~438D, range \(\mathit{chmin}\)) -- is where \(\secref{c15-strains}\) hands you to beats.
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 817F MEX Queries}
+% ---------------------------------------------------------------
+
+\solvedproblem{c15-mex}{MEX Queries}{CF 817F}
+  {https://codeforces.com/problemset/problem/817/F}{CF 2300}
+  {assign + flip composed on a bit-tag; coordinate compression; leftmost-absent descend = the MEX}
+
+\begin{problemstatement}[CF 817F MEX Queries]
+Start with an empty set of positive integers.  Process \(q\) operations, each with \(1\le l\le r\le 10^{18}\):
+\texttt{1 l r} --- insert every integer in \([l,r]\); \texttt{2 l r} --- delete every integer in \([l,r]\); \texttt{3 l r} --- invert every integer in \([l,r]\) (present ones become absent, absent become present).  After \emph{each} operation print the \term{MEX}: the smallest positive integer not currently in the set.
+
+\textbf{Input.} \(1\le q\le 10^5\); \(l,r\) as above.
+
+\textbf{Output.} One line per operation: the MEX after it.
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+3
+1 3 4
+3 1 6
+2 1 3
+
+Output:
+1
+3
+1
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 35 minutes]
+Two obstacles.  \(r\) up to \(10^{18}\): no array is that long.  And ``invert a range'' plus ``the MEX is the \emph{first absent}'' are not prefix-invertible operations -- a BIT (Ch.~18) cannot even express the update, let alone find the first gap.
+\peek{are all the integers in some stretch always in the same state?}
+\nudge{the only boundaries that ever matter are the endpoints you are given: collect every \(l\) and every \(r+1\) (plus a sentinel for \(1\)).  Between consecutive sorted endpoints every integer is \emph{always} updated together, so it is one leaf.  That is coordinate compression, turning \(10^{18}\) into \(\le 2q\) leaves.}
+\fullhint{On the compressed leaves keep a lazy tree whose aggregate is ``how many of my integers are present'' and whose tag is the assign/flip pair of \(\coderef{c15-compose}\).  Operation 1 = assign~1, 2 = assign~0, 3 = flip.  The MEX is the start \(xs[i]\) of the leftmost leaf with \(\mathit{sum}<\mathit{len}\): \emph{descend} preferring the left child whenever it is not fully present (push as you go).  Add a sentinel endpoint \(\max r + 2\) so the last leaf is always absent and a MEX always exists.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Membership of an integer is a single bit.  Every operation is a transform of that bit -- set~1, set~0, or toggle -- exactly the assign/flip monoid of \(\coderef{c15-compose}\).  Compression makes the domain small because the operations only ever start or stop at given endpoints, so the infinite line splits into \(O(q)\) uniform blocks.  The MEX query is a ``find first zero'' over the blocks: store per node the count of present integers; a node is ``all present'' iff its count equals its block-length, and the first not-all-present block, scanned left-to-right, holds the answer (its first integer).
+
+\solstep{Key Observations}
+\begin{observation}
+Within one compressed block every integer shares the same bit for the whole run of operations -- because no operation boundary ever falls strictly inside a block.  So a block is uniform, ``present count = block length or \(0\)'', and the node can be a single field.
+\end{observation}
+\begin{observation}
+The three operations are \emph{not} one invertible add, so Ch.~18's difference BIT is structurally excluded; assign-override and \(\mathit{flip}^2=\mathit{id}\) are precisely \(\thmref{c15-compose}\) applied to bits.
+\end{observation}
+\begin{observation}
+MEX \(=\) first absent \(=\) descend to the leftmost leaf with \(\mathit{sum}<\mathit{len}\).  That is \(\secref{c13-search}\)'s tree-descent, now on a lazy tree -- push on the way down so children counts are current.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Store the actual set of integers}
+{The universe is \(10^{18}\) wide; even a balanced set (Ch.~6) cannot insert \([l,r]\) for \(r-l\) astronomically large.  The range is the unit of work, not the element.}
+\deadend{Compress by the endpoints but forget \(r+1\)}
+{Deleting/inverting \([l,r]\) must stop at \(r\); without the boundary \(r+1\) as its own point you cannot express ``everything past \(r\) is untouched.''  Always insert \(l\) \emph{and} \(r+1\).}
+\aha{Treat set/remove/invert as assign/flip tags over compressed uniform blocks; the MEX is a lazy leftmost-non-full descent.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.22\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ explicit set & insert/delete/invert the integers & \(\bigO{q\cdot(r-l)}\) & \mle \\
+2 & \lv{3}\ difference BIT & cannot invert/assign (not additive) & -- & wrong \\
+3 & \lv{4}\ \textbf{compressed lazy} & assign/flip tags, leftmost-absent & \(\bigO{q\log q}\) & \ac \\
+4 & \lv{5}\ implicit dynamic tree & allocate nodes only where touched & \(\bigO{60\,q}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~4 (an implicit segment tree allocating nodes on demand) is the alternative when you will not precompress; it is the same tag logic with pointer nodes.  We keep the compressed version.
+
+\solstep{Solution}
+Collect points \(\{1\}\cup\{l_i\}\cup\{r_i+1\}\cup\{\max r+2\}\), sort unique into \(xs\); leaf \(i\) is the block \([xs_i,\,xs_{i+1}-1]\) of length \(xs_{i+1}-xs_i\).  Build a lazy tree storing \(\mathit{sum},\mathit{len}\) and an assign/flip tag (\(\coderef{c15-compose}\)).  Map operation \([l,r]\) to leaves \([\,\mathrm{idx}(l),\ \mathrm{idx}(r+1)-1\,]\) and \code{update} with the matching op.  Print \(xs[\) leftmost leaf with \(\mathit{sum}<\mathit{len}\,]\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Uniformity.} Every operation boundary lies in \(xs\), so each block \([xs_i,xs_{i+1}-1]\) is either wholly inside or wholly outside every operation range; all its integers thus receive identical updates and stay equal, so storing one bit (present \(\Leftrightarrow\mathit{sum}=\mathit{len}\)) per block is exact.
+\textbf{Tag correctness.} The node's \(\mathit{sum}\) under assign~1 / assign~0 / flip is set to \(\mathit{len}/0/\mathit{len}-\mathit{sum}\), and the pending tag is merged by \code{merge\_assign}/\code{merge\_flip} (\(\coderef{c15-compose}\)), which the override and \(\mathit{flip}^2=\mathit{id}\) laws make equal to applying the operations in order (\(\thmref{c15-compose}\)); pushing propagates the composed transform to children.  Thus \(\mathit{sum}\) is always the true present count.
+\textbf{MEX.} The smallest positive absent integer lies in the leftmost block that is not all-present.  \code{first\_absent} descends left whenever the left child is not all-present (correct since present counts are current after \code{push}), else right; it returns that block, whose start \(xs_i\) is the first absent integer.  The sentinel block at \(\max r+2\) is never updated, so it is always absent and a result always exists.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 817F full solution: assign/flip lazy over compressed blocks + leftmost-absent descend}, label={lst:c15-817-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+struct Node { long long sum, len; int setv, flip; };
+Node s[4*MX];
+vector<long long> xs;
+int q;
+
+void build(int v, int l, int r){
+    s[v].sum = 0; s[v].setv = -1; s[v].flip = 0;
+    s[v].len = xs[r+1] - xs[l];                 // integers in block-range l..r
+    if (l != r){ int m = (l+r)/2; build(2*v,l,m); build(2*v+1,m+1,r); }
+}
+void apply_set(int v, int val){
+    s[v].sum = val ? s[v].len : 0;
+    s[v].setv = val; s[v].flip = 0;              // SET OVERRIDES
+}
+void apply_flip(int v){
+    s[v].sum = s[v].len - s[v].sum;
+    if (s[v].setv != -1) s[v].setv ^= 1;         // flip a known value
+    else                 s[v].flip ^= 1;         // flip cancels / arms
+}
+void push(int v){
+    if (s[v].setv != -1){ apply_set(2*v, s[v].setv); apply_set(2*v+1, s[v].setv); s[v].setv = -1; }
+    if (s[v].flip){ apply_flip(2*v); apply_flip(2*v+1); s[v].flip = 0; }
+}
+void update(int v, int l, int r, int ql, int qr, int ty){
+    if (ql > r || qr < l) return;
+    if (ql <= l && r <= qr){
+        if (ty == 1) apply_set(v, 1); else if (ty == 2) apply_set(v, 0); else apply_flip(v);
+        return;
+    }
+    push(v); int m = (l+r)/2;
+    update(2*v,l,m,ql,qr,ty); update(2*v+1,m+1,r,ql,qr,ty);
+    s[v].sum = s[2*v].sum + s[2*v+1].sum;        // pull
+}
+int first_absent(int v, int l, int r){
+    if (l == r) return l;
+    push(v); int m = (l+r)/2;
+    if (s[2*v].sum < s[2*v].len) return first_absent(2*v,l,m);   // gap on the left
+    return first_absent(2*v+1,m+1,r);
+}
+int main(){
+    scanf("%d", &q);
+    vector<array<long long,3>> op(q);
+    xs.push_back(1); long long maxr = 0;
+    for (int i = 0; i < q; i++){
+        long long t,l,r; scanf("%lld%lld%lld", &t, &l, &r);
+        op[i] = {t,l,r}; xs.push_back(l); xs.push_back(r+1); maxr = max(maxr, r);
+    }
+    xs.push_back(maxr + 2);                      // sentinel block, always absent
+    sort(xs.begin(), xs.end()); xs.erase(unique(xs.begin(), xs.end()), xs.end());
+    int nseg = (int)xs.size() - 1;
+    build(1, 0, nseg-1);
+    for (int i = 0; i < q; i++){
+        long long t=op[i][0], l=op[i][1], r=op[i][2];
+        int L = lower_bound(xs.begin(), xs.end(), l)   - xs.begin();
+        int R = lower_bound(xs.begin(), xs.end(), r+1) - xs.begin() - 1;
+        update(1, 0, nseg-1, L, R, t);
+        int idx = first_absent(1, 0, nseg-1);
+        printf("%lld\n", xs[idx]);
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CF 817F: add 3..4, then invert 1..6, then remove 1..3]
+Points \(\{1,3,5,1,7,1,4,8\}\to xs=(1,3,4,5,7,8)\); blocks \(b_0[1,2], b_1[3], b_2[4], b_3[5,6], b_4[7]\), all sum \(0\).\\
+\textbf{1 3 4} assign~1 on blocks \([1,2]\): \(b_1,b_2\) present. Leftmost not-full \(=b_0\) (sum \(0<2\)) \(\Rightarrow\) MEX \(=xs_0=\boxed{1}\).\\
+\textbf{3 1 6} flip on blocks \([0,3]\): \(b_0\to\)present, \(b_1,b_2\to\)absent, \(b_3\to\)present, \(b_4\) untouched(absent). Leftmost not-full \(=b_1\) \(\Rightarrow\) MEX \(=xs_1=\boxed{3}\).\\
+\textbf{2 1 3} assign~0 on blocks \([0,1]\): \(b_0,b_1\) absent. Leftmost not-full \(=b_0\) \(\Rightarrow\) MEX \(=xs_0=\boxed{1}\).  Output \(\boxed{1,\,3,\,1}\) -- official.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(|xs|\le 2q+2\le 200{,}002\), so \(nseg=O(q)\).  Each operation: one \code{update} and one \code{first\_absent}, both \(\bigO{\log q}\) -- total \(\bigO{q\log q}\approx 3.4\cdot10^6\) node-visits plus a sort \(\bigO{q\log q}\).  Memory \(4\cdot nseg\) nodes of a small struct \(\approx 10\) MB.  \ac.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.22\linewidth} p{0.30\linewidth} p{0.36\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+MEX \(=1\) from the start & \(b_0=[1,\dots]\) & sentinel of point \(1\) makes \(b_0\) the first block; sum\(0\) \(\Rightarrow\) answer~1 \\
+\(r=10^{18}\) & \(r+1\) overflows? & stored in \code{long long} (\(10^{18}+2<9.2\cdot10^{18}\)) \\
+invert then invert & cancels & \code{merge\_flip}: \(\mathit{flip}^2=\mathit{id}\) \\
+set then invert & override vs order & \code{apply\_set} clears flip; \code{apply\_flip} toggles \(\mathit{setv}\) \\
+all touched blocks present & past the last update & sentinel block \(b_{\text{last}}\) is absent, guarantees a result \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Insert \(r+1\), not just \(r\).}  Compression boundaries are where state can \emph{change}; a block ending exactly at \(r\) and the point \(r+1\) must be separate, else a later \([r+1,\cdot]\) update bleeds into it.
+  \item \textbf{Sentinel for ``beyond every update.''}  Without \(\max r+2\) a fully-covered tree makes \code{first\_absent} descend off the end.  Always guarantee a trailing absent block.
+  \item \textbf{Push before you descend in \code{first\_absent}.}  The descend compares a child's \(\mathit{sum}\) to its \(\mathit{len}\); if the parent is dirty the child's \(\mathit{sum}\) is stale and you pick the wrong branch -- the same push-before-descend rule as \(\secref{c15-core}\), now inside a search.
+  \item \textbf{\code{apply\_set} must clear \(\mathit{flip}\).}  Leaving a stale flip armed on a node you just assigned is a one-query-delayed wrong answer.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: merging assign in the wrong direction]
+A \emph{later} assignment overrides an older pending tag (\(\coderef{c15-compose}\): \code{merge\_assign} sets \(\mathit{setv}\), clears \(\mathit{flip}\)).  Merging so the \emph{older} assign survives gives answers that are one operation behind -- and passes every sample where each node is only ever touched once.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: forgetting \(\mathit{flip}^2=\mathit{id}\)]
+Two inverts on a clean node must cancel.  If your flip is a counter you increment without mod~2, a node with \(\mathit{flip}=2\) behaves like \(\mathit{flip}=0\) only if you reduce it -- keep flip as a single bit, exactly \(\mathit{flip}\oplus1\).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: affine order (\(\mathit{mul}\) before \(\mathit{add}\)) not honoured]
+The affine tag \((\mathit{mul},\mathit{add})\) means ``multiply, \emph{then} add.''  Composing a new \(g\) onto a pending \(f\) is \((g.\mathit{mul}\cdot f.\mathit{mul},\;g.\mathit{mul}\cdot f.\mathit{add}+g.\mathit{add})\).  Swapping to \((f.\mathit{mul}\cdot g.\mathit{mul},\dots)\) is the wrong-order bug the trace above exposed (\(232\) vs \(208\)).
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: folding the tag into the aggregate with the wrong length]
+A sum fold of assign~\(v\) is \(v\cdot\text{len}\) and of affine is \(\mathit{mul}\cdot t+\mathit{add}\cdot\text{len}\), both using the \emph{node's} interval length (the block-length sum).  Using the request width mis-scales, as in \(\secref{c15-core}\)'s Trap~1 -- but now the error also poisons the composed tag.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Where to Drill Next}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Does your \code{merge} keep the \emph{newer} update on the outside?
+  \item For an assign, did you \emph{clear} the pending flip/add of the node?
+  \item For affine, is \(\mathit{add}\) composed as \(g.\mathit{mul}\cdot f.\mathit{add}+g.\mathit{add}\) (multiply the \emph{old} add by the \emph{new} multiplier)?
+  \item In a search that descends (like \code{first\_absent}), did you \code{push} first?
+  \item Did you insert \(r+1\) (and a trailing sentinel) when compressing?
+\end{itemize}
+\end{stuckbox}
+
+No fresh linked practice entries appear here by design -- the composition regime is drilled by the mixed set in the chapter end, and the affine and set/invert tags recur there (\(\probref{c15-summit}\) composes a threshold-flip; CF~1114F and CF~718C in the mixed set use affine and a multiplicative tag).  To self-test composition without a judge: re-run \(\coderef{c15-affine}\) on the trace above but swap the compose order and watch \(t_2\) land on \(232\); then fix a random assign/flip sequence on \(A\)'s leaves and hand-check it against \(\coderef{c15-compose}\).
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c15-core}\) owns the \code{apply}/\code{push}/\code{pull} skeleton these tags plug into.  Chapter~18 (\chref{c14}) owns the difference-BIT contrast the boundary section discharges.  Forward: \(\secref{c15-assign}\) makes range \emph{assign} the headline operation (not just one tag among many); \(\secref{c15-strains}\) marks the updates for which \emph{no} \(\circ\) exists (range \(\bmod\)/\(\mathit{chmin}\) \(\to\) beats, Ch.~23 \chref{c29}); the Summit \(\probref{c15-summit}\) is a reverse-order composition puzzle.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 20.2 in 10 seconds]
+When two updates meet at a dirty node, \emph{compose} them into one tag -- the newer on the \emph{outside}.  Assign \textbf{overrides} (later set wins, clears older pending); flip is \(\mathit{flip}^2=\mathit{id}\) and flip-after-set is a different set; affine \((\mathit{mul},\mathit{add})\) composes as \((\mathit{mul}\cdot\mathit{mul}',\ \mathit{mul}\cdot\mathit{add}'+\mathit{add})\) and is \textbf{order-sensitive}.  The identity tag (add~0, mul~1, assign none, flip off) folds to a no-op.  Non-invertible updates are exactly what Ch.~18's difference BIT cannot do -- the hand-off discharged here.  Worked: CF~817F (\(\probref{c15-mex}\), \(\coderef{c15-817-soln}\)) -- assign/flip over compressed blocks, MEX by leftmost-absent descend.
+\selftest{
+  \item Write \code{merge\_flip} for a tag that already holds assign~1.  What is the result?
+  \item Compose affine \(f=(3,2)\) then \(g=(5,1)\): the merged \((\mathit{mul},\mathit{add})\)?
+  \item Why is range \emph{assign} outside a difference BIT's reach but range add inside?
+  \item In CF~817F, why insert \(r+1\) and a sentinel rather than only \(l,r\)?
+  \item Why must \code{first\_absent} push before reading a child's \(\mathit{sum}\)?
+}
+\end{recallbox}

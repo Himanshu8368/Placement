@@ -1,0 +1,563 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  5.3  Path-as-Sequence and the Depth Sequence             sec:c24-path
+%  Exports: def:c24-path  prop:c24-sweep
+%           lst:c24-path-stack  ex:c24-path-run
+%           prob:c24-levelsum  lst:c24-levelsum
+%           prob:c24-kthlevel  lst:c24-kthlevel  practice: LC 1367 (unlabelled)
+% =====================================================================
+\section{Path-as-Sequence and the Depth Sequence}\label{sec:c24-path}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Which nodes of $G$ share a depth, and what is $\depth$ for every node? (\figref{c04-running-g})
+  \item In the DFS, when you \emph{enter} and \emph{leave} a node, what does the recursion
+        stack hold at that instant, in terms of the root-to-$v$ path? (\secref{c24-times})
+  \item State the subtree range $[\tin(v), \tout(v))$; why is it the \emph{opposite} end of
+        the same stick from a root-path? (\secref{c24-flatten})
+  \item Why did we say the 2-tick (entry \emph{and} exit) clock is the one that unlocks path
+        sums? (\secref{c24-times}, variation 3)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Flattening answered \emph{subtrees}; this section answers \emph{paths}. Read the same DFS one
+way and a subtree is a contiguous \emph{block}; read it another way and the recursion stack
+\emph{is} the root-to-current path, a sequence you can push onto and pop off for free. Two
+views fall out. (i) The \term{root-path view}: carry a stack (or a $\pm w$ difference array on
+the Euler clock) so that at any node you can read the aggregate along its path from the root
+in $O(1)$. (ii) The \term{depth sequence}: bucket nodes by $\depth$ and process level by
+level -- the array behind every ``per-level'' problem. LC 1161 and LC 2583 are exactly this:
+sum each level, then take the best or the $k$-th largest.
+\textbf{Prerequisites.} \secref{c24-times} ($\tin/\tout$, both clocks); \secref{c24-flatten}
+(the subtree range, for contrast); \chref{c03} BFS levels.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item maintain the root-to-node path as a DFS stack and answer path aggregates; \hfill\lv{3}
+  \item turn ``add $w[v]$ to a whole subtree, then read the root-path to $u$'' into an
+        in/out difference sweep;                                          \hfill\lv{4}
+  \item build a \emph{level array} (buckets by $\depth$) and aggregate per level;   \hfill\lv{2}--\lv{3}
+  \item find the best / $k$-th level sum by combining a BFS with a sort.           \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- paths and levels]
+\reckey{the question is about the \emph{root-to-node path} (``sum of values on the way down'',
+``is there a root-path matching this pattern''), or about a \emph{level} (``the level with the
+largest sum'', ``average per level'', ``$k$-th largest level sum'').}
+\recuse{
+  \item ``path from the root to $v$'' aggregates asked for many $v$ -- carry a stack or a
+        difference array (\propref{c24-sweep});
+  \item ``per-level sum / max / average'', ``which level is heaviest'' -- a level array
+        bucketed by $\depth$ (LC 1161, \probref{c24-levelsum});
+  \item ``$k$-th something over the levels'' -- collect level sums, select (LC 2583,
+        \probref{c24-kthlevel});
+  \item ``does this \emph{sequence} appear going downward from some node'' -- DFS carrying the
+        pattern along the path stack (the LC 1367 practice below).
+}
+\recnotuse{
+  \item aggregating over a \emph{subtree} -- that is \secref{c24-flatten}, not here;
+  \item the path between \emph{two arbitrary} nodes (root-path $\to$ LCA $\to$ distance) --
+        \secref{c24-dist} and \chref{c11};
+  \item path \emph{with updates} as a first-class structure -- heavy-light (\chref{c16}).
+}
+One-line test: \emph{is the unit of work ``down from the root'' (a path) or ``across one
+depth'' (a level)? Then use the path stack or the level array -- this section.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+The recursion stack of a DFS is, at every instant, exactly the path from the root to the node
+you are standing on: pushing a node extends the path, popping it retracts. So the ``sequence''
+you carry down (\secref{c02-topdown}) is not extra bookkeeping -- it \emph{is} the stack.
+Everything you want to know about the root-path (its sum, whether it contains a pattern, its
+longest increasing run) can be maintained incrementally as you descend and undone as you
+ascend.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram]
+  \node[troot] (n0) at (0,0) {$0$};
+  \node[tnode] (n1) at (-3,-1.4) {$1$};
+  \node[tnode] (n2) at (0,-1.4) {$2$};
+  \node[tnode] (n3) at (3,-1.4) {$3$};
+  \node[tleaf] (n4) at (-3.9,-2.8) {$4$};
+  \node[tleaf] (n5) at (-2.1,-2.8) {$5$};
+  \node[tleaf] (n6) at (3,-2.8) {$6$};
+  \draw[tedge] (n0) -- (n1); \draw[tedge] (n0) -- (n2); \draw[tedge] (n0) -- (n3);
+  \draw[tedge] (n1) -- (n4); \draw[tedge] (n1) -- (n5); \draw[tedge] (n3) -- (n6);
+  \draw[tedgehl, line width=1.8pt] (n0) -- (n1) -- (n4);
+  \node[annot, align=left, font=\scriptsize] at (-6.5,-0.4)
+    {standing at $4$, the\\stack $=[0,1,4]$\\$=\depth$-path from root};
+  \node[annot, align=left, font=\scriptsize] at (4.3,-2.3)
+    {levels: $L_0=\{0\}$\\$L_1=\{1,2,3\}$\\$L_2=\{4,5,6\}$};
+\end{tikzpicture}
+\caption{Two readings of one DFS. The \textbf{highlighted chain} $0,1,4$ is the recursion
+stack at node $4$ -- the root-path, a \emph{sequence}. The \textbf{horizontal bands} are the
+level arrays $L_d=\{v:\depth(v)=d\}$ -- the \emph{depth sequence}. Paths read down a column;
+levels read across a row.}\label{fig:c24-path}
+\end{figure}
+
+Now bucket nodes by depth. A BFS naturally produces these \term{level bands}; a DFS can push
+each node into \code{level[$\depth(v)$]}. Once you have the array of per-level sums (or
+counts, or maxima) you can scan it for the best level (\probref{c24-levelsum}), sort it for
+order statistics (\probref{c24-kthlevel}), or average it -- all offline from the tree, on a
+plain array.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Root-path; level array}{c24-path}
+The \term{root-path} of $v$ is the sequence of nodes from the root to $v$ inclusive, which a
+DFS holds as its call stack when it reaches $v$. The \term{level} (or \term{depth bucket})
+$L_d = \{\, v : \depth(v) = d \,\}$; the \term{depth sequence} is the partition
+$(L_0, L_1, \dots, L_{\height})$. A \emph{path aggregate} $A(v)$ (sum, xor, list of values) is
+a quantity defined over the root-path of $v$.
+\end{definition}
+
+\noindent\textbf{In plain words.} ``Path from the root to $v$'' $=$ the stack you had to build
+to reach $v$; maintain it as you go. ``Level $d$'' $=$ everyone exactly $d$ edges below the
+root; group them and run one aggregate across each group.
+
+\begin{proposition}{Root-path sums by an in/out difference sweep}{c24-sweep}
+Give each node a weight $w[v]$ and use the \emph{both-tick} Euler clock of \secref{c24-times}
+(values in $[0, 2n)$). Build a difference array $D$ of length $2n$ with $D[\tin(v)] += w[v]$
+and $D[\tout(v)] -= w[v]$. Then the prefix sum $\sum_{i \le \tin(u)} D[i]$ equals
+$\sum_{x} w[x]$ over the \emph{root-path to $u$}. Hence path sums -- and, dually, ``add to a
+subtree then read a path'' questions -- reduce to a prefix scan over the tour.
+\end{proposition}
+\begin{proofbox}
+$w[x]$ is $+1$-weighted at $\tin(x)$ and cancelled at $\tout(x)$. The prefix sum at position
+$\tin(u)$ therefore counts $w[x]$ iff $\tin(x) \le \tin(u) < \tout(x)$, i.e.\ iff $x$'s
+interval contains the instant we enter $u$. By \thmref{c24-anc} those $x$ are exactly the
+ancestors of $u$ (including $u$) -- the root-path. Linearity gives the weighted sum. The
+subtree-add / point-query case is the mirror image: add over $[\tin,\tout)$ and read at
+$\tin(u)$, which the same $D$ supports with the roles swapped.
+\end{proofbox}
+\begin{insightbox}
+This is the \emph{dual} of \secref{c24-flatten}. There, a subtree was a range and a node was a
+point; here, a root-path is a prefix of the tour and a node is again a point. ``Subtree
+update $+$ path query'' and ``path update $+$ subtree query'' are the two compositions these
+two sections give you -- the full generality (with both operations online) is a heavy-light
+or Euler-tour-tree affair (\chref{c16}, \chref{c23}).
+\end{insightbox}
+
+\subsection{The Algorithm: carry the path, or bucket the levels}
+
+\begin{lstlisting}[caption={DFS carrying a root-path stack, and a DFS/BFS filling a level array}, label={lst:c24-path-stack}]
+#include <bits/stdc++.h>
+using namespace std;
+
+vector<vector<int>> adj;
+vector<vector<int>> levelVec;   // levelVec[d] = node ids at depth d
+vector<int> depth_;
+
+// (A) per-level buckets via DFS (push node id into its depth's list)
+void dfsLevels(int u, int p, int d) {
+    if ((int)levelVec.size() <= d) levelVec.resize(d + 1);
+    levelVec[d].push_back(u);
+    depth_[u] = d;
+    for (int v : adj[u]) if (v != p) dfsLevels(v, u, d + 1);   // parent guard
+}
+
+// (B) root-path stack: aggregate along the way down, undone on the way up
+long long pathSum = 0, bestAtNode_toRoot = LLONG_MIN;
+vector<long long> pathVals;      // the current root-to-node sequence
+void dfsPath(int u, int p, long long w) {
+    pathSum += w;                // ENTER: extend the path aggregate
+    pathVals.push_back(u);       //          and the path sequence
+    bestAtNode_toRoot = max(bestAtNode_toRoot, pathSum);   // answer for THIS node
+    for (int v : adj[u]) if (v != p) dfsPath(v, u, w);
+    pathSum -= w;                // EXIT: retract exactly what we added
+    pathVals.pop_back();
+}
+\end{lstlisting}
+\begin{complexitybox}
+Both passes are $\bigO{n}$ (each node entered/left once); the level array and depth array
+are $\bigO{n}$ space total. The path stack costs $\bigO{h}$ live entries. Answering ``sum on
+root-path to $u$'' is then $O(1)$ if you recorded it during the descent, or $\bigO{\depth(u)}$
+if you replay \code{pathVals}. Recursion is $\bigO{h}$ deep -- iterative (explicit stack with
+a matching value stack) on a chain.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Levels and root-paths of $G$ (with $w[v]=v$)}{c24-path-run}
+$\depth=[0,1,1,1,2,2,2]$, so the level buckets are
+$L_0=\{0\}$, $L_1=\{1,2,3\}$, $L_2=\{4,5,6\}$, giving per-level sums
+$S_0=0$, $S_1=1{+}2{+}3=6$, $S_2=4{+}5{+}6=15$. The heaviest level is $L_2$
+($1$-indexed ``level $3$''), and the sorted level sums $\{15,6,0\}$ make the $2$-nd largest
+$6$. Now the \emph{root-path} to node $4$: the stack when DFS stands at $4$ is
+$[0,1,4]$, path sum $0{+}1{+}4=5$; to node $6$: stack $[0,3,6]$, sum $9$. The in/out sweep of
+\propref{c24-sweep} produces the same $5$ and $9$ as prefix sums at $\tin(4)$ and $\tin(6)$.
+\end{example}
+\begin{tracebox}[Push/pop of the path stack along the DFS order $0,1,4,5,2,3,6$]
+Enter $0$ (path $[0]$, sum $0$); enter $1$ ($[0,1]$, sum $1$); enter $4$ ($[0,1,4]$, sum $5$)
+\textbf{answer@4}$=5$; leave $4$; enter $5$ ($[0,1,5]$, sum $6$) \textbf{answer@5}$=6$; leave
+$5$; leave $1$; enter $2$ ($[0,2]$, sum $2$) answer@2$=2$; leave $2$; enter $3$ ($[0,3]$,
+sum $3$); enter $6$ ($[0,3,6]$, sum $9$) answer@6$=9$; leave $6$; leave $3$; leave $0$. Every
+``answer@node'' is the root-path sum -- read at the instant of the push. \checkmark\
+\figref{c24-path}.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Per-level max / count / average}: swap the $+$ in the bucket fold for
+        $\max$, $1$, or keep sum and count for an average (\chref{c03}'s level-order family). \hfill\lv{2}
+  \item \textbf{Path with a predicate} (increasing run, distinct values): carry the
+        \code{pathVals} stack and maintain the statistic incrementally on push/pop. \hfill\lv{3}--\lv{4}
+  \item \textbf{Subtree-add then root-path-read}: the in/out difference sweep,
+        \propref{c24-sweep}, is exactly the two-composition. \hfill\lv{4}
+  \item \textbf{Any-pair path}: not from the root -- get LCA and stitch two root-paths;
+        \secref{c24-dist} and \chref{c11}.                                   \hfill\lv{4}--\lv{5}
+  \item \textbf{Level-order without a queue}: fill $\depth$ by DFS, then sort nodes by
+        $\depth$ -- the ``depth sequence'' is a lazy BFS.                     \hfill\lv{3}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c24-path-pitfalls}
+
+\begin{warningbox}[Trap 1 -- forgetting to undo on the way up]
+A path aggregate pushed on entry must be \emph{popped} on exit, or sibling subtrees inherit a
+phantom prefix and every answer below is inflated.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: push on entry, never retract}, language=C++, basicstyle=\ttfamily\small]
+void dfs(int u,int p){ pathSum+=w[u]; for(int v:adj[u])if(v!=p)dfs(v,u); /* no -= */ }
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: subtract exactly what you added}, language=C++, basicstyle=\ttfamily\small]
+void dfs(int u,int p){ pathSum+=w[u];
+    for(int v:adj[u])if(v!=p)dfs(v,u);
+    pathSum-=w[u]; }                     // restore for the sibling branch
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- off-by-one indexing levels]
+Root is $\depth=0$ but ``level'' in problems is usually $1$-indexed. Reporting
+$\arg\max$ of the level array without $+1$ is a classic wrong answer (LC 1161).
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: returns a $0$-based depth as the level}, language=C++, basicstyle=\ttfamily\small]
+return bestDepth;                 // problem wants level = bestDepth + 1
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: shift to the requested indexing}, language=C++, basicstyle=\ttfamily\small]
+return bestDepth + 1;             // root at depth 0 is "level 1"
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- resizing / touching \code{level[d]} out of range]
+On the first visit to a new maximum depth the bucket does not exist; index it only after
+resizing, or size the array to $\height{+}1$ up front. A stale bound is an out-of-range read.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: push into a bucket that may not exist}, language=C++, basicstyle=\ttfamily\small]
+levelVec[d].push_back(u);                 // d may exceed current size -> UB
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: grow the vector to depth first}, language=C++, basicstyle=\ttfamily\small]
+if ((int)levelVec.size() <= d) levelVec.resize(d + 1);
+levelVec[d].push_back(u);
+\end{lstlisting}
+
+\subsection{Problem Lab}
+
+Two level-array problems, ascending. LC 1161 \emph{Maximum Level Sum} is the warm-up: fill the
+depth buckets, take the heaviest, return its (1-indexed) level. LC 2583 \emph{Kth Largest Sum
+in a Binary Tree} adds an order statistic on the same array. Both are the depth sequence
+$\longrightarrow$ an ordinary array $\longrightarrow$ one scan or sort.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c24-levelsum}{Maximum Level Sum of a Binary Tree}{LeetCode 1161}
+  {https://leetcode.com/problems/maximum-level-sum-of-a-binary-tree/}{LC Medium L2}
+  {BFS/DFS level buckets, per-level sum, argmax with 1-indexing}
+
+\begin{problemstatement}[Maximum Level Sum of a Binary Tree]
+Given the \code{root} of a binary tree, the \textbf{level} of a node is its distance from the
+root with the root at level $1$. The \term{sum} of a level is the sum of node \emph{values} at
+that level. Return the \emph{smallest} level $X$ whose level-sum is maximal. Node values can
+be \textbf{negative}. $1 \le$ number of nodes $\le 10^4$.
+\end{problemstatement}
+
+\solstep{Understanding the Problem}
+This is the depth sequence made concrete: bucket every node by its level, sum each bucket, and
+report the earliest level attaining the maximum. Because node values may be negative, the
+maximum level-sum is \emph{not} necessarily the root level -- you must actually compute every
+level's sum, and initialise the running best to $-\infty$ (not $0$).
+
+\solstep{Key Observations}
+\begin{observation}
+A BFS drains one level at a time, so the ``current queue size'' is the level's population --
+sum those, then move on. Alternatively a DFS pushes each value into \code{level[d]}. Either
+yields the depth sequence.
+\end{observation}
+\begin{observation}
+Ties go to the \emph{smallest} level, so scan levels in increasing order and only update the
+best on a \textbf{strictly} larger sum (use $>$, not $\ge$).
+\end{observation}
+\begin{observation}
+Negative values make a $0$-initialised best wrong on the very first level; seed with the
+first level's sum (or \code{LLONG\_MIN}) and track the level index alongside.
+\end{observation}
+
+\solstep{Solution}
+BFS by levels: for each level, drain exactly the current queue length, accumulating a sum; if
+that sum exceeds the running best, record this level number (1-indexed). Return the recorded
+level.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+Level-order BFS visits nodes grouped by depth in increasing depth (the queue discipline of
+\chref{c03} 3.3), and draining the front of size $|L_d|$ per round enumerates exactly $L_d$,
+so the loop computes each level's true sum and no node is double- or mis-counted. Scanning in
+increasing level and updating only on a \emph{strict} improvement keeps the smallest level
+attaining the maximum, matching the problem's tie-break. Since the best is seeded below every
+reachable sum, the maximum over all levels (possibly negative) is found. The returned index is
+$1$-indexed as required (Trap 2).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Maximum Level Sum via level BFS (LeetCode 1161)}, label={lst:c24-levelsum}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode { int val; TreeNode *left, *right;
+    TreeNode(int v):val(v),left(nullptr),right(nullptr){} };
+
+class Solution {
+public:
+    int maxLevelSum(TreeNode* root) {
+        long long best = LLONG_MIN; int bestLevel = 1, level = 0;
+        queue<TreeNode*> q; q.push(root);
+        while (!q.empty()) {
+            ++level;
+            long long sum = 0;
+            int cnt = (int)q.size();           // exactly this level's width
+            for (int i = 0; i < cnt; ++i) {    // drain one level
+                TreeNode* u = q.front(); q.pop();
+                sum += u->val;
+                if (u->left)  q.push(u->left);
+                if (u->right) q.push(u->right);
+            }
+            if (sum > best) { best = sum; bestLevel = level; }   // strict: smallest wins
+        }
+        return bestLevel;                      // 1-indexed level
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Binary running tree $R$ (\figref{c03-running}), values $1..6$]
+Level 1: $\{1\}$ sum $1$, best $1$/lvl $1$. Level 2: $\{2,3\}$ sum $5$, best $5$/lvl $2$.
+Level 3: $\{4,5,6\}$ sum $15$, best $15$/lvl $3$. Return $\mathbf{3}$. \checkmark\
+\probref{c24-levelsum}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (each node dequeued once), space $\bigO{w}$ the widest level ($\le n$). A
+DFS variant with a \code{level[]} array is also $\bigO{n}$ but $\bigO{h}$ stack. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Initialising \code{best=0} fails when all levels are negative; use \code{LLONG\_MIN}. Using
+$\ge$ instead of $>$ returns the \emph{largest} level among ties, not the smallest. And
+remember level is $1$-indexed here while BFS/DFS depth is often $0$-indexed.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item ``Per level'' $=$ the depth sequence $=$ one array bucketed by $\depth$; the tree
+        disappears once you have it.
+  \item Draining \code{q.size()} per round is the clean way to get level widths.
+  \item Tie-break and indexing (smallest level, $1$-based) are where the WA lives, not the sum.
+\end{enumerate}
+\end{insightbox}
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c24-kthlevel}{Kth Largest Sum in a Binary Tree}{LeetCode 2583}
+  {https://leetcode.com/problems/kth-largest-sum-in-a-binary-tree/}{LC Medium L3}
+  {level sums + nth\_element/sort, not-enough-levels edge}
+
+\begin{problemstatement}[Kth Largest Sum in a Binary Tree]
+Given the \code{root} of a binary tree and an integer $k$. The \term{level sum} is the sum of
+node \emph{values} at a level (root at level $1$). Return the $k$-th \textbf{largest} level sum
+(nozzling that level sums are counted with multiplicity). If the tree has fewer than $k$
+levels, return $-1$. Node values can be negative. $1 \le n \le 10^5$, $1 \le k \le 10^5$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 20 minutes]
+A fair first attempt: reuse the level-sum machinery of \probref{c24-levelsum}, then ask how to
+pull out the $k$-th largest of the resulting array.
+\peek{you now have one number per level -- how many levels could there be, versus $n$?}
+\nudge{collect all level sums into a vector, then either sort descending or use
+\code{nth\_element}. When is the answer $-1$?}
+\fullhint{BFS by levels into a \code{vector<long long> sums}; if \code{sums.size()}$<k$
+return $-1$; else sort descending and return \code{sums[k-1]} (or \code{nth\_element} for
+$\bigO{\text{levels}}$). Values are \code{long long} (level sums reach $\sim n\cdot10^5$ with
+negatives). Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Identical front end to \probref{c24-levelsum} -- build the depth sequence and sum each level.
+The only new question is an \emph{order statistic} on the array of level sums: the $k$-th
+largest. Because there are at most $\height+1 \le n$ levels, the array is small and a sort is
+trivially fast; the edge case is ``fewer than $k$ levels $\Rightarrow -1$''.
+
+\solstep{Key Observations}
+\begin{observation}
+Number of levels $\le n$ (and $\le$ nodes), so sorting all level sums is at worst
+$\bigO{n\log n}$ and typically $\bigO{\height\log\height}$ -- negligible next to the BFS.
+\end{observation}
+\begin{observation}
+Level sums can be negative and can reach $\pm\,n\cdot 10^{5}$, so store in \code{long long}.
+\end{observation}
+\begin{observation}
+``$k$-th largest'' with $k$ up to $10^5$ and possibly $k > $ number of levels: guard the size
+before indexing.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Re-run a BFS $k$ times hunting the $i$-th largest each pass.}{There is only \emph{one}
+array of level sums; compute it once and select from it. Re-traversing the tree is $\bigO{kn}$
+for nothing.}
+\deadend{Keep a running min-heap of size $k$ during the BFS levels.}{Correct and $\bigO{n +
+\height\log k}$, but pointless complexity -- the level count is tiny; just sort. The heap
+shines when the stream is huge and you cannot store it, which is not the case here.}
+\aha{Collect all level sums into a \code{vector<long long>}, sort descending, return
+\code{[k-1]} if it exists, else $-1$.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} level sums + sort desc & one BFS, then sort & $O(n+\ell\log\ell)$ & \ac \\
+2 & \lv{4} level sums + nth\_element & linear select & $O(n+\ell)$ & \ac \\
+3 & \lv{2} BFS $k$ times & re-scan tree per rank & $O(kn)$ & \tle \\
+\bottomrule
+\end{tabular}\end{center}
+$\ell$ is the level count ($\le n$, usually far smaller). Rungs 1 and 2 both pass; 1 is the
+readable default.
+
+\solstep{Solution}
+BFS by levels filling \code{sums}. If \code{sums.size()}$<k$ return $-1$. Otherwise sort
+\code{sums} in descending order and return \code{sums[k-1]}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By the argument in \probref{c24-levelsum}'s proof, the level BFS produces exactly one sum per
+level $\{S_1,\dots,S_\ell\}$ (root at level $1$), each equal to the true level sum. Sorting
+these $\ell$ values in non-increasing order places the $k$-th largest at index $k-1$ when
+$k \le \ell$; when $k > \ell$ there is no $k$-th level and the problem mandates $-1$, which
+the size guard returns. Hence the output matches the definition in both branches.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Kth Largest Level Sum (LeetCode 2583)}, label={lst:c24-kthlevel}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode { long long val; TreeNode *left, *right;
+    TreeNode(long long v):val(v),left(nullptr),right(nullptr){} };
+
+class Solution {
+public:
+    long long kthLargestLevelSum(TreeNode* root, int k) {
+        vector<long long> sums;
+        queue<TreeNode*> q; q.push(root);
+        while (!q.empty()) {
+            long long s = 0;
+            int cnt = (int)q.size();
+            for (int i = 0; i < cnt; ++i) {           // drain one level
+                TreeNode* u = q.front(); q.pop();
+                s += u->val;
+                if (u->left)  q.push(u->left);
+                if (u->right) q.push(u->right);
+            }
+            sums.push_back(s);
+        }
+        if ((int)sums.size() < k) return -1;          // fewer than k levels
+        nth_element(sums.begin(), sums.begin() + (k - 1), sums.end(),
+                    greater<long long>());            // k-th largest into place
+        return sums[k - 1];
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[$R$ level sums, \figref{c03-running}]
+Levels give $\text{sums}=[1,5,15]$. $k=2$: after a descending select, the array's index $1$
+holds $5$ (order $\{15,5,1\}$) $\Rightarrow$ return $\mathbf{5}$. $k=3\Rightarrow 1$;
+$k=4 > $ size $\Rightarrow -1$. \checkmark\ \probref{c24-kthlevel}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+BFS $\bigO{n}$; \code{nth\_element} is $\bigO{\ell}$ average ($\ell$ levels), a full sort
+$\bigO{\ell\log\ell}$ -- both dominated by $\bigO{n}$. Space $\bigO{n}$ (queue) $+\bigO{\ell}$.
+\code{long long} prevents overflow on large-magnitude levels. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+\code{nth\_element} with \code{greater<long long>} partitions so that \code{sums[k-1]} is the
+$k$-th \emph{largest}; using the default (ascending) \code{nth\_element} then indexing
+\code{[k-1]} yields the $k$-th \emph{smallest} -- the inverted-comparator mistake. Also guard
+\code{sums.size()} $< k$ before touching \code{[k-1]}, and keep level sums in \code{long long}.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Once you have the \emph{depth sequence}, ``$k$-th largest over levels'' is a plain
+        array order-statistic -- the tree is already gone.
+  \item $\ell \le n$ and often tiny, so sorting the level sums is free; select if you want the
+        linear constant.
+  \item The interesting bugs are the size guard ($k>\ell$) and the comparator direction.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Stream / huge $\ell$}: if levels were too many to store, keep a size-$k$
+        min-heap across the level sums -- the standard ``$k$-th largest of a stream'' variant.
+  \item \textbf{DFS instead of BFS}: fill \code{level[d]} during a DFS (\coderef{c24-path-stack})
+        and read the array -- same result, but $\bigO{h}$ stack on a skewed tree.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you \emph{undo} the path aggregate on exit, or only push it? (Trap 1.)
+  \item Is your reported level $1$-indexed when the problem wants it? (Trap 2,
+        \probref{c24-levelsum}.)
+  \item Did you guard ``fewer than $k$ levels $\to -1$'' before indexing? (\probref{c24-kthlevel}.)
+  \item Are level sums accumulated in \code{long long} against negative/large values?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Linked List in Binary Tree}{LeetCode 1367}
+    {https://leetcode.com/problems/linked-list-in-binary-tree/}{LC Medium L3}
+    {Does the \code{head} list appear as a downward \emph{root-to-node path prefix} in the
+    tree? DFS carrying the list along the recursion stack: match node-by-node, backtrack
+    (undo) when it fails -- the path-stack discipline of \secref{c24-path}. Start the list
+    match at every tree node, or thread the \code{head} pointer down and allow a fresh start.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 5.3 Path \& Depth Sequence]
+The DFS \emph{stack} is the root-to-node path: push the aggregate on entry, pop on exit
+(never forget the pop). Bucket nodes by $\depth$ for the \emph{depth sequence} -- one array,
+then scan/sort it (LC 1161 heaviest level, LC 2583 $k$-th largest level sum). The in/out
+difference sweep reads root-path sums off the tour (\propref{c24-sweep}) -- the dual of
+subtree flattening.
+\selftest{
+  \item Write the DFS that maintains a root-path sum with a matching undo on exit
+        (\coderef{c24-path-stack}).
+  \item State the in/out difference array and prove it returns the root-path sum
+        (\propref{c24-sweep}).
+  \item On $G$ with $w[v]=v$, list the level sums and name the heaviest 1-indexed level.
+  \item Give the $2$-nd largest level sum of $R$ and say when the answer is $-1$.
+  \item Explain why filling \code{level[d]} by DFS and sorting by $\depth$ are the same
+        ``depth sequence''.
+}
+\end{recallbox}

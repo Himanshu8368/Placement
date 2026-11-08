@@ -1,0 +1,456 @@
+% =====================================================================
+%  29.4  Cactus graphs: cycles that never share an edge.
+%  Exports: sec:c31-cactus  def:c31-cactus  thm:c31-cactustree
+%  lem:c31-cycleorder  fig:c31-cactus  lst:c31-cactusdp
+%  WORKED section + a solved lab.  A cactus is an undirected graph in which every
+%  edge lies in at most one simple cycle (equivalently every block is a bridge or
+%  a simple cycle).  Contracting each cycle-block to a node gives a tree (the
+%  block-cut tree specialised), so DP over a cactus = DP over that tree with one
+%  extra primitive: a "cycle transfer" that folds a cycle node's children around
+%  the ring.  Running object: the bowtie (two triangles sharing one vertex),
+%  counted for independent sets -> 10.  In-section solved lab: CF 231E "Cactus"
+%  (2100, L5) -- a VERTEX cactus (each vertex on at most one cycle, so cycles are
+%  vertex-disjoint); for k queries (x,y) count simple x-y paths, which is 2^c with
+%  c the number of cycles on the x-y route.  Solved by DSU-contracting each cycle,
+%  building the contracted tree, and answering c by LCA + a root-to-node cycle
+%  prefix.  Live-verified against the CF page (2s, 256 MB, n,m,k<=1e5, mod 1e9+7);
+%  the single official sample (10-vertex graph, 6 queries) is replayed in full
+%  -> 2 2 2 4 4 1.  Promoted from this chapter's mixed set, so its URL now lives
+%  here ONLY (no duplicate).
+% =====================================================================
+\section{Cactus Graphs: Cycles That Never Share an Edge}\label{sec:c31-cactus}
+
+\begin{previouslybox}[Blocks were general; here every block is a cycle or an edge]
+\(\secref{c31-block}\) decomposed any graph into blocks via the edge stack.  A
+\term{cactus} is the family where those blocks are as simple as possible: each is
+either a single bridge or a single \emph{simple cycle} (no block is a tangled
+\(K_4\)).  That restriction means every edge sits in at most one cycle, so you can
+contract each whole cycle to one node and still have a \emph{tree}
+(\(\thmref{c31-cactustree}\)).  Dynamic programs that are hard on a general graph --
+independent set, dominating set, matching, colourings -- are polynomial on a cactus
+because they are a tree DP plus one local cycle computation
+(\(\lemref{c31-cycleorder}\)).
+\end{previouslybox}
+
+\begin{topicintro}
+Formally a \term{cactus} is a connected graph where any two simple cycles share at
+most one vertex (\(\defref{c31-cactus}\)); equivalently no edge lies in two cycles.
+The block-cut tree of \(\secref{c31-block}\) specialises: block-nodes are bridges and
+cycles, cut-vertex-nodes are the articulation points where cycles touch.  Collapse
+each cycle to a single node and you get an ordinary tree, and a bottom-up DP is legal
+on it -- the only new operation is, at a cycle block, combining the in-tree values
+that hang around the ring \emph{in cyclic order} with one endpoint's state pinned by
+the parent.  That cycle transfer (\(\lemref{c31-cycleorder}\)) is the entire extra
+craft.
+
+\textbf{Prerequisites.} \(\secref{c31-block}\) (blocks, the edge stack); Ch.~13
+(\chref{c10}) (the fold); the transfer is a bounded ring DP, no new machinery.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item test the cactus property while popping blocks (reject a block that is not a cycle/bridge); \hfill\lv{4}
+  \item contract each cycle block and recognise the resulting tree; \hfill\lv{4}
+  \item write the cycle-transfer DP step that folds a ring with one pinned state; \hfill\lv{5}
+  \item count independent sets / colourings of a cactus in \(\bigO{n}\). \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{Cycles as blocks}
+% ---------------------------------------------------------------
+
+\begin{definition}{Cactus graph}{c31-cactus}
+A connected undirected graph is a \term{cactus} if every edge belongs to at most one
+simple cycle, equivalently if every block of its block-cut tree
+(\(\defref{c31-cutv}\)) is either a single bridge or a single simple cycle.  Any two
+cycles then share at most one vertex.
+\end{definition}
+
+\begin{theorem}{The contracted cactus is a tree}{c31-cactustree}
+Given a cactus, replace each maximal simple cycle by one node (keeping the
+attachment vertices' incidences) and keep bridges as edges.  The result is a tree.
+\end{theorem}
+
+\begin{proofbox}
+Blocks of any graph already form a tree via cut vertices (\(\defref{c31-bct}\)); the
+cactus condition only restricts \emph{which} blocks appear (cycles and bridges), not
+how they glue.  Two cycles sharing an edge would form one non-cycle block, forbidden,
+so distinct cycles share at most a cut vertex, which the block-cut tree already
+models as a single connecting node -- no cycle of block-nodes can close.  Contracting
+each cycle-block to a node and each bridge to an edge yields a connected graph on
+\(\le\) (blocks) nodes with (blocks\(-1\)) inter-block links, i.e.\ a tree. \(\Box\)
+\end{proofbox}
+
+\begin{lemma}{Cyclic-order transfer}{c31-cycleorder}
+Let a cycle block \(C=(c_0,c_1,\dots,c_{k-1},c_0)\) be entered from its parent through
+the articulation \(c_0\), with in-tree (already-computed) child values \(a_i\) at each
+\(c_i\).  A DP with a per-vertex state set \(S\) and a legality/weight table
+\(\mathit{mix}\) combines them by a linear ring DP that pins \(c_0\)'s state to the
+value the parent fixed and folds \(c_1,\dots,c_{k-1}\) in order, closing only if the
+last is consistent with the pinned \(c_0\).  The cost is \(\bigO{k\cdot|S|^2}\) per
+cycle and the sum of \(k\) over cycles is \(\bigO n\).
+\end{lemma}
+
+\begin{lstlisting}[caption={Cactus DP skeleton: pop blocks; a bridge is a tree-edge update, a cycle runs a ring transfer with the entry vertex pinned to each candidate state and the best taken. States here are in/out for independent sets. ASCII only, identifiers without underscores}, label={lst:c31-cactusdp}]
+// dp0[v], dp1[v]: # ways for the sub-cactus rooted at v with v OUT / IN.
+// Bridge block u-v (v child):
+void doBridge(int u,int v){
+  dp0[u]*= dp0[v]+dp1[v];
+  dp1[u]*= dp0[v];
+}
+// Cycle block with entry c0 (state pinned to s) and ring c1..c_{k-1}:
+long long ring(int k, vector<long long>&z0, vector<long long>&z1, int s){
+  // fold c1..c_{k-1}; 'prev0/prev1' carry the running pair, adjacency = no two IN
+  long long prev0=1, prev1=0;              // c0 fixed: if s==IN, c1 forced OUT
+  for(int i=1;i<k;i++){
+    long long n0 = (prev0+prev1) * z0[i];
+    long long n1 = prev0 * z1[i];          // c_i IN only if c_{i-1} OUT
+    prev0=n0; prev1=n1;
+  }
+  if(s==1 && prev1>0) return 0;            // closing edge c_{k-1}-c0 violated
+  return prev0+prev1;
+}
+// At a cycle node u (=c0) combine both pins and multiply into u's DP:
+void doCycle(int k, vector<long long>&z0, vector<long long>&z1){
+  long long out = ring(k,z0,z1,0);         // c0 OUT
+  long long inW = ring(k,z0,z1,1);         // c0 IN
+  // caller multiplies dp0/dp1 of u's parent by (out) and (inW) as appropriate
+}
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.95, transform shape,
+   cyc/.style={circle, draw=softpurple!80, fill=softpurple!12, line width=1pt,
+               minimum size=6.6mm, font=\scriptsize\bfseries, inner sep=1pt},
+   cut/.style={circle, draw=difforange, fill=difforange!20, line width=1.3pt,
+               minimum size=6.6mm, font=\scriptsize\bfseries, inner sep=1pt}]
+  \node[cut] (v) at (0,0) {v};
+  \node[cyc] (x) at (-1.2,1.0) {x}; \node[cyc] (y) at (-1.2,-1.0) {y};
+  \node[cyc] (p) at ( 1.2,1.0) {p}; \node[cyc] (q) at ( 1.2,-1.0) {q};
+  \draw[softpurple!75, line width=1.1pt] (v)--(x)--(y)--(v);
+  \draw[softpurple!75, line width=1.1pt] (v)--(p)--(q)--(v);
+  \node[annot, font=\scriptsize] at (-1.2,1.9) {triangle 1};
+  \node[annot, font=\scriptsize] at ( 1.2,1.9) {triangle 2};
+\end{tikzpicture}
+\caption{The \term{bowtie} cactus: two triangles \(\{v,x,y\}\) and \(\{v,p,q\}\) sharing a
+single cut vertex \(v\) (orange).  Each edge lies in exactly one cycle, so it is a cactus
+(\(\defref{c31-cactus}\)); contracting each triangle to a node leaves the two-node tree
+joined at \(v\) (\(\thmref{c31-cactustree}\)).  Its independent-set count, \(10\,\), is the
+worked trace below.}
+\label{fig:c31-cactus}
+\end{figure}
+
+\subsection{Worked trace: independent sets of the bowtie}
+
+Take the \term{bowtie}: two triangles sharing exactly one vertex \(v\), with
+triangle~1 \(=\{v,x,y\}\) and triangle~2 \(=\{v,p,q\}\); every edge is in one cycle,
+so it is a cactus (\(\defref{c31-cactus}\)).  Count its independent sets with the
+contracted-tree DP.
+
+\begin{tracebox}[Root at the shared vertex \(v\): the two cycle transfers multiply]
+Each triangle is a cycle block entered at \(v\).  \textbf{Pin \(v\) IN}
+(\(s{=}1\)): in triangle \(\{v,x,y\}\) both \(x,y\) are forced OUT, contributing
+\(1\); likewise triangle \(\{v,p,q\}\) contributes \(1\).  So
+\(\mathit{dp}_1(v)=1\) (the set \(\{v\}\)).  \textbf{Pin \(v\) OUT} (\(s{=}0\)): in
+triangle 1 the ring over \(x,y\) with \(v\) out allows \(\emptyset,\{x\},\{y\}\)
+-- \(3\) independent sets (the closing edge \(x\!-\!y\) forbids \(\{x,y\}\)); the
+transfer \code{ring(3,\ldots,0)} returns \(3\).  Triangle 2 likewise \(3\).  So
+\(\mathit{dp}_0(v)=3\cdot3=9\).  \textbf{Total independent sets} \(=\mathit{dp}_0(v)+
+\mathit{dp}_1(v)=9+1=\boxed{10}\).  Cross-check by hand: either \(v\) is chosen
+(then \(x,y,p,q\) all excluded: \(1\) set) or not (then each edge \(x\!-\!y\),
+\(p\!-\!q\) independently offers \(\emptyset/\text{one endpoint}\): \(3\times3=9\)).
+\(10\) confirmed. \(\Box\)
+\end{tracebox}
+
+\begin{insightbox}[Cactus versus the general block-cut tree]
+On a general graph a block can be a dense 2-connected blob with exponentially many
+local configurations, so a block-node DP is hopeless.  The cactus promise -- every
+block is a cycle -- is exactly what bounds each block's local DP at
+\(\bigO{k\cdot|S|^2}\): a cycle is a ring, and a ring is one linear pass.  This is
+why problems phrased as ``the graph is a cactus'' or ``\(m\le n+O(1)\) and it is
+connected enough to be one'' are tractable: the whole difficulty is pushed into
+independent per-cycle transfers glued by Ch.~13's tree fold.
+\end{insightbox}
+
+\begin{complexitybox}[Cactus DP]
+Detecting the cactus property is one edge-stack pass: pop blocks
+(\(\thmref{c31-bccpop}\)) and \emph{reject} if any block has \(|E|\ne|V|\) and
+\(|E|>1\) (a non-cycle, non-bridge block).  Then a postorder over the contracted
+tree does one transfer per cycle: total \(\bigO{n\cdot|S|^2}\) (constant
+\(|S|\) for independent set / 2-colouring, so linear in \(n\)).  Space \(\bigO n\).
+\end{complexitybox}
+
+\begin{warningbox}[Three cactus errors]
+\begin{enumerate}[nosep,leftmargin=1.6em]
+  \item \textbf{Treating a shared-edge pair of cycles as a cactus.} Two triangles
+        sharing an \emph{edge} (a diamond) are \emph{not} a cactus -- the shared edge is
+        on two cycles, so that block has \(|E|>|V|\); the transfer of
+        \(\lemref{c31-cycleorder}\) is invalid there.
+  \item \textbf{Forgetting the closing edge.} In \code{ring}, after folding
+        \(c_1..c_{k-1}\) you must reject the configurations where \(c_{k-1}\) conflicts
+        with the pinned \(c_0\); dropping it turns a cycle into a path and over-counts.
+  \item \textbf{Double-counting the articulation.} The entry vertex \(c_0\) belongs to
+        the cycle block \emph{and} to its parent block; pin its state once and reuse, or
+        you multiply its contribution twice.
+\end{enumerate}
+\end{warningbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Generalise the state, keep the shape.} The bowtie trace is independent
+        set; swap \(\mathit{mix}\) for a proper-colouring table (states = colours) and
+        \code{ring} counts colourings; a dominating-set table counts domination.  Only
+        the constant \(|S|\) and the \code{prev0/prev1} recurrence change.
+  \item \textbf{Near-cactus inputs.} If the graph is not a cactus but has few extra
+        edges, condition on the endpoints of the offending edges (\(\bigO{2^{\text{few}}}\))
+        to reduce to a cactus -- the classic ``cyclomatic number as a parameter'' trick.
+  \item \textbf{Build the block tree explicitly.} For many cycles, materialise the
+        contracted tree (block-node per cycle, cut-vertex nodes) and run a normal
+        tree-DP driver, calling \code{doCycle} at cycle nodes -- you reuse Ch.~13's
+        postorder instead of hand-crafting a cactus walk.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Solved: CF 231E -- Cactus (2100, L5)}
+% ---------------------------------------------------------------
+
+\solvedproblem{c31-cactuscount}{Cactus}{CF 231E}{https://codeforces.com/problemset/problem/231/E}{CF 2100 L5}{vertex cactus, DSU-contract each cycle, contracted tree, LCA + cycle-prefix, count routes as \(2^{c}\)}
+
+\begin{problemstatement}[CF 231E, verified against the live CF problem page]
+A connected undirected graph on \(n\) vertices and \(m\) edges is a \term{vertex
+cactus}: every vertex belongs to at most one simple cycle (so distinct cycles are
+\emph{vertex-disjoint}).  There are no loops or multiple edges.
+A \term{simple path} is a walk that uses each edge at most once; two paths are
+distinct when their \emph{edge sets} differ.  Given \(k\) queries \((x_i,y_i)\)
+(\(x_i\neq y_i\)), for each count the number of distinct simple paths from \(x_i\)
+to \(y_i\), modulo \(10^9+7\).  Constraints: \(2\le n\le 10^5\), \(1\le m\le 10^5\),
+\(1\le k\le 10^5\).  Time limit 2 seconds, memory 256 MB.  One official sample:
+the 10-vertex graph with edges
+\(1\!-\!2,2\!-\!3,3\!-\!4,1\!-\!4,3\!-\!5,5\!-\!6,8\!-\!6,8\!-\!7,7\!-\!6,7\!-\!9,9\!-\!10\)
+and queries \((1,2),(3,5),(6,9),(9,2),(9,3),(9,10)\) \(\to\) outputs
+\(2,2,2,4,4,1\).
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 45 minutes]
+Two vertices of a cactus can be joined by exponentially many simple paths -- each
+cycle on the route doubles the count (two arcs around the ring).  So the answer is
+\(2^{c}\) where \(c\) is the number of cycles you must cross between \(x\) and
+\(y\).  The section's contraction theorem (\(\thmref{c31-cactustree}\)) turns
+``count cycles on the \(x\)--\(y\) route'' into a tree question -- but which tree
+object makes a whole cycle collapse to a single countable node, and what running
+quantity answers \(c\) in \(\bigO{\log n}\) per query?\peek{Contract every maximal
+cycle to one node; bridges stay as edges.  What remains is a tree on the
+components (\(\thmref{c31-cactustree}\)).  Mark each contracted node ``heavy''
+(it was a cycle).  Then \(c\) = number of heavy nodes on the tree path between the
+component of \(x\) and the component of \(y\).}
+\nudge{Find cycles by DFS: a back edge \(u\!-\!v\) (\(v\) an ancestor) plus the tree
+path \(v\!\to\!u\) is one cycle -- union all its vertices into a DSU set and mark
+them cyclic.  Vertex-disjointness means each vertex is unioned once, so it is
+\(\bigO n\).  Build the component tree, root it, and store a root-to-node prefix
+\(\mathrm{pre}[C]=\) (heavy nodes from root to \(C\) inclusive).}
+\fullhint{Answer a query with LCA on the component tree:
+\(c=\mathrm{pre}[C_x]+\mathrm{pre}[C_y]-2\,\mathrm{pre}[L]+\mathit{heavy}[L]\) where
+\(L=\mathrm{lca}(C_x,C_y)\); print \(2^{c}\bmod 10^{9}{+}7\) (precompute powers of
+two).  The \(+\mathit{heavy}[L]\) restores the LCA node subtracted twice.  Full
+build and the six-query replay are below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+On a tree there is exactly one simple path between two vertices, so the count is
+\(1=2^{0}\).  Every cycle is the only source of choice: entering a cycle at one
+vertex and leaving at another, you may go around either side -- two edge-disjoint
+arcs, a factor of \(2\).  Because a vertex cactus has \emph{vertex-disjoint}
+cycles, the choices on different cycles are independent and each cycle contributes
+exactly one factor of \(2\), no matter its length: the answer is \(2^{c}\) where
+\(c\) is the number of cycles met along the \(x\)--\(y\) corridor.  Contracting
+each cycle to one node (\(\thmref{c31-cactustree}\)) makes the corridor an ordinary
+tree path, and ``how many cycle-nodes on the path'' is a textbook LCA + root-prefix
+query (Ch.~16, \(\chref{c11}\)).
+
+\solstep{Key Observations}
+\begin{observation}
+A cycle is a factor \(2\): between the entry vertex \(a\) and exit vertex \(b\) of a
+cycle there are exactly two edge-simple arcs (clockwise, counter-clockwise), so any
+route through that cycle doubles.  Routes are distinguished by \emph{edge sets}, so
+the two arcs are always counted separately.
+\end{observation}
+\begin{observation}
+Vertex-disjoint cycles \(\Rightarrow\) independence: crossing cycle \(A\) never uses an
+edge of cycle \(B\), so choices multiply and \(c\) is additive -- the exponent counts
+cycles, no double-counting worries.
+\end{observation}
+\begin{observation}
+After contraction the graph is a tree, and a cycle-node is ``heavy''.  Making a root
+prefix \(\mathrm{pre}[C]\) count heavy nodes on the root--\(C\) path turns
+``heavy nodes on \(C_x\)--\(C_y\)'' into \(\mathrm{pre}[C_x]+\mathrm{pre}[C_y]-2\mathrm{pre}[L]+\mathit{heavy}[L]\)
+with \(L=\mathrm{lca}(C_x,C_y)\) -- the standard vertex-path fold.
+\end{observation}
+
+\solstep{Think It With Me}
+\begin{thinkbox}
+\deadend{Enumerate the paths per query}{There can be \(2^{\Theta(n)}\) of them --
+\emph{hopeless}.  You must count the exponent, not list the paths.}
+\deadend{DFS the original graph for each query}{\(\bigO{(n+m)k}=\bigO{10^{10}}\) --
+\emph{TLE}; and marking ``is this vertex on a cycle used here?'' per query is a mess.}
+\deadend{Count bridges crossed}{Bridges are forced (one way) and carry no factor;
+counting them gives the wrong exponent -- the choices come from \emph{cycles}, not
+bridges.}
+\aha{Contract each cycle to a heavy node (\(\thmref{c31-cactustree}\)); the answer is
+\(2^{c}\) with \(c\) the heavy-node count on a \emph{tree} path -- one LCA and one
+root-prefix, \(\bigO{\log n}\) per query after \(\bigO{n\log n}\) build.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.28\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ list all paths & DFS, collect edge sets & exponential & \tle\\
+2 & \lv{3}\ per-query graph DFS & walk \(x\to y\), count cycles & \(\bigO{(n+m)k}\) & \tle\\
+3 & \lv{4}\ contract, \(O(n)\) path walk & DSU cycles + brute tree path & \(\bigO{nk}\) & \tle\\
+4 & \lv{5}\ \textbf{contract + LCA prefix} & \(2^{\text{heavy-on-path}}\) & \(\bigO{n\log n+k\log n}\) & \ac\\
+\bottomrule
+\end{tabular}\end{center}
+Rung 4 is the only one that survives \(n,m,k\sim 10^{5}\): pay \(\log n\) once per
+query via binary lifting instead of walking the tree.
+
+\solstep{Solution}
+One DFS finds every cycle: a back edge to ancestor \(v\) makes the tree path
+\(v\!\to\!u\) a cycle, so DSU-union its vertices and flag them cyclic
+(vertex-disjointness bounds the total union work by \(\bigO n\)).  Collapse each DSU
+set to a component node; bridges connect components and form the contracted tree
+\(T\).  Root \(T\), mark a component heavy if it came from a cycle, build binary
+lifting and the inclusive cycle-prefix \(\mathrm{pre}[C]\).  Per query, map
+\(x,y\) to components \(C_x,C_y\), take \(L=\mathrm{lca}\), read
+\(c=\mathrm{pre}[C_x]+\mathrm{pre}[C_y]-2\mathrm{pre}[L]+\mathit{heavy}[L]\), and
+print \(2^{c}\bmod(10^{9}+7)\).
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 231E. DFS finds each cycle from a back edge, DSU-unions its vertices (total O(n) since cycles are vertex-disjoint); contract to a tree, binary-lift for LCA and fold a root-to-node cycle prefix; answer = 2 to the (heavy nodes on path) mod 1e9+7. ASCII identifiers, no underscores}, label={lst:c31-cactuscount}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MAXN=100005, B=18;
+const long long MOD=1000000007LL;
+int n, m, dsu[MAXN], disc[MAXN], par[MAXN], tm=0;
+bool cycV[MAXN];
+vector<int> adj[MAXN], T[MAXN];
+int findp(int x){ return dsu[x]==x ? x : dsu[x]=findp(dsu[x]); }
+void uni(int a,int b){ a=findp(a); b=findp(b); if(a!=b) dsu[b]=a; }
+void dfsCactus(int u,int p){
+  disc[u]=++tm; par[u]=p;
+  for(size_t j=0;j<adj[u].size();j++){ int v=adj[u][j];
+    if(v==p) continue;
+    if(!disc[v]) dfsCactus(v,u);
+    else if(disc[v]<disc[u]){              // back edge u-v: tree path v..u is a cycle
+      int cur=u;
+      while(cur!=v){ uni(cur,par[cur]); cycV[cur]=true; cur=par[cur]; }
+      cycV[v]=true;                         // close onto the ancestor
+    }
+  }
+}
+int comp[MAXN], isCyc[MAXN], up[B][MAXN], depth[MAXN];
+long long pre[MAXN], pw[MAXN];
+int lca(int a,int b){
+  if(depth[a]<depth[b]){ int t=a; a=b; b=t; }
+  int d=depth[a]-depth[b];
+  for(int j=0;j<B;j++) if((d>>j)&1) a=up[j][a];
+  if(a==b) return a;
+  for(int j=B-1;j>=0;j--) if(up[j][a]!=up[j][b]){ a=up[j][a]; b=up[j][b]; }
+  return up[0][a];
+}
+int main(){
+  scanf("%d %d", &n, &m);
+  for(int v=1;v<=n;v++) dsu[v]=v;
+  for(int i=0;i<m;i++){ int a,b; scanf("%d %d", &a, &b);
+    adj[a].push_back(b); adj[b].push_back(a); }
+  dfsCactus(1,0);
+  for(int v=1;v<=n;v++){ comp[v]=findp(v); if(cycV[v]) isCyc[comp[v]]=true; }
+  for(int u=1;u<=n;u++) for(size_t j=0;j<adj[u].size();j++){ int v=adj[u][j];
+    if(u<v){ int cu=comp[u], cv=comp[v];
+      if(cu!=cv){ T[cu].push_back(cv); T[cv].push_back(cu); } } }
+  // iterative DFS over the contracted tree from the component of vertex 1
+  int root=comp[1]; vector<char> seen(n+1,0); vector<int> order;
+  seen[root]=1; up[0][root]=0; depth[root]=0; pre[root]= isCyc[root]?1:0;
+  order.push_back(root);
+  for(size_t i=0;i<order.size();i++){ int c=order[i];
+    for(size_t j=0;j<T[c].size();j++){ int d=T[c][j]; if(seen[d]) continue; seen[d]=1;
+      up[0][d]=c; depth[d]=depth[c]+1; pre[d]=pre[c]+(isCyc[d]?1:0);
+      order.push_back(d); } }
+  for(int j=1;j<B;j++) for(int c=1;c<=n;c++) up[j][c]=up[j-1][ up[j-1][c] ];
+  pw[0]=1; for(int i=1;i<=n;i++) pw[i]=pw[i-1]*2%MOD;
+  int k; scanf("%d", &k);
+  while(k--){ int x,y; scanf("%d %d", &x, &y);
+    int cx=comp[x], cy=comp[y], L=lca(cx,cy);
+    long long c=pre[cx]+pre[cy]-2*pre[L]+(isCyc[L]?1:0);
+    printf("%lld\n", pw[c]);
+  }
+  return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Samples}
+\begin{tracebox}[Contracting the sample graph, then all six queries]
+The two cycles are \(A=\{1,2,3,4\}\) (the back edge \(1\!-\!4\) over tree path \(4\!-\!3\!-\!2\!-\!1\))
+and \(B=\{6,7,8\}\); vertices \(5,9,10\) are singletons.  Contracted tree,
+root \(A\): \(A - 5 - B - 9 - 10\), with heavy nodes \(A\) and \(B\).
+Cycle-prefix \(\mathrm{pre}\): \(\mathrm{pre}[A]{=}1,\ \mathrm{pre}[5]{=}1,\ \mathrm{pre}[B]{=}2,\ \mathrm{pre}[9]{=}2,\ \mathrm{pre}[10]{=}2\).\quad
+\textbf{\(c=\mathrm{pre}[C_x]+\mathrm{pre}[C_y]-2\mathrm{pre}[L]+\mathit{heavy}[L]\)}:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \((1,2)\): both \(\to A\), \(L{=}A\): \(1{+}1{-}2{+}1=1\) \(\to 2^{1}=\mathbf{2}\).
+  \item \((3,5)\): \(A,5\), \(L{=}A\): \(1{+}1{-}2{+}1=1\) \(\to \mathbf{2}\).
+  \item \((6,9)\): \(B,9\), \(L{=}B\): \(2{+}2{-}4{+}1=1\) \(\to \mathbf{2}\).
+  \item \((9,2)\): \(9,A\), \(L{=}A\): \(2{+}1{-}2{+}1=2\) \(\to 2^{2}=\mathbf{4}\).
+  \item \((9,3)\): \(9,A\), \(L{=}A\): same \(=2\) \(\to \mathbf{4}\).
+  \item \((9,10)\): \(9,10\), \(L{=}9\) (not heavy): \(2{+}2{-}4{+}0=0\) \(\to \mathbf{1}\).
+\end{itemize}
+Outputs \(2,2,2,4,4,1\) -- exactly the official sample. \(\Box\)
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Cycle DFS is \(\bigO{n+m}\): each vertex is unioned at most once because the cycles
+are vertex-disjoint.  Building \(T\) is \(\bigO{n+m}\); the lifting table is
+\(\bigO{n\log n}\) and a query (one LCA) is \(\bigO{\log n}\).  Total
+\(\bigO{n\log n + k\log n}\) \(\approx 3.4\cdot 10^{6}\) for \(n=m=k=10^{5}\), inside 2
+seconds.  Memory is the \(B\times n\) lift table \(\approx 1.8\cdot 10^{6}\) ints
+\(\approx 7\) MB, well under 256 MB.  The exponent \(c\le\) (number of cycles) \(\le n\),
+so \(\mathrm{pw}\) is precomputed to \(n\) modulo \(10^{9}{+}7\).
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+\item \textbf{Add the LCA node back.}  The prefix counts heavy nodes \emph{inclusive},
+        so \(-2\,\mathrm{pre}[L]\) removes \(L\) twice; you must add
+        \(\mathit{heavy}[L]\) back.  Forgetting it under-counts whenever the lowest
+        common component is itself a cycle.
+\item \textbf{Recursion depth on the DFS.}  A cactus can be a long path; the
+        \code{dfsCactus} recursion may near \(10^{5}\) frames.  Raise the stack, or
+        convert to the iterative form used for \(T\) in \(\coderef{c31-cactuscount}\).
+\item \textbf{Back-edge detection needs \(v\ne\) parent.}  In a simple graph
+        \code{if(v==p) continue} is enough; there are no parallel edges to confuse the
+        tree edge with a 2-cycle, so every non-parent visited neighbour with
+        \(\mathrm{disc}[v]<\mathrm{disc}[u]\) is a genuine back edge.
+\item \textbf{Powers of two modulo.}  Precompute \(\mathrm{pw}[i]=2^{i}\bmod(10^{9}{+}7)\)
+        once; recomputing per query with \texttt{pow}/bit tricks invites overflow and
+        precision bugs.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[29.4 in one breath]
+\emph{A cactus is a graph whose blocks are only bridges and simple cycles -- every edge
+on at most one cycle (\(\defref{c31-cactus}\)).  Contract each cycle to a node and the
+block-cut tree is a \textbf{tree} (\(\thmref{c31-cactustree}\)), so you DP on it with one
+new primitive: the cyclic-order transfer \code{ring} (\(\lemref{c31-cycleorder}\)) that
+pins the entry vertex and folds the ring, closing only on a consistent last edge.  The
+bowtie counts to \(10\) independent sets (\(\figref{c31-cactus}\)); swap the state table
+for colouring or domination and the same skeleton answers those.}
+\selftest{
+  \item What blocks are allowed in a cactus? \emph{Bridges and single simple cycles only; a block that is a denser 2-connected blob (e.g. a shared-edge diamond) breaks the cactus property \(\defref{c31-cactus}\).)}
+  \item Why does contracting cycles leave a tree? \emph{Cycles meet only at cut vertices (no shared edge), and the block-cut tree already has no cycles among block/cut nodes \(\thmref{c31-cactustree}\).)}
+  \item What extra step does a cycle block add over a tree DP? \emph{A ring transfer that pins the entry vertex's state and folds the cycle in order, rejecting the wrap-around conflict \(\lemref{c31-cycleorder}\).)}
+  \item In CF 231E, why is the answer a power of two and what is the exponent? \emph{Each cycle on the \(x\)--\(y\) route offers two edge-disjoint arcs, and vertex-disjoint cycles make the choices independent, so it is \(2^{c}\) with \(c\) the number of cycle-nodes on the contracted-tree path \(\probref{c31-cactuscount}\).)}
+}
+\end{recallbox}

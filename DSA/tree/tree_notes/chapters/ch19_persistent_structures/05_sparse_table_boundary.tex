@@ -1,0 +1,235 @@
+% =====================================================================
+%  21.5  The Sparse Table (static O(1) RMQ) + the engine-selection map
+%  Exports: sec:c19-sparse  def:c19-spacetable  thm:c19-oone
+%           lst:c19-sparse  (WORKED examples only -- NO solvedproblem)
+%  Discharges the sparse-table promise kept by Ch.15/Ch.19 (sec:c13-static).
+%  Runs on the shared A = (3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2), 16 slots.
+%  MIN sparse table st[j][i] = min(A[i .. i+2^j-1]), verified by hand:
+%    j=0 (len 1): 3 2 4 5 1 1 5 3 7 0 2 4 1 6 3 2      (i=1..16)
+%    j=1 (len 2): 2 2 4 1 1 1 3 3 0 0 2 1 1 3 2         (i=1..15)
+%    j=2 (len 4): 2 1 1 1 1 1 0 0 0 0 1 1 1             (i=1..13)
+%    j=3 (len 8): 1 1 0 0 0 0 0 0 0                      (i=1..9)
+%    j=4 (len16): 0                                     (i=1)
+%    query [3..9]: len7 -> j=floor(log2 7)=2; min(st[2][3], st[2][9-4+1=6])
+%                  = min(1,1) = 1.  A(3..9)=(4,5,1,1,5,3,7) min=1. OK.
+%    query [5..5]: len1 -> j=0; min(st[0][5],st[0][5])=1. OK.
+%    SUM counterexample on [3..9]: true sum=26; overlap of st[2][3]=[3..6]
+%      (=11) + st[2][6]=[6..9] (=16) = 27, double-counts A[6]=1 -> WRONG.
+%      Hence overlap is legal only for IDEMPOTENT merges (min/max/gcd).
+%  Practices (live-verified CF API, un-owned): 1548B Integers Have Friends
+%    (1800, idempotent range-gcd) and 1195E OpenStreetMap (2100, range
+%    max/min sliding window).
+% =====================================================================
+\section{The Sparse Table and Where Each Engine Wins}\label{sec:c19-sparse}
+
+\begin{previouslybox}[Three chapters kept pointing a static \(\min/\max\) range query here]
+Chapter~15 (\chref{c15}) leaned on a range-min engine and explicitly credited its ownership onward; Chapter~19's \(\secref{c13-static}\) section on ``static and offline range problems'' put \(O(1)\) \(\min/\max\) with ``this chapter's sparse table''; and the opener's decision flowchart (\figref{c19-taxonomy}) routed ``pure static idempotent RMQ, zero updates'' here. This section delivers it and then does the chapter's real capstone work: a single map that says, for every combination of `mutable or static / which axis / which operation,' which of the five engines you have met -- plain segment tree, merge-sort tree, chairman, persistent roots, sparse table -- to reach for, and which later chapters take over.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{sparse table} precomputes, for every start \(i\) and every power-of-two length \(2^j\), the merge of \(A[i..i+2^j-1]\): write \(\mathit{st}[j][i]=\mathcal{M}(A[i..i+2^j-1])\). There are \(\log n\) lengths and \(n\) starts, so the build is \(\bigO{n\log n}\) by the recurrence \(\mathit{st}[j][i]=\mathcal{M}(\mathit{st}[j-1][i],\ \mathit{st}[j-1][i+2^{j-1}])\) -- merge two adjacent half-blocks. A range \([l,r]\) of length \(L=r-l+1\) is then answered in \emph{constant} time by taking \(j=\lfloor\log_2 L\rfloor\) and combining \emph{two} blocks of length \(2^j\): \([l,\,l+2^j-1]\) and \([r-2^j+1,\,r]\). Those two blocks \emph{overlap}, and that is perfectly fine -- as long as the merge \(\mathcal{M}\) is \term{idempotent} (\(\mathcal{M}(x,x)=x\)), which holds for \(\min,\max,\gcd\) and \texttt{and}/\texttt{or}, but \emph{not} for sum or product. Overlap is the whole trick and its whole restriction.
+
+\textbf{Prerequisites.} Ch.~13/19 (\chref{c13}) own segment-tree merges and the \(\secref{c13-static}\) static/offline boundary; \(\secref{c19-mst}\)/\(\secref{c19-chairman}\)/\(\secref{c19-ontrees}\) are this chapter's other engines, referenced in the map but not re-explained. Ch.~18 (\chref{c14}) owns prefix sums, the right tool when \(\mathcal{M}\) is sum.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item build a sparse table and answer an idempotent \(\mathcal{M}\) range query in \(O(1)\); \hfill\lv{2}--\lv{3}
+  \item prove \emph{why} two overlapping blocks suffice, and name the operations for which they do not; \hfill\lv{3}
+  \item place sum/product queries correctly: prefix sums or a plain tree, never an overlapping sparse table; \hfill\lv{3}
+  \item read the engine map and select the right structure for any `static-vs-mutable \(\times\) which axis \(\times\) which operation' specification. \hfill\lv{3}--\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``many static \(\min/\max/\gcd\) range queries, no updates ever'']
+\reckey{repeated `what is the minimum / maximum / \(\gcd\) of \(A[l..r]\)'' on a \emph{fixed} array; the array is built once and read \(\gg n\) times; every Ch.~19 \(\bigO{\log n}\) query that never mutates -- the log is pure overhead you can delete.}
+\recuse{
+  \item \(O(1)\) static \(\min/\max\) RMQ (sliding-window maxima, LCA-via-RMQ reductions) -- \(\coderef{c19-sparse}\);
+  \item static range \(\gcd\) (idempotent) -- same build with \code{gcd}; CF~1548B;
+  \item any `combine the whole interval, but the combine is idempotent' query.
+}
+\recnotuse{
+  \item the merge is \emph{sum} or \emph{product} -- overlap double-counts the intersection; use a prefix-sum array (Ch.~18, \chref{c14}) or a plain tree;
+  \item the array is \emph{updated} -- a single write invalidates \(\bigO{n}\) sparse-table entries on its log-lengths; use Ch.~19's tree (\chref{c13}) or persistence;
+  \item the query is about \emph{values \(\le x\)} or an order statistic -- the sparse table has no value axis; that is the merge-sort tree or chairman.
+}
+One-line test: \emph{a fixed array, an \emph{idempotent} merge (\(\min,\max,\gcd\)), and a huge number of range queries -- lay every power-of-two block on a grid and answer with two overlapping reads in \(O(1)\).}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: overlap is free only when \(x\oplus x=x\)}
+% ---------------------------------------------------------------
+
+Ch.~19 answers \(\mathcal{M}(A[l..r])\) by folding the canonical cover -- \(O(\log n)\) disjoint nodes. The sparse table instead pre-stores \emph{every} power-of-two-length block, so it can cover \([l,r]\) with just two blocks of length \(2^{\lfloor\log_2 L\rfloor}\), one anchored at \(l\) and one ending at \(r\). These two blocks meet (and usually overlap) somewhere in the middle: the left block is \([l,\,l+2^j-1]\), the right is \([r-2^j+1,\,r]\), and because \(2^j>L/2\) they always cover \([l,r]\) and possibly share an interval.
+
+For an \emph{idempotent} merge the shared elements are re-merged harmlessly: \(x\oplus x=x\), so \( \mathcal{M}(\text{left block},\text{right block})=\mathcal{M}(\text{union})\). \(\min(5,5)=5\), \(\gcd(a,a)=a\). But for \emph{sum}, re-reading the overlap inflates the result: the middle is added twice. So the sparse table is a \(\min/\max/\gcd\)-only engine, and its \(O(1)\) comes precisely from being allowed to overlap. When the query wants a sum over \([l,r]\), the disjointness requirement returns -- and prefix sums \(P[r]-P[l-1]\) give it in \(O(1)\) anyway (Ch.~18 \chref{c14}), from the opposite trick (subtract, not overlap).
+
+\begin{definition}{Sparse table}{c19-spacetable}
+For a static array \(A[1..n]\) and an associative merge \(\mathcal{M}\), the \term{sparse table} is \(\mathit{st}[j][i]=\mathcal{M}(A[i..i+2^j-1])\) for \(0\le j\le\lfloor\log_2 n\rfloor\) and \(1\le i\le n-2^j+1\). It is filled by \(\mathit{st}[0][i]=A[i]\) and \(\mathit{st}[j][i]=\mathcal{M}(\mathit{st}[j-1][i],\mathit{st}[j-1][i+2^{j-1}])\). A query \(\mathcal{M}(A[l..r])\) with \(L=r-l+1\) and \(j=\lfloor\log_2 L\rfloor\) is \(\mathcal{M}(\mathit{st}[j][l],\ \mathit{st}[j][r-2^j+1])\) -- exact when \(\mathcal{M}\) is idempotent.
+\end{definition}
+
+\begin{theorem}{Build cost and \(O(1)\) idempotent queries}{c19-oone}
+A sparse table builds in \(\bigO{n\log n}\) time and space and answers an idempotent-merge range query in \(\bigO{1}\) (two table reads and one merge). The query is correct for every associative, commutative, \emph{idempotent} merge (\(\min,\max,\gcd,\) bitwise \texttt{and}/\texttt{or}); it is \emph{incorrect} for \(\min/\max\)-like-but-non-idempotent merges such as sum, product, or `number of set bits,' where the two overlapping blocks double-count their intersection.
+\end{theorem}
+\begin{proofbox}
+\textbf{Build.} \(\sum_{j=0}^{\lfloor\log_2 n\rfloor}(n-2^j+1)\le n(\log_2 n+1)\) entries, each one merge of two stored halves: \(\bigO{n\log n}\) time and space.\\
+\textbf{Coverage.} With \(2^j\le L<2^{j+1}\), the two blocks \([l,l+2^j-1]\) and \([r-2^j+1,r]\) each have length \(2^j\le L\) and lie inside \([l,r]\); their union is \([l,r]\) because \((l+2^j-1)\ge(r-2^j+1)\) iff \(2^{j+1}\ge L+1\), true as \(2^{j+1}>L\).\\
+\textbf{Idempotent correctness.} The union covers \([l,r]\) with the intersection possibly counted in both operands; a \(\mathcal{M}\) with \(\mathcal{M}(x,x)=x\) is unchanged by re-merging any element, so \(\mathcal{M}(\text{two blocks})=\mathcal{M}([l,r])\).\\
+\textbf{Non-idempotent failure.} For sum the merged value is \(S([l,r])+S(\text{intersection})\), which exceeds the true sum whenever the intersection is non-empty -- see the \(27\ne26\) worked counterexample below. Hence constant-time overlap is licensed \emph{only} by idempotence.
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  Precompute the answer for every window whose length is a power of two. A query window of any length is trapped between two power-of-two windows -- one snapped to its left edge, one to its right -- that together spill over the whole range and overlap in the middle. Overlap only lies if it changes the answer; \(\min,\max,\gcd\) shrug it off (`\(5\) again is still \(5\);' `\(a\) with \(a\) is still \(a\).'), so two reads answer the query instantly. Sum cannot, so sum uses the disjoint prefix-difference instead.
+
+% ---------------------------------------------------------------
+\subsection{The build and the query}
+% ---------------------------------------------------------------
+
+\begin{lstlisting}[caption={sparse table for range minimum: fill every power-of-two block from two half blocks; answer with two overlapping O(1) reads}, label={lst:c19-sparse}]
+int st[K][N];                 // st[j][i] = min of A[i .. i + 2^j - 1]
+int lg[N];                    // lg[len] = floor(log2 len), precomputed once
+void build(int n){
+    for (int i=1;i<=n;i++) st[0][i]=A[i];            // length-1 blocks
+    lg[1]=0;
+    for (int i=2;i<=n;i++) lg[i]=lg[i/2]+1;          // lg of every length
+    for (int j=1; (1<<j)<=n; j++)
+        for (int i=1; i+(1<<j)-1<=n; i++)
+            st[j][i] = min(st[j-1][i],                // left half [i .. i+2^(j-1)-1]
+                           st[j-1][i+(1<<(j-1))]);    // right half, adjacent
+}
+int queryMin(int l, int r){
+    int j = lg[r-l+1];                 // largest power of two not exceeding the length
+    return min(st[j][l], st[j][r-(1<<j)+1]);   // two blocks that OVERLAP, then meet
+}
+\end{lstlisting}
+
+Swap \code{min} for \code{max}, \code{gcd}, \code{\&}, \code{|} and the same two lines serve every idempotent merge; \(\mathit{queryMin}\) becomes \(\bigO{1}\) with a single table lookup per operand.
+
+% ---------------------------------------------------------------
+\subsection{Worked example 1: the full grid on \(A\)}
+% ---------------------------------------------------------------
+
+\begin{tracebox}[MIN sparse table on A -- each row is length 2 to the j, built from the row above]
+\(A=(3,2,4,5,1,1,5,3,7,0,2,4,1,6,3,2)\).  Row \(j\) stores \(\min\) of the length-\(2^j\) block starting at each \(i\):\\
+\textbf{j=0} (len 1): \(3\ 2\ 4\ 5\ 1\ 1\ 5\ 3\ 7\ 0\ 2\ 4\ 1\ 6\ 3\ 2\)\\
+\textbf{j=1} (len 2): \(2\ 2\ 4\ 1\ 1\ 1\ 3\ 3\ 0\ 0\ 2\ 1\ 1\ 3\ 2\)\\
+\textbf{j=2} (len 4): \(2\ 1\ 1\ 1\ 1\ 1\ 0\ 0\ 0\ 0\ 1\ 1\ 1\)\\
+\textbf{j=3} (len 8): \(1\ 1\ 0\ 0\ 0\ 0\ 0\ 0\ 0\)\\
+\textbf{j=4} (len16): \(0\)\\
+Each entry is \(\min(\text{block above-left},\ \text{block above-right})\): e.g.\ st[2][3]=\(\min(\)st[1][3]=4, st[1][5]=1\()\)=1 covers \(A[3..6]\); st[1][15]=\(\min(A[15]=3,A[16]=2)=2\).  The grid is Ch.~19's \(\bigO{n}\)-per-level shape, stored for all \(\log n\) lengths at once.
+\end{tracebox}
+
+\begin{tracebox}[query min on (3..9) in constant time -- two overlapping blocks give 1]
+\(L=9-3+1=7\), so \(j=\lfloor\log_2 7\rfloor=2\) (\(2^2=4\)).  Answer
+\(=\min(\)st[2][3],\ st[2][9-4+1=6]\()=\min(1,\ 1)=\boxed{1}\).\\
+The two blocks are \([3..6]\) and \([6..9]\): they overlap at index \(6\), and \(\min\) ignores the repeat.\\
+\textbf{Cross-check:} \(A[3..9]=(4,5,1,1,5,3,7)\), its minimum is \(1\).  Two reads, no loop over the range.
+\end{tracebox}
+
+\begin{tracebox}[query min on (5..5) -- the single-element edge case]
+\(L=1\), \(j=\lg[1]=0\).  Answer \(=\min(\)st[0][5],\ st[0][5]\()=A[5]=\boxed{1}\).  A length-1 range is the \(j=0\) row read once (twice, harmlessly); the log table must have \(\lg[1]=0\) or every singleton query mis-indexes.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Worked example 2: why sum breaks the overlap}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[The same two blocks, used for a sum, silently double-count]
+Query \(\Sigma A[3..9]\).  True sum: \(4+5+1+1+5+3+7=26\).  If you `overlap' as for \(\min\): the length-\(4\) blocks \([3..6]\) and \([6..9]\) sum to \(4+5+1+1=11\) and \(1+5+3+7=16\); the naive combine gives \(11+16=27\ne26\).  The element \(A[6]=1\) lives in both blocks and is added twice.  A sparse table over sums is simply wrong; a \term{prefix-sum} array \(P[i]=\sum_{k\le i}A[k]\) answers the same query as \(P[9]-P[2]=35-9=26\) in \(O(1)\) by \emph{disjoint} subtraction (Ch.~18, \chref{c14}).  Idempotence -- not `is it fast' -- is the gate on overlap.
+\end{warningbox}
+
+\noindent The distinction to internalise: \(\min/\max/\gcd\) are idempotent \emph{and} their overlap is invisible; sum/product are invertible, and invertibility buys a \emph{different} \(O(1)\) engine (prefix difference), not the sparse table. Two constant-time families, two algebraic licences.
+
+% ---------------------------------------------------------------
+\subsection{The engine map: which structure, and when}
+% ---------------------------------------------------------------
+
+This is the chapter's capstone. Read the table top-to-bottom when you have a specification; each row is a structure you have now met (or, in the last four rows, one a later chapter owns).
+
+\begin{center}\renewcommand{\arraystretch}{1.22}\setlength{\tabcolsep}{4pt}
+{\small
+\begin{tabular}{@{}p{0.155\linewidth} p{0.155\linewidth} p{0.10\linewidth} p{0.135\linewidth} l@{}}
+\toprule
+\textbf{Engine} & \textbf{Answers} & \textbf{Updates?} & \textbf{Cost / query} & \textbf{Where taught}\\
+\midrule
+Sparse table & static \(\min/\max/\gcd\) on a range & \emph{No} & \(\bigO{1}\) & \(\secref{c19-sparse}\) here \\
+Merge-sort tree & static count/\(\le x\), slow \(k\)-th & \emph{No} & \(\bigO{\log^2 n}\) & \(\secref{c19-mst}\) \\
+Chairman tree & static range \(k\)-th / count & \emph{No} & \(\bigO{\log V}\) & \(\secref{c19-chairman}\) \\
+Persistent segtree & any \emph{version}'s range query & old reads & \(\bigO{\log n}\) & \(\secref{c19-copy}\) \\
+Roots on a tree & \(k\)-th / count on a path & \emph{No} & \(\bigO{\log V}\) & \(\secref{c19-ontrees}\) \\
+Plain segtree & mutable range aggregate & \emph{Yes} & \(\bigO{\log n}\) & Ch.~19 \chref{c13} \\
+Fenwick/BIT & prefix sums, invertible & \emph{Yes} & \(\bigO{\log n}\) & Ch.~18 \chref{c14} \\
+Lazy segtree & range \emph{update} + query & \emph{Yes} & \(\bigO{\log n}\) & Ch.~20 \chref{c15} \\
+\bottomrule
+\end{tabular}}
+\end{center}
+
+\noindent\textbf{Decision prose.} Start with mutability. \emph{Any write} and persistence is out: an idempotent-\(\min\) need becomes a plain tree (\(\bigO{\log n}\)), a range-\emph{assign/add} need becomes lazy (Ch.~20 \chref{c15}), a prefix-invertible need is a BIT (Ch.~18 \chref{c14}). \emph{No writes} and you may pay \(\bigO{1}\) or \(\bigO{\log}\): a pure \(\min/\max/\gcd\) interval query is a \textbf{sparse table}; a query that asks about \emph{values} (how many \(\le x\)? which is \(k\)-th?) needs a value axis -- \textbf{merge-sort tree} if \(\bigO{\log^2 n}\)/\(\bigO{\log^3 n}\) is comfortable, \textbf{chairman tree} if you need \(\bigO{\log V}\); and if the questions are `read a \emph{past version}' after point edits, \textbf{path-copy persistence} is the only one of the five that survives writes while still reading history. Finally the shape of the data moves you off arrays entirely: values on a \emph{tree path} are the four-root pattern of \(\secref{c19-ontrees}\).
+
+\noindent\textbf{Beyond this chapter} (forward-cites only, no code here): a path with \emph{updates} is \term{heavy-light decomposition}, Ch.~22 (\chref{c16}); `range chmin / modulo' and other non-invertible bulk updates are \term{Segment Tree Beats} and \term{Li Chao}, Ch.~23 (\chref{c29}); many offline queries over an un-indexable predicate are \term{Mo's algorithm}, Ch.~27 (\chref{c21}); and \term{rollback DSU} (Ch.~17, \chref{c28}) achieves a cheaper, single-track \emph{partial persistence} -- undo to the last branch instead of storing every root. Path copying and rollback are the same `keep history' wish on opposite trades: persistence \emph{stores} every version for random access at \(\bigO{\log n}\) memory each, rollback \emph{undoes} along one DFS path in \(O(1)\) extra, and can only be at one version at a time.
+
+% ---------------------------------------------------------------
+\subsection{The honest frontier: two names you do not need yet}
+% ---------------------------------------------------------------
+
+\begin{insightbox}[Wavelet tree and fractional cascading, in one paragraph]
+Two classical structures would sharpen what came before, and are named here only so you know the map's edges. The \term{wavelet tree} is a value-axis recursion that answers range \(k\)-th and range-count-in-\([a,b]\) in \(\bigO{\log V}\) using \emph{linear} space -- strictly better memory than the chairman tree's \(\bigO{n\log n}\) pool, by routing each element down a bit/signature level instead of duplicating frequency trees per prefix. \term{Fractional cascading} accelerates `bisect the same threshold in \emph{many} sorted lists' -- the merge-sort tree's \(\bigO{\log^2 n}\) count -- down to \(\bigO{\log n}\) by cross-linking the node lists so one bisection feeds the next. Neither is used in this book's solved problems: they are harder to build correctly, and chairman plus the sparse table already cover the interview-and-contest range. Know that if a problem's memory or log factor truly breaks, these are the next levers, not a re-invention of what is above.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: a sparse table over a non-idempotent merge]
+The single most damaging mistake here: putting \emph{sum} (or product, or `count of ones') in a sparse table and trusting the overlap. The intersection double-counts. Re-read the \(27\ne26\) example. Sum gets prefix differences; range-count with updates gets a tree/BIT.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: the \(\lg\) table edge at length one]
+\(j=\lfloor\log_2 L\rfloor\) needs \(\lg[1]=0\). Seed it explicitly; a loop starting `for i=2' leaves \(\lg[1]\) at its default and a singleton query reads \(\mathit{st}[\,\cdot\,]\) at a garbage level.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: over-running the inner loop]
+\(\mathit{st}[j][i]\) is defined only when \(i+2^j-1\le n\). Writing the guard as \(i+2^j\le n\) or forgetting it reads uninitialised cells -- wrong for the last blocks, and easy to miss on small tests.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: pretending the table is updatable]
+A point write touches \(\bigO{\log n}\) lengths \(\times\) all blocks containing the index -- \(\bigO{n}\) entries. If updates appear anywhere, the sparse table is the wrong row of the map; move to the tree/persistence rows above.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Is your merge genuinely idempotent (\(\mathcal{M}(x,x)=x\)) before you let two blocks overlap?
+  \item Did you seed \(\lg[1]=0\) and guard the inner loop with \(i+2^j-1\le n\)?
+  \item For a sum/product need, did you switch to a prefix array rather than force the table?
+  \item Is the array truly static?  One update and this whole engine is the wrong map row.
+  \item Did you confirm `two overlapping power-of-two blocks cover \([l,r]\)' on the smallest awkward \(L\) (e.g.\ \(L=3,5,7\))?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Integers Have Friends}{CF 1548B}
+    {https://codeforces.com/problemset/problem/1548/B}
+    {CF 1800 L3}
+    {Find the largest subset that is `friends' -- there is a prime \(p\) with all chosen values congruent modulo \(p\), equivalently the \(\gcd\) of their differences exceeds \(1\). The engine: a subarray's `gcd of consecutive differences' is an \emph{idempotent} \(\gcd\) over a range, so precompute a \term{gcd sparse table} (\(\coderef{c19-sparse}\) with \code{gcd}) and, for each left endpoint, \emph{binary-search the farthest right} whose difference-gcd is \(>1\) in \(O(1)\) per probe. That `grow a window, query an idempotent \(\gcd\) instantly' is exactly this section's constant-time overlap; the answer is the longest such run \(+1\). Rating \lv{3} -- reach for the sparse table, not a segment tree, because there are no updates and the merge is \(\gcd\).}
+  \practice{OpenStreetMap}{CF 1195E}
+    {https://codeforces.com/problemset/problem/1195/E}
+    {CF 2100 L4}
+    {For every \(k\) in a range, count the subarrays whose `(maximum \(-\) minimum)' is at most \(k\). Brute force is \(\bigO{n^2}\) per \(k\). The reduction: as you extend a right end, `max' and `min' over the shrinking left window are two \emph{idempotent} range queries -- answer each with a \(\max\) sparse table and a \(\min\) sparse table (\(\coderef{c19-sparse}\)), then for a fixed left endpoint binary-search the maximal right end where \(\max-\min\le k\). The intended \(O(n)\)-per-target version uses monotone deques (a sliding \(\min/\max\)), but build the sparse-table-plus-binary-search solution first to feel the \(O(1)\) idempotent read doing the heavy lifting; then upgrade. Rating \lv{4}.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+The sparse table discharges the promise Ch.~15 (\chref{c15}) and Ch.~19's \(\secref{c13-static}\) both parked here; the prefix-sum alternative for sums is Ch.~18 (\chref{c14}). The engine map's `later' rows hand off to lazy (Ch.~20 \chref{c15}), HLD (Ch.~22 \chref{c16}), beats/Li Chao (Ch.~23 \chref{c29}), Mo (Ch.~27 \chref{c21}), and rollback-as-partial-persistence (Ch.~17 \chref{c28}). The chapter's four solved engines and this fifth are gathered, with the decision flowchart, in the closing section.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 21.5 in 10 seconds]
+A \emph{sparse table} stores \(\mathcal{M}(A[i..i+2^j-1])\) for all \(i,j\): \(\bigO{n\log n}\) build, and an \(O(1)\) query \(\mathcal{M}(\mathit{st}[j][l],\mathit{st}[j][r-2^j+1])\) using two \emph{overlapping} power-of-two blocks -- legal iff \(\mathcal{M}\) is \emph{idempotent} (\(\min,\max,\gcd,\)\texttt{\&},\texttt{|}). Sum/product \emph{fail} the overlap (\(27\ne26\)); they use prefix differences instead. The chapter's \textbf{engine map}: static idempotent interval \(\to\) sparse; static value-axis count/\(k\)-th \(\to\) merge-sort or chairman; read-past-version under writes \(\to\) path copying; tree path \(\to\) four roots; mutable \(\to\) plain/BIT/lazy (Ch.~19/18/20); beyond \(\to\) HLD, beats, Mo, rollback (Ch.~22/23/27/31). No solvedproblem here -- worked traces and the map are the payload.
+\selftest{
+  \item State the idempotence condition and give one merge that passes and one that fails.
+  \item Answer \(\min A[3..9]\) on the grid with the two block reads and their values.
+  \item Why is the sum over the same two blocks \(27\) and not \(26\)? Name the double-counted element.
+  \item Give the \(O(1)\) sum alternative and its \(O(1)\) mechanism (overlap vs.\ subtract).
+  \item From the map, choose engines for: (a) static range \(\gcd\); (b) \(k\)-th in a subarray; (c) range add + range sum.
+}
+\end{recallbox}

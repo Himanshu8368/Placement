@@ -1,0 +1,2830 @@
+# Introduction to Arrays {#sec-arr}
+
+<!--
+Author-facing provenance (not rendered): mirrors array_book ch.1 "Introduction to Arrays"
+(lessons 01-05, patterns p1-p5 with their exercises, problem_set). Lessons A1-A5 + patterns P1-P5.
+Keep this comment the only place a local path or note name may appear.
+-->
+
+::: {.callout-note title="Sources"}
+**`array_book` ch. 1** (five lessons, five patterns, exercises E1–E5, problem set) · **CLRS** (4th ed.) § 10.1 (arrays and matrices in memory), § 16.4 (dynamic tables: the amortised analysis of a growing array) · **CPH** ch. 2 (time complexity and the operation budget), ch. 4 (data structures: dynamic arrays) · **Morin**, *Open Data Structures* ch. 2 (array-based lists) · **Dijkstra**, EWD 831 (why ranges are half-open and indices start at zero).
+
+**Coverage:** contiguous memory and $O(1)$ indexing · cache lines and why order of access matters · static arrays, `std::vector`, Python `list`, amortised doubling, `reserve`, invalidation · 2D arrays and row-major indexing · 0- and 1-based indices, half-open ranges, the `size()` trap, loop invariants, sentinels · the operation budget, overflow, many test cases, fast I/O, memory · one-pass and two-pass scans, prefix and suffix previews, subarrays vs subsequences vs subsets · in-place work: swap, reversal, read/write pointers, encoding two values in one cell, stability · five patterns: single-pass aggregates, read/write compaction, reversal and rotation, simulation and index arithmetic, frequency arrays over small values.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- **Explain** what an array is in memory, why `a[i]` costs the same for every `i`, why scanning in order is faster than jumping around, and what `push_back` / `append` really cost.
+- **Write** loops over half-open ranges $[\ell, r)$ without off-by-one errors, and state and prove a loop's invariant before writing its body.
+- **Read** a problem's constraints and decide the allowed complexity and the integer type before coding.
+- **Scan** an array once with running state (maximum, top-$k$, counts, best earlier partner), and know when a second pass or a second array is needed.
+- **Rewrite** arrays in place: compact with read/write pointers, rotate with three reversals, encode two values in one cell, and keep the result stable.
+- **Count** by value with a frequency array, and turn counts into ranks with a running sum.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from collections import Counter
+from itertools import combinations
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr005_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters
+
+::: {.callout-note title="In plain words"}
+An **array** is a row of identical boxes, one right after another in memory, each reachable by its number. Almost every problem stores its input in one: a list of scores, a string (an array of characters), a grid (an array of rows). This chapter starts at the machine: what really happens when you type `a[i]`. From there it builds the small set of habits and patterns that every later array chapter reuses.
+:::
+
+You will rarely be asked to "invent an array". You will be asked, all the time, to **think in one**. In an interview, the sentence "scan it once and keep the largest value so far" *is* the answer to a whole family of questions, and it only makes sense once you trust two facts: reading any cell is cheap, and reading the cells in order is cheaper still. In a contest, whether a loop over $2\cdot10^5$ numbers takes a few milliseconds or a few seconds is decided by its big-O first, and then by how it walks memory (@sec-arr-memory).
+
+This chapter opens the arrays volume, and it builds directly on Part I. The operation budget and amortised analysis come from @sec-complexity, loop invariants from @sec-pf-invariants, the cost of Python and C++ containers from @sec-lang-costs, and stress testing against a brute force from @sec-test-stress. Here those tools meet their most common data structure. The chapter is in two parts:
+
+- **Part A — lessons.** Five short lessons go from the hardware up: what an array is (A1), how to write indices and ranges without off-by-one errors (A2), how the constraints fix the allowed cost and the integer type (A3), how to scan (A4), and how to rewrite an array in place (A5).
+- **Part B — patterns.** Five patterns turn the lessons into tools, each with two fully solved, stress-tested problems: a single pass with a few variables, a read and a write pointer, reversal and rotation, careful index arithmetic, and a second array indexed by value.
+
+The next chapters keep the same walk over the array and give it a bigger memory: a running total that answers range questions (@sec-pref), a hash map for values too large to index (@sec-hash), and two indices that move under a rule (@sec-tp, @sec-sw).
+
+::: {#fig-arr-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    vals = [42, 7, 19, 3, 88, 51]
+    V.array(ax, p, vals, label="a", note="  one contiguous block")
+    for i in range(len(vals)):
+        V.text(ax, p, i + 0.5, -0.45, f"+{4 * i}", color="muted", size=9)
+    V.text(ax, p, -0.3, -0.45, "bytes", color="muted", size=9, ha="right")
+    V.arrow(ax, p, 0.5, 1.9, 3.5, 1.9, color="indigo", rad=-0.3)
+    V.text(ax, p, 2.0, 2.75, "a[3] = base + 3 * 4: one multiply, one add", color="indigo", size=9)
+V.show(draw)
+```
+
+Six 4-byte integers stored back to back. The machine finds `a[3]` by computing its address, `base + 3·4`, instead of walking past `a[0]`, `a[1]` and `a[2]`. That one fact is behind almost everything in this volume; @sec-arr-memory explains it and its consequences.
+
+:::
+
+## Part A — Lessons
+
+## A1. What an array is: contiguous memory and $O(1)$ indexing {#sec-arr-memory}
+
+::: {.callout-note title="In plain words"}
+Picture a street where every house has the same width and there are no gaps, numbered $0, 1, 2, \dots$ from one end. If you know where house $0$ is and how wide a house is, you can point straight at house $421$ without walking past the other $421$. An array is that street. A linked list is a treasure hunt instead: each house only tells you where the *next* one is, so reaching house $421$ means visiting every house before it.
+:::
+
+**Contiguous memory and address arithmetic.** An array of length $n$ is a block of $n$ elements of the *same type*, stored **contiguously** (one directly after another). If the first element starts at address `base` and one element takes $s$ bytes, then
+
+$$\operatorname{address}(a[i]) = \texttt{base} + i\cdot s \qquad (0 \le i < n).$$ {#eq-arr-address}
+
+The processor does not search for element $i$; it *computes* where it is, with one multiplication and one addition, whatever $i$ and $n$ are. That is exactly what $O(1)$ **random access** means. It also explains why C and C++ count from $0$: `a[i]` is defined as `*(a + i)`, "the element $i$ steps after the first", and the first element is $0$ steps after itself. The element size $s$ depends on the type: $4$ bytes for an `int`, $8$ for a `long long` or a `double`, $1$ for a `char`.
+
+A Python `list` adds one hop. It stores *references* (pointers) to objects, so `a[i]` reads the pointer at `base + 8i` and then follows it to the object. The address arithmetic is still $O(1)$; the extra hop is one reason Python lists are slower than C++ arrays by a constant factor, and why the objects of a list may be scattered in memory even though the pointers are not.
+
+```{python}
+#| label: arr-address
+def address(base: int, i: int, size: int) -> int:
+    """Byte address of a[i] in an array of `size`-byte elements starting at `base`."""
+    return base + i * size
+
+# six ints (4 bytes each) starting at byte 1000, and three long longs (8 bytes each)
+assert [address(1000, i, 4) - 1000 for i in range(6)] == [0, 4, 8, 12, 16, 20]
+assert address(1000, 2, 8) - address(1000, 0, 8) == 16
+# the cost does not depend on i: a[0] and a[999999] are one formula each
+assert address(1000, 999_999, 4) == 1000 + 3_999_996
+```
+
+The same layout in C++, printed by the program itself:
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+int main() {
+    int a[6] = {7, 3, 9, 4, 1, 8};
+    long long b[3] = {1, 2, 3};
+    char* base = (char*)&a[0];
+    for (int i = 0; i < 6; i++)                 // offsets 0, 4, 8, 12, 16, 20
+        cout << "a[" << i << "] at base + " << (char*)&a[i] - base << " bytes\n";
+    cout << "b[2] at base + " << (char*)&b[2] - (char*)&b[0] << " bytes\n";   // 16
+    cout << "*(a + 3) = " << *(a + 3) << "\n";                                 // 4, same as a[3]
+}
+```
+
+**The price of contiguity.** Because the elements must stay side by side, an array cannot grow in place (the memory just after it may belong to something else), and inserting or deleting in the middle shifts every element behind that position: $O(n)$. A **linked list** makes the opposite trade: inserting after a node you already hold is $O(1)$, but reaching element $i$ means following $i$ pointers, each to an address the processor cannot predict.
+
+### Cache lines: why scanning in order is fast {#sec-arr-cache}
+
+Main memory is slow compared with the processor: a trip to RAM typically takes on the order of a hundred nanoseconds, time in which the processor could execute hundreds of instructions. The hardware hides this with **caches**, small fast memories close to the processor, and it never fetches a single byte. It fetches a whole **cache line**, typically $64$ bytes: $16$ consecutive `int`s or $8$ consecutive `long long`s.
+
+So when you scan `a[0], a[1], a[2], …` in order, the first access to a line pays for the trip and the next reads from the same line are almost free; the hardware also notices the sequential pattern and **prefetches** the next line before you ask. Jump around instead (random indices, a linked list, a 2D array walked column by column) and almost every access can pull in a fresh line that you use once. Two algorithms with the same big-O can differ by a large constant factor for this reason alone.
+
+We can count this effect instead of trusting it. The cell below simulates a small cache (it holds a few lines and evicts the least recently used one) and counts **misses**, the accesses that had to fetch a new line:
+
+```{python}
+#| label: arr-cache-sim
+def cache_misses(addresses, line=64, capacity=8):
+    """Misses of an LRU cache that holds `capacity` lines of `line` bytes."""
+    cache, misses = [], 0                 # cache[-1] is the most recently used line
+    for addr in addresses:
+        tag = addr // line
+        if tag in cache:
+            cache.remove(tag)
+        else:
+            misses += 1
+            if len(cache) == capacity:
+                cache.pop(0)              # evict the least recently used line
+        cache.append(tag)
+    return misses
+
+R = C = 64                                # a 64 x 64 grid of 4-byte ints, row-major
+row_order = [(i * C + j) * 4 for i in range(R) for j in range(C)]
+col_order = [(i * C + j) * 4 for j in range(C) for i in range(R)]
+assert cache_misses(row_order) == R * C // 16     # one miss per 16 ints: 256 misses
+assert cache_misses(col_order) == R * C           # every single read misses: 4096
+seq8 = [8 * i for i in range(4096)]               # 4096 long longs read in order
+stride8 = [8 * 8 * i for i in range(4096)]        # every 8th long long
+print(cache_misses(seq8), cache_misses(stride8))  # 512 and 4096
+```
+
+The grid holds $4096$ ints. Walked row by row (consecutive addresses) it costs $256$ misses; walked column by column, each read jumps $64 \cdot 4 = 256$ bytes, lands in a line that was evicted long ago, and all $4096$ reads miss. @fig-arr-cache draws the same effect on a single row of `long long`s.
+
+::: {#fig-arr-cache}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    cells = list(range(16))
+    line_col = {i: ("green" if i < 8 else "cyan") for i in cells}
+    V.array(ax, p, cells, y=3.0, colors=dict(line_col), label="in order",
+            regions=[(0, 8, "green", "cache line 0"), (8, 16, "cyan", "cache line 1")])
+    V.text(ax, p, 8, 1.55, f"16 reads -> {cache_misses([8 * i for i in range(16)])} misses",
+           color="muted", size=9)
+    picks = [0, 8]
+    V.array(ax, p, cells, y=-0.4, colors={i: "red" for i in picks}, label="stride 8",
+            pointers=[(i, "read", "red") for i in picks])
+    V.text(ax, p, 8, -2.45, f"over 4096 reads: in order {cache_misses(seq8)} misses, "
+           f"stride 8 {cache_misses(stride8)} misses", color="muted", size=9)
+V.show(draw)
+```
+
+Sixteen 8-byte values fill two 64-byte cache lines. Reading in order (top) pays one miss per line, then seven nearly free reads. Reading every 8th value (bottom) lands in a new line every time, so every read is a miss. The counts come from the cache simulation above.
+
+:::
+
+The effect is real on hardware too. The program below sums a $4096 \times 4096$ matrix (64 MB) twice, row by row and column by column. Both loops do the same $16.7$ million additions and print the same sum; on a typical desktop the column-order loop is many times slower. Your numbers will differ, but the gap will not disappear.
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+const int N = 4096;
+static int g[N][N];                              // 64 MB, row-major
+
+int main() {
+    for (int i = 0; i < N; i++)
+        for (int j = 0; j < N; j++) g[i][j] = (i ^ j) & 7;
+    auto t0 = chrono::steady_clock::now();
+    long long s1 = 0;
+    for (int i = 0; i < N; i++)                  // row by row: consecutive addresses
+        for (int j = 0; j < N; j++) s1 += g[i][j];
+    auto t1 = chrono::steady_clock::now();
+    long long s2 = 0;
+    for (int j = 0; j < N; j++)                  // column by column: jumps of N*4 bytes
+        for (int i = 0; i < N; i++) s2 += g[i][j];
+    auto t2 = chrono::steady_clock::now();
+    auto ms = [](chrono::steady_clock::duration d) {
+        return (long long)chrono::duration_cast<chrono::milliseconds>(d).count(); };
+    cout << "row order    " << ms(t1 - t0) << " ms (sum " << s1 << ")\n";
+    cout << "column order " << ms(t2 - t1) << " ms (sum " << s2 << ")\n";
+}
+```
+
+::: {.callout-important title="The practical rule"}
+Prefer algorithms that read arrays left to right. For a 2D array, make the **last** index the inner loop. When two algorithms have the same big-O, the one with sequential access usually wins by a constant factor.
+:::
+
+### Static arrays, `std::vector` and Python lists {#sec-arr-static}
+
+C++ gives you two kinds of arrays, and Python one:
+
+| | static array `int a[N];` | `vector<int> v(n);` | Python `list` |
+|---|---|---|---|
+| size fixed when | compiling (`N` is a constant) | running; can grow | running; can grow |
+| where it lives | global: static memory; local: the **stack** | the heap | the heap (pointers to objects) |
+| initial values | global: all zero; local: **garbage** | zero, or `v(n, x)` | whatever you build: `[0] * n` |
+| large sizes | global is fine; a large local array can overflow the stack (often only a few MB) | fine | fine |
+| knows its size | no | `v.size()` | `len(a)` |
+| bounds check | never | only with `v.at(i)` | always (`IndexError`) |
+
+In contests both C++ forms are common: a global `int a[200005];` sized by the largest $n$ plus a few spare cells, or a `vector<int> a(n)` sized exactly. This book uses `vector` almost everywhere: it carries its size, it can be returned from a function, and it is what LeetCode passes to your code. Reading past the end of a C++ array is **undefined behaviour**: often a silent wrong answer, not a crash. Python raises `IndexError` instead, but a negative index silently reads from the end (`a[-1]` is the last element), which hides a different family of bugs.
+
+::: {.callout-warning title="Uninitialised local arrays"}
+```cpp
+// fragment
+int main() {
+    int cnt[100];            // WRONG: local, holds garbage
+    int cnt2[100] = {};      // RIGHT: all zero
+    vector<int> cnt3(100);   // RIGHT: all zero
+}
+```
+A local counting array without `= {}` may work on your machine "by luck" and fail on the judge.
+:::
+
+### How a growable array grows: amortised doubling {#sec-arr-vec}
+
+A `std::vector` keeps a buffer of **capacity** $c$ cells, of which the first **size** $s \le c$ are in use. `push_back(x)` writes `x` into cell $s$ when $s < c$: $O(1)$. When the buffer is full it cannot stretch (the neighbouring memory belongs to someone else), so it must
+
+1. allocate a new, larger buffer (libstdc++, the GCC library, doubles: $2c$; Microsoft's library grows by $1.5c$),
+2. copy (or move) the $s$ old elements into it,
+3. free the old buffer, then write `x`.
+
+That unlucky push costs $O(n)$. Why, then, do we call `push_back` $O(1)$? Because the cost is **amortised**: averaged over any whole sequence of operations, it is constant. This is the aggregate method of @sec-cx-amortized applied to a data structure.
+
+::: {.callout-important title="Amortised cost of doubling"}
+Starting from an empty vector, any $n$ calls of `push_back` with capacity doubling copy fewer than $2n$ elements in total. So the total work is $O(n)$ and the amortised cost per call is $O(1)$.
+
+**Proof.** Copies happen only at a push that finds the buffer full, and the capacities are $1, 2, 4, \dots$. The buffer of capacity $2^j$ is full at push number $2^j + 1$, which then copies $2^j$ elements; that push exists only if $2^j + 1 \le n$. With $2^k$ the largest such power, $2^k < n$, and the total is
+$$1 + 2 + 4 + \dots + 2^k = 2^{k+1} - 1 < 2\cdot 2^k < 2n.$$
+Adding the $n$ writes of the new elements gives fewer than $3n$ element operations. $\blacksquare$
+:::
+
+The same argument works for **any growth factor** $g > 1$: the capacities form a geometric series whose sum stays below $\frac{g}{g-1}\,n$, for example $3n$ for $g = 1.5$. It fails for **additive** growth. Growing by a constant $10$ cells copies $10 + 20 + 30 + \dots \approx n^2/20$ elements: quadratic. CPython's `list` over-allocates by about one eighth of the size plus a small constant, a growth factor near $1.125$, so its appends are amortised $O(1)$ as well; the price of the small factor is more frequent (but cheaper) reallocations. The cell checks all of this by counting copies:
+
+```{python}
+#| label: arr-growth
+def copies_for(n: int, grow) -> int:
+    """Elements copied by n appends when a full buffer of capacity c is replaced by grow(c)."""
+    cap = size = copied = 0
+    for _ in range(n):
+        if size == cap:
+            copied += size
+            cap = grow(cap)
+        size += 1
+    return copied
+
+double = lambda c: max(1, 2 * c)
+one_and_half = lambda c: max(c + 1, math.ceil(1.5 * c))
+plus_ten = lambda c: c + 10
+
+for n in list(range(1, 300)) + [1000, 12_345, 100_000]:
+    assert copies_for(n, double) < 2 * n
+    assert copies_for(n, one_and_half) <= 3 * n
+assert copies_for(1000, double) == 1 + 2 + 4 + 8 + 16 + 32 + 64 + 128 + 256 + 512    # 1023
+assert copies_for(1000, plus_ten) == 49_500                                             # ~ n^2 / 20
+
+# CPython's list really does over-allocate: 1000 appends resize the buffer far fewer than 1000 times
+lst, last, resizes = [], sys.getsizeof([]), 0
+for i in range(1000):
+    lst.append(i)
+    if sys.getsizeof(lst) != last:
+        resizes, last = resizes + 1, sys.getsizeof(lst)
+assert 10 < resizes < 100
+print("doubling 1000:", copies_for(1000, double), "| +10:", copies_for(1000, plus_ten),
+      "| CPython resizes for 1000 appends:", resizes)
+```
+
+@fig-arr-anim-grow plays nine pushes into an empty doubling vector. Watch where the copies happen: only at the pushes that find the buffer full.
+
+::: {#fig-arr-anim-grow}
+
+```{python}
+#| echo: false
+gr_frames, gr_caps = [], []
+gr_cap, gr_buf, gr_copied = 0, [], 0
+for x in range(1, 10):
+    if len(gr_buf) == gr_cap:
+        moved = len(gr_buf)
+        gr_copied += moved
+        gr_cap = max(1, 2 * gr_cap)
+        note = f"push {x}: buffer full, allocate capacity {gr_cap}, copy {moved}"
+    else:
+        note = f"push {x}: free cell, plain write"
+    gr_buf.append(x)
+    gr_frames.append((list(gr_buf), gr_cap, gr_copied))
+    gr_caps.append(f"{note} (copies so far: {gr_copied})")
+assert gr_copied == 1 + 2 + 4 + 8 and gr_frames[-1][1] == 16
+
+def gr_frame(ax, p, k):
+    buf, cap, copied = gr_frames[k]
+    cells = buf + [None] * (cap - len(buf))
+    colors = {i: "green" for i in range(len(buf) - 1)}
+    colors[len(buf) - 1] = "amber"
+    V.array(ax, p, cells, colors=colors, cell_w=0.9,
+            regions=[(0, len(buf), "green", f"size {len(buf)}"), (len(buf), cap, "muted", "free")]
+            if cap > len(buf) else [(0, len(buf), "green", f"size {len(buf)} = capacity")])
+    V.text(ax, p, -0.3, 0.5, f"cap {cap}", ha="right", color="muted", size=10)
+
+V.animate(gr_frame, len(gr_frames), captions=gr_caps, interval=1100)
+```
+
+Nine `push_back` calls into a doubling vector. The amber cell is the value just pushed; empty cells are spare capacity. Reallocations happen only at pushes 1, 2, 3, 5 and 9, the ones that find the buffer full; they copy $0, 1, 2, 4, 8$ elements, $15 < 2 \cdot 9$ in total.
+
+:::
+
+Two practical consequences:
+
+- **`reserve` is not `resize`.** If you know the final size, `v.reserve(n)` allocates once and every later `push_back` is a plain write. It changes the *capacity*, not the *size*: after `v.reserve(n)`, `v[0]` is still out of range. `v.resize(n)` changes the size (new cells are zero).
+- **Pointers, references and iterators into a vector die on reallocation.** `int& first = v[0]; v.push_back(42);` may move the whole buffer, and `first` then refers to freed memory. Keep indices, not references, while the vector can still grow.
+
+```cpp
+// fragment
+vector<int> v;
+v.reserve(n);  v[0] = 5;        // WRONG: size is still 0
+vector<int> w;
+w.resize(n);   w[0] = 5;        // RIGHT: size n, all zero
+vector<int> u;
+u.reserve(n);  u.push_back(5);  // RIGHT: no reallocation for the first n pushes
+```
+
+The costs you will rely on for the rest of the volume:
+
+| Operation on a growable array | Cost | Why |
+|---|---|---|
+| read / write `a[i]` | $O(1)$ | address = `base + i·size` |
+| append / remove the last element | $O(1)$ amortised | an occasional doubling copy, spread thin |
+| insert / delete at position $i$ | $O(n - i)$ | every later cell shifts by one |
+| insert / delete at the front | $O(n)$ | everything shifts (`list.pop(0)`, `v.erase(v.begin())`) |
+| "is $x$ present?" | $O(n)$ | a linear scan, unless sorted (binary search, @sec-bst) or hashed (@sec-hash) |
+
+### Two-dimensional arrays {#sec-arr-2d}
+
+A grid of $R$ rows and $C$ columns can be stored in three ways:
+
+1. **A static 2D array** `int g[R][C]` is one contiguous block in **row-major** order (row 0, then row 1, …), so $\operatorname{address}(g[i][j]) = \texttt{base} + (i\cdot C + j)\cdot s$.
+2. **A flattened vector** `vector<int> g(R * C)` indexed as `g[i * C + j]` has exactly the same layout, sized at run time. The id $i\cdot C + j$ is reversible: $i = \lfloor id / C\rfloor$, $j = id \bmod C$. Note that both directions use $C$, the number of **columns**.
+3. **A vector of vectors** `vector<vector<int>> g(R, vector<int>(C))` (or a Python list of lists) stores every row as a separate block. Rows may have different lengths, and a row can be swapped or passed around, but each access first follows the row pointer, and consecutive rows are not adjacent in memory.
+
+```{python}
+#| label: arr-2d
+R2, C2 = 3, 4
+grid = [[10 * i + j for j in range(C2)] for i in range(R2)]     # list of rows
+flat = [grid[i][j] for i in range(R2) for j in range(C2)]        # row-major, id = i*C + j
+for i in range(R2):
+    for j in range(C2):
+        cid = i * C2 + j
+        assert flat[cid] == grid[i][j] and (cid // C2, cid % C2) == (i, j)
+assert (9 // C2, 9 % C2) == (2, 1)     # id 9 is row 2, column 1 -- divide by C, not by R
+```
+
+::: {#fig-arr-2d}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    cells = [[str(i * C2 + j) for j in range(C2)] for i in range(R2)]
+    V.grid(ax, p, cells, y=4.2, row_labels=[f"row {i}" for i in range(R2)],
+           col_labels=[f"col {j}" for j in range(C2)], colors={(2, 1): "amber"}, cell_w=0.9)
+    V.array(ax, p, list(range(R2 * C2)), y=-0.3, cell_w=0.9, colors={9: "amber"},
+            regions=[(i * C2, (i + 1) * C2, ["green", "cyan", "violet"][i], f"row {i}") for i in range(R2)])
+    V.text(ax, p, 5.4, 1.35, "row-major: id = i * C + j", color="muted", size=9)
+V.show(draw)
+```
+
+A $3\times4$ grid (each cell shows its id) and the same cells laid out row-major in one array. Cell $(2,1)$ has id $2\cdot4+1 = 9$; going back, row $\lfloor 9/4\rfloor = 2$ and column $9 \bmod 4 = 1$.
+
+:::
+
+`vector<vector<int>>` (a list of lists in Python) is the readable default and what LeetCode passes for grids. Switch to a flat array when the grid is large, when you want one integer id per cell (graph searches on grids, Pattern 4), or when every row must be contiguous for speed.
+
+## A2. Indices and ranges: half-open $[\ell, r)$ and off-by-one errors {#sec-arr-ranges}
+
+::: {.callout-note title="In plain words"}
+Most wrong answers on easy array problems are not wrong ideas. They are a loop that runs one step too far, a range that misses its last element, or a comparison with a neighbour that does not exist. This lesson fixes one convention for ranges that removes most of these bugs, and one habit (the loop invariant) that catches the rest.
+:::
+
+**0-based and 1-based indices.** C++ and Python arrays are **0-based**: the $n$ elements are `a[0]`, …, `a[n-1]`. Problem statements usually number positions $1..n$ ("$a_1, a_2, \dots, a_n$"). Both conventions are fine as long as you pick one per program, at the line that reads the input, and stick to it:
+
+| | convert to 0-based | keep 1-based |
+|---|---|---|
+| storage | `a(n)`, read into `a[0..n-1]` | `a(n + 1)`, read into `a[1..n]`, `a[0]` unused |
+| the statement says "position $p$" | use `a[p - 1]` | use `a[p]` |
+| printing a position | print `i + 1` | print `i` |
+| good for | LeetCode, library functions, `%` arithmetic (Pattern 4) | prefix sums with $P[0] = 0$ (@sec-pref), formulas copied from the statement |
+
+::: {.callout-warning title="Mixing the two conventions"}
+The classic bug: read into `a[1..n]` but loop `for (int i = 0; i < n; i++)`. The loop reads the unused `a[0]` and never reads `a[n]`. Decide the convention where the input is read, and write it in a comment.
+:::
+
+**Half-open ranges.** A **range** is a set of consecutive positions. This book writes every range the same way:
+
+> $[\ell, r)$ denotes the positions $\ell, \ell+1, \dots, r-1$: the left end is **included**, the right end is **excluded**. Its length is $r - \ell$, and it is empty exactly when $\ell = r$.
+
+Why this convention, and not $[\ell, r]$? Dijkstra's short note EWD 831 compares the four ways to write "the numbers $2, 3, \dots, 12$" and prefers $2 \le i < 13$, for reasons that matter in code:
+
+- **The length is $r - \ell$**, with no "$+1$".
+- **Adjacent ranges meet without overlap or gap.** Splitting $[\ell, r)$ at any $m$ with $\ell \le m \le r$ gives $[\ell, m)$ and $[m, r)$: no $m \pm 1$ anywhere, and the lengths add up, $(m - \ell) + (r - m) = r - \ell$.
+- **The empty range needs no special case.** $[\ell, \ell)$ has length $0$, and its loop runs zero times. With closed ranges an empty range needs an upper bound *below* the lower one.
+- **Starting at 0 is natural.** With $n$ elements and 0-based indices, the whole array is $0 \le i < n$; 1-based indexing would give the uglier $1 \le i < n + 1$.
+
+Your tools already speak this language. The everyday loop `for (int i = 0; i < n; i++)` *is* the range $[0, n)$; Python's `a[2:5]` gives cells $2, 3, 4$ and `range(l, r)` visits $[\ell, r)$; `sort(a.begin() + l, a.begin() + r)` sorts $[\ell, r)$, and `a.end()` points just past the last element.
+
+::: {#fig-arr-range}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    vals = [5, 2, 8, 1, 9, 3, 6, 4]
+    V.array(ax, p, vals, y=2.6, regions=[(1, 4, "green", "[1, 4): 4 - 1 = 3 cells")],
+            pointers=[(1, "l = 1", "indigo", "top"), (4, "r = 4", "pink", "top")])
+    V.array(ax, p, vals, y=-1.0, regions=[(0, 3, "amber", "[0, m)"), (3, 8, "cyan", "[m, n)")],
+            pointers=[(3, "m = 3", "violet", "top")])
+    V.text(ax, p, 4.0, -2.4, "lengths 3 + 5 = 8: the two halves meet with no gap and no overlap",
+           color="muted", size=9)
+V.show(draw)
+```
+
+Top: the half-open range $[1, 4)$ holds `a[1]`, `a[2]`, `a[3]`. The right end `r` points *just past* the last cell, which is why `r` may legally equal $n$. Bottom: splitting $[0, 8)$ at $m = 3$ gives $[0, 3)$ and $[3, 8)$, no $\pm1$ anywhere.
+
+:::
+
+**Closed ranges $[\ell, r]$** still appear, because statements love "$\ell \le i \le r$". Their length is $r - \ell + 1$: the **fencepost** count (a fence of $r - \ell$ metres with a post every metre has $r - \ell + 1$ posts). Convert once, at input time: the closed $[\ell, r]$ is the half-open $[\ell, r + 1)$.
+
+```{python}
+#| label: arr-ranges
+def range_sum(a: list[int], l: int, r: int) -> int:
+    """Sum of the half-open range a[l:r): r - l elements, empty when l == r."""
+    s = 0
+    for i in range(l, r):
+        s += a[i]
+    return s
+
+rs_a = [5, 2, 8, 1, 9, 3]
+assert range_sum(rs_a, 1, 4) == 2 + 8 + 1 and range_sum(rs_a, 3, 3) == 0
+for m in range(len(rs_a) + 1):                           # every split point, including both ends
+    assert range_sum(rs_a, 0, m) + range_sum(rs_a, m, len(rs_a)) == sum(rs_a)
+assert rs_a[2:5] == [8, 1, 9] and len(rs_a[2:5]) == 5 - 2   # slices are half-open too
+```
+
+### The `size()` trap {#sec-arr-size-trap}
+
+In C++, `v.size()` is **unsigned** (`size_t`). Unsigned arithmetic never goes below zero; it wraps around. On an empty vector `v.size() - 1` is not $-1$ but $2^{64} - 1$ on a 64-bit build, so `for (int i = 0; i < v.size() - 1; i++)` runs (nearly) forever and reads far outside the vector. Two habits remove the whole family of bugs: store `int n = v.size();` once at the top, and compare neighbours with `i + 1 < n` instead of `i < n - 1`.
+
+```cpp
+// fragment
+for (int i = 0; i < v.size() - 1; i++)       // WRONG on an empty v: size() - 1 wraps around
+    if (v[i] > v[i + 1]) ...
+for (int i = 0; i + 1 < (int)v.size(); i++)  // RIGHT: no subtraction on an unsigned value
+    if (v[i] > v[i + 1]) ...
+```
+
+```{python}
+#| label: arr-unsigned
+assert (0 - 1) % 2**64 == 18_446_744_073_709_551_615    # what size() - 1 becomes on an empty vector
+```
+
+An empty input is also a *semantic* question: "the maximum of an empty array" has no value, and a function that starts with `best = a[0]` crashes on it. Either the constraints promise $n \ge 1$ (read them), or start from a sentinel value and decide what to return.
+
+### Loop invariants: proving a loop correct {#sec-arr-invariant}
+
+A **loop invariant** is a statement about the variables that is true every time the loop condition is checked. You prove a loop correct in three steps, exactly like an induction proof (@sec-pf-invariants develops the method in full):
+
+1. **Initialisation:** the invariant holds before the first iteration.
+2. **Maintenance:** if it holds before an iteration, it still holds after it.
+3. **Termination:** when the loop stops, the invariant plus the reason it stopped give the answer.
+
+For array scans the invariant almost always has the shape *"the variables describe the processed prefix $[0, i)$"*. Here is the maximum of a non-empty array, with its proof:
+
+```{python}
+#| label: arr-max-of
+def max_of(a: list[int]) -> int:
+    """Requires len(a) >= 1."""
+    best, i = a[0], 1
+    # invariant: best == max(a[0:i]) and 1 <= i <= len(a)
+    while i < len(a):
+        if a[i] > best:
+            best = a[i]
+        i += 1
+    return best                      # i == len(a): best == max(a[0:n])
+
+for _ in range(500):
+    mo_a = [random.randint(-50, 50) for _ in range(random.randint(1, 9))]
+    assert max_of(mo_a) == max(mo_a)
+```
+
+- **Initialisation.** Before the loop $i = 1$ and `best` $= a[0] = \max(a[0..1))$; since $n \ge 1$, also $1 \le i \le n$.
+- **Maintenance.** If `best` $= \max(a[0..i))$ and $i < n$, the body makes `best` $= \max(\max(a[0..i)), a[i]) = \max(a[0..i+1))$ and then $i \gets i + 1 \le n$.
+- **Termination.** $i$ grows by one each time and never passes $n$, so the loop stops with $i = n$, and the invariant says `best` is the maximum of the whole array. $\blacksquare$
+
+The proof looks pedantic for a three-line loop, but writing the invariant first is how harder loops come out right: the read/write pointers of Pattern 2, the three running maxima of @sec-arr-p1-a, and the two-pointer loops of @sec-tp are all designed by asking "what must be true about $[0, i)$ after each step?". The invariant also points at the bug when there is one: starting with `best = 0` breaks the initialisation step for an all-negative array, and the proof tells you exactly which line is wrong.
+
+### Boundaries and sentinels {#sec-arr-sentinel}
+
+Many conditions look at neighbours: "$a_i$ is a peak if it is larger than both neighbours", "a run ends where $a_i \ne a_{i+1}$". At the two ends a neighbour is missing, and reading `a[-1]` or `a[n]` is undefined behaviour in C++ (and a silent wrap-around read of the *last* element in Python). Two standard cures:
+
+- **Guard the access.** Put the bounds test first. `&&` and `||` (Python's `and`, `or`) evaluate left to right and stop early (**short-circuit**), so the array is never touched out of range: `(i == 0 || a[i] > a[i-1]) && (i == n-1 || a[i] > a[i+1])`. The version `(a[i] > a[i-1] || i == 0)` reads `a[-1]` before it tests `i == 0`.
+- **Add a sentinel.** A **sentinel** is an extra element at the end (or the start) whose value makes the boundary behave like any other position. Appending a value that differs from every real element makes "the last run ends" happen by the same test as every other run end.
+
+```{python}
+#| label: arr-runs
+def runs_checked(a: list[int]) -> list[int]:
+    """Lengths of the maximal runs of equal values, e.g. 4 4 4 1 1 7 -> 3 2 1."""
+    res, start = [], 0
+    for i in range(1, len(a) + 1):
+        if i == len(a) or a[i] != a[i - 1]:        # boundary test on every step
+            res.append(i - start)                  # the run is [start, i): length i - start
+            start = i
+    return res if a else []
+
+
+def runs_sentinel(a: list[int]) -> list[int]:
+    b = a + [None]                                 # sentinel: differs from every real value
+    res, start = [], 0
+    for i in range(1, len(a) + 1):
+        if b[i] != b[i - 1]:                       # no "i == n" test needed
+            res.append(i - start)
+            start = i
+    return res if a else []
+
+
+assert runs_checked([4, 4, 4, 1, 1, 7]) == runs_sentinel([4, 4, 4, 1, 1, 7]) == [3, 2, 1]
+for _ in range(1000):
+    ru_a = [random.randint(0, 2) for _ in range(random.randint(0, 10))]
+    assert runs_checked(ru_a) == runs_sentinel(ru_a)
+    assert sum(runs_checked(ru_a)) == len(ru_a)
+```
+
+Notice the half-open thinking in both functions: a run is the range $[\textit{start}, i)$, so its length is $i - \textit{start}$, no $+1$. A sentinel must be a value that can **never** occur in the data: in C++ an appended `INT_MIN` silently merges a run if the input may itself contain `INT_MIN`. Other common sentinels: $-\infty$ guards at both ends for "peak" questions (data in `a[1..n]`, `a[0] = a[n+1] = -inf`), and a border of walls around a grid.
+
+::: {.callout-warning title="Off-by-one checklist"}
+- `i <= n` on a 0-based array of size $n$ reads `a[n]`.
+- A neighbour `a[i + 1]` in a loop up to `i < n` reads `a[n]` at the last step: loop to `i + 1 < n`.
+- A closed range's length is `r - l + 1`, not `r - l`.
+- `v.size() - 1` on an empty vector is a huge unsigned number.
+- Statement positions are $1..n$ and the array is $0..n-1$: convert exactly once.
+- `while lo <= hi` versus `while lo < hi`: the second stops exactly when $[lo, hi)$ is empty.
+:::
+
+## A3. The cost model: from constraints to complexity, and overflow {#sec-arr-cost}
+
+::: {.callout-note title="In plain words"}
+A statement hands you more than the task. Its **constraints** (the limits on $n$, on the values, on the number of test cases) tell you how fast the algorithm must be and which integer type it needs. Read them *before* you think about the algorithm: they rule out an $O(n^2)$ idea in ten seconds, and they warn you about the sum that will not fit in an `int`.
+:::
+
+**The budget.** A judge executes very roughly $10^8$ "simple" operations per second: additions, comparisons, array accesses in a sequential pattern. With a typical limit of 1–2 seconds your algorithm may perform a few times $10^8$ steps. This is a rule of thumb, not a law: a loop of additions over an array can run faster, while a loop with divisions, `map` lookups or random memory accesses may manage ten times fewer (@sec-cx-budget derives the full table). To use the budget, count the steps of your algorithm as a function of $n$ and plug in the largest $n$:
+
+| loop shape | steps | $n = 10^3$ | $n = 10^5$ | $n = 2\cdot10^5$ |
+|---|---|---|---|---|
+| one scan | $n$ | $10^3$ | $10^5$ | $2\cdot10^5$ |
+| sort, then scan | $n \log_2 n$ | $10^4$ | $1.7\cdot10^6$ | $3.5\cdot10^6$ |
+| all pairs $i < j$ | $n(n-1)/2$ | $5\cdot10^5$ | $5\cdot10^9$ (too slow) | $2\cdot10^{10}$ (too slow) |
+| all subarrays with an inner loop | $\approx n^3/6$ | $1.7\cdot10^8$ | too slow | too slow |
+
+```{python}
+#| label: arr-budget
+assert round(1e5 * math.log2(1e5) / 1e6, 1) == 1.7 and round(2e5 * math.log2(2e5) / 1e6, 1) == 3.5
+assert 10**5 * (10**5 - 1) // 2 == 4_999_950_000 and round(1000**3 / 6 / 1e8, 2) == 1.67
+```
+
+Turned around, the largest $n$ points at the complexity class:
+
+| $n$ up to | roughly fits | reach for |
+|---|---|---|
+| $20$ | $2^n$, $n!$ | brute force over subsets or permutations |
+| $500$ | $n^3$ | triple loop, interval DP |
+| $5000$ | $n^2$ | all pairs, every subarray with running state |
+| $2\cdot10^5$ – $10^6$ | $n \log n$ | sort then scan, binary search, a heap |
+| $10^7$ | $n$ | one or two linear passes with cheap work per cell |
+| $10^{18}$ | $\log n$ or $O(1)$ | binary search on a number, a closed formula |
+
+Two worked reads. "Reorder $2\cdot10^5$ students": $n^2 = 4\cdot10^{10}$ is far over budget, so the solution is $O(n)$ or $O(n\log n)$, a single pass or a sort. "$1 \le n \le 40$": $2^{40} \approx 10^{12}$ is too much, but $2^{20}$ twice is fine, which quietly suggests splitting the input into two halves (meet in the middle). The constraint is a hint, not decoration.
+
+**Overflow.** The value range matters as much as $n$:
+
+| type | range | rule of thumb |
+|---|---|---|
+| `int` (32 bits) | $-2^{31} \dots 2^{31}-1 = 2\,147\,483\,647$ | $\approx 2.1\cdot10^9$: values up to $10^9$ fit, their sums do not |
+| `long long` (64 bits) | $-2^{63} \dots 2^{63}-1$ | $\approx 9.2\cdot10^{18}$: sums, and products of two values up to $10^9$ |
+| `unsigned long long` | $0 \dots 2^{64}-1$ | wraps modulo $2^{64}$ (used for hashing) |
+| Python `int` | unbounded | never overflows, but each operation is slower |
+
+Signed overflow in C++ is **undefined behaviour**: the program may print garbage, loop forever, or work on your machine and fail on the judge. In practice an `int` sum usually wraps around modulo $2^{32}$, and the cell below reproduces exactly what the wrapped values look like (Python cannot overflow, so it emulates a 32-bit register):
+
+```{python}
+#| label: arr-overflow
+def wrap32(x: int) -> int:
+    """The value a 32-bit two's-complement int would hold after computing x."""
+    x &= 0xFFFF_FFFF
+    return x - 2**32 if x >= 2**31 else x
+
+assert wrap32(200_000 * 10**9) == 552_894_464          # a sum of 2e5 values of 1e9, kept in an int
+assert wrap32(100_000 * 100_000) == 1_410_065_408      # int * int, wrapped before it is widened
+lo32, hi32 = 2_000_000_000, 2_100_000_000
+assert wrap32(lo32 + hi32) // 2 == -97_483_648         # (lo + hi) / 2: a negative "midpoint"
+assert lo32 + (hi32 - lo32) // 2 == 2_050_000_000      # lo + (hi - lo) / 2 never overflows
+assert 200_000 * 199_999 // 2 == 19_999_900_000        # pairs for n = 2e5: needs 64 bits
+```
+
+Three traps cover almost every case:
+
+1. **Sums.** $n$ values of size up to $V$ sum to at most $nV$. With $n = 2\cdot10^5$ and $V = 10^9$ that is $2\cdot10^{14}$: the accumulator must be `long long`. The `int` version prints $552\,894\,464$, a plausible-looking, completely wrong number.
+2. **Products are computed in the type of the operands.** `long long x = a * b;` with `int a, b` multiplies in `int` *first* and only then converts the garbage: $10^5 \cdot 10^5$ becomes $1\,410\,065\,408$. Write `(long long)a * b`, or declare the values `long long`.
+3. **Counts of pairs and subarrays.** $n(n-1)/2$ for $n = 2\cdot10^5$ is about $2\cdot10^{10}$: compute it as `(long long)n * (n - 1) / 2`.
+
+A fourth, rarer one: the midpoint `(lo + hi) / 2` overflows once `lo + hi` passes $2^{31} - 1$, for example when both are above about $1.1\cdot10^9$; `lo + (hi - lo) / 2` is always safe. When in doubt, use `long long` for every sum, product, count and answer. It costs nothing measurable in a scan; an overflow costs the whole problem.
+
+::: {#fig-arr-overflow}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    cells = [
+        ["int (32-bit)", "-2^31 .. 2^31 - 1", "about 2.1e9"],
+        ["long long (64-bit)", "-2^63 .. 2^63 - 1", "about 9.2e18"],
+        ["sum of 2e5 values of 1e9", f"2e14 -> int holds {wrap32(200_000 * 10**9)}", "needs 64 bits"],
+        ["1e5 * 1e5 in int", f"1e10 -> int holds {wrap32(10**10)}", "widen first"],
+    ]
+    V.grid(ax, p, cells, colors={(0, 1): "amber", (0, 2): "amber", (1, 1): "green", (1, 2): "green",
+                                 (2, 1): "red", (2, 2): "red", (3, 1): "red", (3, 2): "red"}, cell_w=2.6)
+V.show(draw)
+```
+
+Why the value range is part of the cost model. The red rows are results a 32-bit `int` cannot hold: it silently keeps the value modulo $2^{32}$, computed here by `wrap32`.
+
+:::
+
+### Many test cases: the "sum of $n$" guarantee {#sec-arr-multitest}
+
+Codeforces problems usually pack many test cases into one input: "$1 \le t \le 10^4$, $1 \le n \le 2\cdot10^5$, *the sum of $n$ over all test cases does not exceed $2\cdot10^5$*". The last sentence is the important one. Without it the input could hold $10^4$ tests of size $2\cdot10^5$ each, $2\cdot10^9$ numbers, too many even to read. With it, the *total* work of an $O(n)$ algorithm over all tests is $O(\sum n)$.
+
+The guarantee covers work proportional to $n$, **not** work proportional to the largest possible $n$ or to the value range. Clearing a global array of size $2\cdot10^5$ at the start of each of $10^4$ tests is $2\cdot10^9$ writes:
+
+```cpp
+// fragment
+int cnt[200005];
+while (t--) {
+    memset(cnt, 0, sizeof cnt);                   // WRONG: 2e5 writes per test, 1e4 tests
+    ...
+}
+while (t--) {
+    // read n and a[0..n)
+    for (int i = 0; i < n; i++) cnt[a[i]]++;
+    ...
+    for (int i = 0; i < n; i++) cnt[a[i]] = 0;    // RIGHT: undo only what this test touched
+}
+```
+
+The same applies to `vector<int> cnt(MAXV)` declared inside the loop: size it by this test ($n + 1$ cells when the values are at most $n$), or clear only the cells you used.
+
+### Fast input and output, and memory {#sec-arr-io}
+
+Reading $2\cdot10^5$ numbers with plain `cin` is fine; reading $10^6$ or more can eat a noticeable part of the time limit, because by default `cin` stays synchronised with C's `stdio` and flushes `cout` before every read. Two lines at the top of `main` switch both off; and `'\n'` instead of `endl` avoids a flush on every output line (except in interactive problems, where you *must* flush). In Python, read everything at once with `sys.stdin.buffer.read().split()` (@sec-lang-templates).
+
+```cpp
+#include <bits/stdc++.h>
+using namespace std;
+
+int main() {
+    ios::sync_with_stdio(false);   // stop syncing with printf/scanf (do not mix them now)
+    cin.tie(nullptr);              // do not flush cout before every cin
+    int t;
+    if (!(cin >> t)) return 0;
+    while (t--) {
+        int n;
+        cin >> n;
+        vector<long long> a(n);
+        long long sum = 0;
+        for (auto& x : a) { cin >> x; sum += x; }
+        cout << sum << '\n';       // '\n', not endl: endl flushes the buffer every time
+    }
+}
+```
+
+**Memory.** A common limit is 256 MB. An `int` is 4 bytes, so $10^7$ ints take 40 MB, a $5000 \times 5000$ `int` table takes 100 MB (fine) and a $10^4 \times 10^4$ one takes 400 MB (too much). In this chapter memory is never tight, but later it decides whether an $O(n^2)$ table is allowed even when the time is.
+
+::: {.callout-tip title="Before you code: read the constraints"}
+- Largest $n$ (and $\sum n$): which complexity fits in $\approx 10^8$ steps per second?
+- Largest value: does every value fit in `int`? Does every *sum*, *product*, *count* and the *answer*?
+- Products: is one operand widened to `long long` *before* the multiplication?
+- Many tests: is the per-test work proportional to this test's $n$ (no full `memset`)?
+- Large input: `sync_with_stdio(false)`, `cin.tie(nullptr)`, `'\n'`.
+- Memory: cells $\times$ bytes per cell below the limit?
+:::
+
+## A4. Scanning: one pass, two passes, and when a second array helps {#sec-arr-scan}
+
+::: {.callout-note title="In plain words"}
+Most array work is *walking once while remembering something small*. The "something" is your running state: a sum, the largest value so far, a count. If a few variables summarise what you have seen, one pass is enough. If every position needs a fact you only know at the end, look twice. If the answer is a value *per position* that depends on both sides, store a second array.
+:::
+
+A **scan** visits the elements in order, $a_0, a_1, \dots, a_{n-1}$, and updates a small amount of **state** at each step. It is the most common loop in this book and, thanks to the cache (@sec-arr-cache), the fastest. Every one-pass algorithm has the same four parts:
+
+| part | what it is |
+|---|---|
+| **state** | the variables that summarise the prefix $[0, i)$: a sum, a minimum, the two largest values, the length of the current streak |
+| **initial value** | the summary of the *empty* prefix: $0$ for a sum, $-\infty$ for a maximum, "nothing seen" flags |
+| **update** | how the summary of $[0, i)$ plus the element $a_i$ gives the summary of $[0, i+1)$ |
+| **answer** | read off the final state, or kept up to date *during* the scan ("the best value seen at any time") |
+
+The invariant is always "the state is the summary of $[0, i)$" (@sec-arr-invariant), and the whole difficulty is the **update**: it must be computable from the old state and $a_i$ alone. A sum, a maximum, a count, the two largest values: yes. The **median** of the prefix: no. After reading $1, 5, 3$ the median is $3$; append $9$ and $8$ and the new median is $5$, an element the old summary "median $= 3$" did not remember. A correct update would need the whole sorted prefix. Pattern 1 (@sec-arr-p1) is the catalogue of states that do work.
+
+::: {#fig-arr-scan}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [3, 1, 4, 1, 5]
+    best = None
+    rows = []
+    for i, v in enumerate(a):
+        best = v if best is None else max(best, v)
+        rows.append(dict(values=a,
+                         colors={k: ("green" if k <= i else "muted") for k in range(len(a))},
+                         pointers=[(i, "i", "indigo")],
+                         note=f"  best = {best}"))
+    assert best == max(a)
+    V.trace(ax, p, rows, gap=3.0)
+V.show(draw)
+```
+
+One pass carrying `best`. The green cells are the prefix already read; `best` is their maximum, the invariant of @sec-arr-invariant, drawn step by step from the real update.
+
+:::
+
+**Two passes: when the first pass decides what the second looks for.** "How many times does the maximum occur?" has two natural solutions. *Two passes:* pass 1 finds the maximum $M$, pass 2 counts the elements equal to $M$; each pass is trivial and obviously correct. *One pass:* keep the maximum so far and its count, and when a *larger* value appears the old count becomes worthless, so reset it to 1.
+
+```{python}
+#| label: arr-count-max
+def count_max_two_pass(a: list[int]) -> tuple[int, int]:
+    m = max(a)                       # pass 1: a global fact
+    return m, sum(1 for x in a if x == m)   # pass 2: use it at every position
+
+
+def count_max_one_pass(a: list[int]) -> tuple[int, int]:
+    best, cnt = a[0], 0
+    for x in a:
+        if x > best:
+            best, cnt = x, 1         # a new maximum: the old count is worthless
+        elif x == best:
+            cnt += 1
+    return best, cnt
+
+
+assert count_max_two_pass([3, 7, 2, 7, 5, 7, 1]) == count_max_one_pass([3, 7, 2, 7, 5, 7, 1]) == (7, 3)
+for _ in range(1000):
+    cm_a = [random.randint(-5, 5) for _ in range(random.randint(1, 10))]
+    assert count_max_two_pass(cm_a) == count_max_one_pass(cm_a)
+```
+
+The one-pass version is not faster in any way that matters ($n$ versus $2n$ steps, both $O(n)$); it matters only when the data can be read once (a stream). **Prefer the version you can prove at a glance**, and use two passes freely when the first computes a *global* quantity (the maximum, the total, the number of zeros) that the second needs at every position. Advantage (@sec-arr-p1-b) is exactly this shape.
+
+**Prefix and suffix arrays: a preview.** Sometimes the answer for *each* position depends on everything to its left, or to its right. Then one number is not enough, and we store the running state for every prefix (and suffix):
+
+$$\textit{pre}[i] = \max(a_0, \dots, a_i), \qquad \textit{suf}[i] = \max(a_i, \dots, a_{n-1}).$$
+
+Each is one scan (left to right, right to left), and afterwards "the largest element left of $i$" and "the largest element right of $i$" are $O(1)$ lookups. The same idea with sums, $P[i] = a_0 + \dots + a_{i-1}$ so that the sum of $[\ell, r)$ is $P[r] - P[\ell]$, is so important that it has the next chapter to itself (@sec-pref).
+
+```{python}
+#| label: arr-pre-suf
+def prefix_suffix_max(a: list[int]) -> tuple[list[int], list[int]]:
+    n = len(a)
+    pre, suf = [0] * n, [0] * n
+    for i in range(n):
+        pre[i] = a[i] if i == 0 else max(pre[i - 1], a[i])
+    for i in range(n - 1, -1, -1):
+        suf[i] = a[i] if i == n - 1 else max(suf[i + 1], a[i])
+    return pre, suf
+
+ps_pre, ps_suf = prefix_suffix_max([3, 7, 2, 7, 5, 7, 1])
+assert ps_pre == [3, 7, 7, 7, 7, 7, 7] and ps_suf == [7, 7, 7, 7, 7, 7, 1]
+```
+
+**When is a second array really needed?**
+
+| situation | extra memory |
+|---|---|
+| one number for the whole array (sum, maximum, count, "is it sorted?") | $O(1)$: one pass |
+| a global value, then an answer per position ("maximum of the others") | $O(1)$ beyond the output: two passes |
+| each position needs a summary of its **left** side only | $O(1)$: the running state when we reach $i$ *is* that summary |
+| each position needs its left **and** its right side | one suffix array, plus the left side as a running variable |
+| the output itself is an array | the output array, or overwrite the input (@sec-arr-inplace) |
+
+The third row is worth remembering as **"the left side is free"**. A left-to-right scan already knows the prefix when it stands at $i$. So for a quantity that combines a left summary with $a_i$ ("the largest $a_j - a_i$ with $i < j$", "the smallest element before $j$") one running variable replaces the whole *pre* array. Only questions that need the *right* side as well force a stored array or a scan in the other direction.
+
+### Counting the shapes: subarrays, subsequences, subsets {#sec-arr-counts}
+
+Problems talk about three kinds of "parts" of an array, and confusing them changes the answer completely. Let $a = (a_0, \dots, a_{n-1})$.
+
+- A **subarray** (also *segment*; *substring* for strings) is a contiguous block $a_\ell, a_{\ell+1}, \dots, a_{r-1}$: a half-open range $[\ell, r)$ with $\ell < r$.
+- A **subsequence** keeps some of the elements *in their original order*, not necessarily adjacent: $a_{i_1}, a_{i_2}, \dots, a_{i_k}$ with $i_1 < i_2 < \dots < i_k$.
+- A **subset** is a choice of elements where the order does not matter (often the problem lets you rearrange them anyway).
+
+Every subarray is a subsequence, and every subsequence determines a subset of positions. How many are there? That decides whether "try them all" is an option:
+
+| object | contiguous? | order kept? | how many (length $n$) | enumerate all when |
+|---|---|---|---|---|
+| **subarray** | yes | yes | $\binom{n+1}{2} = \frac{n(n+1)}{2}$ non-empty | $n \lesssim 5000$ with $O(1)$ work each |
+| **subsequence** | no | yes | $2^n$, of which $2^n - 1$ non-empty | $n \lesssim 20$ |
+| **subset** (of positions) | no | no | $2^n$ | $n \lesssim 20$ |
+
+A subarray is named by its two boundaries $\ell < r$, chosen from the $n + 1$ positions $0, \dots, n$: that is where $\binom{n+1}{2}$ comes from. A subsequence is one keep-or-drop decision per element: $2^n$. If the array has repeated values and only the *multiset* of chosen values matters, there are fewer distinct subsets of values. The enumeration below checks the counts on `abcd`:
+
+```{python}
+#| label: arr-shapes
+sh = "abcd"
+sh_n = len(sh)
+subarrays = [sh[l:r] for l in range(sh_n) for r in range(l + 1, sh_n + 1)]   # every [l, r)
+subseqs = ["".join(sh[i] for i in range(sh_n) if mask >> i & 1) for mask in range(1, 1 << sh_n)]
+assert len(subarrays) == sh_n * (sh_n + 1) // 2 == 10
+assert len(subseqs) == 2**sh_n - 1 == 15
+pairs = [s for s in subseqs if len(s) == 2]
+assert sorted(pairs) == ["ab", "ac", "ad", "bc", "bd", "cd"]
+assert [s for s in pairs if s in subarrays] == ["ab", "bc", "cd"]     # only these are contiguous
+```
+
+::: {.callout-warning title="Read the word carefully"}
+"Subarray", "contiguous subsequence", "segment" and "substring" mean contiguous. "Subsequence" means order kept, gaps allowed. "Choose some elements" or "subset" usually means order is irrelevant. The maximum sum of a *subsequence* is the sum of all positive elements; the maximum sum of a *subarray* needs Kadane's algorithm (@sec-dpi-p5). Same array, same word "sum", different problems.
+:::
+
+## A5. In place versus extra memory {#sec-arr-inplace}
+
+::: {.callout-note title="In plain words"}
+"In place" means: do the transformation inside the same boxes, using only a few extra variables. You save memory, and the work usually stays cache-friendly. The price is care: you must never overwrite a value you have not finished reading.
+:::
+
+Many array tasks produce a new arrangement of the elements: remove some, move some to the end, reverse, rotate, replace each value by a function of its neighbours. There are two ways to produce it. **With extra memory**, build the result in a second array, then copy it back or return it: simple, hard to get wrong, $O(n)$ extra memory. **In place**, rearrange the input itself with $O(1)$ extra variables: required when the statement says so ("modify `nums` in place with $O(1)$ extra memory") and useful when memory is tight. The danger of working in place is always the same: **a write destroys a value that is still needed**. This lesson collects the four standard ways to avoid that and ends with the property that separates good in-place algorithms from bad ones, stability.
+
+**The overwrite problem.** Task: shift every element one position to the right (the last one falls off), $a_i \gets a_{i-1}$. The obvious left-to-right loop copies the first value everywhere, because `a[1] = a[0]` destroys the old `a[1]` before `a[2]` reads it. Running the same rule from right to left reads every value before it is overwritten.
+
+```{python}
+#| label: arr-shift
+def shift_right_wrong(a: list[int]) -> list[int]:
+    a = list(a)
+    for i in range(1, len(a)):            # left to right: reads values it has just written
+        a[i] = a[i - 1]
+    return a
+
+
+def shift_right(a: list[int]) -> list[int]:
+    a = list(a)
+    for i in range(len(a) - 1, 0, -1):    # right to left: each source is read before it is overwritten
+        a[i] = a[i - 1]
+    return a
+
+
+assert shift_right_wrong([5, 8, 1, 6, 2]) == [5, 5, 5, 5, 5]
+assert shift_right([5, 8, 1, 6, 2]) == [5, 5, 8, 1, 6]
+```
+
+::: {.callout-important title="The one question to ask"}
+Before every in-place write `a[w] = …`, ask: *is the old value of `a[w]` still needed by a later step?* If yes, save it first (swap), process in the other direction, or keep it inside the cell in encoded form. Data moving right means scanning from the right; data moving left means scanning from the left.
+:::
+
+**Swap.** `swap(a[i], a[j])` exchanges two cells through one temporary, so neither value is lost; in Python, `a[i], a[j] = a[j], a[i]`. Every in-place permutation of an array (reversal, rotation, partition, sorting) can be written as a sequence of swaps. The "clever" swap without a temporary, `a[i] ^= a[j]; a[j] ^= a[i]; a[i] ^= a[j];`, sets the cell to $0$ when $i = j$ (all three lines then work on the same cell, and $x \oplus x = 0$), and it is not faster. Use `std::swap`.
+
+```{python}
+#| label: arr-xor-swap
+def xor_swap(a: list[int], i: int, j: int) -> None:
+    a[i] ^= a[j]
+    a[j] ^= a[i]
+    a[i] ^= a[j]
+
+xs_a = [6, 9]
+xor_swap(xs_a, 0, 1)
+assert xs_a == [9, 6]
+xor_swap(xs_a, 0, 0)              # i == j: the value is destroyed
+assert xs_a == [0, 6]
+```
+
+**Reversal with two pointers.** To reverse the half-open range $[\ell, r)$, start one index at each end, swap the two cells, and move both inwards:
+
+```{python}
+#| label: arr-reverse
+def reverse_range(a: list[int], l: int, r: int) -> None:
+    """Reverse a[l:r] in place: floor((r - l) / 2) swaps."""
+    i, j = l, r - 1
+    while i < j:
+        a[i], a[j] = a[j], a[i]
+        i += 1
+        j -= 1
+
+for _ in range(1000):
+    rv_n = random.randint(0, 9)
+    rv_list = list(range(rv_n))
+    rv_l = random.randint(0, rv_n)
+    rv_r = random.randint(rv_l, rv_n)
+    rv_copy = list(rv_list)
+    reverse_range(rv_list, rv_l, rv_r)
+    assert rv_list == rv_copy[:rv_l] + rv_copy[rv_l:rv_r][::-1] + rv_copy[rv_r:]
+```
+
+Reversing $[\ell, r)$ means: the element at position $p$ moves to its **mirror** position $\ell + r - 1 - p$. *Invariant:* before each test of $i < j$, we have $i + j = \ell + r - 1$, every position outside $[i, j]$ already holds its mirrored value, and $[i, j]$ is untouched. A swap of $a_i$ and $a_j$ puts both into their final positions (since $j$ is $i$'s mirror), and moving $i \gets i + 1$, $j \gets j - 1$ keeps $i + j$ constant. When $i \ge j$, at most the middle cell is left, and it is its own mirror. $\blacksquare$ @fig-arr-anim-reverse plays it; reversal is the building block of rotation (Pattern 3).
+
+::: {#fig-arr-anim-reverse}
+
+```{python}
+#| echo: false
+rvf_state = list(range(1, 8))
+rvf_frames, rvf_caps = [(list(rvf_state), 0, 6)], ["start: i = 0 and j = 6 point at the two ends"]
+rvf_i, rvf_j = 0, 6
+while rvf_i < rvf_j:
+    rvf_state[rvf_i], rvf_state[rvf_j] = rvf_state[rvf_j], rvf_state[rvf_i]
+    rvf_caps.append(f"swap a[{rvf_i}] and a[{rvf_j}], then move both inwards")
+    rvf_i, rvf_j = rvf_i + 1, rvf_j - 1
+    rvf_frames.append((list(rvf_state), rvf_i, rvf_j))
+rvf_caps[-1] += f": i = {rvf_i} = j, the middle cell is its own mirror, done"
+assert rvf_state == [7, 6, 5, 4, 3, 2, 1] and len(rvf_frames) == 4
+
+def rvf_frame(ax, p, k):
+    st, i, j = rvf_frames[k]
+    done = {c: "green" for c in range(len(st)) if c < i or c > j}
+    ptrs = [(i, "i", "indigo")] + ([(j, "j", "pink", "top")] if j != i else [(j, "j", "pink", "top")])
+    V.array(ax, p, st, colors=done, pointers=ptrs, cell_w=1.1)
+
+V.animate(rvf_frame, len(rvf_frames), captions=rvf_caps, interval=1200)
+```
+
+Reversing $(1, \dots, 7)$ in place with two indices that meet in the middle. Green cells already hold their final, mirrored value. Three swaps, $\lfloor 7/2 \rfloor$, and the middle cell is never touched.
+
+:::
+
+**Read and write pointers.** To *remove* elements in place (keep only those that pass a test, in their original order) use two indices moving in the *same* direction: a **read pointer** $r$ that visits every element, and a **write pointer** $w$ that marks where the next kept element goes. The whole safety argument is the inequality $w \le r$: the write position never overtakes the read position, so no unread element is ever destroyed. This is Pattern 2 (@sec-arr-p2). The mirror image, *inserting* or duplicating elements in place, needs the write pointer to run *ahead*, so it is done from the back, right to left (Exercise 14).
+
+**Encoding two values in one cell.** Sometimes every new value depends on *old* values of other cells, in no convenient direction. Example: replace every element by the maximum of itself and its neighbours in the **original** array, $b_i = \max(a_{i-1}, a_i, a_{i+1})$ (missing neighbours ignored). A left-to-right loop has just overwritten $a_{i-1}$; a right-to-left loop has the same problem with $a_{i+1}$. With extra memory it is trivial. In place, if the values are small non-negative integers, keep the old and the new value in the same cell:
+
+$$\text{cell} = \text{old} + M\cdot\text{new},\quad 0 \le \text{old}, \text{new} < M \quad\Longrightarrow\quad \text{old} = \text{cell} \bmod M,\quad \text{new} = \lfloor \text{cell}/M \rfloor.$$ {#eq-arr-encode}
+
+Adding a multiple of $M$ does not change the remainder modulo $M$, so a cell that has already been updated still reveals its old value. After the pass, a second pass divides every cell by $M$. It is a two-digit number in base $M$: the low digit is the old value, the high digit the new one.
+
+```{python}
+#| label: arr-neighbour-max
+def neighbour_max_inplace(a: list[int]) -> list[int]:
+    """b[i] = max(a[i-1], a[i], a[i+1]) of the ORIGINAL array, values >= 0, O(1) extra space."""
+    a = list(a)
+    n = len(a)
+    M = max(a) + 1                                   # every old and new value is < M
+    for i in range(n):
+        best = a[i] % M                              # old value of a[i]
+        if i > 0:
+            best = max(best, a[i - 1] % M)           # old value, even though a[i-1] is encoded
+        if i + 1 < n:
+            best = max(best, a[i + 1] % M)
+        a[i] += M * best                             # store the new value in the high digit
+    return [x // M for x in a]                       # keep only the new values
+
+
+def neighbour_max_brute(a: list[int]) -> list[int]:
+    return [max(a[max(0, i - 1):i + 2]) for i in range(len(a))]
+
+
+assert neighbour_max_inplace([3, 1, 4, 1, 5, 9, 2, 6]) == [3, 4, 4, 5, 9, 9, 9, 6]
+for _ in range(1000):
+    nm_a = [random.randint(0, 20) for _ in range(random.randint(1, 10))]
+    assert neighbour_max_inplace(nm_a) == neighbour_max_brute(nm_a)
+```
+
+Conditions and alternatives:
+
+- The encoded value is at most $(M-1) + M(M-1) = M^2 - 1$, so $M^2$ must fit in the type: $M$ up to about $46\,340$ for an `int`; use `long long` cells otherwise.
+- When the values are indices in $[0, n)$, $M = n$. This is how Build Array from Permutation (@sec-arr-p4-b) builds `a[a[i]]` in place.
+- When all values are *positive*, the **sign** is a free one-bit flag: negate $a_v$ to mark "value $v$ was seen" and read the original as $|a_v|$ (Exercise 38).
+
+**Stability.** A rearrangement is **stable** if elements that the rule does not distinguish keep their original relative order. "Even values first" is stable if the even values come out in their original order and so do the odd ones. Stability matters whenever elements carry more than the key you rearrange by: records sorted by one field and then another, or a statement that says "keep the relative order of the non-zero elements" (Move Zeroes, @sec-arr-p2-a). Two in-place-looking methods for "evens first" behave differently:
+
+```{python}
+#| label: arr-stability
+st_items = [(4, "a"), (7, "b"), (2, "c"), (9, "d"), (6, "e"), (3, "f"), (8, "g")]   # (value, label)
+# (1) filter into a copy: stable
+st_stable = [x for x in st_items if x[0] % 2 == 0] + [x for x in st_items if x[0] % 2 == 1]
+# (2) swap from both ends: in place, NOT stable
+st_two = list(st_items)
+i, j = 0, len(st_two) - 1
+while i < j:
+    if st_two[i][0] % 2 == 0:
+        i += 1
+    elif st_two[j][0] % 2 == 1:
+        j -= 1
+    else:
+        st_two[i], st_two[j] = st_two[j], st_two[i]
+        i, j = i + 1, j - 1
+lab = lambda xs: " ".join(f"{v}{c}" for v, c in xs)
+assert lab(st_stable) == "4a 2c 6e 8g 7b 9d 3f"
+assert lab(st_two) == "4a 8g 2c 6e 9d 3f 7b"          # 8g jumped over 2c and 6e; 7b ended up last
+del i, j
+```
+
+| method | extra memory | stable | where |
+|---|---|---|---|
+| copy into a new array | $O(n)$ | yes | always available |
+| read/write pointers (remove or compact) | $O(1)$ | yes, for the kept part | Pattern 2 |
+| swaps from both ends (partition) | $O(1)$ | no | the later chapter on partitioning |
+| `std::stable_partition`, `std::stable_sort`, Python `sorted` | $O(n)$ buffer | yes | library |
+
+::: {.callout-warning title="vector::erase (or list.pop(i)) in a loop"}
+```cpp
+// fragment
+for (int i = 0; i < (int)v.size(); )             // WRONG idea: O(n^2)
+    if (v[i] == 0) v.erase(v.begin() + i); else i++;
+```
+Each `erase` shifts the whole tail left: up to $n$ erases of $O(n)$ each, about $5\cdot10^9$ moves for $10^5$ zeros. The read/write loop does the same job in one pass; the library spells it `v.erase(remove(v.begin(), v.end(), 0), v.end())`.
+:::
+
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that say "use me", a boxed template with its invariant, the theory that makes it correct, and its complexity. Then two problems are solved completely: the statement, the one key observation, the brute force refined step by step into the pattern, runnable Python stress-tested against the brute force, matching C++, the cost of every form, and the edge cases.
+
+## Pattern 1: Single-pass aggregates {#sec-arr-p1}
+
+**Where we are.** The lessons showed what an array is, what each operation costs, and how to scan and rewrite one safely. The five patterns now walk the array with one more piece of state each time: a few running variables (this pattern), a second pointer that rewrites the array as it reads it (Pattern 2), two pointers that meet in the middle to move whole blocks (Pattern 3), indices computed by a rule instead of by walking (Pattern 4), and a second array indexed by value (Pattern 5).
+
+**Recognise it.** The answer is one number, or a small fixed set of numbers, that depends on the *multiset of values* rather than on how the elements are arranged: a sum or a count, the maximum and where it is, the second or third largest, the best pair "earlier $\le$ later", the longest streak. Often each position needs one *global* value with itself left out ("the strongest *other* participant"), which is one pass to summarise and a second to answer. The constraints are large ($n$ up to $10^5$–$10^6$), so $O(n^2)$ is out and $O(n)$ fits, and the statement may ask for $O(1)$ extra memory.
+
+**When not.** The update must need only a constant amount of information about the prefix. It does not for the **median** or the $k$-th largest for a $k$ that grows with $n$ (sort, @sec-srt, or a heap), for "how many times does *each* value occur" (a frequency array, Pattern 5, or a hash map, @sec-hash), or for sums of many ranges (prefix sums, @sec-pref).
+
+::: {.callout-important title="Template"}
+Walk the array once, keeping a fixed-size summary `state`. Before reading `a[i]`, `state` already summarises the whole range $[0, i)$; one update makes it summarise $[0, i{+}1)$.
+
+```text
+state = summary of the empty prefix      # 0, -inf, "nothing seen", ...
+for i in range(n):
+    state = update(state, a[i])          # invariant holds again for [0, i+1)
+answer = read(state)                     # or keep the answer up to date inside the loop
+```
+
+**Invariant.** At the top of each iteration, `state` equals the aggregate of $[0, i)$. Initialise for the empty prefix, keep it true with one update per element, and read the answer when $i = n$.
+:::
+
+**Why it is correct.** Let $f$ be the quantity we want, defined on every prefix, and suppose some update satisfies $f(a_0, \dots, a_i) = \textsc{update}(f(a_0, \dots, a_{i-1}), a_i)$. Starting from $f(\text{empty})$, induction on $i$ shows that `state` $= f(a_0..a_{i-1})$ before step $i$; after the last step it is $f$ of the whole array. So proving a scan means proving its update, case by case. For example, the two largest values (duplicates allowed) of $P \cup \{x\}$ are the two largest among $\{m_1, m_2, x\}$, because no other element of $P$ can beat $m_2$; comparing $x$ with $m_1$ and then $m_2$ sorts those three values, which is exactly the shift rule in the table.
+
+**Complexity.** $O(n)$ time, $O(1)$ work per element. $O(1)$ extra space: the summary is a fixed few variables.
+
+The states you will use again and again:
+
+| aggregate | state | update with $x = a_i$ | empty prefix |
+|---|---|---|---|
+| sum, count | $s$ | $s \gets s + x$ (or $+1$ if $x$ qualifies) | $0$ |
+| maximum and its *first* index | $m, p$ | if $x > m$: $m \gets x$, $p \gets i$ | $m = -\infty$ |
+| maximum and its *last* index | $m, p$ | if $x \ge m$: $m \gets x$, $p \gets i$ | $m = -\infty$ |
+| maximum and how often | $m, c$ | $x > m$: $(x, 1)$; $x = m$: $c \gets c + 1$ | $(-\infty, 0)$ |
+| two largest (duplicates allowed) | $m_1 \ge m_2$ | $x > m_1$: $m_2 \gets m_1$, $m_1 \gets x$; else if $x > m_2$: $m_2 \gets x$ | $-\infty, -\infty$ |
+| $k$ largest *distinct* | $m_1 > \dots > m_k$ | skip $x$ if it equals some $m_j$; else insert it and drop the last | all unset |
+| best pair $a_j - a_i$, $i < j$ | $lo$, $best$ | $best \gets \max(best, x - lo)$, **then** $lo \gets \min(lo, x)$ | $lo = +\infty$ |
+| longest streak | $run$, $best$ | $run \gets run + 1$ if $x$ continues the streak, else $1$; $best \gets \max(best, run)$ | $0, 0$ |
+
+**The $k$ largest: a tiny sorted list.** The "two largest" and "three largest" states are a sorted list of length $k$ maintained by *insertion*: find where $x$ belongs, shift the smaller entries down one slot, and let the last fall off. For a small constant $k$ that is $O(k)$ per element, still linear overall; for a large $k$ use a heap of size $k$ ($O(n \log k)$).
+
+**Distinct or not?** Read the statement twice. "The second largest *element*" of $(5, 5, 3)$ is $5$, because the two 5s are different elements; "the second largest *distinct value*" is $3$. The update differs in one line: for distinct values an $x$ equal to some $m_j$ is skipped *before* the comparisons; otherwise ties fall through to a lower slot. Third Maximum Number (@sec-arr-p1-a) needs the distinct version, Advantage (@sec-arr-p1-b) the other one.
+
+**Initial values and sentinels.** The empty prefix has no maximum. Three ways to represent "nothing seen yet", in order of preference: (1) **start from the first element** when $n \ge 1$ is guaranteed, $m = a_0$, then loop from $i = 1$; (2) a **sentinel outside the value range**: if the values are `int`, keep the state in `long long` and start from `LLONG_MIN`, which no `int` equals (in Python, `None` or `-math.inf`); (3) an **explicit flag** or "number of slots filled". Starting a maximum at $0$ is the most common bug of this pattern: it is right only when the values are known to be non-negative. Starting it at `INT_MIN` is the second most common: you can no longer tell "unset" from "set to $-2^{31}$".
+
+**Pairs with an earlier element.** "Maximise $a_j - a_i$ over $i < j$" looks like a double loop. Fix the *later* index $j$: its best partner is the smallest value in $[0, j)$, a prefix minimum, one running variable ("the left side is free", @sec-arr-scan). The order of the two updates matters: *first* use the minimum of $[0, j)$, *then* add $a_j$ to it, otherwise $a_j$ pairs with itself and a strictly decreasing array reports $0$ instead of "no positive pair".
+
+The cell below computes every row of the table in one pass and checks it against direct definitions:
+
+```{python}
+#| label: arr-aggregates
+def aggregates(a: list[int]) -> dict:
+    """Several single-pass aggregates of a non-empty list, in one loop."""
+    s, mn, mx, first_max, last_max = 0, math.inf, -math.inf, -1, -1
+    top1 = top2 = -math.inf                       # two largest, duplicates allowed
+    lo, best_diff = math.inf, -math.inf           # max a[j] - a[i] over i < j
+    run = best_run = 0                            # longest block of equal values
+    for i, x in enumerate(a):
+        s += x
+        mn = min(mn, x)
+        if x > mx:
+            mx, first_max = x, i                  # strict: keeps the FIRST maximum
+        if x == mx:
+            last_max = i                          # every tie moves it: the LAST maximum
+        if x > top1:
+            top1, top2 = x, top1                  # shift down
+        elif x > top2:
+            top2 = x
+        if i > 0:
+            best_diff = max(best_diff, x - lo)    # use [0, i) first ...
+        lo = min(lo, x)                           # ... then add a[i]
+        run = run + 1 if i > 0 and a[i] == a[i - 1] else 1
+        best_run = max(best_run, run)
+    return dict(sum=s, min=mn, max=mx, first=first_max, last=last_max,
+                top2=(top1, top2), diff=best_diff, run=best_run)
+
+
+def aggregates_brute(a: list[int]) -> dict:
+    n, m = len(a), max(a)
+    srt = sorted(a, reverse=True)
+    runs = [r - l for l in range(n) for r in range(l + 1, n + 1) if len(set(a[l:r])) == 1]
+    return dict(sum=sum(a), min=min(a), max=m, first=a.index(m), last=n - 1 - a[::-1].index(m),
+                top2=(srt[0], srt[1] if n > 1 else -math.inf),
+                diff=max((a[j] - a[i] for i in range(n) for j in range(i + 1, n)), default=-math.inf),
+                run=max(runs))
+
+
+assert aggregates([4, 9, 2, 2, 2, 9, -1, 7, 3]) == dict(sum=37, min=-1, max=9, first=1, last=5,
+                                                        top2=(9, 9), diff=8, run=3)
+for _ in range(2000):
+    ag_a = [random.randint(-6, 6) for _ in range(random.randint(1, 9))]
+    assert aggregates(ag_a) == aggregates_brute(ag_a)
+```
+
+::: {#fig-arr-p1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    a = [5, 2, 9, 9, 1]
+    rows = []
+    f = s = t = None
+    for x in a:
+        if x not in (f, s, t):
+            if f is None or x > f:
+                t, s, f = s, f, x
+            elif s is None or x > s:
+                t, s = s, x
+            elif t is None or x > t:
+                t = x
+        rows.append([str(x)] + ["-" if v is None else str(v) for v in (f, s, t)])
+    assert (f, s, t) == (9, 5, 2)
+    V.grid(ax, p, rows, row_labels=[f"step {k + 1}" for k in range(len(rows))],
+           col_labels=["read", "1st", "2nd", "3rd"],
+           colors={(3, 0): "amber", (4, 3): "green"})
+V.show(draw)
+```
+
+The three-largest-distinct state on $[5, 2, 9, 9, 1]$, one row per element read. The second $9$ (amber) equals a value already kept, so it is skipped instead of taking a second rank. After the last row the third slot holds the answer, $2$; no sorting was needed.
+
+:::
+
+{{< include ../problems/lc-0414-third-maximum-number/problem.qmd >}}
+
+[**From the best values to the best of the others.** Third Maximum keeps the top three distinct values of the whole array. Advantage asks, for every element, for the maximum of all the *other* elements: a global summary first (the top two values, duplicates counted), then a second pass that answers each position in $O(1)$.]{.flow-bridge}
+
+{{< include ../problems/cf-1760c-advantage/problem.qmd >}}
+
+## Pattern 2: Read/write pointers — compacting in place {#sec-arr-p2}
+
+**From reading to rewriting.** Pattern 1 only *read* the array and summarised it. Now we must *change* it: drop some elements and keep the rest in their original order, with $O(1)$ extra space. The state is no longer a few numbers but a whole prefix of the array, $a[0, w)$, the output under construction; a second pointer $w$ marks where the next survivor goes.
+
+**Recognise it.** "Remove … **in place**", "return the new length $k$; the first $k$ elements must hold the result", "$O(1)$ extra memory". The kept elements must keep their relative order (stability), so swapping from both ends is not allowed. The keep decision depends on the element itself, or on the **last few kept** elements (de-duplication, "at most $k$ copies"). The removed elements may have to go to the end instead of disappearing (Move Zeroes: compact, then fill the tail). A later element may **cancel** an earlier kept one ("a digit deletes the closest letter on its left"): the kept prefix then behaves like a stack.
+
+**When not.** If the output is **longer** than the input (duplicating or inserting), $w$ would overtake $r$: write from the back instead (Exercise 14). If order does not matter and you only split into two groups, two pointers from both ends do fewer writes (partitioning). If the decision needs information about **all** elements ("remove the values that occur more than twice" in an *unsorted* array), count first (Pattern 5), then compact.
+
+::: {.callout-important title="Template"}
+Two indices on one array: `r` **reads** every cell in order; `w` **writes** only the cells you keep. Because the write position never passes the read position ($w \le r$), no unread value is ever overwritten.
+
+```text
+w = 0
+for r in range(n):
+    if keep(a[r], a[0:w]):       # may look at the WRITTEN part a[0:w), never at a[w:r)
+        a[w] = a[r]
+        w += 1
+return w                         # a[0:w) is the result, in the original order
+```
+
+**Invariant.** Before step $r$: (1) $w \le r$; (2) $a[0, w)$ is exactly the kept elements of the *original* $a[0, r)$, in order; (3) $a[r, n)$ still holds the original values.
+:::
+
+**Why it is correct.** *Initialisation:* $w = r = 0$, all three statements are about empty ranges or the untouched array. *Maintenance:* by (3) the cell $a_r$ still holds the original value $x$. If $x$ is dropped, only $r$ grows. If $x$ is kept, we write it to $a_w$; since $w \le r$, that cell is either a "free" cell in $[w, r)$, already read and no longer needed, or $a_r$ itself, so no unread cell changes and (3) holds for $r + 1$. The kept list of $a[0, r{+}1)$ is the kept list of $a[0, r)$ followed by $x$, which is exactly $a[0, w{+}1)$ now: (2) holds, and both pointers grew by one. *Termination:* at $r = n$, (2) says $a[0, w)$ is the kept subsequence of the whole array. Every element was read once and written at most once. $\blacksquare$
+
+The keep test may look at the **written** part $a[0, w)$, which is final by (2). It must **not** look at the original value of a cell in $[w, r)$: that cell may already have been overwritten.
+
+**Complexity.** $O(n)$ time ($n$ reads, at most $n$ writes), $O(1)$ extra space: the array is its own output buffer.
+
+::: {#fig-arr-p2}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    zone = [3, -1, 4, -1, -5, 9, 2, -6]
+    st, w = list(zone), 0
+    for r in range(6):                       # run the template on the first six reads (keep x >= 0)
+        if st[r] >= 0:
+            st[w] = st[r]
+            w += 1
+    assert (st, w) == ([3, 4, 9, -1, -5, 9, 2, -6], 3)
+    V.array(ax, p, st, regions=[(0, w, "green", "kept [0, w)"), (w, 6, "muted", "free [w, r)"),
+                                (6, 8, "indigo", "unread [r, n)")],
+            pointers=[(w, "w", "amber", "top"), (6, "r", "indigo", "top")])
+V.show(draw)
+```
+
+The three zones of the template after six reads of $[3, -1, 4, -1, -5, 9, 2, -6]$ with the rule "keep $x \ge 0$". The green prefix is the output so far; the grey cells were already read and may be overwritten; the blue cells are untouched. The next step copies $2$ into the first free cell.
+
+:::
+
+**Three kinds of keep rules.**
+
+- **(a) The element alone.** "Remove every `val`", "keep the non-zero elements", "keep the even ones": the test is `keep(a[r])`.
+- **(b) The last kept elements.** In a **sorted** array, "keep at most $k$ copies of each value" means: keep $x$ unless the last $k$ kept elements all equal $x$. Since the kept part is sorted too, that is the single comparison `w < k or x != a[w - k]`. With $k = 1$ it removes all duplicates (LC 26); with $k = 2$ it is Remove Duplicates II (@sec-arr-p2-b).
+- **(c) Cancellation.** A special element removes the *last kept* element instead of being kept: $w \gets w - 1$. The kept prefix is then a stack whose top is $a_{w-1}$. Still $w \le r$, still $O(n)$.
+
+```{python}
+#| label: arr-rw-templates
+def compact(a: list[int], keep) -> int:
+    w = 0
+    for r in range(len(a)):
+        if keep(a[r]):
+            a[w] = a[r]
+            w += 1
+    return w
+
+
+def at_most_k(a: list[int], k: int) -> int:       # a is sorted
+    w = 0
+    for r in range(len(a)):
+        if w < k or a[r] != a[w - k]:              # compare with the WRITTEN part
+            a[w] = a[r]
+            w += 1
+    return w
+
+
+def cancel(a: list[int]) -> int:                  # every 0 deletes the last kept element
+    w = 0
+    for r in range(len(a)):
+        if a[r] != 0:
+            a[w] = a[r]                            # push
+            w += 1
+        elif w > 0:
+            w -= 1                                 # pop
+    return w
+
+
+def at_most_k_read_side(a: list[int], k: int) -> int:   # the classic bug: compares with a[r - k]
+    w = 0
+    for r in range(len(a)):
+        if r < k or a[r] != a[r - k]:
+            a[w] = a[r]
+            w += 1
+    return w
+
+
+def run_rw(f, a, *args):
+    b = list(a)
+    m = f(b, *args)
+    return b[:m]
+
+
+assert run_rw(compact, [3, -1, 4, -1, -5, 9, 2, -6], lambda x: x >= 0) == [3, 4, 9, 2]
+assert run_rw(at_most_k, [1, 1, 2, 3, 3, 3, 4], 1) == [1, 2, 3, 4]
+assert run_rw(cancel, [5, 3, 0, 7, 0, 0, 8]) == [8]
+assert run_rw(at_most_k_read_side, [1, 1, 1, 2, 2, 3], 2) == [1, 1, 2, 3]     # wrong: a 2 is lost
+for _ in range(2000):
+    rw_a = sorted(random.randint(0, 4) for _ in range(random.randint(0, 10)))
+    for k in (1, 2, 3):
+        assert run_rw(at_most_k, rw_a, k) == [x for i, x in enumerate(rw_a) if rw_a[:i].count(x) < k]
+    rw_b = [random.randint(0, 3) for _ in range(random.randint(0, 10))]
+    stack = []
+    for x in rw_b:
+        if x:
+            stack.append(x)
+        elif stack:
+            stack.pop()
+    assert run_rw(cancel, rw_b) == stack
+```
+
+The last assertion shows why the keep rule must read the *written* part. On $[1,1,1,2,2,3]$ the read-side version compares the second $2$ with `a[2]`, but by then cell $2$ already holds the first $2$; the second $2$ looks like a third copy and is dropped.
+
+The library knows rule (a) and rule (b) with $k = 1$: `std::remove_if(a.begin(), a.end(), pred)` is template (a) with the *opposite* predicate (it removes where `pred` is true), and `std::unique` is template (b) with $k = 1$. Neither shrinks the vector; both return the new end, so follow them with `a.erase(newEnd, a.end())`, the "erase–remove idiom".
+
+::: {#fig-arr-anim-compact}
+
+```{python}
+#| echo: false
+mz_a = [0, 1, 0, 3, 12]
+mz_state, mz_w, mz_frames, mz_caps = list(mz_a), 0, [], []
+for mz_r in range(len(mz_state)):
+    mz_x = mz_state[mz_r]
+    if mz_x != 0:
+        mz_state[mz_w] = mz_x
+        mz_w += 1
+        mz_caps.append(f"read {mz_x} at r = {mz_r}: keep it, write it at {mz_w - 1}, w = {mz_w}")
+    else:
+        mz_caps.append(f"read 0 at r = {mz_r}: skip it, w stays at {mz_w}")
+    mz_frames.append((list(mz_state), mz_w, mz_r))
+for mz_j in range(mz_w, len(mz_state)):
+    mz_state[mz_j] = 0
+mz_frames.append((list(mz_state), mz_w, len(mz_state)))
+mz_caps.append(f"paint 0 over the tail from w = {mz_w}")
+assert mz_state == [1, 3, 12, 0, 0]
+
+def mz_frame(ax, p, k):
+    st, w, r = mz_frames[k]
+    colors = {j: "green" for j in range(w)}
+    if k == len(mz_frames) - 1:
+        colors.update({j: "amber" for j in range(w, len(st))})
+    ptrs = [(w, "w", "green")]
+    if r < len(st):
+        ptrs.append((r, "r", "indigo", "top"))
+    V.array(ax, p, st, colors=colors, pointers=ptrs, cell_w=1.2)
+
+V.animate(mz_frame, len(mz_frames), captions=mz_caps, interval=1000)
+```
+
+Move Zeroes with a read pointer `r` (top) and a write pointer `w` (bottom). Green cells are the survivors already compacted to the front. The write pointer never passes the read pointer, so no unread value is overwritten; the last frame paints the leftover tail with zeros.
+
+:::
+
+{{< include ../problems/lc-0283-move-zeroes/problem.qmd >}}
+
+[**From a fixed rule to one that looks back.** Move Zeroes decides to keep an element by looking at it alone (rule a). Remove Duplicates II decides by comparing it with what was already *written*, two places back in the output (rule b), and that is only correct because the array is sorted.]{.flow-bridge}
+
+{{< include ../problems/lc-0080-remove-duplicates-from-sorted-array-ii/problem.qmd >}}
+
+## Pattern 3: Reversal and rotation {#sec-arr-p3}
+
+**From one direction to two.** In Pattern 2 the two indices moved in the *same* direction, a writer trailing a reader. Pattern 3 keeps the goal (rewrite in place, $O(1)$ extra space) but sends the indices in *opposite* directions: one starts at each end, and every step swaps the two cells they point at. That reverses a range (@sec-arr-inplace), and three reversals move whole blocks: a rotation.
+
+**Recognise it.** The statement says **reverse**, **rotate**, **cyclic shift**, "move the last $k$ elements to the front", "shift every element $k$ places to the right, wrapping around". Two blocks must **swap places** while each keeps its inner order ($AB \to BA$): that is a rotation, whatever the story says. You must decide whether an array is a rotation of another one, or of a sorted array. Many rotations are applied but only a few cells are read afterwards: keep a start offset instead of moving data. The follow-up asks for $O(1)$ extra memory.
+
+**When not.** If elements must be reordered *by value*, that is sorting (@sec-srt). A *search* in a rotated sorted array is binary search (@sec-bst). Rotations of a changing subarray, applied many times, need a balanced tree.
+
+::: {.callout-important title="Template"}
+**Rotating right by $k$** (the element at index $i$ moves to $(i + k) \bmod n$; the last $k$ elements come to the front) is three reversals. First reduce `k %= n`, then:
+
+```text
+reverse(a, 0, n)        # whole array:      AB   -> B^R A^R
+reverse(a, 0, k)        # the front block:  B^R  -> B
+reverse(a, k, n)        # the back block:   A^R  -> A
+```
+
+Each `reverse(l, r)` is the two-pointer swap loop of @sec-arr-inplace on the half-open range $[l, r)$.
+:::
+
+**Why it is correct.** Write the array as two blocks, $A$ = the first $n - k$ elements and $B$ = the last $k$; we want $AB \to BA$. Let $X^R$ denote $X$ reversed. Reversing a concatenation turns the order of the blocks around **and** reverses each block, and reversing twice is the identity:
+
+$$(AB)^R = B^R A^R, \qquad (X^R)^R = X.$$ {#eq-arr-rev}
+
+So reversing the whole array gives $B^R A^R$: the blocks are now in the right places, each backwards. Reversing the first $k$ cells turns $B^R$ into $B$, and reversing the last $n - k$ turns $A^R$ into $A$: the result is $BA$. $\blacksquare$
+
+**Rotating left by $k$** is rotating right by $n - k$. With reversals it is the same three calls in the other order: reverse $[0, k)$, reverse $[k, n)$, then reverse all ($A^R B^R$ with $|A| = k$, then $(A^R B^R)^R = BA$). Always reduce $k \bmod n$ first: rotating by $n$ is the identity, and $k$ may be much larger than $n$.
+
+**Complexity.** The three reversals do $\lfloor n/2 \rfloor + \lfloor k/2 \rfloor + \lfloor (n-k)/2 \rfloor \le n$ swaps: $O(n)$ time, $O(1)$ extra space. The C++ library has `std::reverse(first, last)` and `std::rotate(first, middle, last)`; the latter makes `middle` the new first element, a **left** rotation by `middle - first`.
+
+::: {#fig-arr-p3}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    na, nb = 5.0, 3.0                       # |A| = n - k and |B| = k, drawn to scale
+    rows = [("start: n - k then k", [("A  ->", na, "indigo"), ("B  ->", nb, "amber")]),
+            ("reverse all", [("<-  B^R", nb, "amber"), ("<-  A^R", na, "indigo")]),
+            ("reverse [0, k)", [("B  ->", nb, "amber"), ("<-  A^R", na, "indigo")]),
+            ("reverse [k, n)", [("B  ->", nb, "amber"), ("A  ->", na, "indigo")])]
+    for r, (title, blocks) in enumerate(rows):
+        x, y = 0.0, -1.3 * r
+        for lab, w, c in blocks:
+            V.box(ax, p, x, y, w, 0.8, lab, color=c, round_=False)
+            x += w
+        V.text(ax, p, x + 0.4, y + 0.4, title, ha="left", color="muted", size=10)
+V.show(draw)
+```
+
+The proof of @eq-arr-rev in blocks. Arrows show the reading direction inside each block. Reversing everything swaps the blocks but flips both; two more reversals flip them back.
+
+:::
+
+**The cycle (juggling) method.** A rotation is a **permutation** of the positions: the value at $i$ must go to $p(i) = (i + k) \bmod n$. Follow it: pick up the value at position $s$, drop it at $p(s)$, pick up what was there, drop it at $p(p(s))$, and so on until you return to $s$. Every value moves *exactly once*, with one spare variable. How many cycles are there? From $s$ we visit $s, s + k, s + 2k, \dots \pmod n$ and are back at $s$ after $t$ steps exactly when $n$ divides $tk$, that is after $t = n / \gcd(n, k)$ steps. So there are $g = \gcd(n, k)$ cycles of length $n / g$, and the cycle of $s$ contains exactly the positions congruent to $s$ modulo $g$; the starts $0, 1, \dots, g - 1$ cover every position once (@fig-arr-cycles).
+
+```{python}
+#| label: arr-rotate-cycles
+def rotate_right_cycles(a: list[int], k: int) -> list[int]:
+    a = list(a)
+    n = len(a)
+    if n == 0 or k % n == 0:
+        return a
+    k %= n
+    for s in range(math.gcd(n, k)):          # one start per cycle
+        cur, carry = s, a[s]
+        while True:
+            cur = (cur + k) % n
+            a[cur], carry = carry, a[cur]    # drop the carried value, pick up the next one
+            if cur == s:
+                break
+    return a
+
+
+def cycles_of(n: int, k: int) -> list[list[int]]:
+    seen, out = set(), []
+    for s in range(n):
+        if s not in seen:
+            cyc, cur = [], s
+            while cur not in seen:
+                seen.add(cur)
+                cyc.append(cur)
+                cur = (cur + k) % n
+            out.append(cyc)
+    return out
+
+
+assert rotate_right_cycles([1, 2, 3, 4, 5, 6], 2) == [5, 6, 1, 2, 3, 4]
+assert cycles_of(6, 2) == [[0, 2, 4], [1, 3, 5]] and len(cycles_of(7, 3)) == 1
+for _ in range(1000):
+    cy_n, cy_k = random.randint(1, 12), random.randint(0, 30)
+    cy_a = list(range(cy_n))
+    cy_r = cy_k % cy_n
+    assert rotate_right_cycles(cy_a, cy_k) == cy_a[cy_n - cy_r:] + cy_a[:cy_n - cy_r]
+    assert len(cycles_of(cy_n, cy_k)) == math.gcd(cy_n, cy_k)      # gcd(n, 0) = n one-cell cycles
+```
+
+::: {#fig-arr-cycles}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    for cx, (n, k) in ((0.0, (6, 2)), (8.5, (7, 3))):
+        pos = {i: (cx + 2.0 * math.sin(2 * math.pi * i / n), 2.0 * math.cos(2 * math.pi * i / n))
+               for i in range(n)}
+        colours = ["indigo", "pink", "green"]
+        for c, cyc in enumerate(cycles_of(n, k)):
+            for t, i in enumerate(cyc):
+                j = cyc[(t + 1) % len(cyc)]
+                (x0, y0), (x1, y1) = pos[i], pos[j]
+                d = math.hypot(x1 - x0, y1 - y0)
+                ux, uy = (x1 - x0) / d, (y1 - y0) / d
+                V.arrow(ax, p, x0 + 0.35 * ux, y0 + 0.35 * uy, x1 - 0.38 * ux, y1 - 0.38 * uy,
+                        color=colours[c])
+        for i, (x, y) in pos.items():
+            V.box(ax, p, x - 0.3, y - 0.3, 0.6, 0.6, str(i), color="muted")
+        g = len(cycles_of(n, k))
+        V.text(ax, p, cx, -2.9, f"n = {n}, k = {k}: gcd = {g}, {g} cycle{'s' if g > 1 else ''} "
+               f"of length {n // g}", color="muted", size=10)
+V.show(draw)
+```
+
+Arrows $i \to (i + k) \bmod n$, computed by `cycles_of`. Left: the positions split by parity into two cycles, so the juggling method needs two starting points, 0 and 1. Right: $\gcd(7, 3) = 1$, one cycle through all seven positions.
+
+:::
+
+Reversal or cycles? Both are $O(n)$ time and $O(1)$ space. Reversal does about $n$ swaps with perfectly sequential memory access; the cycle method does exactly $n$ writes but jumps by $k$ cells, which is unfriendly to the cache on large arrays (@sec-arr-cache). Reversal is also much harder to get wrong, so use it by default. The cycle idea matters because the same "follow the permutation" loop applies *any* permutation in place.
+
+**Rotation without moving anything: a start offset.** Often the array need not be rotated at all. After rotating right by $k$, the element now at index $i$ is the one that was at $(i - k) \bmod n$. Keep one integer `start` and read through it: $\text{rotated}[i] = a[(\texttt{start} + i) \bmod n]$, and "rotate right by $k$" becomes `start = (start - k) mod n`. A rotation then costs $O(1)$, and $10^5$ rotations followed by a few lookups cost almost nothing. In C++ write `((start - k) % n + n) % n`, because `%` of a negative number is negative there; Python's `%` already returns a value in $[0, n)$ (@sec-arr-p4).
+
+**Detecting rotations.** *Is $b$ a rotation of $a$?* Every rotation of $a$ is a window of length $n$ of the doubled array $aa$: the rotation starting at index $s$ is $a[s..n) \, a[0..s) = (aa)[s, s + n)$. So $b$ is a rotation of $a$ iff the lengths match and $b$ occurs in $aa$. Trying every start is $O(n^2)$; linear-time string matching makes it $O(n)$. In code we never build $aa$, we index it as $a[j \bmod n]$. *Was $a$ sorted and then rotated?* A non-decreasing array has no **drop** $a_i > a_{i+1}$. Rotating it creates at most one drop at the seam, provided we also look at the circular pair $(a_{n-1}, a_0)$. That is Check if Sorted and Rotated (@sec-arr-p3-b).
+
+```{python}
+#| label: arr-rotation-tools
+def rotate_view(a: list[int], ks: list[int]) -> list[int]:
+    """Apply right rotations by each k in ks through a start offset; nothing is moved."""
+    n, start = len(a), 0
+    for k in ks:
+        start = (start - k) % n                    # Python's % is never negative
+    return [a[(start + i) % n] for i in range(n)]
+
+
+def is_rotation(a: list[int], b: list[int]) -> bool:
+    n = len(a)
+    if len(b) != n:
+        return False
+    return n == 0 or any(all(a[(s + j) % n] == b[j] for j in range(n)) for s in range(n))
+
+
+assert rotate_view([1, 2, 3, 4, 5, 6, 7], [3, 5, 2]) == [5, 6, 7, 1, 2, 3, 4]   # 3 + 5 + 2 = 10 = 3 mod 7
+assert is_rotation([3, 4, 5, 1, 2], [1, 2, 3, 4, 5]) and not is_rotation([1, 2, 3], [1, 3, 2])
+for _ in range(500):
+    rt_a = [random.randint(0, 3) for _ in range(random.randint(1, 7))]
+    rt_k = random.randint(0, 20)
+    rt_b = rotate_view(rt_a, [rt_k])
+    assert rt_b == rotate_right_cycles(rt_a, rt_k) and is_rotation(rt_a, rt_b)
+```
+
+::: {#fig-arr-anim-rotate}
+
+```{python}
+#| echo: false
+rv_a, rv_k = [1, 2, 3, 4, 5, 6, 7], 3
+rv_state, rv_n = list(rv_a), len(rv_a)
+rv_frames = [list(rv_state)]
+for rv_lo, rv_hi in ((0, rv_n), (0, rv_k), (rv_k, rv_n)):
+    reverse_range(rv_state, rv_lo, rv_hi)          # the tested reversal of @sec-arr-inplace
+    rv_frames.append(list(rv_state))
+assert rv_state == rv_a[-rv_k:] + rv_a[:-rv_k]
+rv_caps = ["start: rotate right by k = 3", "reverse the whole array: the blocks are in place, each one backwards",
+           "reverse the first k = 3 cells", "reverse the last n - k = 4 cells: rotated"]
+rv_marks = [[], [(0, rv_n, "violet", "")], [(0, rv_k, "cyan", "first k")],
+            [(0, rv_k, "cyan", ""), (rv_k, rv_n, "amber", "last n - k")]]
+
+def rv_frame(ax, p, k):
+    V.array(ax, p, rv_frames[k], regions=rv_marks[k], cell_w=1.1)
+
+V.animate(rv_frame, len(rv_frames), captions=rv_caps, interval=1300)
+```
+
+Rotate Array by three reversals. The first reversal puts the last $k$ values in front but backwards; the next two reversals turn each block the right way round. Every reversal is in place, so the extra space stays $O(1)$.
+
+:::
+
+{{< include ../problems/lc-0189-rotate-array/problem.qmd >}}
+
+[**From doing a rotation to recognising one.** Rotate Array performs the rotation. Check if Sorted and Rotated asks whether an array *could be* the result of one, and the answer is a single count: the number of drops around the circle.]{.flow-bridge}
+
+{{< include ../problems/lc-1752-check-if-array-is-sorted-and-rotated/problem.qmd >}}
+
+## Pattern 4: Simulation and index arithmetic {#sec-arr-p4}
+
+**From pointers that walk to indices that are computed.** Patterns 2 and 3 moved their pointers one cell at a time, and the target of every move was given by one fixed formula, $i \to (i + k) \bmod n$. Pattern 4 generalises both halves. The rule can be any process the statement describes (add one to a number, pass an object around a circle, follow $i \to a[i]$), and the index can be any arithmetic on indices: $2i$, $\lfloor i/2 \rfloor$, $i \bmod n$, $r \cdot C + c$. The "don't destroy unread values" problem gets a general fix too: encode the old and the new value in one cell (@eq-arr-encode).
+
+**Recognise it.** The statement says "repeat the following", "every second", "in order from $0$ to $n - 1$ do …", and (steps) $\times$ (cost per step) fits the budget. A number is given as an **array of digits**, too long for any integer type. Positions are computed: pairs $(2i, 2i+1)$, a circle ($\bmod\ n$), a grid flattened to 1D, a permutation ($i \to a[i]$). The array must be rewritten in place while every cell still needs its old value. The input is small and the question is "what does the process produce?": simulate first, think later.
+
+**When not.** If the number of steps is huge ($10^9$ seconds of passing a pillow), find the period or a formula (Exercise 31). Do not simulate a process that keeps inserting into the middle of a large array or deleting from it; each step is $O(n)$, and that needs other structures. When the steps interact only through sums, prefix sums or difference arrays replace the simulation (@sec-pref).
+
+::: {.callout-important title="Template"}
+Turn the description into a state and a step, then apply the step until the state says stop.
+
+```text
+state = initial                  # e.g. carry = 1 and i = last index
+while not done(state):
+    state = step(state)          # apply ONE rule, literally, in the order the statement gives
+    # guard every computed index: i - 1, (i + k) % n, a[a[i]], r * C + c
+result = read_out(state)
+```
+
+**Invariant.** After $t$ steps the state equals what the real process shows after $t$ rules, so the simulation is provably the definition.
+:::
+
+**Complexity.** (number of steps) $\times$ (cost of one step): usually $O(n)$ time, one step per cell, and $O(1)$ beyond the output. The traps are indices drifting out of range and updates applied in the wrong order, not the cost.
+
+**Simulation done right: three questions.** (1) **What is the state?** Sometimes the whole array, often much less: a position and a direction, or one running counter that replaces "decrease every later cell by 1". (2) **In which order are the cells updated?** If a cell's new value depends on old values of other cells, the wrong order mixes old and new values (the shift-right example of @sec-arr-inplace); iterate in an order where the needed values are still old, keep a copy, or encode. (3) **What happens at the borders?** The first and last index, an empty array, a carry out of the top digit, a pillow that reaches the end of the line.
+
+**Digit arrays and carries.** A number too long for any integer type is stored as an array of digits. LeetCode stores it **most significant digit first** ($123 \to [1, 2, 3]$); many implementations prefer **least significant first**, because then digit $i$ has weight $10^i$ and the number can grow at the end. Addition is the school algorithm: from the least significant digit, add the two digits and the carry, write $s \bmod 10$, carry $\lfloor s/10 \rfloor$. With two digits and an incoming carry of at most 1, $s \le 9 + 9 + 1 = 19$, so the carry is always 0 or 1, and the result is at most one digit longer than the longer input. *Invariant:* after the $t$ least significant columns, the written digits $r_0, \dots, r_{t-1}$ and the carry $c$ satisfy $\sum_{i<t} r_i 10^i + c\cdot 10^t = \sum_{i<t}(a_i + b_i)10^i$. Column $t$ writes $r_t = s \bmod 10$ and $c' = \lfloor s/10 \rfloor$ with $s = a_t + b_t + c$, so $r_t 10^t + c' 10^{t+1} = s\,10^t$, which replaces the old carry term exactly. Incrementing (Plus One, @sec-arr-p4-a) is the special case $b = 1$: the carry can only continue through 9s, so the loop stops at the first digit that is not 9.
+
+```{python}
+#| label: arr-add-digits
+def add_digits(a: list[int], b: list[int]) -> list[int]:
+    """Sum of two numbers given as digit lists, most significant digit first."""
+    res, i, j, carry = [], len(a) - 1, len(b) - 1, 0
+    while i >= 0 or j >= 0 or carry:
+        s = carry
+        if i >= 0:
+            s += a[i]
+            i -= 1
+        if j >= 0:
+            s += b[j]
+            j -= 1
+        res.append(s % 10)                  # built least significant first
+        carry = s // 10
+    return res[::-1] or [0]
+
+
+to_digits = lambda x: [int(c) for c in str(x)]
+assert add_digits([9, 9, 8], [4, 7]) == [1, 0, 4, 5]          # 998 + 47 = 1045
+for _ in range(2000):
+    ad_x, ad_y = random.randint(0, 10**12), random.randint(0, 10**6)
+    assert add_digits(to_digits(ad_x), to_digits(ad_y)) == to_digits(ad_x + ad_y)
+```
+
+**Index arithmetic.** Most of the difficulty of "easy" simulations is the index formula:
+
+| map | meaning | typical use |
+|---|---|---|
+| $i \to a[i]$ | follow a pointer stored in the cell | permutations, "next" arrays (@sec-arr-p4-b) |
+| $i \to 2i, 2i+1$; $i \to \lfloor i/2 \rfloor$ | split into pairs / merge from pairs | interleaving two halves, $2\times2$ blocks, heaps |
+| $i \to (i \pm 1) \bmod n$ | neighbours on a circle | circular arrays, Josephus-type walks |
+| $(r, c) \leftrightarrow r\cdot C + c$ | row-major 2D $\leftrightarrow$ 1D | grids as arrays (@sec-arr-2d) |
+| $i \to n - 1 - i$ | mirror | palindromes, reversal |
+| $t \to t \bmod 2(n-1)$ | a back-and-forth walk has period $2(n-1)$ | bouncing objects (Exercise 31) |
+
+**Negative indices.** In C++, `-7 % 5 == -2`: the remainder takes the sign of the dividend. For a position on a circle write `((i % n) + n) % n`. Python's `%` takes the sign of the divisor, so `-7 % 5 == 2` already, which is one more reason to test C++ index code on negative steps.
+
+```{python}
+#| label: arr-mod
+def cpp_mod(x: int, n: int) -> int:
+    """What C++ computes for x % n (truncating division)."""
+    return x - n * int(x / n)
+
+assert cpp_mod(-7, 5) == -2 and -7 % 5 == 3 and (cpp_mod(-7, 5) + 5) % 5 == 3
+assert ((2 - 7) % 5, (4 + 10**12) % 5) == (0, 4)      # walking around a circle of 5 seats
+```
+
+**Two values in one cell, revisited.** If every old and new value lies in $[0, n)$, store $a[i] = \text{old}_i + n\cdot\text{new}_i$ (@eq-arr-encode with $M = n$). Three conditions: (1) both values really lie in $[0, n)$, otherwise use any $M$ larger than every value; (2) $M^2$ fits in the type: $n = 10^5$ gives $10^{10}$, which needs `long long`; (3) when writing cell $i$, read the old value of the source cell *through* `% M`, because the source may already be encoded.
+
+**Boundaries.** Guard every computed index (`if 0 <= j < n`) before reading `a[j]`. A sentinel cell at one or both ends removes special cases: with a leading $0$ cell, the carry out of $999$ lands in an existing cell instead of forcing the array to grow at the front. Clamping ("never below 0") is applied at the moment of the update, not at the end.
+
+::: {#fig-arr-p4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    nums = [5, 0, 1, 2, 7, 6, 3, 4]
+    ans = [nums[nums[i]] for i in range(len(nums))]
+    V.array(ax, p, nums, y=2.4, label="nums")
+    V.array(ax, p, ans, y=-1.0, colors={i: "green" for i in range(len(ans))}, label="ans")
+    V.text(ax, p, len(nums) + 0.4, 0.75, "ans[i] = nums[ nums[i] ]", color="muted", size=10, ha="left")
+    for i in (0, 1, 2):
+        V.arrow(ax, p, i + 0.5, 2.35, nums[i] + 0.5, 0.05, color="indigo", rad=0.25)
+V.show(draw)
+```
+
+Index arithmetic made visible (Build Array from Permutation). To fill `ans[i]` you read `nums[i]` and use it as an index: `ans[0] = nums[5] = 6`, `ans[1] = nums[0] = 5`, `ans[2] = nums[1] = 0`. The arrows go from position $i$ to position `nums[i]`, the cell read the second time.
+
+:::
+
+{{< include ../problems/lc-0066-plus-one/problem.qmd >}}
+
+[**From a carry to a value used as an index.** Plus One walks right to left, and the only state is a carry. Build Array from Permutation jumps instead: each value is an index to read again, and its in-place follow-up needs the two-values-in-one-cell encoding.]{.flow-bridge}
+
+{{< include ../problems/lc-1920-build-array-from-permutation/problem.qmd >}}
+
+## Pattern 5: Frequency arrays over small values {#sec-arr-p5}
+
+**From one array to two.** Pattern 4 used a *value* as an index into the same array, which worked because every value was a valid index. Pattern 5 makes that the whole method: a second array indexed by value. Pattern 1 kept one number for the whole array; a frequency array keeps one number **per possible value**, still in one pass.
+
+**Recognise it.** The constraints give a **small value range**: $0 \le a_i \le 100$, letters `a`–`z`, digits, $|a_i| \le 1000$, values at most $n$. The answer depends on the values only through their **multiplicities**: duplicates, "appears exactly $k$ times", the most frequent value, "same multiset", pairs with equal values or a given difference. You need, for every element, **how many elements are smaller**: running sums of the counts. The question is about the **counts themselves** ("are all counts different?"): count the counts. You want to sort small integers in $O(n + V)$: counting sort.
+
+**When not.** If the values are large or sparse ($a_i \le 10^9$), an array of $10^9$ counters does not fit in memory: use a hash map (@sec-hash), or sort and count runs (@sec-srt). If **positions** matter ("the nearest equal element"), counts have forgotten them.
+
+::: {.callout-important title="Template"}
+Bucket the data by value into `cnt`, then read whatever you need back out of `cnt`, often with one more pass that turns it into a running (prefix) count.
+
+```text
+cnt = [0] * V                      # V = MAX - MIN + 1 possible values
+for x in a: cnt[x - MIN] += 1      # value x lives in cell x - MIN
+less = 0
+for v in range(V):                 # scan the VALUE domain, not the array
+    ... use less (= number of elements with value < v + MIN) and cnt[v] ...
+    less += cnt[v]
+```
+
+**Invariant.** After the counting loop has processed $a_0, \dots, a_{i-1}$, `cnt[v]` is the number of $j < i$ with $a_j = v$ (shifted by `MIN`). During the value scan, `less` is the number of elements strictly smaller than the current value.
+:::
+
+**Why it is correct.** Processing $a_i$ increments exactly the counter of the value $a_i$, the only value whose number of occurrences grows when the prefix grows by one element; induction on $i$ does the rest. Two free sanity checks follow: $\sum_v \texttt{cnt}[v] = n$, and the number of distinct values is the number of non-zero counters.
+
+**Complexity.** $O(n + V)$ time, one pass to fill and one over the value domain; $O(V)$ space. When $V$ is small and fixed this beats sorting ($O(n \log n)$), and it beats a hash map in constant factors because `cnt` is one contiguous array (@sec-arr-cache).
+
+**Offsets for negative values.** Indices cannot be negative. If the values lie in $[\text{MIN}, \text{MAX}]$, store value $v$ in cell $v - \text{MIN}$; the array has $V = \text{MAX} - \text{MIN} + 1$ cells (for $|a_i| \le 1000$: `cnt[v + 1000]`, 2001 cells). Forgetting the offset in C++ writes *before* the array: no error message, just corrupted memory. Forgetting the "$+1$" in "$\text{MAX} + 1$ cells" is the other classic bug.
+
+**Counts → prefix counts → ranks.** The number of elements smaller than $v$ is the sum of the counts of all values below $v$. One running-sum pass over `cnt` answers it for every $v$: $\textit{less}[0] = 0$, $\textit{less}[v+1] = \textit{less}[v] + \texttt{cnt}[v]$. Then $\textit{less}[v]$ elements are $< v$, $\textit{less}[v+1]$ are $\le v$, and in sorted order the copies of $v$ occupy exactly the positions $[\textit{less}[v], \textit{less}[v+1])$. That is **counting sort**: walk over $a$ and put each element into the next free slot of its value's block. Walking in input order keeps equal elements in their original order, so the sort is **stable**, which matters when elements carry data.
+
+**Frequency of frequencies.** Sometimes the question is about the counts: "is every count different?", "how many values reach the largest count?", "how many values occur exactly once?". The counts are themselves small integers in $[1, n]$, so count them too: $\textit{fof}[c]$ = the number of distinct values that occur exactly $c$ times. Skip the zero counters (values that do not occur at all); forgetting to is the classic bug of Unique Number of Occurrences (@sec-arr-p5-b).
+
+**Counting pairs by value.** A pair question that depends only on the two values is answered from the counts, without looking at pairs of positions: pairs $i < j$ with $a_i = a_j$ number $\sum_v \binom{\texttt{cnt}[v]}{2}$; pairs with $|a_i - a_j| = k > 0$ number $\sum_v \texttt{cnt}[v]\cdot\texttt{cnt}[v + k]$. The cost drops from $O(n^2)$ pairs to $O(V)$ values.
+
+```{python}
+#| label: arr-counting-tools
+def counting_tools(a: list[int], lo: int, hi: int):
+    """Ranks, a stable counting sort, the frequency of frequencies, and equal pairs."""
+    V_ = hi - lo + 1
+    cnt = [0] * V_
+    for x in a:
+        cnt[x - lo] += 1                              # offset: value x lives in cell x - lo
+    less = [0] * (V_ + 1)
+    for v in range(V_):
+        less[v + 1] = less[v] + cnt[v]
+    ranks = [less[x - lo] for x in a]                 # how many elements are smaller than x
+    pos, out = less[:-1], [None] * len(a)
+    for x in a:                                       # stable: input order inside each value block
+        out[pos[x - lo]] = x
+        pos[x - lo] += 1
+    fof = Counter(c for c in cnt if c > 0)            # skip the values that do not occur
+    equal_pairs = sum(c * (c - 1) // 2 for c in cnt)
+    return ranks, out, dict(fof), equal_pairs
+
+
+ct_ranks, ct_sorted, ct_fof, ct_pairs = counting_tools([2, -1, 3, -1, 0, 2, 2, -5], -5, 5)
+assert ct_ranks == [4, 1, 7, 1, 3, 4, 4, 0] and ct_sorted == [-5, -1, -1, 0, 2, 2, 2, 3]
+assert ct_fof == {1: 3, 2: 1, 3: 1} and ct_pairs == 1 + 3
+for _ in range(1000):
+    ct_a = [random.randint(-4, 4) for _ in range(random.randint(0, 12))]
+    r_, s_, f_, q_ = counting_tools(ct_a, -4, 4)
+    assert r_ == [sum(y < x for y in ct_a) for x in ct_a] and s_ == sorted(ct_a)
+    assert f_ == dict(Counter(Counter(ct_a).values()))
+    assert q_ == sum(1 for i, j in combinations(range(len(ct_a)), 2) if ct_a[i] == ct_a[j])
+```
+
+**When to switch to a hash map.**
+
+| value range | tool | cost |
+|---|---|---|
+| $V$ up to a few million | counting array | $O(n + V)$ time, $O(V)$ memory; fastest in practice |
+| $V$ huge, $n \le 10^6$ | hash map (`unordered_map`, `dict`, `Counter`; @sec-hash) | $O(n)$ expected; beware anti-hash tests in C++ on Codeforces (@sec-lang-p7) |
+| $V$ huge, order needed | sort, then count runs; or compress the values | $O(n \log n)$, deterministic |
+
+With many test cases, size the counting array by the current test ($n + 1$ cells when the values are at most $n$), or reset only the cells you touched (@sec-arr-multitest).
+
+::: {#fig-arr-p5}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    nums = [8, 1, 2, 2, 3]
+    freq = [0] * 9
+    for x in nums:
+        freq[x] += 1
+    less, run = [], 0
+    for v in range(9):
+        less.append(run)
+        run += freq[v]
+    assert [less[x] for x in nums] == [4, 0, 1, 1, 3]
+    V.bars(ax, p, freq, y=1.6, height=2.0, colors={1: "indigo", 2: "amber", 3: "green", 8: "pink"})
+    V.text(ax, p, -0.3, 2.6, "cnt", ha="right", color="muted", size=10)
+    V.array(ax, p, less, y=-0.9, colors={1: "indigo", 2: "amber", 3: "green", 8: "pink"}, index=False)
+    V.text(ax, p, -0.3, -0.4, "less", ha="right", color="muted", size=10)
+V.show(draw)
+```
+
+The frequency array of $[8, 1, 2, 2, 3]$ (bar height = how often the value under it occurs) and its running sum `less`, where `less[v]` counts the elements strictly smaller than $v$. Reading `less` at each element gives the answer of @sec-arr-p5-a: $[4, 0, 1, 1, 3]$.
+
+:::
+
+{{< include ../problems/lc-1365-how-many-numbers-are-smaller-than-the-current-number/problem.qmd >}}
+
+[**From counting values to counting counts.** How Many Smaller counts each value and takes a running total over the values. Unique Number of Occurrences counts once more, over the counts themselves, and its values can be negative, so the first array needs an offset.]{.flow-bridge}
+
+{{< include ../problems/lc-1207-unique-number-of-occurrences/problem.qmd >}}
+
+**Looking back.** Every pattern was the same walk over contiguous memory, carrying a little more state each time: a few variables (aggregates), a write pointer that turns the prefix into the output (compaction), a second pointer coming from the other end (reversal and rotation), an index computed by a rule (simulation), and a second array indexed by value (frequency arrays). Each was proved the same way, with an invariant about the processed prefix $[0, i)$. The next chapters keep that walk and grow the state once more: a running total that answers range questions (@sec-pref), a hash map for values too large to index (@sec-hash), and two pointers that move under a rule (@sec-tp, @sec-sw).
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Answer is one summary of all cells (max, count, top-$k$, longest streak) | Single-pass aggregates | @sec-arr-p1 |
+| A per-position answer needs one global fact first ("max of the others") | Two passes over running state | @sec-arr-scan, @sec-arr-p1-b |
+| Best pair $i < j$ with an extreme partner ("largest $a_j - a_i$") | Prefix extreme as a running variable | @sec-arr-p1 |
+| "Modify in place", keep order, remove or compact, return the new length | Read/write pointers | @sec-arr-p2 |
+| Sorted input, "at most $k$ copies" | Read/write, compare with `a[w - k]` | @sec-arr-p2-b |
+| Output longer than the input (duplicate, insert) in place | Read/write from the back | @sec-arr-inplace, @sec-arr-p2 |
+| Rotate by $k$, cyclic shift, "two blocks swap places" | Three reversals ($k \bmod n$ first) | @sec-arr-p3 |
+| Many rotations, few reads | Start offset, $(start + i) \bmod n$ | @sec-arr-p3 |
+| "Is it a rotation of …", "sorted and rotated" | Windows of $aa$; count circular drops | @sec-arr-p3 |
+| Number as a digit array; "add one" | Carry from the least significant end | @sec-arr-p4 |
+| Index rule: $a[a[i]]$, $2i$, $i \bmod n$, $rC + c$ | Simulation and index arithmetic | @sec-arr-p4 |
+| A new value per cell from old values, $O(1)$ space | Encode two values in one cell | @sec-arr-inplace, @sec-arr-p4-b |
+| Values in a small range; "how many smaller"; counting sort | Frequency array + running sum | @sec-arr-p5 |
+| "Are the counts distinct?", "how many values occur $k$ times?" | Frequency of frequencies | @sec-arr-p5-b |
+| Values up to $10^9$ | Not a counting array: hash map or sort | @sec-hash, @sec-srt |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **A maximum started at `0`** fails on all-negative input; start from the first element, or from a sentinel outside the value range (@sec-arr-p1).
+- **A sentinel that can occur in the data**: `INT_MIN` as "unset" cannot tell "unset" from a real $-2^{31}$; use a wider type, `None`, or a flag (@sec-arr-p1-a).
+- **Letting a duplicate take a rank** in a top-$k$ of *distinct* values, or skipping duplicates when the statement counts elements (@sec-arr-p1-a, @sec-arr-p1-b).
+- **Updating the prefix state before using it** in a pair question pairs $a_j$ with itself (@sec-arr-p1).
+- **Off-by-one on ranges**: `<=` where you meant `<`, `range(n + 1)` reading `a[n]`, `v.size() - 1` on an empty vector (@sec-arr-ranges).
+- **`int` overflow** on a running sum, a pair count, or `int * int`: widen to `long long` *before* the operation (@sec-arr-cost).
+- **Clearing a big array in every test case** instead of only the cells you touched: $t \cdot V$ work (@sec-arr-multitest).
+- **Destroying data you still need** while writing in place: keep `w <= r`, choose the loop direction, or encode (@sec-arr-inplace).
+- **Comparing with the read side** (`a[r - 2]`) in Remove Duplicates II: that cell may already be overwritten; compare with `a[w - 2]` (@sec-arr-p2).
+- **`erase` inside a loop**: $O(n^2)$, and the element after each erase is skipped (@sec-arr-inplace).
+- **`k` without `% n`** in rotation, or the three reversals in the wrong order, which rotates left instead of right (@sec-arr-p3-a).
+- **Linear instead of circular drops** in "sorted and rotated": $[2,1,3,4]$ has one linear drop but is not a rotated sorted array (@sec-arr-p3-b).
+- **Negative `%` in C++**: `-7 % 5 == -2`; use `((i % n) + n) % n` (@sec-arr-p4).
+- **Reading an encoded cell without `% n`**, or an encoding whose $n^2$ overflows `int` (@sec-arr-p4-b).
+- **Rows and columns mixed up** in $r\cdot C + c$: square test grids hide the bug (@sec-arr-2d).
+- **A counting array one cell too short** ($\text{MAX}$ instead of $\text{MAX} + 1$), or **indexed by a negative value** without an offset (@sec-arr-p5).
+- **Counting the zero counters** when checking "are all counts distinct" (@sec-arr-p5-b).
+- **Assuming a contiguous array is always fast**: only in-order access is cache-friendly; scattered jumps lose most of the advantage (@sec-arr-cache).
+:::
+
+
+## Exercises
+
+The exercises follow the chapter: the lessons first (1–6), then one block per pattern (7–13 aggregates, 14–19 read/write pointers, 20–26 reversal and rotation, 27–32 simulation, 33–37 frequency arrays), then three harder in-place problems (38–40). Every solution that has code is checked here against a brute force or the official samples.
+
+**1. [E] Why is `a[i]` $O(1)$ in an array but reaching the $i$-th node of a linked list $O(i)$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The array stores cell $i$ at the address `base + i·s` (@eq-arr-address), computable with one multiplication and one addition. A linked list only stores, in each node, where the *next* node is; the address of node $i$ cannot be derived without visiting nodes $0, \dots, i-1$ and following $i$ pointers. Each of those hops also goes to an address the processor cannot predict, so it often misses the cache (@sec-arr-cache).
+:::
+
+**2. [E] How many elements are in the half-open range $[3, 9)$? In $[k, k)$? Write the closed range $[2, 7]$ as a half-open one and give its length.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$9 - 3 = 6$ elements (indices $3, \dots, 8$). $[k, k)$ is empty, $k - k = 0$, which is why `while lo < hi` stops exactly on the empty range. The closed $[2, 7]$ is the half-open $[2, 8)$, length $8 - 2 = 6 = 7 - 2 + 1$ (@sec-arr-ranges).
+:::
+
+**3. [E] How many elements are copied in total by $9$ `push_back` calls into an empty doubling vector? By $1000$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Copies happen at the pushes that find the buffer full: the push after sizes $1, 2, 4, 8, \dots$. For $9$ pushes that is $1 + 2 + 4 + 8 = 15 < 18$ (@fig-arr-anim-grow). For $1000$ pushes, $1 + 2 + \dots + 512 = 1023 < 2000$, as `copies_for` checks in @sec-arr-vec. In general the total is below $2n$.
+:::
+
+**4. [M] Show that growing a full buffer by a constant $c$ cells makes $n$ appends cost $\Theta(n^2/c)$, while growing it by a factor $g > 1$ keeps them $O(n)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+*Additive.* The buffer is full at sizes $c, 2c, 3c, \dots$, and each time all elements are copied, so $n$ appends copy $c + 2c + \dots + \lfloor (n-1)/c \rfloor c \approx \frac{n^2}{2c}$ elements: quadratic ($49\,500$ copies for $n = 1000$, $c = 10$, as checked in @sec-arr-vec). *Multiplicative.* The capacities at the copies grow like $1, g, g^2, \dots$ up to the last one below $n$, so their sum is at most $n(1 + 1/g + 1/g^2 + \dots) = \frac{g}{g-1}n$: $2n$ for $g = 2$, $3n$ for $g = 1.5$. That is $O(n)$ in total, $O(1)$ amortised per append.
+:::
+
+**5. [E] A grid has $R = 3$ rows and $C = 5$ columns, stored row-major in one array. Which id does cell $(2, 4)$ get, and which cell has id $7$? What goes wrong if you divide by $R$ instead?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$(2, 4) \to 2\cdot5 + 4 = 14$, the last cell. Id $7 \to (\lfloor 7/5 \rfloor, 7 \bmod 5) = (1, 2)$. Dividing by $R = 3$ gives $(2, 1)$, a different cell; the bug is invisible on square grids, where $R = C$, so always test index code on a non-square example (@sec-arr-2d).
+
+```{python}
+ex5_R, ex5_C = 3, 5
+assert 2 * ex5_C + 4 == 14 and (7 // ex5_C, 7 % ex5_C) == (1, 2) and (7 // ex5_R, 7 % ex5_R) == (2, 1)
+```
+:::
+
+**6. [M] State and prove the invariant of `count_max_one_pass` from @sec-arr-scan.**
+
+::: {.callout-note collapse="true" title="Solution"}
+*Invariant:* before processing $a_i$, `best` $= \max(a[0, i))$ and `cnt` is the number of occurrences of that maximum in $a[0, i)$, with the convention that for $i = 0$ we start from `best` $= a_0$, `cnt` $= 0$ (and $a_0$ is then counted by the first iteration, since it equals `best`). *Maintenance:* if $a_i >$ `best`, the new maximum is $a_i$ and it occurs once in $a[0, i]$: `(best, cnt) = (a_i, 1)`. If $a_i =$ `best`, the maximum is unchanged and one more copy appears: `cnt + 1`. If $a_i <$ `best`, nothing changes. *Termination:* at $i = n$ the pair is the maximum of the whole array and its count. The stress test in @sec-arr-scan checks the code against the two-pass version.
+:::
+
+**7. [E] [LC 485 · Max Consecutive Ones](https://leetcode.com/problems/max-consecutive-ones/){difficulty="Easy"}. Return the length of the longest block of consecutive 1s in a binary array ($n \le 10^5$).**
+
+::: {.callout-note collapse="true" title="Solution"}
+State: `run` = the length of the block of 1s ending at the current position, `best` = the longest block so far. A 1 extends the block, a 0 resets it. The answer must be updated *inside* the loop: reading `run` only at the end returns the length of the *last* block.
+
+```{python}
+def ex7_max_ones(a):
+    run = best = 0
+    for x in a:
+        run = run + 1 if x == 1 else 0
+        best = max(best, run)
+    return best
+
+assert ex7_max_ones([1, 1, 0, 1, 1, 1]) == 3 and ex7_max_ones([1, 0, 1, 1, 0, 1]) == 2
+for _ in range(500):
+    e7 = [random.randint(0, 1) for _ in range(random.randint(1, 12))]
+    assert ex7_max_ones(e7) == max((r - l for l in range(len(e7)) for r in range(l, len(e7) + 1)
+                                    if all(e7[l:r])), default=0)
+```
+:::
+
+**8. [E] [CF 1676B · Equal Candies](https://codeforces.com/problemset/problem/1676/B){rating="800"}. $n \le 50$ boxes hold $a_i \le 10^7$ candies. You may only *eat* candies. Find the minimum number eaten so that all boxes end equal.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The final level $L$ cannot exceed any box, so $L \le \min a_i$, and eating more than necessary only costs, so $L = \min a_i$. The answer is $\sum_i (a_i - L) = S - n\cdot\min a_i$: a sum and a minimum, one pass. Here $50 \cdot 10^7$ still fits in an `int`, but the `long long` habit costs nothing.
+
+```{python}
+def ex8_candies(a):
+    s, mn = 0, a[0]
+    for x in a:
+        s, mn = s + x, min(mn, x)
+    return s - len(a) * mn
+
+assert ex8_candies([1, 2, 3, 4, 5]) == 10 and ex8_candies([1, 1, 1]) == 0
+for _ in range(300):
+    e8 = [random.randint(1, 20) for _ in range(random.randint(1, 8))]
+    assert ex8_candies(e8) == min(sum(x - L for x in e8) for L in range(0, min(e8) + 1))
+```
+:::
+
+**9. [E] [LC 2016 · Maximum Difference Between Increasing Elements](https://leetcode.com/problems/maximum-difference-between-increasing-elements/){difficulty="Easy"}. Return the maximum of $a_j - a_i$ over $i < j$ with $a_i < a_j$, or $-1$ if there is none.**
+
+::: {.callout-note collapse="true" title="Solution"}
+For each $j$ the best $i < j$ is the one with the smallest $a_i$: keep `lo` $= \min(a_0..a_{j-1})$, use it *before* adding $a_j$, and only when $a_j >$ `lo` (strictly), otherwise the pair is not increasing. On $[5, 5]$ an unconditional `best = max(best, a[j] - lo)` would return $0$ instead of $-1$.
+
+```{python}
+def ex9_max_diff(a):
+    lo, best = a[0], -1
+    for x in a[1:]:
+        if x > lo:
+            best = max(best, x - lo)          # pair (argmin of the prefix, j)
+        lo = min(lo, x)                       # then include a[j]
+    return best
+
+assert [ex9_max_diff(t) for t in ([7, 1, 5, 4], [9, 4, 3, 2], [1, 5, 2, 10], [5, 5])] == [4, -1, 9, -1]
+for _ in range(500):
+    e9 = [random.randint(1, 9) for _ in range(random.randint(2, 8))]
+    assert ex9_max_diff(e9) == max([e9[j] - e9[i] for i in range(len(e9)) for j in range(i + 1, len(e9))
+                                    if e9[i] < e9[j]], default=-1)
+```
+:::
+
+**10. [E] [CF 1979A · Guess the Maximum](https://codeforces.com/problemset/problem/1979/A){rating="800"}. Alice picks $k$; Bob then picks $i < j$ and takes $M = \max(a_i, \dots, a_j)$; Alice wins if $M > k$. Find the largest $k$ for which Alice always wins.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Bob wants $M$ as small as possible, and extending a segment can only raise its maximum, so his best choices are segments of length two. Alice wins iff $k < \min_i \max(a_i, a_{i+1})$, so the answer is that minimum minus one: an aggregate over adjacent pairs. The traps are thinking about the global maximum, or forgetting that Bob must take at least two elements.
+
+```{python}
+def ex10_guess(a):
+    return min(max(a[i], a[i + 1]) for i in range(len(a) - 1)) - 1
+
+assert ex10_guess([2, 4, 1, 7]) == 3
+for _ in range(500):
+    e10 = [random.randint(1, 9) for _ in range(random.randint(2, 7))]
+    assert ex10_guess(e10) == min(max(e10[i:j + 1]) for i in range(len(e10))
+                                  for j in range(i + 1, len(e10))) - 1
+```
+:::
+
+**11. [M] [LC 628 · Maximum Product of Three Numbers](https://leetcode.com/problems/maximum-product-of-three-numbers/){difficulty="Easy"}. Return the largest product of three elements at different positions ($-1000 \le a_i \le 1000$), in one pass.**
+
+::: {.callout-note collapse="true" title="Solution"}
+In sorted order the answer would be $\max(m_1 m_2 m_3,\ m_1 s_1 s_2)$, with $m_1 \ge m_2 \ge m_3$ the three largest and $s_1 \le s_2$ the two smallest: two negative factors make a positive product. "Three largest" alone gives $6$ on $[-10, -9, 1, 2, 3]$ instead of $270$. All five values come from one pass with two shifting lists; duplicates are allowed, because positions must differ, not values.
+
+```{python}
+def ex11_max_product(a):
+    m1 = m2 = m3 = -math.inf
+    s1 = s2 = math.inf
+    for x in a:
+        if x > m1:
+            m1, m2, m3 = x, m1, m2
+        elif x > m2:
+            m2, m3 = x, m2
+        elif x > m3:
+            m3 = x
+        if x < s1:
+            s1, s2 = x, s1
+        elif x < s2:
+            s2 = x
+    return max(m1 * m2 * m3, m1 * s1 * s2)
+
+assert [ex11_max_product(t) for t in ([1, 2, -3], [1, 2, 3, 4], [-1, -2, -3], [-10, -9, 1, 2, 3])] \
+    == [-6, 24, -6, 270]
+for _ in range(1000):
+    e11 = [random.randint(-6, 6) for _ in range(random.randint(3, 7))]
+    assert ex11_max_product(e11) == max(x * y * z for x, y, z in combinations(e11, 3))
+```
+:::
+
+**12. [M] [LC 2210 · Count Hills and Valleys in an Array](https://leetcode.com/problems/count-hills-and-valleys-in-an-array/){difficulty="Easy"}. An index is part of a hill (valley) if its closest *non-equal* neighbours on both sides exist and are both smaller (larger); equal neighbours form one hill or valley. Count them.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Treat each plateau of equal values as one point. Keep `prev`, the last value that differed from the current plateau. At index $i$ (with $0 < i < n - 1$) skip it if $a_i = a_{i+1}$ (the plateau continues and is judged at its last index); otherwise it is a hill if $a_i >$ `prev` and $a_i > a_{i+1}$, a valley if both are smaller, and then `prev` becomes $a_i$. Comparing only with immediate neighbours counts the plateau $1, 1$ in $[2,4,1,1,6,5]$ zero times or twice.
+
+```{python}
+def ex12_hills(a):
+    cnt, prev = 0, a[0]
+    for i in range(1, len(a) - 1):
+        if a[i] == a[i + 1]:
+            continue                               # inside a plateau: judge it at its end
+        if (a[i] > prev and a[i] > a[i + 1]) or (a[i] < prev and a[i] < a[i + 1]):
+            cnt += 1
+        prev = a[i]
+    return cnt
+
+def ex12_brute(a):
+    b = [x for i, x in enumerate(a) if i == 0 or x != a[i - 1]]    # compress the plateaus
+    return sum(1 for i in range(1, len(b) - 1) if (b[i] - b[i - 1]) * (b[i] - b[i + 1]) > 0)
+
+assert ex12_hills([2, 4, 1, 1, 6, 5]) == 3 and ex12_hills([6, 6, 5, 5, 4, 1]) == 0
+for _ in range(1000):
+    e12 = [random.randint(1, 4) for _ in range(random.randint(3, 10))]
+    assert ex12_hills(e12) == ex12_brute(e12)
+```
+:::
+
+**13. [M] [LC 2091 · Removing Minimum and Maximum From Array](https://leetcode.com/problems/removing-minimum-and-maximum-from-array/){difficulty="Medium"}. The values are distinct; one deletion removes the first or the last element. Return the fewest deletions that remove both the minimum and the maximum.**
+
+::: {.callout-note collapse="true" title="Solution"}
+One pass finds the positions of the minimum and the maximum; call them $i < j$. Delete from the front through $j$ ($j + 1$ deletions), from the back through $i$ ($n - i$), or from the front through $i$ and from the back through $j$ ($(i + 1) + (n - j)$). The answer is the smallest of the three.
+
+```{python}
+def ex13_deletions(a):
+    lo = min(range(len(a)), key=a.__getitem__)
+    hi = max(range(len(a)), key=a.__getitem__)
+    i, j, n = min(lo, hi), max(lo, hi), len(a)
+    return min(j + 1, n - i, (i + 1) + (n - j))
+
+assert [ex13_deletions(t) for t in ([2, 10, 7, 5, 4, 1, 8, 6], [0, -4, 19, 1, 8, -2, -3, 5], [101])] \
+    == [5, 3, 1]
+for _ in range(500):
+    e13 = random.sample(range(-20, 20), random.randint(1, 8))
+    keep = {e13.index(min(e13)), e13.index(max(e13))}
+    assert ex13_deletions(e13) == min(f + b for f in range(len(e13) + 1) for b in range(len(e13) + 1 - f)
+                                      if all(k < f or k >= len(e13) - b for k in keep))
+```
+:::
+
+**14. [E] [LC 1089 · Duplicate Zeros](https://leetcode.com/problems/duplicate-zeros/){difficulty="Easy"}. Duplicate every zero of a fixed-length array in place, shifting the rest right; elements pushed past the end are lost.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The output is longer than the kept input, so a forward write pointer would run ahead of the read pointer: on $[1, 0, 2, 3]$ it produces $[1, 0, 0, 0]$. Count the zeros $z$. Without truncation, element $i$ would land at $i + (\text{zeros before } i)$, so walk $i$ from the right with a *virtual* write position $j$ starting at $n - 1 + z$; write only when $j < n$, and write a zero twice. Since $j \ge i$ always, no unread cell is overwritten: the mirror image of $w \le r$ (@sec-arr-p2).
+
+```{python}
+def ex14_duplicate_zeros(a):
+    n, j = len(a), len(a) - 1 + a.count(0)
+    for i in range(n - 1, -1, -1):
+        if j < n:
+            a[j] = a[i]
+        if a[i] == 0:                         # a zero is written twice
+            j -= 1
+            if j < n:
+                a[j] = 0
+        j -= 1
+    return a
+
+assert ex14_duplicate_zeros([1, 0, 2, 3, 0, 4, 5, 0]) == [1, 0, 0, 2, 3, 0, 0, 4]
+for _ in range(1000):
+    e14 = [random.choice([0, 0, 1, 2, 3]) for _ in range(random.randint(1, 9))]
+    want = [y for x in e14 for y in ([0, 0] if x == 0 else [x])][:len(e14)]
+    assert ex14_duplicate_zeros(list(e14)) == want
+```
+:::
+
+**15. [E] [CF 1385B · Restore the Permutation by Merger](https://codeforces.com/problemset/problem/1385/B){rating="800"}. A permutation $p$ of $1..n$ was merged with a copy of itself, keeping the order within each copy. Restore $p$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Each value's first occurrence in the merged sequence comes from one of the two copies, and in both copies the values appear in the order of $p$; so the first occurrences appear in the order of $p$. The answer is the subsequence of first occurrences: a read/write filter whose keep rule is a `seen` array over the small values $1..n$ (Pattern 5 used as a filter).
+
+```{python}
+def ex15_restore(a, n):
+    seen, w = [False] * (n + 1), 0
+    a = list(a)
+    for r in range(len(a)):
+        if not seen[a[r]]:
+            seen[a[r]] = True
+            a[w] = a[r]
+            w += 1
+    return a[:w]
+
+for _ in range(500):
+    e15_n = random.randint(1, 7)
+    e15_p = random.sample(range(1, e15_n + 1), e15_n)
+    picks = sorted(random.sample(range(2 * e15_n), e15_n))       # positions taken by the first copy
+    merged, it1, it2 = [], iter(e15_p), iter(e15_p)
+    for pos in range(2 * e15_n):
+        merged.append(next(it1) if pos in picks else next(it2))
+    assert ex15_restore(merged, e15_n) == e15_p
+```
+:::
+
+**16. [E] [LC 3174 · Clear Digits](https://leetcode.com/problems/clear-digits/){difficulty="Easy"}. Repeatedly delete the first digit together with the closest non-digit character to its left. Return the final string.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The closest letter to the left that is still present is exactly the last *kept* letter, so the kept prefix is a stack: a letter is pushed (`s[w++] = c`), a digit pops (`w--`). This is keep rule (c), cancellation, of @sec-arr-p2. On `ab1c2d`: push a, b; the 1 pops b; push c; the 2 pops c; push d: `ad`.
+
+```{python}
+def ex16_clear(s):
+    s, w = list(s), 0
+    for c in s:
+        if c.isdigit():
+            w = max(w - 1, 0)                 # the digit deletes the last kept letter
+        else:
+            s[w] = c
+            w += 1
+    return "".join(s[:w])
+
+def ex16_brute(s):
+    while any(c.isdigit() for c in s):
+        d = next(i for i, c in enumerate(s) if c.isdigit())
+        l = max(i for i in range(d) if not s[i].isdigit())
+        s = s[:l] + s[l + 1:d] + s[d + 1:]
+    return s
+
+assert [ex16_clear(t) for t in ("abc", "cb34", "ab1c2d")] == ["abc", "", "ad"]
+for _ in range(500):
+    e16, letters = "", 0
+    for _ in range(random.randint(1, 10)):
+        if letters and random.random() < 0.4:
+            e16, letters = e16 + random.choice("0123456789"), letters - 1
+        else:
+            e16, letters = e16 + random.choice("abc"), letters + 1
+    assert ex16_clear(e16) == ex16_brute(e16)
+```
+:::
+
+**17. [M] [LC 1861 · Rotating the Box](https://leetcode.com/problems/rotating-the-box/){difficulty="Medium"}. A grid holds stones `#`, obstacles `*` and empty cells `.`. Rotate it $90°$ clockwise; gravity then makes every stone fall onto an obstacle, another stone, or the bottom. Return the result.**
+
+::: {.callout-note collapse="true" title="Solution"}
+After a clockwise rotation, "down" is the direction of increasing column index in the original grid. So first let the stones slide *right* in every row, then rotate. Sliding is a write pointer per row moving right to left: `w` is where the next stone lands, an obstacle at column $r$ resets it to $r - 1$, and a stone at $r$ is lifted and dropped at `w`, then `w -= 1`. Since $w \ge r$, a stone never lands on an unread stone. The rotation itself is index arithmetic: `res[j][m - 1 - i] = box[i][j]`. Time $O(mn)$.
+
+```{python}
+def ex17_rotate_box(box):
+    box = [row[:] for row in box]
+    m, n = len(box), len(box[0])
+    for row in box:
+        w = n - 1
+        for r in range(n - 1, -1, -1):
+            if row[r] == "*":
+                w = r - 1                       # an obstacle starts a new segment
+            elif row[r] == "#":
+                row[r], row[w] = ".", "#"
+                w -= 1
+    return [[box[m - 1 - i][j] for i in range(m)] for j in range(n)]
+
+def ex17_brute(box):
+    box = [row[:] for row in box]
+    moved = True
+    while moved:                                # move stones right one cell at a time
+        moved = False
+        for row in box:
+            for c in range(len(row) - 1):
+                if row[c] == "#" and row[c + 1] == ".":
+                    row[c], row[c + 1], moved = ".", "#", True
+    m, n = len(box), len(box[0])
+    return [[box[m - 1 - i][j] for i in range(m)] for j in range(n)]
+
+assert ex17_rotate_box([["#", ".", "*", "."], ["#", "#", "*", "."]]) == \
+    [["#", "."], ["#", "#"], ["*", "*"], [".", "."]]
+for _ in range(300):
+    e17 = [[random.choice("#.*.") for _ in range(random.randint(1, 5))]]
+    e17 += [[random.choice("#.*.") for _ in range(len(e17[0]))] for _ in range(random.randint(0, 3))]
+    assert ex17_rotate_box(e17) == ex17_brute(e17)
+```
+:::
+
+**18. [M] Normalise separators.** An array uses $0$ as a separator between blocks of non-zero values, but the zeros are messy: several in a row, some at the start and the end. Rewrite it in place so that consecutive blocks are separated by exactly one zero, with no leading or trailing zeros, and return the new length. Example: $[0,0,3,4,0,0,0,5,0,6,0,0] \to [3,4,0,5,0,6]$.
+
+::: {.callout-note collapse="true" title="Solution"}
+A non-zero is always kept. A zero is kept only if the last **written** element is a non-zero, so the output never starts with a zero and never has two in a row. The trap is the end: if the input ends with zeros, the loop writes one separator after the last block with nothing after it; undo it after the loop.
+
+```{python}
+def ex18_normalise(a):
+    w = 0
+    for x in a:
+        if x != 0:
+            a[w], w = x, w + 1
+        elif w > 0 and a[w - 1] != 0:          # one separator after a block
+            a[w], w = 0, w + 1
+    if w > 0 and a[w - 1] == 0:
+        w -= 1                                  # no trailing separator
+    return w
+
+def ex18_brute(a):
+    blocks, cur = [], []
+    for x in a + [0]:
+        if x:
+            cur.append(x)
+        elif cur:
+            blocks.append(cur)
+            cur = []
+    return [y for k, b in enumerate(blocks) for y in ([0] if k else []) + b]
+
+e18 = [0, 0, 3, 4, 0, 0, 0, 5, 0, 6, 0, 0]
+assert e18[:ex18_normalise(e18)] == [3, 4, 0, 5, 0, 6]
+for _ in range(1000):
+    e18 = [random.choice([0, 0, 1, 2]) for _ in range(random.randint(0, 10))]
+    want = ex18_brute(e18)
+    assert e18[:ex18_normalise(e18)] == want
+```
+:::
+
+**19. [M] Delete a list of positions.** Given an array of length $n$ and a *sorted* list of $m$ distinct positions, delete those positions in place in $O(n + m)$ time and $O(1)$ extra memory, keeping the order of the rest.
+
+::: {.callout-note collapse="true" title="Solution"}
+Two read pointers and one write pointer: $r$ scans the array, $j$ scans the positions. If `pos[j] == r`, index $r$ is deleted and $j$ advances; otherwise $a_r$ is copied to $a_w$. Because the positions are sorted, `pos[j]` is always the smallest position not yet passed. Deleting with `erase` one by one would cost $O(nm)$ and would also shift every later position.
+
+```{python}
+def ex19_delete(a, pos):
+    w = j = 0
+    for r in range(len(a)):
+        if j < len(pos) and pos[j] == r:
+            j += 1                              # r is deleted
+            continue
+        a[w], w = a[r], w + 1
+    return w
+
+e19 = [10, 20, 30, 40, 50, 60]
+assert e19[:ex19_delete(e19, [0, 2, 3])] == [20, 50, 60]
+for _ in range(500):
+    e19 = list(range(random.randint(0, 9)))
+    e19_pos = sorted(random.sample(range(len(e19)), random.randint(0, len(e19))))
+    want = [x for i, x in enumerate(e19) if i not in e19_pos]
+    assert e19[:ex19_delete(e19, e19_pos)] == want
+```
+:::
+
+**20. [E] [LC 541 · Reverse String II](https://leetcode.com/problems/reverse-string-ii/){difficulty="Easy"}. Split a string into consecutive blocks of $2k$ characters; in every block reverse the first $k$ characters (all of them if fewer remain).**
+
+::: {.callout-note collapse="true" title="Solution"}
+For every block start $i = 0, 2k, 4k, \dots$ reverse the half-open range $[i, \min(i + k, n))$ with the two-index loop. The `min` handles both short endings at once. Total work $O(n)$.
+
+```{python}
+def ex20_reverse_str(s, k):
+    a = list(s)
+    for i in range(0, len(a), 2 * k):
+        reverse_range(a, i, min(i + k, len(a)))
+    return "".join(a)
+
+assert ex20_reverse_str("abcdefg", 2) == "bacdfeg" and ex20_reverse_str("abcd", 2) == "bacd"
+```
+:::
+
+**21. [E] [LC 2946 · Matrix Similarity After Cyclic Shifts](https://leetcode.com/problems/matrix-similarity-after-cyclic-shifts/){difficulty="Easy"}. In each of $k$ steps the even-indexed rows shift one place left and the odd-indexed rows one place right, cyclically. Is the final matrix equal to the original?**
+
+::: {.callout-note collapse="true" title="Solution"}
+After $k$ steps an even row is rotated left by $k$ and an odd row right by $k$; no need to simulate. A row equals its left rotation by $k$ iff `row[j] == row[(j + k) % n]` for every $j$, and that holds iff it equals its *right* rotation by $k$ (substitute $j \to j - k$). So the direction is a red herring: $O(mn)$ time, $O(1)$ memory.
+
+```{python}
+def ex21_similar(mat, k):
+    return all(row[j] == row[(j + k) % len(row)] for row in mat for j in range(len(row)))
+
+def ex21_brute(mat, k):
+    cur = [row[:] for row in mat]
+    for _ in range(k):
+        cur = [row[1:] + row[:1] if i % 2 == 0 else row[-1:] + row[:-1] for i, row in enumerate(cur)]
+    return cur == mat
+
+assert not ex21_similar([[1, 2, 3], [4, 5, 6], [7, 8, 9]], 4)
+assert ex21_similar([[1, 2, 1, 2], [5, 5, 5, 5], [6, 3, 6, 3]], 2)
+for _ in range(500):
+    e21_n = random.randint(1, 4)
+    e21 = [[random.randint(1, 2) for _ in range(e21_n)] for _ in range(random.randint(1, 3))]
+    e21_k = random.randint(1, 6)
+    assert ex21_similar(e21, e21_k) == ex21_brute(e21, e21_k)
+```
+:::
+
+**22. [M] [CF 1726A · Mainak and Array](https://codeforces.com/problemset/problem/1726/A){rating="900"}. Perform exactly one operation: choose a subarray and rotate it cyclically by any amount. Maximise $a_n - a_1$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A subarray containing neither end changes nothing. One containing only the last end, but not the first, can bring any $a_i$ with $i \ge 2$ to the end: value $\max_{i \ge 2} a_i - a_1$. One containing only the first end can bring any $a_i$ with $i \le n-1$ to the front: $a_n - \min_{i \le n-1} a_i$. Rotating the whole array makes the new ends two old neighbours $a_{i-1}$ (last) and $a_i$ (first): $\max_i (a_{i-1} - a_i)$, plus the rotation by $0$, $a_n - a_1$. The answer is the best of these four aggregates.
+
+```{python}
+def ex22_mainak(a):
+    n = len(a)
+    best = a[-1] - a[0]
+    if n > 1:
+        best = max(best, max(a[1:]) - a[0], a[-1] - min(a[:-1]),
+                   max(a[i - 1] - a[i] for i in range(1, n)))
+    return best
+
+def ex22_brute(a):
+    best = -math.inf
+    for l in range(len(a)):
+        for r in range(l + 1, len(a) + 1):
+            for s in range(r - l):
+                b = a[:l] + a[l:r][s:] + a[l:r][:s] + a[r:]
+                best = max(best, b[-1] - b[0])
+    return best
+
+assert [ex22_mainak(t) for t in ([1, 3, 9, 11, 5, 7], [20], [9, 99, 999], [2, 1, 8, 1])] == [10, 0, 990, 7]
+for _ in range(500):
+    e22 = [random.randint(1, 9) for _ in range(random.randint(1, 6))]
+    assert ex22_mainak(e22) == ex22_brute(e22)
+```
+:::
+
+**23. [M] [LC 396 · Rotate Function](https://leetcode.com/problems/rotate-function/){difficulty="Medium"}. For the array $B_k$ obtained by rotating $a$ right by $k$, let $F(k) = \sum_i i\cdot B_k[i]$. Return $\max_k F(k)$ in $O(n)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $S = \sum a_i$. From $B_{k-1}$ to $B_k$ every element moves one index right, adding $S$ in total, except the element that was at index $n - 1$, namely $a[n - k]$, which wraps to index $0$: it contributed $(n-1)a[n-k]$, was counted once more in $S$, and now contributes $0$. Hence $F(k) = F(k-1) + S - n\cdot a[n-k]$: a running update instead of $n$ fresh sums. Intermediate values reach about $10^5 \cdot 10^5 \cdot 100 = 10^{12}$, so use `long long` in C++.
+
+```{python}
+def ex23_rotate_function(a):
+    n, S = len(a), sum(a)
+    F = sum(i * x for i, x in enumerate(a))
+    best = F
+    for k in range(1, n):
+        F += S - n * a[n - k]                 # a[n - k] wraps from the end to index 0
+        best = max(best, F)
+    return best
+
+assert ex23_rotate_function([4, 3, 2, 6]) == 26 and ex23_rotate_function([100]) == 0
+for _ in range(500):
+    e23 = [random.randint(-5, 5) for _ in range(random.randint(1, 7))]
+    rots = [e23[len(e23) - k:] + e23[:len(e23) - k] for k in range(len(e23))]
+    assert ex23_rotate_function(e23) == max(sum(i * x for i, x in enumerate(b)) for b in rots)
+```
+:::
+
+**24. [E] [LC 1460 · Make Two Arrays Equal by Reversing Subarrays](https://leetcode.com/problems/make-two-arrays-equal-by-reversing-subarrays/){difficulty="Easy"}. In one step you may reverse any subarray of `arr`. Can it be made equal to `target`?**
+
+::: {.callout-note collapse="true" title="Solution"}
+It looks like a search over sequences of reversals, but reversing a subarray of length 2 swaps two neighbours, and adjacent swaps reach *every* arrangement (that is how bubble sort works). Reversals can do no more than permute. So the answer is "yes" iff both arrays hold the same values with the same multiplicities, which a counting array over the values $\le 1000$ decides in $O(n + 1000)$ (Pattern 5). The cell confirms the claim by searching every sequence of reversals on small arrays.
+
+```{python}
+def ex24_can_equal(target, arr):
+    cnt = [0] * 1001
+    for x in target:
+        cnt[x] += 1
+    for x in arr:
+        cnt[x] -= 1
+        if cnt[x] < 0:
+            return False
+    return len(arr) == len(target)
+
+def ex24_reachable(arr):
+    seen, todo = {tuple(arr)}, [tuple(arr)]
+    while todo:
+        cur = todo.pop()
+        for l in range(len(cur)):
+            for r in range(l + 1, len(cur) + 1):
+                nxt = cur[:l] + cur[l:r][::-1] + cur[r:]
+                if nxt not in seen:
+                    seen.add(nxt)
+                    todo.append(nxt)
+    return seen
+
+for _ in range(100):
+    e24 = [random.randint(1, 3) for _ in range(random.randint(1, 5))]
+    e24_t = [random.randint(1, 3) for _ in range(len(e24))]
+    assert ex24_can_equal(e24_t, e24) == (tuple(e24_t) in ex24_reachable(e24))
+```
+:::
+
+**25. [M] [CF 451B · Sort the Array](https://codeforces.com/problemset/problem/451/B){rating="1300"}. Given $n$ *distinct* integers, decide whether reversing exactly one segment makes the array increasing, and if so print one.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $\ell$ be the first index with $a_\ell > a_{\ell+1}$ (if there is none the array is sorted; reverse $[1, 1]$). Everything before $\ell$ is already in place, so a valid segment must start at $\ell$, and it must contain the whole decreasing run starting there: extend $r$ while $a_r > a_{r+1}$. Reverse $[\ell, r]$ and check *once* whether the array is now sorted. The trap is to skip that final check: $[3, 1, 2, 4]$ reverses its run $3, 1$ into $[1, 3, 2, 4]$, still unsorted, so the answer is "no".
+
+```{python}
+def ex25_sort_by_reversal(a):
+    n, l = len(a), 0
+    while l + 1 < n and a[l] < a[l + 1]:
+        l += 1
+    if l == n - 1:
+        return (1, 1)
+    r = l
+    while r + 1 < n and a[r] > a[r + 1]:
+        r += 1
+    b = a[:l] + a[l:r + 1][::-1] + a[r + 1:]
+    return (l + 1, r + 1) if b == sorted(a) else None     # 1-based, as the judge prints
+
+def ex25_brute_exists(a):
+    return any(a[:l] + a[l:r][::-1] + a[r:] == sorted(a) for l in range(len(a)) for r in range(l + 1, len(a) + 1))
+
+assert ex25_sort_by_reversal([3, 2, 1]) == (1, 3) and ex25_sort_by_reversal([3, 1, 2, 4]) is None
+for _ in range(1000):
+    e25 = random.sample(range(10), random.randint(1, 7))
+    got = ex25_sort_by_reversal(e25)
+    assert (got is not None) == ex25_brute_exists(e25)
+    if got:
+        l, r = got[0] - 1, got[1]
+        assert e25[:l] + e25[l:r][::-1] + e25[r:] == sorted(e25)
+```
+:::
+
+**26. [M] Rotate an array **left** by $k$ with three reversals. Check your order on $n = 3$, $k = 1$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Left by $k$ is right by $n - k$, or the same three reversals in the other order: reverse $[0, k)$, reverse $[k, n)$, reverse all. With $A$ the first $k$ elements: $AB \to A^R B^R \to (A^R B^R)^R = BA$ by @eq-arr-rev. On $[1, 2, 3]$, $k = 1$: $[1, 2, 3] \to [1, 3, 2] \to [2, 3, 1]$, the left rotation. The "right" order (reverse all first) would give $[3, 1, 2]$, the right rotation: test a tiny case before submitting.
+
+```{python}
+def ex26_rotate_left(a, k):
+    a, n = list(a), len(a)
+    k %= n
+    reverse_range(a, 0, k)
+    reverse_range(a, k, n)
+    reverse_range(a, 0, n)
+    return a
+
+assert ex26_rotate_left([1, 2, 3], 1) == [2, 3, 1]
+for _ in range(500):
+    e26 = list(range(random.randint(1, 8)))
+    e26_k = random.randint(0, 20)
+    assert ex26_rotate_left(e26, e26_k) == e26[e26_k % len(e26):] + e26[:e26_k % len(e26)]
+```
+:::
+
+**27. [E] [LC 2022 · Convert 1D Array Into 2D Array](https://leetcode.com/problems/convert-1d-array-into-2d-array/){difficulty="Easy"}. Fill an $m \times n$ matrix row by row with the elements of `original`, or return an empty matrix if that is impossible.**
+
+::: {.callout-note collapse="true" title="Solution"}
+It is possible iff `len(original) == m * n`. Then cell $(i, j)$ is `original[i * n + j]`: row-major index arithmetic (@sec-arr-2d), with $n$ the number of **columns**.
+
+```{python}
+def ex27_construct(original, m, n):
+    if len(original) != m * n:
+        return []
+    return [[original[i * n + j] for j in range(n)] for i in range(m)]
+
+assert ex27_construct([1, 2, 3, 4], 2, 2) == [[1, 2], [3, 4]] and ex27_construct([1, 2], 1, 1) == []
+assert ex27_construct([1, 2, 3, 4, 5, 6], 2, 3) == [[1, 2, 3], [4, 5, 6]]
+```
+:::
+
+**28. [E] [CF 1950B · Upscaling](https://codeforces.com/problemset/problem/1950/B){rating="800"}. Print a $2n \times 2n$ checkerboard made of $2\times2$ blocks, starting with `#` blocks in the top-left corner.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Cell $(i, j)$ belongs to block $(\lfloor i/2 \rfloor, \lfloor j/2 \rfloor)$, and blocks alternate like a chessboard, so the cell is `#` iff $\lfloor i/2 \rfloor + \lfloor j/2 \rfloor$ is even. One formula per cell, no simulation of the blocks.
+
+```{python}
+def ex28_upscale(n):
+    return ["".join("#" if (i // 2 + j // 2) % 2 == 0 else "." for j in range(2 * n)) for i in range(2 * n)]
+
+def ex28_blocks(n):
+    out = [[None] * (2 * n) for _ in range(2 * n)]
+    for bi in range(n):
+        for bj in range(n):
+            for di in range(2):
+                for dj in range(2):
+                    out[2 * bi + di][2 * bj + dj] = "#" if (bi + bj) % 2 == 0 else "."
+    return ["".join(row) for row in out]
+
+assert ex28_upscale(2) == ["##..", "##..", "..##", "..##"]
+assert all(ex28_upscale(n) == ex28_blocks(n) for n in range(1, 8))
+```
+:::
+
+**29. [E] [CF 1873B · Good Kid](https://codeforces.com/problemset/problem/1873/B){rating="800"}. Given at most $9$ digits, add $1$ to exactly one of them so that the product of all digits is as large as possible.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Adding 1 to digit $d$ multiplies the product by $(d+1)/d$, which is largest for the smallest $d$; if some digit is $0$, raising one $0$ to $1$ is the only way to get a non-zero product. Either way: add 1 to the **smallest** digit, an aggregate (the minimum) followed by one product.
+
+```{python}
+def ex29_good_kid(d):
+    d = list(d)
+    d[d.index(min(d))] += 1
+    return math.prod(d)
+
+assert [ex29_good_kid(t) for t in ([2, 2, 1, 2], [0, 1, 2], [4, 3, 2, 3, 4], [9] * 9)] == [16, 2, 432, 430467210]
+for _ in range(500):
+    e29 = [random.randint(0, 9) for _ in range(random.randint(1, 9))]
+    assert ex29_good_kid(e29) == max(math.prod(e29[:i] + [e29[i] + 1] + e29[i + 1:]) for i in range(len(e29)))
+```
+:::
+
+**30. [E] [CF 1352A · Sum of Round Numbers](https://codeforces.com/problemset/problem/1352/A){rating="800"}. A number is round if all its digits except the first are zero. Write $n \le 10^4$ as a sum of as few round numbers as possible.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Every non-zero digit $d$ at place $10^i$ contributes the round number $d\cdot 10^i$, and no round number can cover two non-zero digits, so the minimum is the number of non-zero digits. Walk the digits from the least significant end, as in a carry loop.
+
+```{python}
+def ex30_round(n):
+    out, place = [], 1
+    while n:
+        if n % 10:
+            out.append((n % 10) * place)
+        n, place = n // 10, place * 10
+    return out
+
+assert sorted(ex30_round(5009)) == [9, 5000] and ex30_round(7) == [7] and len(ex30_round(9876)) == 4
+assert all(sum(ex30_round(x)) == x and len(ex30_round(x)) == sum(c != "0" for c in str(x)) for x in range(1, 10_001))
+```
+:::
+
+**31. [M] [LC 2582 · Pass the Pillow](https://leetcode.com/problems/pass-the-pillow/){difficulty="Easy"}. People $1..n$ stand in a line, person 1 holds a pillow, and every second it moves to the next person; at either end the direction reverses. Who holds it after `time` seconds? Make it work for `time` up to $10^{18}$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A back-and-forth walk over $n$ people has period $2(n - 1)$: after that many seconds the pillow is back at person 1, moving forward. Let $r = \text{time} \bmod 2(n-1)$. For $r \le n - 1$ the pillow is going forward and is at person $1 + r$; otherwise it is coming back and is at person $2n - 1 - r$. The simulation is $O(\text{time})$, the formula $O(1)$.
+
+```{python}
+def ex31_pillow(n, time):
+    r = time % (2 * (n - 1))
+    return 1 + r if r <= n - 1 else 2 * n - 1 - r
+
+def ex31_simulate(n, time):
+    pos, step = 1, 1
+    for _ in range(time):
+        if not 1 <= pos + step <= n:
+            step = -step
+        pos += step
+    return pos
+
+assert ex31_pillow(4, 5) == 2 and ex31_pillow(3, 2) == 3
+assert all(ex31_pillow(n, t) == ex31_simulate(n, t) for n in range(2, 8) for t in range(1, 40))
+assert ex31_pillow(1000, 10**18) == ex31_pillow(1000, 10**18 % 1998)
+```
+:::
+
+**32. [M] Given a permutation `p` of $0..n-1$, build its **inverse** `inv` with `inv[p[i]] = i`. Then explain why `p[inv[v]] == v` for every $v$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+One pass writes, for each position $i$, the position $i$ into the cell named by the value $p[i]$: `inv[p[i]] = i`. Indexing by *value* is the frequency-array mindset (Pattern 5) applied to a permutation. Since $p$ is a bijection, every cell of `inv` is written exactly once; and `inv[v]` is the position where $v$ sits, so $p[\text{inv}[v]] = v$.
+
+```{python}
+def ex32_inverse(p):
+    inv = [0] * len(p)
+    for i, x in enumerate(p):
+        inv[x] = i
+    return inv
+
+for _ in range(300):
+    e32 = random.sample(range(9), 9)
+    e32_inv = ex32_inverse(e32)
+    assert all(e32_inv[e32[i]] == i and e32[e32_inv[i]] == i for i in range(9))
+```
+:::
+
+**33. [E] [LC 1394 · Find Lucky Integer in an Array](https://leetcode.com/problems/find-lucky-integer-in-an-array/){difficulty="Easy"}. A value is lucky if it occurs exactly as many times as its value. Return the largest lucky value, or $-1$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Values are at most $500$: count them in an array and scan the values from the top, returning the first $v$ with `cnt[v] == v`.
+
+```{python}
+def ex33_lucky(a):
+    cnt = [0] * 501
+    for x in a:
+        cnt[x] += 1
+    return next((v for v in range(500, 0, -1) if cnt[v] == v), -1)
+
+assert [ex33_lucky(t) for t in ([2, 2, 3, 4], [1, 2, 2, 3, 3, 3], [2, 2, 2, 3, 3])] == [2, 3, -1]
+```
+:::
+
+**34. [E] [LC 2006 · Count Number of Pairs With Absolute Difference K](https://leetcode.com/problems/count-number-of-pairs-with-absolute-difference-k/){difficulty="Easy"}. Count the pairs $i < j$ with $|a_i - a_j| = k$ (values $\le 100$, $k \ge 1$).**
+
+::: {.callout-note collapse="true" title="Solution"}
+A pair with values $v$ and $v + k$ is counted once whichever comes first, so the answer is $\sum_v \texttt{cnt}[v]\cdot\texttt{cnt}[v + k]$: pairs by value (@sec-arr-p5), $O(n + V)$ instead of $O(n^2)$.
+
+```{python}
+def ex34_pairs(a, k):
+    cnt = [0] * (101 + k)
+    for x in a:
+        cnt[x] += 1
+    return sum(cnt[v] * cnt[v + k] for v in range(101))
+
+assert ex34_pairs([1, 2, 2, 1], 1) == 4 and ex34_pairs([1, 3], 3) == 0 and ex34_pairs([3, 2, 1, 5, 4], 2) == 3
+for _ in range(500):
+    e34, e34_k = [random.randint(1, 6) for _ in range(random.randint(1, 9))], random.randint(1, 4)
+    assert ex34_pairs(e34, e34_k) == sum(abs(x - y) == e34_k for x, y in combinations(e34, 2))
+```
+:::
+
+**35. [E] [CF 1980A · Problem Generator](https://codeforces.com/problemset/problem/1980/A){rating="800"}. Each of $m$ rounds needs one problem of each difficulty `A`–`G`; you have problems with given difficulties. How many new problems must you create?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Count the difficulties in a 7-cell array; each difficulty is short by $\max(0, m - \texttt{cnt}[c])$, and the shortfalls add up.
+
+```{python}
+def ex35_generator(s, m):
+    cnt = [0] * 7
+    for c in s:
+        cnt[ord(c) - ord("A")] += 1               # offset: 'A' lives in cell 0
+    return sum(max(0, m - c) for c in cnt)
+
+assert [ex35_generator("BGECDCBDED", 1), ex35_generator("BGECDCBDED", 2), ex35_generator("BBCDEFFGG", 1)] == [2, 5, 1]
+```
+:::
+
+**36. [M] [LC 274 · H-Index](https://leetcode.com/problems/h-index/){difficulty="Medium"}. The h-index is the largest $h$ such that at least $h$ papers have at least $h$ citations each. Compute it in $O(n)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$h$ can never exceed $n$, so a paper with more than $n$ citations counts the same as one with exactly $n$: put it in bucket $n$ (**capped buckets**). Then scan $h$ from $n$ down with a running count of papers having at least $h$ citations; the first $h$ where that count reaches $h$ is the answer.
+
+```{python}
+def ex36_h_index(c):
+    n = len(c)
+    cnt = [0] * (n + 1)
+    for x in c:
+        cnt[min(x, n)] += 1                       # cap: values above n collapse into bucket n
+    at_least = 0
+    for h in range(n, -1, -1):
+        at_least += cnt[h]
+        if at_least >= h:
+            return h
+
+assert ex36_h_index([3, 0, 6, 1, 5]) == 3 and ex36_h_index([1, 3, 1]) == 1
+for _ in range(500):
+    e36 = [random.randint(0, 12) for _ in range(random.randint(1, 9))]
+    assert ex36_h_index(e36) == max(h for h in range(len(e36) + 1) if sum(x >= h for x in e36) >= h)
+```
+:::
+
+**37. [M] [CF 1335C · Two Teams Composing](https://codeforces.com/problemset/problem/1335/C){rating="1100"}. From $n$ students with skills $a_i \le n$, form two disjoint teams of equal size $x$: in the first all skills are distinct, in the second all skills are equal. Maximise $x$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $d$ be the number of distinct skills and $m$ the largest count, both read from one counting array. Build the second team from the most frequent skill. Either it uses that skill entirely, and the first team has $d - 1$ other skills to choose from: $\min(d - 1, m)$; or it leaves one copy for the first team: $\min(d, m - 1)$. The answer is the larger of the two.
+
+```{python}
+def ex37_teams(a):
+    cnt = Counter(a)
+    d, m = len(cnt), max(cnt.values())
+    return max(min(d - 1, m), min(d, m - 1))
+
+def ex37_brute(a):
+    cnt, best = Counter(a), 0
+    for s, c in cnt.items():
+        for x in range(c + 1):                   # x copies of skill s form the second team
+            left_distinct = len(cnt) - 1 + (1 if c - x > 0 else 0)
+            if x <= left_distinct:
+                best = max(best, x)
+    return best
+
+assert [ex37_teams(t) for t in ([4, 2, 4, 1, 4, 3, 4], [2, 1, 5, 4, 3], [1], [1, 1, 1, 3])] == [3, 1, 0, 2]
+for _ in range(1000):
+    e37 = [random.randint(1, 5) for _ in range(random.randint(1, 9))]
+    assert ex37_teams(e37) == ex37_brute(e37)
+```
+:::
+
+**38. [H] Given $n + 1$ integers, each in $[1, n]$, find a repeated value using the array itself as the marker, in $O(n)$ time and $O(1)$ extra space, then restore the array.**
+
+::: {.callout-note collapse="true" title="Solution"}
+All values are positive, so the **sign** of a cell is a free one-bit flag (@sec-arr-inplace). For each element read $v = |a_i|$; if $a_v$ is already negative, $v$ was seen before and is a repeat; otherwise negate $a_v$ to mark "value $v$ seen". Indices $1..n$ exist because the array has $n + 1$ cells. Read every value through `abs`, because its cell may already be marked. Restore by taking absolute values. (LeetCode 287 forbids modifying the array; there the intended solution is cycle detection, a later topic.)
+
+```{python}
+def ex38_find_repeat(a):
+    a = list(a)
+    rep = None
+    for i in range(len(a)):
+        v = abs(a[i])                             # the cell may already carry a mark
+        if a[v] < 0:
+            rep = v if rep is None else rep
+        else:
+            a[v] = -a[v]
+    restored = [abs(x) for x in a]
+    return rep, restored
+
+for _ in range(1000):
+    e38_n = random.randint(1, 8)
+    e38 = [random.randint(1, e38_n) for _ in range(e38_n + 1)]
+    rep, back = ex38_find_repeat(e38)
+    assert e38.count(rep) >= 2 and back == e38
+```
+:::
+
+**39. [H] [LC 238 · Product of Array Except Self](https://leetcode.com/problems/product-of-array-except-self/){difficulty="Medium"}. Return, for every $i$, the product of all other elements, in $O(n)$ without division, then with $O(1)$ extra space beyond the output.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Each position needs its left side *and* its right side (@sec-arr-scan), so it is a prefix product times a suffix product. Write the prefix products into the output array in a forward pass; then a backward pass multiplies in a *running* suffix product, one variable instead of a second array. Division would fail on zeros.
+
+```{python}
+def ex39_except_self(a):
+    n = len(a)
+    out = [1] * n
+    for i in range(1, n):
+        out[i] = out[i - 1] * a[i - 1]            # product of a[0:i]
+    suffix = 1
+    for i in range(n - 1, -1, -1):
+        out[i] *= suffix                          # times product of a[i+1:n]
+        suffix *= a[i]
+    return out
+
+assert ex39_except_self([1, 2, 3, 4]) == [24, 12, 8, 6] and ex39_except_self([-1, 1, 0, -3, 3]) == [0, 0, 9, 0, 0]
+for _ in range(500):
+    e39 = [random.randint(-3, 3) for _ in range(random.randint(2, 7))]
+    assert ex39_except_self(e39) == [math.prod(e39[:i] + e39[i + 1:]) for i in range(len(e39))]
+```
+:::
+
+**40. [H] Values lie in $[0, n)$. Return the value whose *second* occurrence comes first (or $-1$), using $O(1)$ extra space: mark by adding $n$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Walk the array left to right; the original value at $i$ is `a[i] % n` (the cell may already carry marks). If `a[v] >= n`, the value $v$ has been seen and this is its second occurrence, the earliest one, since we scan left to right; otherwise add $n$ to `a[v]`. Adding $n$ keeps the original value readable as the remainder: the encoding of @eq-arr-encode with a one-bit "new value". The magnitudes stay below $2n$.
+
+```{python}
+def ex40_first_repeat(a):
+    a, n = list(a), len(a)
+    for i in range(n):
+        v = a[i] % n                              # the original value of a[i]
+        if a[v] >= n:
+            return v
+        a[v] += n
+    return -1
+
+def ex40_brute(a):
+    seen = set()
+    for x in a:
+        if x in seen:
+            return x
+        seen.add(x)
+    return -1
+
+for _ in range(1000):
+    e40_n = random.randint(1, 8)
+    e40 = [random.randint(0, e40_n - 1) for _ in range(e40_n)]
+    assert ex40_first_repeat(e40) == ex40_brute(e40)
+```
+:::
+
+## Interview questions
+
+**1. Why does `a[i]` cost $O(1)$, and what does the CPU actually do?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Cell $i$ lives at `base + i·s` (@eq-arr-address). The compiler emits a multiply (often a shift), an add and a load: the address is *computed*, never searched for, so the cost does not depend on $i$ or $n$ (@sec-arr-memory).
+:::
+
+**2. Two programs are both $O(n)$ over the same data, but one is several times faster. How can that be?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Caches. Memory moves in 64-byte lines, so an in-order scan pays one slow fetch per line and then reads the rest of the line almost for free, with hardware prefetching on top. Scattered access (random indices, linked nodes, a column-order walk of a row-major grid) can pay a full memory trip on nearly every read. Big-O hides this constant (@sec-arr-cache, @fig-arr-cache).
+:::
+
+**3. Why is `push_back` amortised $O(1)$ when a single call can copy the whole array?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The capacity doubles, so the copies over $n$ pushes form the series $1 + 2 + 4 + \dots < 2n$. The bound is a worst-case guarantee about every *sequence* of operations, not an average over random inputs. Growing by a constant instead would make the total quadratic (@sec-arr-vec).
+:::
+
+**4. What is the difference between `reserve` and `resize`, and why can a reference into a vector become invalid?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`reserve(n)` changes the capacity only (the size stays the same, so `v[0]` may still be out of range); `resize(n)` changes the size and creates the cells. A `push_back` into a full buffer moves every element to a new block, so pointers, references and iterators into the old block dangle. Keep indices while a vector can still grow (@sec-arr-vec).
+:::
+
+**5. What is a half-open range, and why prefer it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$[\ell, r)$ keeps $\ell$, excludes $r$, holds $r - \ell$ items and is empty when $\ell = r$. Adjacent ranges $[\ell, m)$ and $[m, r)$ meet with no overlap or gap, the loop is the familiar `for (i = l; i < r; i++)`, and it matches Python slices and every STL algorithm (@sec-arr-ranges).
+:::
+
+**6. Name the usual sources of off-by-one errors, and one habit that prevents most of them.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Loop bounds (`<=` instead of `<`), closed versus half-open lengths ($r - \ell + 1$ versus $r - \ell$), neighbour access at the last index, `size() - 1` on an empty vector, and mixing 0- and 1-based positions. Writing the loop invariant ("the state describes $[0, i)$") forces the start and end values to be right (@sec-arr-ranges, @sec-arr-invariant).
+:::
+
+**7. The constraints say $n \le 2\cdot10^5$ and a one-second limit. What complexity is safe, and what else do you read off the statement?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$O(n)$ or $O(n\log n)$; $n^2 = 4\cdot10^{10}$ is far beyond the roughly $10^8$ simple steps per second. Also read the value range (does every sum and product fit in `int`?), whether there are many test cases with a bound on $\sum n$, and the memory limit (@sec-arr-cost, @sec-cx-budget).
+:::
+
+**8. When must you switch from `int` to `long long`, and where exactly does `int * int` go wrong?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Whenever a sum, product, count or answer can pass $2^{31} - 1 \approx 2.1\cdot10^9$: a sum of $2\cdot10^5$ values up to $10^9$, a product of two $10^5$s, the number of pairs for $n = 2\cdot10^5$. `long long x = a * b` multiplies in `int` first and only then widens the wrapped result; write `(long long)a * b` (@sec-arr-cost).
+:::
+
+**9. Which running states can a single pass maintain, and which cannot? Give an example of each.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Any summary whose new value depends only on the old summary and the new element: a sum, the maximum and its index, the top $k$ for a small $k$, the best pair with an earlier element (via the prefix minimum), the current streak. The median cannot: after $1, 5, 3$ the median $3$ forgets that a $5$ was seen, and that $5$ becomes the median after $9, 8$ arrive (@sec-arr-scan, @sec-arr-p1).
+:::
+
+**10. In place or a second array: how do you choose, and what makes an in-place loop safe?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Use a second array when it is allowed and clarity matters. Work in place when the statement demands $O(1)$ extra space. Safety means never overwriting a value that a later step still needs: keep the write pointer at or behind the read pointer ($w \le r$), pick the loop direction (data moving right means scanning from the right), swap, or encode both values in one cell (@sec-arr-inplace).
+:::
+
+**11. What does "stable" mean for a rearrangement, and which of your in-place tools are stable?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Elements the rule does not distinguish keep their relative order. Read/write compaction is stable for the kept elements (Move Zeroes relies on it); swapping from both ends (partition) is not, as the "evens first" example shows; `std::stable_partition` and Python's `sorted` are stable at the price of a buffer (@sec-arr-inplace).
+:::
+
+**12. Remove Duplicates II: why compare with `a[w - 2]` and not `a[r - 2]`?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The written prefix $a[0, w)$ is final and correct by the invariant, so `a[w - 2]` really is the value two places back in the output. The cell `a[r - 2]` lies in the free zone $[w, r)$ and may already have been overwritten: on $[1,1,1,2,2,3]$ the read-side test drops the second 2 (@sec-arr-p2).
+:::
+
+**13. Rotate an array right by $k$ in $O(1)$ extra space, and prove it.**
+
+::: {.callout-note collapse="true" title="Answer"}
+`k %= n`; reverse all, reverse $[0, k)$, reverse $[k, n)$. With $A$ the first $n - k$ and $B$ the last $k$ elements, $(AB)^R = B^R A^R$, and reversing each block back gives $BA$ (@eq-arr-rev). The alternative is the cycle method, $\gcd(n, k)$ cycles of $i \to (i + k) \bmod n$, which writes each element once but jumps around memory (@sec-arr-p3).
+:::
+
+**14. How do you check whether $b$ is a rotation of $a$, and whether $a$ is a sorted array rotated?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Every rotation of $a$ is a length-$n$ window of $aa$, so check that the lengths match and $b$ occurs in $aa$ (index it as $a[j \bmod n]$; $O(n^2)$ naively, $O(n)$ with string matching). For "sorted and rotated", count the circular drops $a_i > a_{(i+1) \bmod n}$: at most one means yes (@sec-arr-p3).
+:::
+
+**15. Build Array from Permutation in $O(1)$ extra space: what is the trick, and what can go wrong?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Store both values in each cell: `a[i] += n * (a[a[i]] % n)`, then divide every cell by $n$. The `% n` recovers the original value of a cell that is already encoded; forgetting it reads a half-written value. The encoded values reach about $n^2$, which overflows a 32-bit `int` once $n$ passes about $46\,000$ (@eq-arr-encode, @sec-arr-p4-b).
+:::
+
+**16. Values lie in $[0, 100]$ and you need "how many are smaller than each element". Sort, hash, or count?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Count: a 101-cell frequency array plus one running-sum pass over the values gives every answer in $O(n + 101)$ time and constant extra space, beating the $O(n\log n)$ sort and a hash map's constants. For values up to $10^9$ the array would not fit; then sort, or use a hash map when only equality matters (@sec-arr-p5).
+:::
+
+**17. Does Python overflow? Why should a Python programmer still care about integer ranges?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Python integers are unbounded, so they never overflow, but big ones are slower, and an interview or contest answer in C++ or Java must widen to 64 bits. The reasoning also matters for encodings: packing two values in one cell multiplies magnitudes to about $n^2$ (@sec-arr-cost, @eq-arr-encode).
+:::
+
+**18. How many subarrays, subsequences and subsets does a length-$n$ array have, and what does that tell you?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$\frac{n(n+1)}{2}$ non-empty subarrays, so enumerating them is fine up to $n \approx 5000$ with $O(1)$ work each; $2^n$ subsequences and subsets of positions, so enumeration only works up to $n \approx 20$. The count is the feasibility budget for brute force (@sec-arr-counts).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Address of `a[i]`:** `base + i * size`; scan in order, last index innermost in 2D; row-major id `i * C + j`, back with `id // C`, `id % C`.
+- **Single-pass aggregate:** `state = summary(empty)`; `for x in a: state = update(state, x)`; invariant "state summarises $[0, i)$". Pairs $i < j$: use the prefix extreme, *then* add $a_j$.
+- **Read/write compaction:** `w = 0; for r: if keep(a[r], a[0:w]): a[w] = a[r]; w += 1`; always `w <= r`; at most $k$ copies in sorted input: `w < k or a[r] != a[w - k]`.
+- **Rotate right by $k$:** `k %= n`; reverse all, reverse $[0, k)$, reverse $[k, n)$. Many rotations: `start = (start - k) mod n`, read `a[(start + i) % n]`.
+- **Carry loop:** from the least significant digit, `s = a + b + carry`, write `s % 10`, `carry = s // 10`; a final carry adds a digit.
+- **Two values in one cell:** `a[i] += M * new`, read old as `a[i] % M`, new as `a[i] // M`; $M^2$ must fit.
+- **Frequency array:** `cnt[x - MIN] += 1`; `less[v + 1] = less[v] + cnt[v]` gives ranks and counting sort; count the counts for "are the counts distinct".
+:::
+
+- An array is one contiguous block, so `a[i]` is an address computation, $O(1)$; inserting in the middle is $O(n)$, and scanning *in order* is what the cache rewards.
+- A growable array doubles its buffer, so appends are **amortised** $O(1)$: the copies sum to less than $2n$. Additive growth would be quadratic.
+- Half-open ranges $[\ell, r)$ make lengths $r - \ell$, splits clean and empty ranges free; a loop invariant about $[0, i)$ fixes the start, the stop and the update.
+- Read $n$, the value range and $\sum n$ before coding: they fix the complexity, the integer type and how much you may reset per test.
+- A scan is state + initial value + update + answer. One pass when the update needs only the old state and $a_i$; two passes when every position needs a global fact; a stored array when it needs both sides.
+- In-place work is safe when no write destroys a value still needed: $w \le r$, the right loop direction, swaps, or an encoding. Read/write compaction is stable; swapping from both ends is not.
+- The five patterns add one piece of state each: running variables, a write pointer, a second pointer from the other end, a computed index, a second array indexed by value.
+- Prove each loop the same way, with an invariant on the processed prefix, and stress-test it against a brute force.
+
+## Practice ladder
+
+Ordered by concept, following the five patterns; every solved problem in the chapter has at least one partner here or in its own practice list.
+
+::: {.practice}
+- [CF 158A · Next Round](https://codeforces.com/problemset/problem/158/A){rating="800"} — a count over a sorted array with a threshold read from one cell.
+- [LC 896 · Monotonic Array](https://leetcode.com/problems/monotonic-array/){difficulty="Easy"} — two flags in one pass.
+- [CF 1985C · Good Prefixes](https://codeforces.com/problemset/problem/1985/C){rating="1000"} — a running sum and a running maximum; the sums need 64 bits.
+- [CF 1744B · Even-Odd Increments](https://codeforces.com/problemset/problem/1744/B){rating="800"} — aggregates under updates: keep the sum and the parity counts, never touch the array.
+- [CF 266A · Stones on the Table](https://codeforces.com/problemset/problem/266/A){rating="800"} — compaction counted instead of performed.
+- [LC 27 · Remove Element](https://leetcode.com/problems/remove-element/){difficulty="Easy"} — read/write compaction, keep rule on the element alone.
+- [CF 978A · Remove Duplicates](https://codeforces.com/problemset/problem/978/A){rating="800"} — keep the rightmost copies: compact from the back with a seen array.
+- [LC 26 · Remove Duplicates from Sorted Array](https://leetcode.com/problems/remove-duplicates-from-sorted-array/){difficulty="Easy"} — read/write with a one-back look.
+- [CF 1638A · Reverse](https://codeforces.com/problemset/problem/1638/A){rating="800"} — choose the one reversal that makes the permutation smallest.
+- [LC 796 · Rotate String](https://leetcode.com/problems/rotate-string/){difficulty="Easy"} — is $b$ a rotation of $a$: windows of $aa$.
+- [CF 1365C · Rotation Matching](https://codeforces.com/problemset/problem/1365/C){rating="1400"} — rotations as offsets, counted in a frequency array.
+- [LC 989 · Add to Array-Form of Integer](https://leetcode.com/problems/add-to-array-form-of-integer/){difficulty="Easy"} — the carry loop with a number instead of a digit array.
+- [CF 136A · Presents](https://codeforces.com/problemset/problem/136/A){rating="800"} — the inverse permutation, indexing by value.
+- [CF 1969A · Two Friends](https://codeforces.com/problemset/problem/1969/A){rating="800"} — double indexing: $p_{p_i} = i$.
+- [CF 1619C · Wrong Addition](https://codeforces.com/problemset/problem/1619/C){rating="1200"} — undo a digit-by-digit addition from the least significant end.
+- [CF 339A · Helpful Maths](https://codeforces.com/problemset/problem/339/A){rating="800"} — counting sort over three values.
+- [CF 1714B · Remove Prefix](https://codeforces.com/problemset/problem/1714/B){rating="800"} — a seen array scanned from the back.
+- [CF 1990A · Submission Bait](https://codeforces.com/problemset/problem/1990/A){rating="900"} — reason about the frequency of each value from the top.
+- [CF 1862C · Flower City Fence](https://codeforces.com/problemset/problem/1862/C){rating="1100"} — counts by value turned into running sums.
+- [CF 1990C · Mad MAD Sum](https://codeforces.com/problemset/problem/1990/C){rating="1500"} — simulation with a seen array until the process becomes a shift.
+:::
+
+## Further reading
+
+- [Dijkstra, EWD 831 — "Why numbering should start at zero"](https://www.cs.utexas.edu/users/EWD/transcriptions/EWD08xx/EWD831.html) — the one-page argument for half-open ranges and 0-based indexing behind @sec-arr-ranges.
+- [Morin, *Open Data Structures* — Ch. 2: Array-Based Lists](https://opendatastructures.org/ods-python/2_Array_Based_Lists.html) — a free, rigorous treatment of growable arrays and the amortised analysis of resizing (@sec-arr-vec).
+- [Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf) — chapter 2 on time complexity and the operation budget, chapter 4 on dynamic arrays and other basic structures in C++.
+- [Drepper, *What Every Programmer Should Know About Memory*](https://www.akkadia.org/drepper/cpumemory.pdf) — the long, authoritative explanation of caches, cache lines and prefetching behind @sec-arr-cache.
+- [Wikipedia — Dynamic array](https://en.wikipedia.org/wiki/Dynamic_array) — growth factors used by real libraries and the geometric-series argument for amortised $O(1)$ appends.
+- [cppreference — `std::vector`](https://en.cppreference.com/w/cpp/container/vector) — complexity guarantees, `reserve` versus `resize`, and the iterator-invalidation rules.
+- [Python wiki — Time Complexity](https://wiki.python.org/moin/TimeComplexity) — the cost of every `list`, `dict` and `set` operation in CPython, useful when reasoning about $O(1)$ versus $O(n)$ in Python.

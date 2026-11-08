@@ -1,0 +1,588 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  14.2  States that grow with the data (profile DP)   sec:c27-growing
+%  Exports: def:c27-profile  thm:c27-profile-bound  lst:c27-profile
+%           fig:c27-profilefig  ex:c27-profile-run  prob:c27-profile-solved
+%           lst:c27-490f-soln
+%  Where 14.1's index j = 0..V was a fixed small budget, here the state's
+%  index RANGES with the data (a length / value that grows along the path).
+%  Anchor CF 490F (Treeland Tour): longest strictly-increasing population
+%  sequence along ANY simple path -- the "concert count".  Method: one
+%  patience-sorting profile array maintained by DFS with rollback, run from
+%  every start vertex (O(n^2 log n)).  Segment-tree-merge (the faster route)
+%  is Chapter 17's (c28); we deliberately do not use it here.  Samples 490F
+%  (6 -> 4, 5 -> 3) live-verified; running profile on T reaches length 5.
+% =====================================================================
+\section{States That Grow: the Profile DP}\label{sec:c27-growing}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item In \secref{c27-knapsack} the state $\mathit{dp}[v][0..V]$ had a
+        \emph{fixed} length $V$ chosen from the constraints ($x\le10$, $k$ small).
+        What broke if $V$ were $\sim n$? (the $\bigO{nV}$ of
+        \thmref{c27-amortize} becomes $\bigO{n^2}$)
+  \item Chapter~13's longest-increasing-subsequence aside: the classic 1-D LIS
+        is a \emph{patience} array -- $\mathit{tails}[\ell]$ = smallest possible
+        tail of an increasing subsequence of length $\ell{+}1$. How many slots
+        can that array hold on a sequence of length $L$? (at most $L$ -- the
+        array \emph{grows with the data})
+  \item Ch.~12 measured $\depth(v)$ and the diameter path in one DFS. Is a
+        diameter (longest \emph{path}) the same object as a longest
+        \emph{increasing} path? (no -- one is measured in edges, one in an
+        ordered label sequence along the edges)
+  \item What made 14.1's merge \emph{linear}? (the cap $\min(\cdot,V)$; here we
+        will cap by nothing and instead bound the growth by path length)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Section~14.1 was about a budget you could read off the constraints -- a small,
+\emph{fixed} $V$. This section is its opposite: what to do when the state's
+index \emph{ranges with the data}, so the array at a node is not $\mathit{dp}[v][0..V]$
+for a constant $V$ but a \term{profile} whose meaningful length grows as you
+descend. The canonical object is the \emph{longest increasing subsequence along
+a path}: the profile is the patience-tails array, its length is at most the
+current path length, and you maintain it with a stack-style \emph{rollback}
+during a single DFS rather than merging it between siblings.
+
+The case study, CF~490F (\probref{c27-profile-solved}), asks for the largest
+number of strictly-increasing-population concerts the band can give on \emph{any}
+simple path of a tree. A path is an ordered sequence, so this is LIS-along-a-path --
+and the trick that makes it tractable is that \emph{every} simple path is a
+root-to-descendant chain if you are free to pick the root at the path's endpoint.
+Enumerate the start vertex, DFS with a rollback patience profile, take the max.
+
+\textbf{Prerequisites.} \secref{c27-knapsack} for the ``index on the state''
+mentality (here we drop the fixed-budget cap and instead bound growth by path
+length); the classical patience-sorting $\bigO{n\log n}$ LIS; Ch.~12's rooting
+and one-DFS traversal (\coderef{c09-dfs3}). Segment-tree or small-to-large
+merging of these profiles is Chapter~17's (\chref{c28}) and is \emph{not} used.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item tell a \emph{growing} profile state from 14.1's fixed-budget array; \hfill\lv{3}
+  \item maintain a patience LIS array through a DFS with correct rollback; \hfill\lv{4}
+  \item solve CF~490F by enumerating the path's start vertex, cold. \hfill\lv{4}--\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\subsection{Intuition}
+
+Two mental models of ``an array on a node.'' In 14.1 the array was
+$\mathit{dp}[v][0..V]$: a \emph{value} for each of a \emph{fixed} set of budget
+levels, and siblings were combined because the budget was a shared resource
+(a knapsack). Here the array is a \emph{profile of the path you are currently on}:
+think of the patience-tails array of LIS, whose valid length equals the longest
+increasing subsequence \emph{of the chain from the root down to here}. Its length
+is not fixed by any constant -- it grows to at most the chain length -- and there
+is nothing to combine across siblings, because the profile describes one root-to-node
+chain, not a subtree. The only real operation is \emph{extend by one element on the
+way down} and \emph{undo that extension on the way up}, i.e.\ a stack discipline.
+
+That stack discipline is the whole technique. Do a DFS from some root, keeping a
+single global tails array; before recursing into a child, feed the child's value
+to patience-insert and remember exactly what it changed (the index it overwrote,
+or that it appended); after the child returns, put that one slot back. Then every
+node sees \emph{its own} root-to-node profile, at $\bigO{\log}$ extra cost per node.
+The catch specific to \emph{paths} (not root-to-node chains) is that a path $u\!\to\!v$
+bends at $\lca(u,v)$, so it is not a chain from any \emph{fixed} root. The escape:
+a path $u\!\to\!v$ \emph{is} a chain from $u$ if we are allowed to root at $u$. Since
+we want the maximum over all paths, we simply run the rollback-DFS from every
+vertex as start -- $n$ passes -- and every ordered path, in both directions, is a
+chain in one of them.
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Profile state (a growing index)}{c27-profile}
+A \term{profile DP} stores at the current DFS node $v$ a state whose meaningful
+length is a function of the chain from the root to $v$, not a fixed constant.
+Formally the state is an array $P_v[0\,.\,\ell_v]$ with $\ell_v$ determined by the
+data along the chain (for LIS-along-a-path, $P_v$ is the patience-tails array and
+$\ell_v$ its length, $\le \depth(v)+1$). $P$ is updated on entering $v$ from the
+parent's $P$ by a single \emph{push or overwrite}, and reverted on leaving $v$.
+Unlike \defref{c27-knap-state}, children are \emph{not} merged: each child re-reads
+the parent's profile, modifies it along its own branch, and restores it.
+\end{definition}
+
+\begin{theorem}{Enumerating the start vertex finds the best path profile in $\bigO{n^2\log n}$}{c27-profile-bound}
+Let $F(\pi)$ be a path functional (increasing-subsequence length, or any profile)
+that a single rollback-DFS can evaluate for all $\pi$ that are chains from one fixed
+start $s$ in $\bigO{n\log n}$. Then
+\[
+  \max_{\text{simple paths }\pi} F(\pi) \;=\; \max_{s \in V}\ \max_{\text{chains } s\to v} F(s\!\to\!v),
+\]
+and running the DFS from all $n$ starts costs $\bigO{n^2\log n}$ total.
+\end{theorem}
+\begin{proofbox}[\thmref{c27-profile-bound}]
+\emph{Right side covers every path.} A simple path is a sequence of distinct
+vertices $u = x_0, x_1, \dots, x_t = v$. Root the tree at $u$: then $v$ is a
+descendant of $u$ and the path $u\!\to\!v$ is exactly the unique $u$-to-$v$ chain,
+so it is enumerated in the $s=u$ pass. Because we also run the $s=v$ pass, the
+reversed order $v\!\to\!u$ is enumerated too, and a profile like LIS is
+\emph{orientation-sensitive} -- both directions must be seen, and both are. Hence
+every simple path in both orders appears among the chains on the right.
+\emph{Each pass is $\bigO{n\log n}$.} Fix $s$. The DFS visits each of the $n$ nodes
+once; entering a node does one patience insertion at $\bigO{\log(\text{length})}
+\le \bigO{\log n}$, leaving it does $\bigO{1}$ restore (the changed slot index and
+old value were saved in the call frame). So one pass is $\bigO{n\log n}$.
+\emph{All $n$ starts:} $\bigO{n^2\log n}$. Correctness of the max is immediate:
+the left side ranges over the same set of paths, each of whose orders is present on
+the right. \qed
+\end{proofbox}
+
+\begin{insightbox}
+The contrast with \thmref{c27-amortize} is the point of this section. In 14.1 the
+array had a \emph{budget} length capped by a constant, so merging siblings stayed
+linear and the \emph{hard part} was the amortisation. Here the array length is
+\emph{uncapped} (it grows with the path), so there is no fixed budget to amortise
+against; the cost instead is paid in \emph{re-running} the traversal from every
+start. The profile itself is cheap to maintain (one slot, $\bigO{\log n}$); the
+expense is the $n$ roots. When even $\bigO{n^2\log n}$ is too slow (a larger $n$),
+the repair is to merge profiles with a segment tree -- that is small-to-large
+territory, Chapter~17 (\chref{c28}), not this chapter's method.
+\end{insightbox}
+
+\subsection{The Algorithm: Rollback Patience Profile}
+
+\begin{lstlisting}[caption={A single rollback patience profile maintained through a DFS: extend on entry, undo the exact change on exit}, label={lst:c27-profile}]
+// Strictly-increasing LIS along the current root->node chain.
+// tails[] is the classic patience array; one slot changed per node, restored on exit.
+vector<int> vals;          // vals[v] = the node's value (population, label, ...)
+vector<vector<int>> adj;
+vector<int> tails;         // global patience tails (length = best LIS on this chain)
+int best;
+
+void dfs(int v, int p) {
+    // patience insert vals[v]: first slot >= vals[v] (lower_bound -> STRICT increase)
+    int pos = (int)(lower_bound(tails.begin(), tails.end(), vals[v]) - tails.begin());
+    bool appended = (pos == (int)tails.size());
+    int old = appended ? 0 : tails[pos];
+    if (appended) tails.push_back(vals[v]);
+    else          tails[pos] = vals[v];
+
+    if ((int)tails.size() > best) best = (int)tails.size();   // record profile length
+
+    for (int u : adj[v]) if (u != p) dfs(u, v);
+
+    if (appended) tails.pop_back();     // undo EXACTLY this node's change
+    else          tails[pos] = old;     // so siblings still see the parent's profile
+}
+
+// CF 490F driver: run the DFS from every start vertex; every path is a chain from
+// one of them (in both directions), so the max over all passes is the answer.
+int solve(int n) {
+    best = 0;
+    for (int s = 1; s <= n; s++) {
+        tails.clear();
+        dfs(s, 0);
+    }
+    return best;
+}
+\end{lstlisting}
+
+\begin{complexitybox}
+One pass $\bigO{n\log n}$ (each of $n$ nodes does one $\bigO{\log n}$ patience insert
+plus an $\bigO{1}$ restore); $n$ passes give $\bigO{n^2 \log n}$ time,
+$\bigO{n}$ working memory beyond the adjacency (the tails array is at most length~$n$,
+and the recursion stack is depth $\le n$). For $n = 6000$ that is about
+$3.6\cdot10^{7}\!\cdot\!\log \approx 3\cdot10^{8}$ light operations -- within the CF
+limit in C++. Verdict: the profile maintenance is the cheap axis; the $\bigO{n}$
+re-starts are the expensive axis, and that asymmetry \emph{defines} the growing-state
+regime. Watch the recursion depth: a $6000$-chain is legal, so raise the stack or
+make \coderef{c27-profile}'s DFS iterative if your judge caps it low.
+\end{complexitybox}
+
+\subsection{Worked Example: A Growing Profile on $T$}
+
+\begin{example}{The longest increasing path-profile on the running tree $T$}{c27-profile-run}
+Give node $v$ the value $\mathit{label}(v)$ (as in the opener's overlays), so $T$'s
+vertices carry $1,\dots,10$. Consider the path from $8$ to $10$,
+$8\!-\!5\!-\!2\!-\!1\!-\!3\!-\!7\!-\!9\!-\!10$, whose value sequence is
+$(8,5,2,1,3,7,9,10)$. Root at $8$ and run \coderef{c27-profile}; the tails profile
+along the chain to $10$ is built step by step in the figure and trace. The patience
+array grows to length~$5$ ($1,3,7,9,10$), and no simple path of $T$ supports a longer
+strictly-increasing sequence, so the profile maximum on $T$ is $\mathbf{5}$.
+\end{example}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape,
+    tnode/.style={circle, draw=primaryblue, line width=0.9pt, fill=primaryblue!8,
+                  minimum size=7mm, font=\small\bfseries, text=primaryblue!60!black}]
+  \node[tnode] (n1) at (0,0) {$1$};
+  \node[tnode] (n2) at (-3,-1.6) {$2$};
+  \node[tnode] (n3) at ( 3,-1.6) {$3$};
+  \node[tnode] (n4) at (-5.2,-3.2) {$4$};
+  \node[tnode] (n5) at (-1.6,-3.2) {$5$};
+  \node[tnode] (n6) at ( 1.6,-3.2) {$6$};
+  \node[tnode] (n7) at ( 5.2,-3.2) {$7$};
+  \node[tnode] (n8) at (-1.6,-4.8) {$8$};
+  \node[tnode] (n9) at ( 5.2,-4.8) {$9$};
+  \node[tnode] (n10) at ( 5.2,-6.4) {$10$};
+  \draw[tedge] (n1)--(n2) (n1)--(n3) (n2)--(n4) (n2)--(n5)
+               (n3)--(n6) (n3)--(n7) (n5)--(n8) (n7)--(n9) (n9)--(n10);
+  % highlight the 8->10 path
+  \draw[tedgehl, line width=1.6pt] (n8)--(n5)--(n2)--(n1)--(n3)--(n7)--(n9)--(n10);
+  % patience length along the path, near each node
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at (-1.6,-4.2) {1};
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at (-1.9,-2.7) {1};
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at (-2.4,-1.1) {1};
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at ( 0.6, 0.4) {1};
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at ( 3.6,-1.1) {2};
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at ( 5.9,-2.7) {3};
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at ( 5.9,-4.2) {4};
+  \node[font=\tiny\ttfamily, text=warningred!75!black] at ( 5.9,-5.9) {5};
+  \node[annot, font=\scriptsize, text=difforange!75!black, anchor=west] at (7.0,-0.6)
+    {highlighted:};
+  \node[annot, font=\scriptsize, text=difforange!75!black, anchor=west] at (7.0,-1.3)
+    {path $8\!\to\!10$};
+  \node[annot, font=\scriptsize, text=warningred!75!black, anchor=west] at (7.0,-2.2)
+    {red badge $=$ tails};
+  \node[annot, font=\scriptsize, text=warningred!75!black, anchor=west] at (7.0,-2.9)
+    {length so far};
+\end{tikzpicture}
+\caption{The \emph{growing} patience profile along the increasing path $8\!\to\!10$
+of $T$ (values $8,5,2,1,3,7,9,10$), rooted at $8$. The red badge at each path node is
+the length of the tails array after that node is fed to \coderef{c27-profile}: it
+drops to $1$ as the head values $8,5,2,1$ each replace slot~$0$, then climbs
+$2,3,4,5$ as $3,7,9,10$ extend it. Final length $5$ -- the LIS of the path, and the
+profile maximum over all of $T$. Unlike 14.1's fixed $V$, this index \emph{grew} with
+the chain.}
+\label{fig:c27-profilefig}
+\end{figure}
+
+\begin{tracebox}[Rollback profile along the chain $8\!\to\!10$ on $T$ (start $s=8$)]
+values fed in order: $8,5,2,1,3,7,9,10$. tails starts empty.\\
+$8$: lower\_bound$\,\emptyset\to$pos~0, append -> tails$=[8]$, len~1, best~1.\\
+$5$: pos~0 (replace), old$=8$, tails$=[5]$, len~1. \;\;$2$: tails$=[2]$, len~1.\\
+$1$: tails$=[1]$, len~1.\\
+$3$: pos~1 (append), tails$=[1,3]$, len~2, best~2.\\
+$7$: pos~2 (append), tails$=[1,3,7]$, len~3, best~3.\\
+$9$: append -> $[1,3,7,9]$, len~4, best~4. \;\;$10$: append -> $[1,3,7,9,10]$, len~5, best~5.\\
+On the way \emph{up}, each node restores its one slot (e.g.\ returning past~$10$ pops
+index~4; returning to the $1\!\to\!3$ edge restores tails$=[1,3,7,9]$...), so the sibling
+branch $4$ (value~$4$) is measured against the \emph{parent's} profile $[1]$, never
+against $10$'s. Max over all starts stays $5$. \checkmark\ (no path of $T$ has a
+strictly-increasing sequence longer than~$5$.)
+\end{tracebox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{One slot, restored.} The profile's power and its safety both come from
+        changing exactly \emph{one} array position per node and putting it back on
+        exit -- otherwise a child would leak into its sibling's measurement.
+  \item \emph{Length is data-driven.} The tails array reached length $5$ here only
+        because the path had a $5$-term increasing run; there was no budget~$V$ to
+        set. That is the ``growing state'' in one sentence.
+  \item \emph{Paths bend, roots don't.} A fixed root cannot see a path that bends at
+        its LCA as a single chain; re-rooting at every start is the brute force that
+        makes every path a chain.
+\end{enumerate}
+\end{insightbox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Non-decreasing instead of strictly increasing}: swap the
+        patience \lstinline{lower_bound} for \lstinline{upper_bound};
+        the rollback structure is identical. A one-character bug with a
+        one-integer-different answer -- test ties. \hfill\lv{3}
+  \item \textbf{Longest path under a value window} (e.g. LIS with elements $\le M$):
+        the profile index still grows, but you prune inserts that exceed $M$; the
+        enumerate-the-start skeleton of \coderef{c27-profile} is unchanged. \hfill\lv{4}
+  \item \textbf{Two-sided profile merge}: if you must answer for a \emph{fixed} root
+        and a path that bends at the LCA, keep an increasing profile going \emph{down}
+        each child and an decreasing profile coming \emph{up}, and combine at the bend
+        -- the seed of Ch.~17's heavy-path merge (\chref{c28}). \hfill\lv{5}
+  \item \textbf{When re-starting is too slow}: $\bigO{n^2\log n}$ is fine at $n\le6000$;
+        at $n\sim10^5$ the $n$ passes blow up and you merge patience structures
+        small-to-large (Ch.~17) or centroid (Ch.~24). \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- forgetting to restore the profile on exit]
+The signature bug. If you overwrite a tails slot (or append) and never undo it when
+the DFS returns, the next sibling inherits a profile polluted by the previous branch:
+you will report an LIS built from two \emph{disconnected} sub-paths, over-counting.
+Symptom: correct on a single chain, too-high answers on a star or a bend. Save the
+slot index and old value \emph{locally} (as \coderef{c27-profile} does) so nested
+children cannot clobber the parent's saved state.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2 -- one root instead of all roots]
+A path that bends at its LCA is not a root-to-node chain for a \emph{fixed} root, so
+running \coderef{c27-profile} from the default root~$1$ misses it. On CF~490F's
+Example~2 the best path $4\!-\!2\!-\!1\!-\!3\!-\!5$ bends exactly at node~$1$; rooting
+only at $1$ \emph{does} catch it here (bend $=$ root), but rooting only at, say, $4$
+in a deeper tree does not catch everything. The safe rule: loop the start over all $n$
+vertices -- that is what \thmref{c27-profile-bound} proves is sufficient.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- \texttt{lower\_bound} vs \texttt{upper\_bound} for strictness]
+CF~490F wants \emph{strictly} larger populations. Strict LIS uses
+\lstinline{lower_bound} (replace first $\ge$); non-decreasing uses
+\lstinline{upper_bound} (replace first $>$). Swapping them is silent and shifts the
+answer whenever two path nodes share a population. Verify on a tie case.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+\solvedproblem{c27-profile-solved}{Treeland Tour}{Codeforces 490F}
+  {https://codeforces.com/problemset/problem/490/F}{CF 2200 · L5}
+  {growing profile state, patience LIS with rollback, enumerate the path start,
+   orientation-sensitive functional, both directions}
+
+\begin{problemstatement}[Treeland Tour (statement and samples verified against the live problem)]
+Treeland is a tree of $n$ cities; city $i$ has population $r_i$. A band tours along
+\emph{some simple path} (never revisiting a city) and holds concerts in \emph{some}
+of the cities on that path, subject to: each concert city has strictly larger
+population than the previous concert city. Maximise the \emph{number of concerts}.
+Output that maximum. Constraints: $2 \le n \le 6000$, $1 \le r_i \le 10^6$.
+\textbf{Example~1}: $n=6$, $r = (1,2,3,4,5,1)$; edges $1\text{--}2, 2\text{--}3,
+3\text{--}4, 3\text{--}5, 3\text{--}6$; output \texttt{4} (path $1\text{--}2\text{--}3\text{--}4$
+with populations $1,2,3,4$). \textbf{Example~2}: $n=5$, $r=(1,2,3,4,5)$; edges
+$1\text{--}2, 1\text{--}3, 2\text{--}4, 3\text{--}5$; output \texttt{3} (path
+$4\text{--}2\text{--}1\text{--}3\text{--}5$ has populations $4,2,1,3,5$, whose LIS
+is $1,3,5$ of length~$3$).
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+Name the two ideas before coding. (a)~the functional is LIS along an ordered
+sequence; (b)~a tree path is not a rooted chain unless you choose the root.
+\peek{What 1-D structure computes LIS online in $\bigO{\log}$ per element, and can
+      you undo its last step?}
+\nudge{Patience sorting: a tails array, one lower\_bound per element. To undo,
+      save the single slot you changed and restore it when the DFS returns.}
+\fullhint{Root the tree at each start vertex $s$ in turn ($n$ passes). In the $s$
+pass, DFS maintaining one global tails array; on entering $v$ lower\_bound
+insert $r_v$, record the changed index and old value (or that you appended),
+update a running $\mathit{best} = \max(\mathit{best}, \text{len})$, recurse into
+children, then restore that one slot. Every simple path is a chain from one of its
+two endpoints, and LIS is orientation-sensitive, so scanning all starts covers both
+directions. Answer $= \mathit{best}$. Total $\bigO{n^2\log n}$ by
+\thmref{c27-profile-bound}.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The tour is a \emph{simple path} -- a sequence of distinct cities -- and the concerts
+are a strictly-increasing-in-population \emph{subsequence} of it. For a fixed path the
+answer is exactly the LIS of that path's population sequence; the problem then maximises
+over \emph{all} $\Theta(n^2)$ simple paths. The difficulty is that LIS is computed by an
+\emph{ordered scan}, and a tree path's order is only defined once you pick an endpoint to
+start from. Two facts collapse the problem. First, LIS has an online $\bigO{\log}$ form
+(patience tails) whose single-slot modification is trivially \emph{reversible}, so one DFS
+can carry the tails array down and roll it back up. Second, a simple path $u\!\to\!v$ is
+precisely the $u$-rooted chain to $v$; enumerating the start vertex turns ``over all paths''
+into ``over all roots, over all chains,'' which the rollback DFS handles per root.
+
+\solstep{Key Observations}
+\begin{observation}
+LIS is \emph{orientation-sensitive}: the sequence read $u\!\to\!v$ and $v\!\to\!u$ can have
+different LIS lengths (e.g.\ $(1,3,5)$ has LIS~$3$, reversed $(5,3,1)$ has LIS~$1$). So to
+maximise over paths \emph{as undirected}, you must evaluate both orders -- achieved by the
+both-endpoints sweep of \thmref{c27-profile-bound}.
+\end{observation}
+\begin{observation}
+Each node touches the profile in exactly one slot, and that slot's previous value can be
+saved in the call frame; a DFS that modifies-then-restores that one slot gives every child
+the \emph{parent's} profile, not a sibling's. This is the difference between a correct
+path profile and an over-count.
+\end{observation}
+\begin{observation}
+The profile length is $\le$ the chain length $\le n$ -- a \emph{growing} index, with no
+constant budget to cap by. The cost axis is therefore the number of starts ($n$), not the
+merge; that is exactly what separates 14.2 from \secref{c27-knapsack}.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Do a rerooting DP: compute, for every ordered path through each node, the
+best increasing sequence, combined left/right at each vertex.}
+{Rerooting a \emph{sequence} functional is not a constant-tuple fold -- the state is the
+whole tails array (a growing profile, \defref{c27-profile}), and merging two children's
+arrays is expensive and error-prone. That direction lands in Ch.~17's small-to-large
+machinery (\chref{c28}); for $n\le6000$ it is massive overkill.}
+\deadend{Try every pair $(u,v)$, extract the path, run an $\bigO{L\log L}$ LIS on it.}
+{$\binom{n}{2}$ paths $\times$ up to $\bigO{n}$ extraction and LIS each $= \bigO{n^3\log n}$
+$\approx 2\cdot10^{11}$ for $n=6000$ -- a certain \tle. The idea is right (max over paths of
+their LIS) but the paths are recomputed from scratch every time.}
+\aha{Reuse the tails array across \emph{all paths sharing a start}: root at $s$, one
+rollback-DFS measures every $s\!\to\!v$ chain for $\bigO{n\log n}$; do it for all $n$ starts.
+$\bigO{n^2\log n}$, and correctness is the ``path $=$ chain from its endpoint'' fact.}
+\end{thinkbox}
+
+\solstep{Solution}
+Set $\mathit{best}=0$. For each start $s=1..n$: clear the tails array and run the
+rollback DFS \coderef{c27-profile} from $s$ over the whole tree (parent-guarded, so
+each chain from $s$ is followed exactly once, with one slot changed and restored per
+node). $\mathit{best}$ accumulates the largest tails length seen anywhere. Print
+$\mathit{best}$.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[\coderef{c27-490f-soln} returns the maximum LIS over all simple paths]
+\emph{(Feasibility)} Fix a start $s$. We claim that at the moment the DFS is at node $v$,
+the tails array equals the patience-tails array of the sequence of populations along the
+unique simple path $s\!\to\!v$. Induction on the DFS depth: at $s$ the array is the tails of
+$(r_s)$ -- true by the first insert. Entering a child $u$ of $v$ appends $r_u$ to that path,
+and the patience insert of $r_u$ into $v$'s tails array yields exactly $u$'s path tails;
+the modify/restore pair leaves $v$'s array untouched for the next sibling, so each child is
+measured against the correct parent profile. Hence $\mathit{best}$, updated to
+$\max(\mathit{best}, \text{len}(\text{tails}))$ at every node, is the maximum LIS over all
+$s$-to-$v$ paths. \emph{(Completeness)} By \thmref{c27-profile-bound}, every simple path in
+either order is an $s\!\to\!v$ chain for $s$ equal to one endpoint. The outer loop runs all
+$s$, so $\mathit{best}$ ranges over every path in both orientations. \emph{(Optimality)}
+Each chain LIS is an achievable concert count for that tour, and every tour is such a chain,
+so the max equals the largest achievable number of concerts. \qed
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Codeforces 490F -- enumerate the start vertex, run the rollback patience profile of \coderef{c27-profile} once per start}, label={lst:c27-490f-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+int n;
+vector<int> r;                       // r[v] = population of city v
+vector<vector<int>> adj;
+vector<int> tails;                   // patience array (global, rolled back)
+int best_ans = 0;
+
+void dfs(int v, int p) {
+    // STRICTLY increasing -> lower_bound (first slot >= r[v])
+    int pos = (int)(lower_bound(tails.begin(), tails.end(), r[v]) - tails.begin());
+    bool appended = (pos == (int)tails.size());
+    int old = appended ? 0 : tails[pos];
+    if (appended) tails.push_back(r[v]);
+    else          tails[pos] = r[v];
+
+    if ((int)tails.size() > best_ans) best_ans = (int)tails.size();
+
+    for (int u : adj[v]) if (u != p) dfs(u, v);
+
+    if (appended) tails.pop_back();  // restore parent's profile exactly
+    else          tails[pos] = old;
+}
+
+int main() {
+    if (scanf("%d", &n) != 1) return 0;
+    r.assign(n + 1, 0);
+    for (int i = 1; i <= n; i++) scanf("%d", &r[i]);
+    adj.assign(n + 1, {});
+    for (int i = 0; i < n - 1; i++) {
+        int a, b; scanf("%d %d", &a, &b);
+        adj[a].push_back(b); adj[b].push_back(a);
+    }
+    for (int s = 1; s <= n; s++) {   // every path is a chain from one of its ends
+        tails.clear();
+        dfs(s, 0);
+    }
+    printf("%d\n", best_ans);
+    return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official Example~1: $n=6$, $r=(1,2,3,4,5,1)$, edges $1\text{--}2,2\text{--}3,3\text{--}4,3\text{--}5,3\text{--}6$ $\Rightarrow$ 4]
+Start $s=1$; tails empty; $\mathit{best}=0$.\\
+$1\!\to\!2\!\to\!3\!\to\!4$ values $1,2,3,4$: tails $[1]$, $[1,2]$, $[1,2,3]$,
+$[1,2,3,4]$ -- $\mathit{best}=4$.\\
+Back to~$3$, take $3\!\to\!5$ (value~$5$): after restore, tails at~$3$ is $[1,2,3]$;
+insert $5$ appends -> $[1,2,3,5]$, len~4 (ties $\mathit{best}=4$).\\
+$3\!\to\!6$ value~$1$: at~$3$ tails $[1,2,3]$; lower\_bound of $1$ is pos~0,
+replace -> $[1,2,3]$ still len~3.\\
+Restoring through $2,1$ the array returns to $[]$, so the branch to $4$, $5$, $6$
+is each measured against the parent's own profile -- no leaking. $\mathit{best}=4$.
+Other starts cannot beat a $4$-node increasing run (the longest chain has $4$ strictly
+increasing values), so the final answer is \texttt{4}. \checkmark
+\end{tracebox}
+
+\begin{tracebox}[Official Example~2: $n=5$, $r=(1,2,3,4,5)$, edges $1\text{--}2,1\text{--}3,2\text{--}4,3\text{--}5$ $\Rightarrow$ 3]
+Start $s=4$: chain $4\!\to\!2\!\to\!1\!\to\!3\!\to\!5$ values $4,2,1,3,5$.\\
+$4$: $[4]$ len1. $2$: replace pos0 -> $[2]$ len1. $1$: $[1]$ len1.
+$3$: append -> $[1,3]$ len2. $5$: append -> $[1,3,5]$ len3.\\
+$\mathit{best}=3$ on this one chain. No other path yields a longer increasing run
+(the tree's longest path has $5$ nodes but only the $4,2,1,3,5$ order, whose LIS is
+$3$), so the answer is \texttt{3}. \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+$\bigO{n^2\log n}$ time, $\bigO{n}$ extra memory, exactly \thmref{c27-profile-bound}:
+$n$ starts, each a DFS of $n$ nodes costing $\bigO{\log n}$ per node for the
+lower\_bound plus $\bigO{1}$ restore. At $n=6000$ that is a few $\times10^{8}$ light
+steps -- pass. The recursion can nest $n$ deep on a chain, so bump the stack limit
+(or iterate) to avoid a \re that never shows on the small samples. Verdict: \ac, and
+the profile--rollback pairing is the reusable idea: whenever the state is a growing
+per-chain array and you need it for \emph{every path}, sweep the start and use a
+save-one-slot stack.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to lose CF~490F: (i)~\emph{not restoring} the tails slot -- over-counts by
+merging sibling branches (Trap~1); (ii)~running from a \emph{single} root -- misses
+bending paths (Trap~2); (iii)~\lstinline{upper_bound} where strict increase needs
+\lstinline{lower_bound} (Trap~3, bites when two cities share a population); (iv)~
+stack overflow on a $6000$-chain \re -- raise the recursion limit. Variant worth
+doing after Ch.~17: keep the profile per \emph{heavy} child and merge light children
+small-to-large to push toward $\bigO{n\log^2 n}$ for large $n$ -- a Ch.~17 exercise,
+previewed not solved here (\chref{c28}).
+\end{warningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you save the \emph{slot index and old value locally} in the call frame so
+        a nested child's insert cannot clobber the value you must restore?
+  \item Did the loop run the DFS from \emph{every} start vertex, clearing the tails
+        array each time?
+  \item Is the strictness of the comparison (\lstinline{lower_bound} vs
+        \lstinline{upper_bound}) matched to the problem's ``larger than''?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Sasha and a Walk in the City}{Codeforces 1324E}
+    {https://codeforces.com/problemset/problem/1324/E}{CF 1800 · L4}
+    {Label the tree so that at every vertex, ``all children have larger label'' or
+    ``all children have smaller label'' -- count valid labelings with a bounded
+    per-node budget of larger/smaller children. Root the tree and DP
+    $\mathit{dp}[v][t]$ over ``the relation $v$ must keep with its children'' -- a
+    small growing index merged per child, so \thmref{c27-amortize}'s cap keeps it
+    $\bigO{nk}$ and this straddles 14.1 and 14.2. Samples verified online before you
+    trace.}
+\end{practiceset}
+
+\paragraph{Back-cites (URLs live elsewhere in the book).}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{CF~570D ``Tree Requests''} (\chref{c10} owns this URL): a
+        depth-indexed profile $\mathit{dp}[v][d]$ answered per query is a growing
+        state read at a node; Ch.~13 built the array, and \thmref{c27-profile-bound}
+        is why re-scanning over starts (or, there, over depths) is the honest cost
+        when no constant $V$ caps it.
+  \item \textbf{CF~161D ``Distance in Tree''} (\chref{c10} owns this URL): its
+        $\mathit{dp}[v][d]$ histogram merge is the \emph{fixed}-budget twin
+        (\secref{c27-knapsack}); contrast the capped merge there with the uncapped
+        growing profile here.
+\end{itemize}
+
+\begin{recallbox}[10-second refresher -- 14.2 States that grow]
+The state's index \emph{ranges with the data} (patience-tails length $\le$ chain
+length), not a fixed budget -- \defref{c27-profile}. There is no sibling merge to
+amortise; instead maintain one global profile through a DFS, changing \emph{one slot}
+per node and restoring it on exit, and (for all-paths functionals) re-run from every
+start vertex -- $\bigO{n^2\log n}$ by \thmref{c27-profile-bound}. CF~490F
+(\probref{c27-profile-solved}) is LIS-along-a-path: strict increase
+(\lstinline{lower_bound}), orientation handled by both-endpoint sweeping; the
+profile on $T$ grows to length~$5$ along $8\!\to\!10$.
+\selftest{
+  \item Why does a growing profile have no $\min(\cdot,V)$ cap, and what plays the
+        role of ``the expensive axis'' instead?
+  \item State the one-slot modify/restore invariant that keeps siblings independent.
+  \item Why must the start vertex be enumerated for a \emph{path} functional but not
+        for a subtree functional?
+  \item Which single change makes the profile non-decreasing instead of strictly
+        increasing, and when does getting it wrong change the answer?
+  \item What breaks (complexity-wise) at $n\sim10^5$, and which chapter owns the fix?
+}
+\end{recallbox}

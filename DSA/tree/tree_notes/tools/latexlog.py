@@ -26,10 +26,21 @@ def summarise_log(log_path, overfull_min=2.0):
     text = Path(log_path).read_text(encoding="latin-1", errors="replace")
     lines = text.splitlines()
     errors = []
+    # -file-line-error prints "<path>.<ext>:<line>: message"; MiKTeX also wraps long
+    # paths, so match the prefix only.  Include aux/sty/cls: a corrupted aux aborts the
+    # run, and missing those files used to report a clean build for a dead one.
+    errline = re.compile(r"^(\S.*?\.(?:tex|aux|sty|cls|def|toc|ind|bbl)):\d+: ")
     for i, line in enumerate(lines):
-        if re.match(r"^(\S.*?\.tex):(\d+): ", line) or line.startswith("! "):
+        if errline.match(line) or line.startswith("! "):
             ctx = [l for l in lines[i + 1:i + 4] if l.strip()]
             errors.append(line.strip() + ("\n      " + "\n      ".join(ctx) if ctx else ""))
+    if "Fatal error occurred" in text or "Emergency stop" in text:
+        errors.append("FATAL: pdflatex aborted (Emergency stop / Fatal error) -- "
+                      "no usable PDF was produced")
+    mstop = re.search(r"That makes (\d+) errors", text)
+    if mstop:
+        errors.append(f"ERROR CAP REACHED: log reports {mstop.group(1)} errors "
+                      "(TeX stopped counting; the list above is truncated)")
     undefined = sorted(set(re.findall(r"Reference `([^']+)' on page \d+ undefined", text)))
     multiply = sorted(set(re.findall(r"Label `([^']+)' multiply defined", text)))
     overfull = []

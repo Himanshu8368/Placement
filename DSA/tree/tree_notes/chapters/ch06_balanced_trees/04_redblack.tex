@@ -1,0 +1,309 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  8.4  Red-Black Trees (conceptual, N-lite)     sec:c06-redblack
+%  Exports: def:c06-rbcolor  thm:c06-rbheight  fig:c06-rbfix  ex:c06-rb-run
+%           (no solved problem; practice: CF 1354D)
+% =====================================================================
+\section{Red-Black Trees (Why \code{std::set} Is Fast)}\label{sec:c06-redblack}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item AVL keeps height $\le 1.44\,\lg(n+2)$ by enforcing $|\bal|\le 1$ and rotating up to twice per
+        insertion. What did the balancing \emph{cost} you? (balance factors, height upkeep, the four
+        rotation cases -- \defref{c06-bal}, \thmref{c06-fixheight}.)
+  \item Chapter~7 asserted $\code{std::set}$/$\code{map}$ operations are $\bigO{\log n}$ and \emph{deferred}
+        the proof. To which structure? (a self-balancing tree -- now named: red-black,
+        \propref{c05-logn}.)
+  \item What does $\bigO{\log n}$ \emph{depend on} -- the keys, or the height? (the height;
+        \defref{c06-heightcost}.)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+This section is deliberately \emph{conceptual}: you will almost never implement a red-black tree by hand,
+because your standard library already ships one -- but you should be able to \emph{explain} why a
+\code{std::set} never degrades into the chain $C$. Red-black trees are AVL's pragmatic cousin. Instead of
+demanding every node be within one level of balance, they paint nodes \term{red} or \term{black} and impose
+five cheap colouring rules. Those rules let a path be \emph{twice} as long as another -- so the tree is
+lazier than AVL -- yet still cap the height at $2\,\lg(n+1)$ (\thmref{c06-rbheight}), which is exactly the
+$\bigO{\log n}$ promise Chapter~7 borrowed and now cashes. The colouring is also engineered to make edits
+\emph{cheap}: an insertion that breaks a rule is repaired by recolouring and at most two rotations, and
+recolouring a red node is a single-bit flip -- often cheaper than an AVL rotation, which is why the
+\emph{write-heavy} containers chose red-black over AVL. We show the five invariants, prove the height
+bound, walk the insertion repair cases, and connect back to \secref{c05-contests}. There is no
+build-it-yourself lab here by design; the practice instead makes you \emph{use} an order statistic, the
+one question a bare red-black \code{set} refuses to answer quickly.
+\textbf{Prerequisites.} \secref{c06-rotations} (rotations), \secref{c06-avl} (what a strict balance rule
+costs); \chref{c05}'s container section.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state the five red-black invariants and why forbidding adjacent reds bounds the height; \hfill\lv{3}
+  \item prove $\height \le 2\,\lg(n+1)$ from black-height, repaying \propref{c05-logn}; \hfill\lv{4}
+  \item narrate the insertion repair: recolour when the uncle is red, rotate when it is black; \hfill\lv{4}
+  \item explain the AVL-vs-red-black tradeoff and know \code{std::set} \emph{is} a red-black tree. \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- you need a balanced tree but you own none]
+\reckey{an ordered set/map with $\bigO{\log n}$ insert/erase/find where \emph{using} the library beats
+re-implementing, \emph{and} you must reason about the guarantee it gives.}
+\recuse{
+  \item ``store keys, query neighbours/coverage fast'' with a \code{std::set}/\code{map} -- that container
+        is red-black (\secref{c05-contests}, Range Module);
+  \item write-heavy workloads where a rotation is dearer than a flip -- red-black's lazy rebalancing wins
+        over AVL;
+  \item you must \emph{explain} why an indexed \code{map}'s guarantee holds under any input order.
+}
+\recnotuse{
+  \item you need the $k$-th smallest \emph{fast} -- a red-black \code{set} does \textbf{not} expose rank
+        cheaply; use an order-statistic tree or a Fenwick over values (the practice at the end of
+        this section, \chref{c14});
+  \item you need the tightest possible search height and mostly read -- AVL's $1.44\lg n$ beats red-black's
+        $2\lg n$ (\thmref{c06-avlbound} vs \thmref{c06-rbheight});
+  \item you want to code the simplest balanced tree yourself -- a treap (\secref{c06-treaps}) has no colour
+        cases at all.
+}
+One-line test: \emph{are you leaning on a black-box balanced container and need to trust (or explain) its
+$\bigO{\log n}$? That box is red-black; understand the five rules and you understand it.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+AVL said: ``the two subtrees of every node may differ by at most one level,'' and had to rotate often to
+obey it. Red-black says something weaker but easier to maintain: ``along any root-to-leaf path, red nodes
+may \emph{slip in} extra levels, but never two reds in a row, and every path must contain the same number
+of \emph{black} nodes.'' A red edge is a borrowed half-level -- a child hanging at the same black-depth as
+its parent. Because reds can never stack, the longest a path can stretch is to alternate black, red,
+black, red\ldots, which is at most \emph{twice} the all-black shortest path. So the height is within a
+factor $2$ of logarithmic -- bad enough to be lazy, good enough to be fast.
+
+The magic is that this looser rule is \emph{cheap to restore}. When an insertion violates ``no two adjacent
+reds,'' usually you can fix it just by recolouring a few nodes (a colour bit is O(1)) and pushing the
+problem one level up -- only sometimes do you actually rotate. AVL, by contrast, must rotate to fix even
+the smallest height imbalance. That is precisely why the language runtimes that prize fast \emph{writes}
+(GCC's \code{std::map}, Java's \code{TreeMap}, and many others) implement red-black trees: fewer
+structural changes per edit, at the cost of a slightly taller tree on reads.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape]
+  % helper styles via inline options
+  \tikzset{bl/.style={circle, draw=black!70, fill=black!75, text=white, minimum size=6mm, font=\small\bfseries},
+           rd/.style={circle, draw=warningred, fill=warningred!35, minimum size=6mm, font=\small\bfseries}}
+  % (a) uncle RED -> recolour
+  \node[annot, font=\scriptsize\bfseries] at (1.3,1.3) {(a) uncle red: recolour};
+  \node[bl] (a2) at (1.3,0.4) {$20$};
+  \node[rd] (a1) at (0.4,-0.7) {$10$};
+  \node[rd] (a3) at (2.2,-0.7) {$30$};
+  \node[rd] (an) at (0.0,-1.8) {$5$};
+  \draw (a2) -- (a1); \draw (a2) -- (a3); \draw (a1) -- (an);
+  \node[annot, align=left, font=\scriptsize] at (1.6,-2.5) {grandparent+uncle $\to$ black,\\ parent's line up $\to$ red};
+  % arrow a->b
+  \draw[flow] (3.4,-0.5) -- (4.1,-0.5);
+  % (b) uncle BLACK, line -> single rotate
+  \node[annot, font=\scriptsize\bfseries] at (6.2,1.3) {(b) black uncle, line: rotate};
+  \node[bl] (b4) at (6.2,0.4) {$40$};
+  \node[rd] (b2) at (5.1,-0.7) {$20$};
+  \node[bl] (b6) at (7.3,-0.7) {$60$};
+  \node[rd] (b1) at (4.4,-1.8) {$10$};
+  \node[bl] (b3) at (5.8,-1.8) {$30$};
+  \draw (b4) -- (b2); \draw (b4) -- (b6); \draw (b2) -- (b1); \draw (b2) -- (b3);
+  \node[annot, align=left, font=\scriptsize] at (6.2,-2.6) {zig-zig: rotate the grandparent,\\ recolour parent/grandparent};
+  % (c) bend below (mention)
+  \node[annot, align=left, font=\scriptsize\itshape] at (9.3,-0.6) {(c) black uncle, bend\\ (zig-zag): the LR/RL\\ double rotation of\\ \defref{c06-rotcases} +\\ recolour. Same shapes\\ as AVL, different\\ \emph{when}.};
+\end{tikzpicture}
+\caption{Red-black insertion repair, given a red parent (which already breaks the no-adjacent-red rule with
+the freshly-inserted red node). \textbf{(a)} If the \emph{uncle is red}, no rotation: recolour parent and
+uncle black, grandparent red, and treat the grandparent as the new ``red node to check'' -- the fix hops
+one level up. \textbf{(b)} If the uncle is \emph{black} and the red nodes form a straight \emph{line}, rotate
+about the grandparent and swap two colours. \textbf{(c)} If they form a \emph{bend}, do the LR/RL double
+rotation first to make a line, then case (b). Case (a) is red-black's signature -- it fixes by
+\emph{flipping bits}, which AVL never gets to do.}\label{fig:c06-rbfix}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{The five red-black invariants}{c06-rbcolor}
+Every node is coloured \term{red} or \term{black}; the external leaves ($\nil$) are black. A binary search
+tree is \term{red-black} if:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item every node is red or black;
+  \item the root is black;
+  \item every $\nil$ leaf is black;
+  \item a red node has only black children (no two reds on any edge);
+  \item every path from a node down to any $\nil$ leaf in its subtree contains the same number of black
+        nodes (its \term{black-height} $\mathit{bh}(v)$).
+\end{enumerate}
+\end{definition}
+
+\noindent\textbf{In plain words.} Rules 1--3 are bookkeeping. Rule 4 stops two reds stacking, so no path
+doubling up; rule 5 makes all paths agree on how many \emph{black} steps they take. Together they say
+``paths can differ, but only by red sprinkles that never double,'' and that is enough to keep the tree
+logarithmic while making edits cheap.
+
+\begin{theorem}{Red-black height is at most $2\,\lg(n+1)$}{c06-rbheight}
+A red-black tree with $n$ internal (non-$\nil$) nodes has height $\height \le 2\,\lg(n+1)$. Consequently
+membership, insertion and deletion in it are $\bigO{\log n}$ worst case -- the guarantee
+\propref{c05-logn} promised for \code{std::set}/\code{map}.
+\end{theorem}
+\begin{proofbox}
+Let $\mathit{bh}$ be the black-height of the root. \emph{(Lower bound on path length.)} The shortest root-to-leaf
+path is all-black, so it has length at least $\mathit{bh}$ edges. \emph{(Upper bound.)} By rule 4 no two
+consecutive nodes are red, so the longest path alternates black/red and has at most $2\mathit{bh}$ edges -- each of
+the $\mathit{bh}$ black nodes is followed by at most one red. Hence the longest path is at most twice the shortest:
+$\height \le 2\mathit{bh}$. \emph{(Black-height vs $n$.)} A subtree of black-height $b$ contains at least
+$2^{b}-1$ internal nodes (induction: both children of the black root have black-height $\ge b-1$, so
+$\ge 2(2^{b-1}-1)+1 = 2^{b}-1$). Thus $n \ge 2^{\mathit{bh}}-1$, giving $\mathit{bh} \le \lg(n+1)$. Combining,
+$\height \le 2\mathit{bh} \le 2\,\lg(n+1)$. \end{proofbox}
+\begin{insightbox}
+Compare the constants: AVL $\le 1.44\,\lg(n+2)$ (\thmref{c06-avlbound}) versus red-black
+$\le 2\,\lg(n+1)$ -- red-black's trees are up to $\sim 40\%$ taller in the worst case, so \emph{reads}
+touch a few more nodes. But rule 4's slack means a red insertion is frequently repaired by \emph{recolouring}
+(case (a) of \figref{c06-rbfix}) with no structural change at all. For \emph{balanced read/write} library
+containers that tradeoff favours red-black, which is why \code{std::map} is red-black, not AVL.
+\end{insightbox}
+
+\subsection{The policy: fix upward, mostly by colour}
+
+The repair in \figref{c06-rbfix} is applied after planting a red node at a failed-search leaf (the same
+plant as \secref{c05-insert-delete}); only rule 4 can break, and only against a red parent. The loop
+walks \emph{up} two levels at a time (to the grandparent) while the parent is red, choosing case (a), (b)
+or (c) by the uncle's colour and the line-vs-bend geometry. It terminates in $\bigO{\log n}$ steps because
+each recolouring pushes the violation toward the root, and at most \emph{two rotations} end the whole
+repair (the classic bounds: insertion $\le 2$ rotations, deletion $\le 3$, plus $O(\log n)$ recolourings).
+The BST descent and the rotations are literally the ones from \coderef{c06-rotcode}; only the
+\emph{decision of when and which} differs -- red-black's answer is ``let colour absorb the slack, rotate
+only when it cannot.''
+
+\subsection{Worked Example}
+
+\begin{example}{Colouring the chain $C$: where red-black is lazier than AVL}{c06-rb-run}
+Insert $1,2,\dots,7$ (the order that made AVL rotate four times, \exref{c06-avl-run}). Red-black plants
+each as a \emph{red} leaf and repairs upward. Ascending keys make every new node a right child, so we
+tend to see the \emph{line} case (b): $1$ (black root), insert $2$ red -- fine; insert $3$ red onto red
+parent $2$ with a black (absent, hence black-$\nil$) uncle -- case (b), \texttt{rotateLeft(1)} and swap
+colours, giving a black $2$ with red children $1,3$. Continue: the tree at each stage is a valid
+red-black tree of height at most $2\lg(n+1)$ and \emph{frequently only recolouring} is invoked where AVL
+would have rotated (case (a) -- red uncle -- appears as soon as both sides grow). The final 7-node tree is
+some red-black tree of height $\le 2\lg 8 = 6$... and in fact red-black lands at height $3$ with a couple
+of red nodes slipped in -- \emph{looser} than AVL's height-$2$ balanced twin of \figref{c06-chain}, and
+perfectly acceptable: still $\bigO{\log n}$. The lesson is visible on the same input: AVL insists on the
+twin, red-black settles for ``twice the shortest'' and pays for it with fewer, cheaper edits. Inorder is
+$1,2,\dots,7$ throughout -- colour never touches the sorted line (\thmref{c06-rotation}).
+\end{example}
+
+\begin{tracebox}[Why ``no two reds'' bounds the shape -- one recolour cascade]
+Suppose a red node $z$ has red parent $p$ and red uncle $u$ (case a). Recolour $p,u$ black and the
+grandparent $g$ red. Black-height is preserved on every path \emph{through} $g$ (they each gain a black
+$p$ but $g$ turns red, net zero), so rule 5 is not broken. Now $g$ is red and may itself have a red
+parent -- so we simply continue the loop at $g$. This is the ``fix travels up by colour'' mechanism: an
+arbitrary number of these, then a single line/bend rotation that terminates, is all it takes -- $O(\log n)$
+colour flips but $\le 2$ rotations total.
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Left-leaning red-black (LLRB / Sedgewick)} -- a one-invariant red-black variant you can
+        actually write in a page; same bound, fewer cases, at the cost of a small asymmetry. \hfill\lv{4}
+  \item \textbf{Top-down red-black} -- one-pass insertion that pushes redness down as it descends, avoiding
+        the upward fixup loop; this is roughly how \code{std::map} insert is structured. \hfill\lv{5}
+  \item \textbf{Why not just always AVL?} If your workload is read-dominated and you can afford the tighter
+        height (search-critical indexes), AVL's $1.44\lg n$ beats $2\lg n$; the choice is a genuine
+        read/write engineering tradeoff, not a correctness one. \hfill\lv{3}--\lv{4}
+  \item \textbf{Augmented red-black} -- add a subtree \emph{size} to nodes and the \code{set} gains
+        order-statistics -- the missing ability probed by the practice problem. \hfill\lv{4}--\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c06-redblack-pitfalls}
+
+\begin{warningbox}[Trap 1 -- thinking red-black is ``balanced like AVL'']
+It is not \emph{height}-balanced; it is \emph{black-height}-balanced. Two paths may legitimately differ by
+up to a factor of two. Do not reason ``AVL's $1.44\lg n$'' for a \code{set}; the correct worst-case constant
+is $2$ (\thmref{c06-rbheight}). Proofs and performance estimates must use the looser bound.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2 -- expecting $k$-th smallest from \code{std::set} in $\bigO{\log n}$]
+\code{std::set} gives lower/upper bound and neighbour queries fast, but the $k$-th element via
+\texttt{std::next(s.begin(),k)} is $\bigO{k}$ -- the tree stores no subtree sizes. That is not a red-black
+failure, just a non-augmented one: reach for an order-statistic tree (GNU \code{pb\_ds}) or a Fenwick over
+the value range (\chref{c14}) -- see the practice below.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- recolouring that breaks black-height]
+Every recolour must keep rule 5 true. Flipping a node without flipping its ``sibling'' changes the black
+count on one path and silently destroys the balance guarantee (the tree can rot). Case (a) recolours
+\emph{both} parent and uncle precisely to preserve black-height -- never recolour just one side.
+\end{warningbox}
+
+\subsection{Why You Almost Never Implement This}
+
+The point of \secref{c06-redblack} in a contest toolkit is \emph{leverage, not code}. When you insert into
+\code{std::set}, \code{std::map}, or \code{std::multiset}, you are already standing on a red-black tree:
+the $\bigO{\log n}$ bounds Chapter~7 used throughout (\propref{c05-logn}, the whole of
+\secref{c05-contests}) are \thmref{c06-rbheight} in disguise. The times you hand-roll a balanced tree are
+exactly when the container's node layout is not enough -- you need an \emph{aggregate} (a sum, a size) at
+each node, or \texttt{split}/\texttt{merge}. For those, prefer the treap (\secref{c06-treaps}): same
+guarantee modulo expectation, a fraction of the cases. Red-black is the structure to \emph{understand}, not
+to \emph{write}, which is why there is no lab here.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.15\linewidth} p{0.36\linewidth} p{0.36\linewidth}@{}}
+\toprule
+ & \textbf{AVL (\secref{c06-avl})} & \textbf{Red-black (\secref{c06-redblack})} \\
+\midrule
+Rule     & $|\bal(v)|\le 1$ at every node (def.\ \defref{c06-bal}) & five colour invariants (def.\ \defref{c06-rbcolor}) \\
+Height   & $\le 1.44\,\lg(n+2)$ (\thmref{c06-avlbound}) & $\le 2\,\lg(n+1)$ (\thmref{c06-rbheight}) \\
+On edit  & rotate to restore height, $\le 2$ per insert   & recolour if possible, $\le 2$ rotations per insert \\
+Good for & read-heavy, tighter search                       & write-heavy, fewer structural changes \\
+Where    & in-memory indexes you tune                       & \code{std::set}/\code{map}, OS schedulers \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Can a red node have a red child? (No -- rule 4; that is the single invariant doing all the height
+        work.)
+  \item Does red-black give AVL's $1.44\lg n$, or the looser $2\lg n$? (The looser one,
+        \thmref{c06-rbheight}.)
+  \item For the practice: does \code{std::set} know the $k$-th smallest quickly? (No -- you must supply rank;
+        see Trap~2.)
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Multiset}{Codeforces 1354D}
+    {https://codeforces.com/problemset/problem/1354/D}{CF 1600 · L3}
+    {A multiset starts with given values; a query either \emph{inserts} a value or \emph{removes the
+    $k$-th smallest} (order statistic). A \code{std::multiset} handles insert and erase, but the
+    $k$-th-smallest is the trap: \texttt{std::next} walks $\bigO{k}$, which \tle s (Trap~2). The clean
+    fix is to store \emph{frequencies over the value domain} in a Fenwick tree
+    (\chref{c14}) and find the smallest value whose prefix count reaches $k$ by binary lifting on the tree
+    -- $\bigO{\log(\max\text{value})}$ per query -- or an order-statistic tree (GNU \code{pb\_ds}), which is
+    exactly a red-black \code{set} with the subtree-size augmentation of Var.~4. This is the one question a
+    bare \code{set} cannot answer, and it is why the chapter pairs the red-black guarantee
+    (\thmref{c06-rbheight}) with augmentation (\secref{c06-treaps}).}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 8.4 Red-Black Trees]
+Red-black replaces AVL's tight height rule with five colour invariants (\defref{c06-rbcolor}); forbidding
+adjacent reds makes the longest path at most twice the shortest, so $\height\le 2\lg(n+1)$
+(\thmref{c06-rbheight}) -- the $\bigO{\log n}$ behind \code{std::set}/\code{map} that Chapter~7 borrowed
+(\propref{c05-logn}). Insertion repairs a red-red violation by recolouring when the uncle is red (case (a)
+of \figref{c06-rbfix}) and rotating when it is black, so edits cost fewer structural changes than AVL at
+the price of a taller tree -- the reason write-heavy libraries pick red-black. You should \emph{use} it and
+\emph{explain} it; to \emph{implement} a custom balanced node, use the treap (\secref{c06-treaps}).
+\selftest{
+  \item List the five invariants and say which two carry almost all the height argument.
+  \item Prove $\height \le 2\mathit{bh}$ and $\mathit{bh} \le \lg(n+1)$ in two sentences.
+  \item When does insertion recolour instead of rotate, and why is that cheaper?
+  \item Give the worst-case height constants for AVL and red-black, and name the workload each suits.
+  \item Why can \code{std::set} not return the $k$-th smallest in $\bigO{\log n}$, and what two structures fix it?
+}
+\end{recallbox}

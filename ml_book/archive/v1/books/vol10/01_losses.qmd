@@ -1,0 +1,86 @@
+---
+title: "Losses for modern models"
+---
+
+# Losses for modern models
+
+**Reference question.** What does each common training loss estimate, and when is it the wrong reduction?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Squared | A conditional mean. Sensitive to outliers. |
+| Logistic / cross-entropy | A conditional categorical distribution. Proper for probabilities. |
+| Margin | A ranking or a separation constraint. Not a probability unless you add a calibration step. |
+| Class weights | A change of the empirical measure toward rare classes. They change the functional you estimate. |
+| Reduction | Sum and mean differ by $n$ or by the batch size. The optimizer must know which you used. |
+
+## Theory
+
+The loss is the definition of the task inside the optimizer. Changing it changes the Bayes predictor. Class-weighted cross-entropy does not estimate $P(Y \mid X)$ under the original data law. It estimates the conditional probability under a reweighted law. That can be what you want for a rare class, and it will miscalibrate probabilities for the original law unless you correct them. Write the reweighting in the card.
+
+Label smoothing replaces one-hot targets by a mixture with a uniform distribution. It is a regularizer and a change of target. The model's best possible log loss is no longer zero. A training loss that stops falling at a positive number may be correct.
+
+For sequence models the loss is usually a sum over tokens. A longer document then contributes more gradient. Mean-over-tokens and mean-over-documents are different estimators. Pick the one that matches the decision, and do not compare two runs that reduced differently.
+
+## Derivation
+
+The gradient of mean squared error on a batch of size $B$ is $B^{-1}$ times the gradient of the sum. If you tune $\eta$ for the sum and then switch the code to the mean, you have multiplied the effective step by $1/B$. A mysterious need to increase the learning rate by about $B$ after a "cleanup" refactor is this factor. Write $\eta$ next to the reduction in the config hash.
+
+For softmax cross-entropy, if $p = \mathrm{softmax}(z)$ and $y$ is one-hot, $\nabla_z L = p - y$ for the sum of per-example losses, or that quantity over $B$ for the mean. The $p - y$ form is the one to gradient-check. A sign error trains the model to be confidently wrong, and the loss rises.
+
+## Code
+
+```python
+import numpy as np
+
+def softmax(z):
+    z = np.asarray(z, dtype=np.float64)
+    z = z - z.max(axis=-1, keepdims=True)
+    e = np.exp(z)
+    return e / e.sum(axis=-1, keepdims=True)
+
+def cross_entropy_mean(z, y_index):
+    p = softmax(z)
+    picked = p[np.arange(len(y_index)), y_index]
+    return float(-np.mean(np.log(np.clip(picked, 1e-12, 1.0))))
+```
+
+## Experiment
+
+**Hypothesis.** Doubling the batch size while switching from a summed loss to a mean loss, without changing $\eta$, changes the parameter step unless $\eta$ is adjusted by the same factor.
+
+**Protocol.** One affine logistic model, one batch, compute the gradient under sum and under mean. Compare the proposed steps $\eta g$.
+
+**Metric.** The ratio of step norms.
+
+**Decision rule.** The ratio should equal the batch size when $\eta$ is fixed. If your training code hides the ratio inside a library reduction, print it. Do not tune around an unknown factor.
+
+## Project
+
+**Deliverable.** A loss card for the network project: the formula, the reduction, the Bayes target, and a gradient check of the classification head if you use one. Include a reweighted variant only as a labeled alternative, with a sentence on calibration.
+
+**Constraints.** The config stores `reduction` and `class_weights`.
+
+**Rubric.** A change in reduction forces a new config hash, by Volume 03's rules.
+
+## Depth tracks
+
+**Beginner.** Implement softmax cross-entropy and check that a one-hot prediction of the true class has loss near 0.
+
+**University.** Complete the sum-versus-mean step comparison.
+
+**Research.** Derive the gradient of label-smoothed cross-entropy and say what probability vector minimizes it. Check the gradient at one point.
+
+## Failure modes
+
+- Comparing losses across runs that used different reductions.
+- Reweighting classes and still reporting unweighted accuracy as if the training objective matched it.
+- Clipping probabilities at 0 inside the log.
+
+## See also
+
+Volume 06 for proper scoring. Volume 12 for token-level reductions.

@@ -1,0 +1,1202 @@
+# Index Tricks: Cyclic Sort, Marking & Permutation Cycles {#sec-idx}
+
+<!--
+Author-facing provenance (not rendered): Chapter 16 of the arrays volume, per outline.yml
+("Index Tricks: Cyclic Sort, Marking & Permutation Cycles"); source plan array_book ch10 (only a
+planned-contents box: A1-A5, P1-P5). Lessons A1-A6 + patterns P1-P5 cover the outline's covers line.
+Registry problems homed here: lc-0442, cf-864d, cf-1385b, cf-862a, cf-1249b2, cf-1768d, cf-932c,
+cf-1828b, lc-0268, cf-1567b, cf-136b, cf-136a, cf-1690f, cf-1487b. Story boards: books/traces/arr016_traces.py.
+Homed elsewhere and shown here as cards only: LC 448, LC 41, LC 645 (chapter 13), LC 1920 (chapter 5),
+LC 287 and CF 1020B (graphs chapter 199).
+-->
+
+::: {.callout-note title="Sources"}
+**Knuth**, *The Art of Computer Programming* Vol. 1, §1.3.3 (permutations: cycle notation, products, inverses computed in place) · **Erickson**, *Algorithms* (proof style for the invariants) · **Wikipedia**: Permutation (cycle notation, composition, order), Cycle sort, Parity of a permutation, Exclusive or · **USACO Guide** (Silver): functional graphs · Codeforces and LeetCode statements for every solved problem.
+
+**Coverage:** index-compatible arrays and the array as a function $i \mapsto a_i$ · cyclic sort with its swap bound, duplicates and out-of-range values · marking in place: negation, adding $n$, restoring, preconditions · cycle decomposition, minimum swaps $n - c$, parity of a permutation, applying a permutation in place, rotation as cycles · missing and duplicate values by sum, sum of squares, XOR, the XOR split, and marking · permutations as functions: composition, inverse by scatter, powers and order through cycle lengths, involutions · five patterns: cyclic sort, marking in place, permutation cycles, sums and XOR, permutations as functions.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Recognise when an array's values live in the same range as its indices, and use the array as **its own lookup table**: no hash map, no sort (@sec-idx-a1).
+- Run **cyclic sort**, prove it makes at most $n$ swaps (exactly $n - c$ on a permutation), and adapt it to duplicates and out-of-range values (@sec-idx-a2, @sec-idx-p1).
+- Mark "seen" **inside the array** by negating or by adding $n$, read the marks back, restore the input, and state the precondition each technique needs (@sec-idx-a3, @sec-idx-p2).
+- Decompose a permutation into **cycles** and use them for the minimum number of swaps ($n - c$), parity, applying a permutation in place, and constructing permutations with given cycle lengths (@sec-idx-a4, @sec-idx-p3).
+- Recover a **missing** and a **duplicate** value by sum, sum of squares, XOR or marking, and choose by overflow, mutability and the number of unknowns (@sec-idx-a5, @sec-idx-p4).
+- Compose, invert and raise permutations to a power in $O(n)$, and compute when a repeated permutation first returns to the start (@sec-idx-a6, @sec-idx-p5).
+:::
+
+```{python}
+#| include: false
+import itertools
+import math
+import random
+import sys
+from collections import Counter
+from functools import reduce
+from math import gcd
+
+import matplotlib.pyplot as plt
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr016_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-idx-why}
+
+::: {.callout-note title="In plain words"}
+Many array problems promise that the numbers are $1$ to $n$ (or $0$ to $n - 1$, or "each value appears once or twice"). That promise is a gift: **every value is also a valid index**. So a value can be sent to the slot it names, a slot can be scribbled on to remember that its value was seen, and a whole permutation can be read as a set of loops that close on themselves. This chapter turns that gift into five tools (cyclic sort, marking in place, cycle decomposition, sum and XOR bookkeeping, and permutation algebra), each of which replaces an $O(n)$-space table or an $O(n \log n)$ sort by an $O(n)$-time, $O(1)$-space pass with a short correctness proof.
+:::
+
+Several earlier chapters already used this idea in passing. Frequency arrays over small values (@sec-arr-p5) spend a separate array indexed by value; hash maps (@sec-hash) pay for the same lookup when the values are large or sparse. Encoding two numbers in one cell, $\text{old} + M \cdot \text{new}$ (@eq-arr-encode in @sec-arr-inplace), is how an array keeps extra information without extra memory. Linear-time sorting introduced *value-as-index* as the zero-space end of counting sort, with sign marking and cyclic placement solving two first examples (@sec-lts-a5, @sec-lts-p2), and the pigeonhole view of a permutation with one defect (@sec-lts-p5). Partitioning treated permutations as *sequences*: the next permutation (@sec-part-perm), rank and unrank (@sec-part-rank), and rotation by juggling, which already moves elements around cycles (@sec-part-rotate-recap).
+
+This chapter treats permutations as **functions** and develops every trick fully: why it is correct, what it costs, and exactly when it breaks. It comes in two parts. **Part A** has six lessons:
+
+- **A1, the index-as-slot model.** Why "$1 \le a_i \le n$" unlocks everything, and the array as a function $i \mapsto a_i$.
+- **A2, cyclic sort.** Put every value at its home by swapping; at most $n$ swaps, because each swap parks a value for good.
+- **A3, marking in place.** Negate (or add $n$ to) the cell a value names to record "seen" without a set; restore afterwards.
+- **A4, permutation cycles.** Disjoint loops, the minimum number of swaps $n - c$, parity, and applying a permutation in place.
+- **A5, missing and duplicate values.** Sum, sum of squares, XOR and marking, and when each one is the right choice.
+- **A6, permutations as functions.** Composition, inverse, powers and order, all in $O(n)$ through the cycles.
+
+**Part B** spends five patterns on fourteen fully solved problems. The next chapter, @sec-mat, applies in-place marking and index arithmetic to two-dimensional arrays; the graphs volume picks up the functional-graph view for arrays that are *not* permutations (@sec-gr-p5).
+
+## Part A — Lessons
+
+## A1. Values in $[1, n]$: the array as its own function {#sec-idx-a1}
+
+**The idea in plain words.** If an array of length $n$ only holds numbers from $1$ to $n$, then every number can be used as an address into the same array: value $v$ "lives" at index $v - 1$. Everything in this chapter is some way of using that address.
+
+**Definition.** A length-$n$ array $a$ is *index-compatible* if $1 \le a_i \le n$ for every $i$. Then $\mathrm{home}(v) = v - 1$ is a legal index for every value, so values and positions live in the **same set** $\{0, 1, \ldots, n - 1\}$ after the shift by one. (For arrays over $0..n-1$ the shift disappears and $\mathrm{home}(v) = v$.)
+
+**The array as a function.** Any index-compatible array defines a function $f(i) = a_i - 1$ from positions to positions. Reading `a[a[i] - 1]` means "the value standing at the home of $a_i$", that is, applying $f$ twice. When every value $1..n$ appears exactly once, $a$ is a **permutation** and $f$ is a *bijection* (one-to-one and onto): it has an inverse $f^{-1}$, with $f^{-1}(j) = i$ exactly when $f(i) = j$. When some value repeats, some other value must be absent (there are $n$ slots and $n$ values), $f$ is not a bijection, and the "home" picture has a slot hit twice and a slot hit by nobody.
+
+**Why it matters.** The two pictures in @fig-idx-a1 are the whole chapter in miniature. A permutation matches values to slots perfectly, and walking its arrows gives cycles (A4, A6). A non-permutation has collisions and holes, and the tricks of A2, A3 and A5 find them.
+
+```{python}
+def is_permutation(a):
+    n = len(a)
+    seen = [False] * n
+    for x in a:
+        if not (1 <= x <= n) or seen[x - 1]:
+            return False
+        seen[x - 1] = True
+    return True
+
+
+assert is_permutation([2, 3, 1])
+assert is_permutation([1])
+assert not is_permutation([1, 1])       # 1 twice, so 2 is missing
+assert not is_permutation([2])          # 2 has no home when n = 1
+assert not is_permutation([0, 2, 1])    # 0 has no home in 1..n
+for _ in range(200):
+    n = random.randint(1, 8)
+    a = [random.randint(0, n + 1) for _ in range(n)]
+    assert is_permutation(a) == (sorted(a) == list(range(1, n + 1)))
+```
+
+::: {#fig-idx-a1}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    for col, (a, title) in enumerate([([3, 1, 4, 2], "a permutation"), ([2, 2, 4, 1], "not a permutation")]):
+        x0 = col * 7.0
+        hits = Counter(v - 1 for v in a)
+        V.array(ax, p, a, x=x0, y=0.0, label="a" if col == 0 else None)
+        slot_col = {j: ("green" if hits[j] == 1 else "red" if hits[j] > 1 else "amber") for j in range(4)}
+        V.array(ax, p, [j + 1 for j in range(4)], x=x0, y=-3.0, colors=slot_col, index=False,
+                label="home of v" if col == 0 else None)
+        for i, v in enumerate(a):
+            V.arrow(ax, p, x0 + i + 0.5, -0.1, x0 + v - 1 + 0.5, -1.9, color="indigo")
+        V.text(ax, p, x0 + 2.0, 2.2, title, size=10, color="muted")
+    assert not is_permutation([2, 2, 4, 1]) and is_permutation([3, 1, 4, 2])
+V.show(draw)
+```
+
+Each arrow sends a value to its home slot (the bottom row shows the value each slot is the home of). Left: a permutation hits every home exactly once (green). Right: two copies of $2$ collide on one home (red) and the home of $3$ is never hit (amber). The tricks below detect, repair or exploit exactly these collisions and holes.
+
+:::
+
+## A2. Cyclic sort: park each value at its home {#sec-idx-a2}
+
+**The idea in plain words.** Walk through the array. Whenever the value under the cursor is not where it belongs, swap it into its home slot; the value that was sitting there comes back to the cursor and gets the same treatment. When the cursor's value is home (or cannot go home), move on. Every swap puts at least one value where it belongs for good, so the work is linear.
+
+**Algorithm.** Cursor $i$ scans left to right. Let $h = a_i - 1$ be the home of the cursor's value.
+$$\text{if } 0 \le h < n \text{ and } a_h \ne a_i \text{, then swap}(a_i, a_h) \text{ and stay at } i; \quad \text{else } i \leftarrow i + 1.$$
+
+The test $a_h \ne a_i$ (rather than $a_i \ne i + 1$) is what makes the loop safe on duplicates: if the home already holds an equal value, swapping would exchange two equal values forever. The range test $0 \le h < n$ lets the loop skip values that have no home (zero, negatives, values above $n$), which is how First Missing Positive uses it.
+
+**Theorem (cyclic sort).** On any integer array the loop stops after at most $n$ swaps and $n$ advances, so it runs in $O(n)$ time with $O(1)$ extra space. Afterwards, every value $v \in 1..n$ that occurs in the array sits at index $v - 1$. On a permutation it makes exactly $n - c$ swaps, where $c$ is the number of cycles (A4), which is the minimum possible.
+
+*Proof.* A swap at cursor $i$ writes $v = a_i$ into slot $h = v - 1$, where before the swap $a_h \ne v$. After it, slot $h$ holds $v$ and is never part of a swap again: if the cursor is at $h$, its value's home is $h$ itself and the test fails; if some later cursor value has home $h$, that value is $v$ and $a_h = v$, so the test fails again. So every swap *permanently fixes a new slot*, and there are at most $n$ swaps. The cursor only moves right, so there are at most $n$ advances. When the cursor passes $i$, $a_i$ is either home, has no home, or has a home holding an equal value; so every value in $1..n$ that occurs ends at its home. On a permutation, a cycle of length $L \ge 2$ is resolved by $L - 1$ swaps, because its last swap fixes two slots at once (the value brought back to the cursor is then home too), and summing $L - 1$ over all cycles gives $n - c$. A4 proves that no method can do better. ∎
+
+```{python}
+def cyclic_sort(a):
+    """Park each value v in 1..n at index v-1, in place. Returns the number of swaps."""
+    n = len(a)
+    i = swaps = 0
+    while i < n:
+        home = a[i] - 1
+        if 0 <= home < n and a[home] != a[i]:
+            a[i], a[home] = a[home], a[i]
+            swaps += 1
+        else:
+            i += 1
+    return swaps
+
+
+def count_cycles(perm1):                 # cycles of a permutation of 1..n (used only to check)
+    seen, c = set(), 0
+    for s in range(len(perm1)):
+        if s not in seen:
+            c += 1
+            j = s
+            while j not in seen:
+                seen.add(j)
+                j = perm1[j] - 1
+    return c
+
+
+a = [4, 3, 2, 1]
+assert cyclic_sort(a) == 2 and a == [1, 2, 3, 4]
+for _ in range(300):
+    n = random.randint(1, 12)
+    p = random.sample(range(1, n + 1), n)
+    a = list(p)
+    assert cyclic_sort(a) == n - count_cycles(p)        # exactly n - c swaps on a permutation
+    assert a == list(range(1, n + 1))
+    b = [random.randint(-2, n + 2) for _ in range(n)]   # duplicates and values without a home
+    c = list(b)
+    assert cyclic_sort(c) <= n
+    assert all(c[v - 1] == v for v in set(b) if 1 <= v <= n)
+    assert sorted(c) == sorted(b)                       # only a rearrangement
+```
+
+::: {#fig-idx-a2}
+
+```{python}
+#| echo: false
+def _a2_frames(a):
+    a = list(a)
+    frames = [(list(a), 0, "start: cursor at 0")]
+    n, i = len(a), 0
+    while i < n:
+        home = a[i] - 1
+        if 0 <= home < n and a[home] != a[i]:
+            v = a[i]
+            a[i], a[home] = a[home], a[i]
+            frames.append((list(a), i, f"value {v} goes home to slot {home}; slot {home} is fixed for good"))
+        else:
+            j = i
+            while i < n and not (0 <= a[i] - 1 < n and a[a[i] - 1] != a[i]):
+                i += 1
+            if i < n:
+                frames.append((list(a), i, f"slots {j}..{i - 1} hold their own values: cursor moves to {i}"))
+            else:
+                frames.append((list(a), n - 1, "cursor ran off the end: every value is home"))
+    return frames
+
+
+a2_frames = _a2_frames([4, 3, 6, 1, 2, 5])
+assert a2_frames[-1][0] == [1, 2, 3, 4, 5, 6]
+assert sum(1 for _, _, c in a2_frames if c.startswith("value")) == 6 - count_cycles([4, 3, 6, 1, 2, 5])
+
+
+def a2_frame(ax, p, t):
+    arr, cur, _ = a2_frames[t]
+    V.array(ax, p, arr,
+            colors={i: ("green" if arr[i] == i + 1 else "amber") for i in range(len(arr))},
+            pointers=[(cur, "i", "indigo")],
+            note="green = at home")
+
+
+V.animate(a2_frame, len(a2_frames), captions=[c for _, _, c in a2_frames], interval=1200)
+```
+
+Cyclic sort on $[4, 3, 6, 1, 2, 5]$, a permutation with cycles $\{0, 3\}$ and $\{1, 2, 5, 4\}$ (as positions). The cursor stays put while it swaps and only advances over cells that are home. Four swaps $= 6 - 2 = n - c$, and once a cell turns green it is never touched again: that is the linear-time proof.
+
+:::
+
+**Two variants solved elsewhere.** With duplicates, the slots that end up holding the wrong value name the missing values, and the values standing in them are the extra copies; LC 448 reads off the missing ones. With arbitrary integers, the range test leaves values outside $1..n$ where they are, and the first slot $i$ with $a_i \ne i + 1$ is the smallest missing positive. Both are solved in full in the linear-time sorting chapter:
+
+{{< include ../problems/lc-0448-find-all-numbers-disappeared-in-an-array/card.qmd >}}
+
+{{< include ../problems/lc-0041-first-missing-positive/card.qmd >}}
+
+**When to reach for it.** "Values in $1..n$ (or $0..n-1$)", "find what is missing or repeated", "sort without extra memory", and the array may be rearranged. If the array must stay as it is, use marking (A3, restorable) or arithmetic (A5, read-only) instead.
+
+## A3. Marking in place: negate, or add $n$ {#sec-idx-a3}
+
+**The idea in plain words.** Cyclic sort moves values. Marking leaves every value where it is and borrows a little spare room in each cell to remember something about the value whose home the cell is. The sign of a positive number is one spare bit; the "high digit" of a number stored as $\text{old} + n \cdot \text{count}$ is a whole spare counter.
+
+An index-compatible array of length $n$ has $n$ cells, one per possible value, so it can store a seen-table of $n$ entries for free. Three forms:
+
+**1. Negation (one bit per value).** For each value $v$ read from the array, look at cell $v - 1$. If it is already negative, $v$ was seen before: a duplicate. Otherwise negate it. Every read must go through $|\cdot|$, because the sign is now data, not part of the value. At the end, cells that are still positive are the homes of values that never occurred.
+
+**2. Adding $n$ (one counter per value).** Shift every value to $0..n-1$ (subtract $1$). For each position $i$, add $n$ to cell $a_i \bmod n$; the $\bmod$ recovers the original value of a cell that may already carry multiples of $n$. Afterwards cell $j$ holds $\text{orig}_j + n \cdot \text{count}(j)$ with $0 \le \text{orig}_j < n$, so $\lfloor a_j / n \rfloor$ is the number of times value $j + 1$ occurred and $a_j \bmod n$ is the original value. This is exactly the two-values-in-one-cell encoding of @eq-arr-encode, with base $M = n$.
+
+**3. Restoring.** Negation restores with $|\cdot|$, add-$n$ with $\bmod n$ (and the shift back). If the caller must get the array back unchanged, restore before returning; copying the array instead would cost the $O(n)$ space the trick was meant to save.
+
+```{python}
+def duplicates_by_sign(a):
+    """Values in 1..n. Returns the duplicates in order of their repeat, restoring a."""
+    dups = []
+    for x in a:
+        j = abs(x) - 1
+        if a[j] < 0:
+            dups.append(j + 1)
+        else:
+            a[j] = -a[j]
+    missing = [j + 1 for j in range(len(a)) if a[j] > 0]
+    for j in range(len(a)):
+        a[j] = abs(a[j])
+    return dups, missing
+
+
+def counts_by_adding_n(a):
+    """Values in 1..n. Returns count[v] for v = 1..n, restoring a."""
+    n = len(a)
+    for i in range(n):
+        a[i] -= 1                         # values 0..n-1: count digit starts at 0
+    for i in range(n):
+        a[a[i] % n] += n                  # % n strips the counts already added
+    counts = [a[j] // n for j in range(n)]
+    for j in range(n):
+        a[j] = a[j] % n + 1               # restore
+    return counts
+
+
+arr = [3, 2, 1, 3, 4, 2]
+assert duplicates_by_sign(arr) == ([3, 2], [5, 6]) and arr == [3, 2, 1, 3, 4, 2]
+arr = [4, 3, 2, 7, 8, 2, 3, 1]
+assert counts_by_adding_n(arr) == [1, 2, 2, 1, 0, 0, 1, 1] and arr == [4, 3, 2, 7, 8, 2, 3, 1]
+assert counts_by_adding_n([2, 2]) == [0, 2]      # the shift keeps value 2 from faking a count
+for _ in range(300):
+    n = random.randint(1, 15)
+    a = [random.randint(1, n) for _ in range(n)]
+    b = list(a)
+    cnt = Counter(a)
+    assert counts_by_adding_n(b) == [cnt[v] for v in range(1, n + 1)] and b == a
+    dups, missing = duplicates_by_sign(b)
+    assert sorted(dups) == sorted(v for v in cnt for _ in range(cnt[v] - 1)) and b == a
+    assert missing == [v for v in range(1, n + 1) if cnt[v] == 0]
+```
+
+::: {#fig-idx-a3}
+
+```{python}
+#| echo: false
+def _a3_frames(a):
+    a = list(a)
+    frames = [(list(a), None, "start: all cells positive, nothing seen")]
+    for x in list(a):
+        j = abs(x) - 1
+        if a[j] < 0:
+            frames.append((list(a), j, f"read {abs(x)}: cell {j} is already negative, so {abs(x)} is a duplicate"))
+        else:
+            a[j] = -a[j]
+            frames.append((list(a), j, f"read {abs(x)}: negate cell {j} to record 'seen {abs(x)}'"))
+    pos = [j for j in range(len(a)) if a[j] > 0]
+    frames.append((list(a), None, f"still positive: cells {pos}, so value(s) {[j + 1 for j in pos]} never occurred"))
+    return frames
+
+
+a3_frames = _a3_frames([3, 1, 3, 4, 1])
+assert a3_frames[-1][0] == [-3, 1, -3, -4, 1]
+assert a3_frames[-1][2].endswith("[2, 5] never occurred")
+
+
+def a3_frame(ax, p, t):
+    arr, hi, _ = a3_frames[t]
+    V.array(ax, p, arr,
+            colors={i: ("red" if arr[i] < 0 else "muted") for i in range(len(arr))},
+            pointers=([(hi, "look", "indigo")] if hi is not None else []),
+            note="red = negative = seen")
+
+
+V.animate(a3_frame, len(a3_frames), captions=[c for _, _, c in a3_frames], interval=1200)
+```
+
+Negation marking on $[3, 1, 3, 4, 1]$. Each read value names a cell (the arrow); a positive cell is negated, a negative one reveals a duplicate. One pass finds both repeats ($3$ and $1$), and the cells left positive at the end name the missing values $2$ and $5$.
+
+:::
+
+**Preconditions and costs.**
+
+| Technique | Needs | Gives | Watch out for |
+|---|---|---|---|
+| Negation | values in $1..n$, all positive | one bit per value (seen / not seen) | read with `abs`; a value $0$ has no sign to flip |
+| Add $n$ | values in $1..n$ (shifted to $0..n-1$) | a count per value, plus the original | read the index with `% n`; cells reach about $n^2$, so 64-bit once $n$ is in the tens of thousands |
+| Cyclic sort (A2) | values in $1..n$ | the array sorted by home | it destroys the original order |
+
+All three are $O(n)$ time and $O(1)$ extra space, and all three mutate the input (the first two can restore it). If values may be $0$, shift by one or use add-$n$; if the array is read-only, none of them applies and A5's arithmetic takes over. Set Mismatch, the one-duplicate-one-missing case, is solved with negation marking in the linear-time sorting chapter:
+
+{{< include ../problems/lc-0645-set-mismatch/card.qmd >}}
+
+## A4. Permutation cycles, minimum swaps and parity {#sec-idx-a4}
+
+**The idea in plain words.** Take a permutation and follow it: from position $i$ go to position $p_i$, then to $p_{p_i}$, and so on. Because no two positions point to the same place, you can never walk into the middle of a loop; you must come back to where you started. So the positions split into separate loops, called **cycles**. Almost every question about a permutation (how many swaps to sort it, how often to apply it before it repeats, how to apply it in place) is answered by its cycles.
+
+**Notation.** In this lesson $p$ is 0-based: a permutation of $0..n-1$, read as the function $i \mapsto p_i$. A 1-based input is converted by subtracting one from every value.
+
+**Cycle decomposition.** Start at an unvisited $i$ and follow $i \to p_i \to p_{p_i} \to \cdots$ until you return to $i$: that is one cycle. Mark its members visited and repeat from the next unvisited position. Each position is visited once, so the decomposition costs $O(n)$. A **fixed point** ($p_i = i$) is a cycle of length $1$. In *cycle notation* the permutation $[1, 2, 0, 4, 3, 5]$ is written $(0\ 1\ 2)(3\ 4)(5)$.
+
+*Why the walk must return to $i$.* The walk visits finitely many positions, so it repeats some position. The first repeated position must be $i$: if it were some $j \ne i$, then $j$ would have two different predecessors on the walk, but in a permutation every position has exactly one preimage.
+
+::: {#fig-idx-a4}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    perm = [3, 6, 2, 5, 7, 0, 1, 4]
+    seen, cycles = [False] * 8, []
+    for s in range(8):
+        if not seen[s]:
+            c, j = [], s
+            while not seen[j]:
+                seen[j] = True
+                c.append(j)
+                j = perm[j]
+            cycles.append(c)
+    assert cycles == [[0, 3, 5], [1, 6], [2], [4, 7]]
+    palette = ["indigo", "green", "amber", "cyan"]
+    V.array(ax, p, perm, x=0.0, y=3.2, label="p",
+            colors={j: palette[k] for k, c in enumerate(cycles) for j in c})
+    centers = [1.6, 5.4, 8.0, 10.6]
+    r = 1.15
+    for k, (c, cx) in enumerate(zip(cycles, centers)):
+        L = len(c)
+        pos = {}
+        for t, j in enumerate(c):
+            ang = math.pi / 2 - 2 * math.pi * t / L
+            pos[j] = (cx + (r if L > 1 else 0) * math.cos(ang), (r if L > 1 else 0) * math.sin(ang) - 0.5)
+        for j in c:
+            x, y = pos[j]
+            V.box(ax, p, x - 0.32, y - 0.32, 0.64, 0.64, str(j), color=palette[k])
+        if L > 1:
+            for t, j in enumerate(c):
+                (x0, y0), (x1, y1) = pos[j], pos[c[(t + 1) % L]]
+                d = math.hypot(x1 - x0, y1 - y0)
+                ux, uy = (x1 - x0) / d, (y1 - y0) / d
+                V.arrow(ax, p, x0 + 0.38 * ux, y0 + 0.38 * uy, x1 - 0.38 * ux, y1 - 0.38 * uy,
+                        color=palette[k], rad=-0.3)
+        V.text(ax, p, cx, -2.4, f"length {L}", size=9, color=palette[k])
+V.show(draw)
+```
+
+The permutation $p = [3, 6, 2, 5, 7, 0, 1, 4]$ (top) drawn as arrows $i \to p_i$ (bottom). It falls apart into the cycles $(0\ 3\ 5)$, $(1\ 6)$, $(2)$ and $(4\ 7)$: $c = 4$ cycles on $n = 8$ positions. Each cell of the top row has the colour of its cycle.
+
+:::
+
+The walk itself is the order of events that matters, so here it is as an animation: the cursor follows the arrows, colours each position with its cycle the first time it arrives, and starts a new cycle from the next uncoloured position.
+
+::: {#fig-idx-anim-a4}
+
+```{python}
+#| echo: false
+a4_p = [3, 6, 2, 5, 7, 0, 1, 4]
+a4_palette = ["indigo", "green", "amber", "cyan"]
+
+
+def _a4_frames(perm):
+    n = len(perm)
+    comp = [None] * n
+    frames = [(list(comp), None, "start: no position visited")]
+    c = 0
+    for s in range(n):
+        if comp[s] is not None:
+            continue
+        j, members = s, []
+        while comp[j] is None:
+            comp[j] = c
+            members.append(j)
+            j = perm[j]
+        path = " -> ".join(map(str, members + [s]))
+        frames.append((list(comp), s, f"cycle {c + 1}: {path} (length {len(members)})"))
+        c += 1
+    frames.append((list(comp), None, f"all {n} positions visited once: c = {c}, so {n} - {c} = {n - c} swaps sort p"))
+    return frames
+
+
+a4_frames = _a4_frames(a4_p)
+assert a4_frames[-1][0] == [0, 1, 2, 0, 3, 0, 1, 3]
+
+
+def a4_frame(ax, p, t):
+    comp, start, _ = a4_frames[t]
+    V.array(ax, p, a4_p, label="p",
+            colors={j: a4_palette[comp[j]] for j in range(len(a4_p)) if comp[j] is not None},
+            pointers=([(start, "start", "indigo")] if start is not None else []))
+
+
+V.animate(a4_frame, len(a4_frames), captions=[c for _, _, c in a4_frames], interval=1300)
+```
+
+Cycle decomposition of $p = [3, 6, 2, 5, 7, 0, 1, 4]$, one frame per cycle. Each walk starts at the leftmost uncoloured position and colours every position it passes; positions already coloured are skipped, so the total work is $n$ steps.
+
+:::
+
+**Theorem (minimum swaps to sort).** A permutation of $n$ elements with $c$ cycles (fixed points included) needs exactly $n - c$ swaps to sort.
+
+*Proof.* Swapping the values at positions $u$ and $v$ rewires the two arrows leaving $u$ and $v$: afterwards $u \to p_v$ and $v \to p_u$. If $u$ and $v$ are on the same cycle $u \to p_u \to \cdots \to v \to p_v \to \cdots \to u$, the rewiring splits it into two cycles, $u \to p_v \to \cdots \to u$ and $v \to p_u \to \cdots \to v$. If they are on different cycles, the same rewiring splices the two loops into one. So **every swap changes $c$ by exactly $\pm 1$**. The sorted array has $n$ cycles, all fixed points, so at least $n - c$ swaps are needed. Cyclic sort (A2) uses exactly $L - 1$ swaps on each cycle of length $L$, so $n - c$ in total, which meets the bound. ∎
+
+**Parity.** Because each swap changes $c$ by exactly one, the number of swaps in *any* sequence that sorts $p$ has the same parity as $n - c$. That parity is the **parity** (or sign) of the permutation: *even* if $n - c$ is even, *odd* otherwise. It also equals the parity of the number of inversions, since one adjacent swap changes the inversion count by exactly one. Consequences: a permutation can be sorted with exactly $m$ swaps iff $m \ge n - c$ and $m \equiv n - c \pmod 2$ (for $n \ge 2$, wasted swaps come in pairs); and puzzles that only allow moves of a fixed parity (3-cycles, the 15-puzzle) can only reach half of all arrangements.
+
+**Applying a permutation in place.** Given values $a$ and a permutation $p$ meaning "the element at position $i$ moves to position $p_i$", the result $b$ has $b_{p_i} = a_i$. With a second array this is one line. In place, carry a value around each cycle: pick up $a_i$, drop it at $p_i$ while picking up what was there, continue to $p_{p_i}$, and stop when you are back at $i$. To know which cycles are done without a visited array, mark $p$ itself (A3): replace a visited $p_j$ by its bitwise complement $\lnot p_j = -p_j - 1$, which is negative even when $p_j = 0$, and complement again at the end.
+
+```{python}
+def cycles_of(p):
+    n = len(p)
+    seen = [False] * n
+    out = []
+    for s in range(n):
+        if not seen[s]:
+            cyc, j = [], s
+            while not seen[j]:
+                seen[j] = True
+                cyc.append(j)
+                j = p[j]
+            out.append(cyc)
+    return out
+
+
+def min_swaps(p):
+    return len(p) - len(cycles_of(p))
+
+
+def inversions(p):
+    return sum(1 for i in range(len(p)) for j in range(i + 1, len(p)) if p[i] > p[j])
+
+
+def apply_in_place(a, p):
+    """Move a[i] to position p[i] for every i, in place; p is restored afterwards."""
+    for s in range(len(a)):
+        if p[s] < 0:
+            continue                       # s lies on a finished cycle
+        carry, j = a[s], s
+        while p[j] >= 0:
+            nxt = p[j]
+            p[j] = ~p[j]                   # mark j visited (works for p[j] = 0 too)
+            a[nxt], carry = carry, a[nxt]
+            j = nxt
+    for j in range(len(p)):
+        p[j] = ~p[j]                       # restore p
+
+
+assert cycles_of([3, 6, 2, 5, 7, 0, 1, 4]) == [[0, 3, 5], [1, 6], [2], [4, 7]]
+assert min_swaps([3, 6, 2, 5, 7, 0, 1, 4]) == 4
+assert min_swaps([0, 1, 2]) == 0 and min_swaps([1, 2, 0]) == 2
+for _ in range(300):
+    n = random.randint(1, 9)
+    p = random.sample(range(n), n)
+    assert (min_swaps(p) - inversions(p)) % 2 == 0          # two ways to read the parity
+    a = [random.randint(0, 99) for _ in range(n)]
+    want = [None] * n
+    for i in range(n):
+        want[p[i]] = a[i]
+    q = list(p)
+    apply_in_place(a, q)
+    assert a == want and q == p
+for n in range(1, 6):                                       # n - c is the true minimum (BFS check)
+    for perm in itertools.permutations(range(n)):
+        dist, frontier, ident = {perm: 0}, [perm], tuple(range(n))
+        for u in frontier:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    v = list(u)
+                    v[i], v[j] = v[j], v[i]
+                    v = tuple(v)
+                    if v not in dist:
+                        dist[v] = dist[u] + 1
+                        frontier.append(v)
+        assert dist[ident] == min_swaps(list(perm))
+```
+
+**Rotation as cycles.** Rotating an array left by $k$ is the permutation $i \mapsto (i - k) \bmod n$ on positions. Its cycles are the residue classes modulo $g = \gcd(n, k)$, so it has exactly $g$ cycles of length $n / g$, and applying it in place cycle by cycle is the *juggling* rotation recalled in @sec-part-rotate-recap: $n$ moves, $O(1)$ extra.
+
+**When the array is not a permutation.** If values may repeat, the arrows $i \to a_i$ form a *functional graph*: every position still has one outgoing arrow, but some have several incoming ones and some none. Walks then end in a cycle after a "tail", a $\rho$ shape. That is the setting of Floyd's cycle finding and of the graphs chapter (@sec-gr-p5):
+
+{{< include ../problems/cf-1020b-badge/card.qmd >}}
+
+## A5. Missing and duplicate numbers: sum, XOR, marking {#sec-idx-a5}
+
+**The idea in plain words.** If you know what the array *should* contain (all of $1..n$, say), compare a summary of what it *does* contain with a summary of what it should. A sum or an XOR of everything cancels all the values that are present and leaves only the difference. One unknown needs one equation; a missing value *and* a duplicate need two.
+
+For an array that should be $1..n$:
+
+- **Sum, one gap.** If the array holds $n - 1$ distinct values of $1..n$, the missing one is $\frac{n(n+1)}{2} - \sum a_i$. Simple, but the sums grow like $n^2$: use 64-bit arithmetic.
+- **XOR, one gap.** $m = \bigoplus_{v=1}^{n} v \oplus \bigoplus_i a_i$, because XOR is associative and commutative and $x \oplus x = 0$: every present value cancels with itself. Nothing can overflow. The XOR of $1..n$ has a closed form, $f(n) = n, 1, n + 1, 0$ for $n \bmod 4 = 0, 1, 2, 3$ (proved in @sec-idx-p4-mexor).
+- **One missing $m$ and one duplicate $d$ (length $n$).** The sum gives $S_1 = \frac{n(n+1)}{2} - \sum a_i = m - d$. The sum of squares gives $S_2 = \frac{n(n+1)(2n+1)}{6} - \sum a_i^2 = m^2 - d^2 = (m - d)(m + d)$. So $m + d = S_2 / S_1$, and $m, d$ follow. The sums of squares grow like $n^3/3$, and the product $n(n+1)(2n+1)$ computed before dividing by $6$ overflows a signed 64-bit integer once $n$ is near $1.7 \cdot 10^6$.
+- **The XOR split.** The XOR of $1..n$ and the array gives $x = m \oplus d \ne 0$. Pick any set bit of $x$, for example the lowest, $x \mathbin{\&} {-x}$. It splits all numbers (the range and the array) into two groups; $m$ and $d$ land in different groups, and every other value cancels within its own group. XOR each group separately to get $\{m, d\}$, and one more pass over the array tells which one is the duplicate. Overflow-free, read-only.
+- **Marking.** A3's negation finds both in one pass: the duplicate when a cell is already negative, the missing value as the cell still positive. It is the only method here that also handles *several* duplicates, but it writes to the array.
+
+```{python}
+def missing_by_sum(a, n):
+    return n * (n + 1) // 2 - sum(a)
+
+
+def missing_by_xor(a, n):
+    return reduce(lambda u, w: u ^ w, list(range(1, n + 1)) + list(a), 0)
+
+
+def mismatch_by_squares(a):
+    """a: 1..n with one value doubled and one missing. Returns (duplicate, missing)."""
+    n = len(a)
+    s1 = n * (n + 1) // 2 - sum(a)                       # m - d
+    s2 = n * (n + 1) * (2 * n + 1) // 6 - sum(x * x for x in a)   # m^2 - d^2
+    m_plus_d = s2 // s1
+    m = (m_plus_d + s1) // 2
+    return m_plus_d - m, m
+
+
+def mismatch_by_xor(a):
+    n = len(a)
+    x = reduce(lambda u, w: u ^ w, list(range(1, n + 1)) + list(a), 0)   # m ^ d
+    bit = x & -x
+    g0 = g1 = 0
+    for v in list(range(1, n + 1)) + list(a):
+        if v & bit:
+            g1 ^= v
+        else:
+            g0 ^= v
+    d = g0 if g0 in a else g1                            # one more pass decides which is which
+    return d, g0 ^ g1 ^ d
+
+
+assert missing_by_sum([1, 2, 4, 5], 5) == 3 == missing_by_xor([1, 2, 4, 5], 5)
+assert mismatch_by_squares([1, 2, 2, 4]) == (2, 3) == mismatch_by_xor([1, 2, 2, 4])
+for _ in range(400):
+    n = random.randint(2, 30)
+    d, m = random.sample(range(1, n + 1), 2)
+    a = [v for v in range(1, n + 1) if v != m] + [d]
+    random.shuffle(a)
+    assert mismatch_by_squares(a) == mismatch_by_xor(a) == (d, m)
+    b = [v for v in range(1, n + 1) if v != m]
+    assert missing_by_sum(b, n) == missing_by_xor(b, n) == m
+```
+
+::: {#fig-idx-a5}
+
+```{python}
+#| echo: false
+a5 = [1, 2, 4, 5]
+a5_n = 5
+a5_all = list(range(1, a5_n + 1)) + a5
+a5_run = [reduce(lambda u, w: u ^ w, a5_all[:t + 1]) for t in range(len(a5_all))]
+assert a5_run[-1] == 3
+
+
+def a5_frame(ax, p, t):
+    V.array(ax, p, a5_all,
+            colors={i: ("violet" if i <= t else "muted") for i in range(len(a5_all))},
+            regions=[(0, 5, "indigo", "1..n"), (5, 9, "amber", "the array")])
+    V.text(ax, p, 4.5, -2.2, f"running XOR = {a5_run[t]}  (binary {a5_run[t]:03b})", size=10)
+
+
+a5_caps = [f"XOR in {a5_all[t]}: running value {a5_run[t]}" for t in range(len(a5_all))]
+a5_caps[-1] += " -- every present value cancelled, the missing 3 is left"
+V.animate(a5_frame, len(a5_caps), captions=a5_caps, interval=900)
+```
+
+XOR the range $1..5$ together with the array $[1, 2, 4, 5]$. The violet prefix is what has been XOR-ed so far. The running value wanders, but every value that appears on both sides cancels, and only the missing $3$ survives at the end.
+
+:::
+
+**Choosing a method.**
+
+| Situation | Method | Why |
+|---|---|---|
+| One value missing, array read-only | XOR (or a 64-bit sum) | one equation, one unknown; XOR cannot overflow |
+| One missing and one duplicate, read-only | sum + sum of squares, or the XOR split | two unknowns need two independent equations |
+| Many duplicates or many missing, array writable | negation marking (A3) or cyclic sort (A2) | the array stores a whole seen-table |
+| $n + 1$ values in $1..n$, read-only, one value repeated many times | Floyd's cycle finding on $i \mapsto a_i$ | sums fail when the repeat count is unknown |
+
+The last row deserves its own card: it is the functional-graph view of A4, owned by the graphs chapter; the proofs chapter uses the same problem for the pigeonhole principle (@sec-pf-contradiction). The hashing chapter met the one-gap sum and XOR tricks as $O(1)$-memory counters (@sec-hash-vote).
+
+{{< include ../problems/lc-0287-find-the-duplicate-number/card.qmd >}}
+
+## A6. Permutations as functions: compose, invert, iterate {#sec-idx-a6}
+
+**The idea in plain words.** A permutation is a rule "position $i$ goes to position $p_i$". Rules can be done one after another (composition), undone (inverse), and repeated $k$ times (powers). Each of these is one short loop over the array, and repeating a rule many times is cheap once you know its cycles: on a cycle of length $L$, doing the rule $L$ times is the same as doing nothing.
+
+Throughout, $p$ and $q$ are 0-based permutations of $0..n-1$.
+
+- **Composition.** $(p \circ q)(i) = p(q(i))$: first $q$, then $p$. As arrays, $r_i = p[q_i]$, a *gather* (read from the position the data names). Composition is associative but not commutative: $p \circ q \ne q \circ p$ in general. LC 1920 computes $p \circ p$, in place with the encoding of @eq-arr-encode (@sec-arr-p4-b).
+- **Inverse.** $p^{-1}$ undoes $p$: $p^{-1}(p(i)) = i$. As arrays, $s[p_i] = i$, a *scatter* (write to the position the data names), $O(n)$. The inverse of a composition reverses the order: $(p \circ q)^{-1} = q^{-1} \circ p^{-1}$, like taking off socks and shoes.
+- **Powers.** $p^k$ is $p$ applied $k$ times. Repeated composition costs $O(nk)$ (or $O(n \log k)$ by repeated squaring), but the cycles give $O(n)$ for any $k$: on a cycle $(c_0\ c_1\ \cdots\ c_{L-1})$, $p^k(c_t) = c_{(t + k) \bmod L}$.
+- **Order.** The smallest $k \ge 1$ with $p^k = \mathrm{id}$ is $\operatorname{lcm}$ of the cycle lengths: each cycle of length $L$ returns exactly at the multiples of $L$, and all of them return together at the common multiples. The order can be far larger than $n$ (cycles of lengths $2, 3, 5, 7$ on $17$ elements give $210$), so never find it by simulation.
+- **Fixed points and involutions.** $p_i = i$ is a cycle of length $1$. A permutation is its own inverse ($p \circ p = \mathrm{id}$, an *involution*) iff all its cycles have length $1$ or $2$.
+
+```{python}
+def compose(p, q):                       # first q, then p
+    return [p[q[i]] for i in range(len(q))]
+
+
+def inverse(p):
+    s = [0] * len(p)
+    for i, v in enumerate(p):
+        s[v] = i                         # scatter
+    return s
+
+
+def power(p, k):
+    r = [0] * len(p)
+    for cyc in cycles_of(p):
+        L = len(cyc)
+        for t, j in enumerate(cyc):
+            r[j] = cyc[(t + k) % L]      # k steps along the cycle
+    return r
+
+
+def order(p):
+    return reduce(lambda u, L: u * L // gcd(u, L), (len(c) for c in cycles_of(p)), 1)
+
+
+p = [1, 2, 0, 4, 3]                      # (0 1 2)(3 4)
+assert inverse(p) == [2, 0, 1, 4, 3] and compose(p, inverse(p)) == [0, 1, 2, 3, 4]
+assert order(p) == 6 and power(p, 6) == [0, 1, 2, 3, 4] and power(p, 7) == p
+for _ in range(300):
+    n = random.randint(1, 9)
+    p = random.sample(range(n), n)
+    q = random.sample(range(n), n)
+    k = random.randint(0, 30)
+    slow = list(range(n))
+    for _ in range(k):
+        slow = compose(p, slow)
+    assert power(p, k) == slow
+    assert inverse(compose(p, q)) == compose(inverse(q), inverse(p))
+    assert power(p, order(p)) == list(range(n))
+    assert all(power(p, j) != list(range(n)) for j in range(1, order(p)))
+    assert (inverse(p) == p) == all(len(c) <= 2 for c in cycles_of(p))
+```
+
+::: {#fig-idx-a6}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    pp = [1, 2, 0, 4, 3]
+    rows = [list(range(5))]
+    for _ in range(3):
+        rows.append(compose(pp, rows[-1]))
+    assert rows[3] == power(pp, 3) == [0, 1, 2, 4, 3]
+    for r, row in enumerate(rows):
+        home = [row[j] == j for j in range(5)]
+        V.array(ax, p, row, y=-1.8 * r, label=f"p^{r}" if r else "p^0 = id",
+                colors={j: (("indigo" if j < 3 else "green") if not home[j] else "muted") for j in range(5)},
+                index=(r == 0))
+    V.text(ax, p, 5.4, -1.8 * 3 + 0.5, "3-cycle home again, 2-cycle not", ha="left", color="muted", size=9)
+V.show(draw)
+```
+
+Powers of $p = [1, 2, 0, 4, 3] = (0\ 1\ 2)(3\ 4)$. Row $k$ shows $p^k(i)$ in column $i$, and each row is $p$ applied to the row above; grey cells are back home ($p^k(i) = i$). The indigo part (the 3-cycle) is home at every multiple of $3$, the green part (the 2-cycle) at every even $k$, so the whole permutation first returns at $\operatorname{lcm}(3, 2) = 6$.
+
+:::
+
+Permutations as *sequences*, ranked and unranked in lexicographic order, are in @sec-part-rank; here they are functions. When the arrows $i \to a_i$ do not form a bijection, the same iterate-and-walk questions are asked on functional graphs in @sec-gr-p5.
+
+{{< include ../problems/lc-1920-build-array-from-permutation/card.qmd >}}
+
+## Part B — Patterns
+
+## Pattern 1: Cyclic sort — place, don't compare {#sec-idx-p1}
+
+**Where we are.** The lessons built five tools, and the patterns climb them one idea at a time. Pattern 1 *moves* values to the slots they name (cyclic sort). Pattern 2 stops moving and only *marks* the slots. Pattern 3 stops looking at single slots and follows the *cycles* the slots form. Pattern 4 refuses to touch the array at all and recovers what is missing from *aggregates* (sums and XORs). Pattern 5 treats the whole permutation as a *function* to invert, compose and iterate. Each pattern keeps what the previous one taught and adds one thing.
+
+**Recognise it.** Values promised in $1..n$ (or $0..n-1$); the question is which values are missing, repeated, or out of place; $O(1)$ extra space is required; and the array may be rearranged.
+
+::: {.callout-important title="Template"}
+```text
+i = 0
+while i < n:
+    h = a[i] - 1                       # home of the cursor's value
+    if 0 <= h < n and a[h] != a[i]:    # it has a home, and the home holds something else
+        swap(a[i], a[h])               # park it; the displaced value comes to the cursor
+    else:
+        i += 1
+# now a[v-1] == v for every v in 1..n that occurs;
+# a slot with a[i] != i+1 means: value i+1 is missing, and a[i] is an extra copy (or homeless)
+```
+
+**Invariant.** Every swap fixes one more slot for good, so there are at most $n$ swaps and $n$ advances.
+:::
+
+**Complexity.** $O(n)$ time, $O(1)$ extra space; the array is rearranged. On a permutation the swap count is exactly $n - c$, the minimum (@sec-idx-a4).
+
+{{< include ../problems/lc-0442-find-all-duplicates-in-an-array/problem.qmd >}}
+
+[**From reading the misfits to repairing them.** Find All Duplicates only *reports* the values standing in the wrong slots. Make a Permutation must *overwrite* those extra copies with the missing values, which makes the order of the writes matter: the answer must be the lexicographically smallest permutation.]{.flow-bridge}
+
+{{< include ../problems/cf-864d-make-permutation/problem.qmd >}}
+
+The two problems of the linear-time sorting chapter belong to this pattern too: LC 448 reads the *missing* values off the misfit slots, and LC 41 adds the range test for values without a home (both cards are in @sec-idx-a2).
+
+## Pattern 2: Marking in place — the array remembers {#sec-idx-p2}
+
+**From moving values to merely remembering them.** Cyclic sort answers its question by rearranging the array, which destroys the input order. Many problems need that order: "emit the values in the order they first appear", or "the array must be returned unchanged". Marking keeps every value where it is and records presence in a spare bit (the sign) or a spare digit (a multiple of $n$) of the cell that the value names.
+
+**Recognise it.** Values in a known small range; the question is about presence or first occurrence; the order of the input matters, or the input must be restored; $O(1)$ extra space is wanted, or a seen-table of size $n$ is acceptable and the in-place version is the follow-up.
+
+::: {.callout-important title="Template"}
+```text
+for x in a:                            # presence, one bit per value (values 1..n, all positive)
+    v = abs(x)                         # x may already carry someone else's mark
+    if a[v-1] > 0:  first time v is seen -> act; a[v-1] = -a[v-1]
+    else:           v seen before        -> act
+for i: a[i] = abs(a[i])                # restore
+
+for i: a[a[i] % n] += n                # counts (values shifted to 0..n-1): count(j) = a[j] // n
+```
+
+**Invariant.** Before reading position $t$, cell $v - 1$ is marked iff $v$ occurred before position $t$.
+:::
+
+**Complexity.** $O(n)$ time; $O(1)$ extra for the in-place forms, $O(n)$ for an explicit seen-table. The marks must fit: one sign bit, or values up to about $n^2$ for add-$n$.
+
+{{< include ../problems/cf-1385b-restore-merger/problem.qmd >}}
+
+[**From emitting on the first mark to counting the unmarked.** Restore the Merger acts the moment a cell flips from unmarked to marked. Mahmoud and Ehab and the MEX builds the same presence table and then *scores* it: how many values below $x$ are still unmarked, and is $x$ itself marked.]{.flow-bridge}
+
+{{< include ../problems/cf-862a-mex/problem.qmd >}}
+
+The defect version, one duplicate and one missing value, is marked the same way in Set Mismatch (card in @sec-idx-a3).
+
+## Pattern 3: Permutation cycles — walk, count, construct {#sec-idx-p3}
+
+**From single slots to loops of slots.** Marking answers questions about one value at a time. When the input is a permutation, the interesting structure is not any single slot but the loops that the arrows $i \to p_i$ form. Cycle lengths answer "when does it come back", the number of cycles answers "how many swaps", and choosing the cycles answers "build a permutation with this property".
+
+**Recognise it.** A permutation, and a question about repeated application ("after how many days"), the minimum number of swaps, what can be reached by restricted swaps, or a construction with prescribed cycle lengths or fixed points.
+
+::: {.callout-important title="Template"}
+```text
+comp = [-1] * n; c = 0
+for s in range(n):                     # one walk per cycle: O(n) in total
+    if comp[s] < 0:
+        j = s
+        while comp[j] < 0: comp[j] = c; j = p[j]
+        c += 1
+# min swaps to sort = n - c; a swap within a cycle splits it, across cycles merges two
+# a cycle of length L returns after L steps; to build cycles, rotate blocks of positions
+```
+
+**Invariant.** Each position is assigned to exactly one cycle, by the walk from the smallest position on that cycle.
+:::
+
+**Complexity.** $O(n)$ time and $O(n)$ space for the labels (or $O(1)$ extra with in-place marking of $p$, as in @sec-idx-a4).
+
+{{< include ../problems/cf-1249b2-books-exchange-hard-version/problem.qmd >}}
+
+[**From measuring cycles to counting swaps.** Books Exchange only needs each cycle's *length*. Lucky Permutation needs the *number* of cycles, through $n - c$, and one structural fact about them: whether two neighbouring positions share a cycle.]{.flow-bridge}
+
+{{< include ../problems/cf-1768d-lucky-permutation/problem.qmd >}}
+
+[**From analysing cycles to building them.** Lucky Permutation reads the cycles of a given permutation. Permutation Cycle runs the machine backwards: the cycle lengths are prescribed, and we must lay out a permutation that has them.]{.flow-bridge}
+
+{{< include ../problems/cf-932c-permutation-cycle/problem.qmd >}}
+
+[**From free swaps to restricted ones.** So far any two elements could be swapped. Permutation Swap allows only swaps at one fixed distance $k$, which splits the positions into residue classes that never mix, and the largest workable $k$ turns out to be a gcd.]{.flow-bridge}
+
+{{< include ../problems/cf-1828b-permutation-swap/problem.qmd >}}
+
+## Pattern 4: Missing by sums and XOR — bookkeeping without slots {#sec-idx-p4}
+
+**From touching the array to leaving it alone.** Patterns 1 to 3 all write to the array or to a table indexed by its values. When the array is read-only, or the promise is about an *aggregate* (a MEX, an XOR) rather than about slots, recover what is missing from an equation instead: a sum or an XOR of everything cancels whatever is present and leaves the rest.
+
+**Recognise it.** "Exactly one value is missing (or one extra)", "constant extra space, do not modify the input", or a target stated as a XOR or a MEX.
+
+::: {.callout-important title="Template"}
+```text
+missing = n*(n+1)/2 - sum(a)                    # one unknown; 64-bit
+missing = XOR(1..n) ^ XOR(a)                    # one unknown; overflow-free
+f(t) = XOR(0..t) = [t, 1, t+1, 0][t % 4]        # prefix XOR in O(1)
+two unknowns m, d:  sum gives m - d, sum of squares gives m^2 - d^2,
+                    or split XOR(m ^ d) by one set bit
+```
+
+**Invariant.** Every value that appears on both sides (the expected range and the array) cancels exactly; only the unknowns survive.
+:::
+
+**Complexity.** $O(n)$ time, $O(1)$ extra space, read-only.
+
+{{< include ../problems/lc-0268-missing-number/problem.qmd >}}
+
+[**From recovering a missing value to choosing extra ones.** Missing Number knows the full range and solves for the one value that is not there. MEXor Mixup turns it around: the MEX forces a whole range to be present, its XOR is fixed by the prefix formula, and we must choose the fewest extra elements that bring the XOR to a target.]{.flow-bridge}
+
+{{< include ../problems/cf-1567b-mexor-mixup/problem.qmd >}}
+
+[**From XOR to its base-3 cousin.** Both problems so far leaned on XOR being addition without carries, so it can be undone bit by bit. Ternary Logic uses exactly that property in base 3: a digit-wise sum modulo 3 with no carries is undone digit by digit.]{.flow-bridge}
+
+{{< include ../problems/cf-136b-ternary-logic/problem.qmd >}}
+
+## Pattern 5: Permutations as functions — invert, iterate, predict {#sec-idx-p5}
+
+**From recovering values to transforming arrangements.** Pattern 4 asked which values are present. The last pattern asks what a permutation *does*: who maps to whom (the inverse), what happens when it is applied again and again (powers and order), and where an element is after many steps. Lesson A6 gave the algebra; the problems apply it.
+
+**Recognise it.** "Who gave to whom", "apply the operation $k$ times", "after how many operations does it repeat", "where is X at time $k$" with $k$ up to $10^9$ or more.
+
+::: {.callout-important title="Template"}
+```text
+inverse:      q[p[i]] = i                         # scatter, O(n)
+compose:      r[i] = p[q[i]]                      # gather, O(n): first q, then p
+power p^k:    on each cycle c_0..c_{L-1}:  r[c_t] = c_{(t+k) % L}
+order of p:   lcm of the cycle lengths            # 64-bit
+returns of a labelled cycle: smallest period d of its labels, then lcm over cycles
+```
+
+**Invariant.** Applying $p$ moves every element one step along its own cycle; nothing ever leaves its cycle.
+:::
+
+**Complexity.** $O(n)$ per inverse, composition or power; the lcm needs 64-bit arithmetic because the order can exceed any polynomial in $n$.
+
+{{< include ../problems/cf-136a-presents/problem.qmd >}}
+
+[**From one inverse to many applications.** Presents undoes a permutation once. Shifting String applies one over and over and asks when a labelled string first comes back: each cycle is a ring of letters, rotated one step per application, and the rings return together at the lcm of their periods.]{.flow-bridge}
+
+{{< include ../problems/cf-1690f-shifting-string/problem.qmd >}}
+
+[**From a stored permutation to an implicit one.** Shifting String is given its permutation as an array. In Cat Cycle the permutation is the rotation $i \mapsto i + 1$ on a circle of $10^9$ spots, never stored, and the only twist is a predictable extra step whenever the two cats meet.]{.flow-bridge}
+
+{{< include ../problems/cf-1487b-cat-cycle/problem.qmd >}}
+
+**Looking back.** Five patterns, one loan: *the array lends its slots to its values.* Cyclic sort repays the loan by moving each value into the slot it names. Marking writes a note in that slot instead (a sign or a high digit) and erases it afterwards. Cycles follow the slots from one to the next and discover that a permutation is a handful of independent loops, which settles swaps, parity, construction and repetition. Sums and XORs are what remains when the slots may not be touched: the whole array is compared with what it should be through one aggregate that cancels everything present. And the permutation-as-function view reads the same arrows forwards (composition, powers) and backwards (the inverse). Before coding, say which of the five you are doing; the code is then a few lines.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| "Values in $1..n$; find what is missing or repeated; $O(1)$ extra space; may rearrange" | Cyclic sort, read the misfit slots | @sec-idx-a2, @sec-idx-p1-dups |
+| "Fewest rewrites to make a permutation; lexicographically smallest result" | Frequency of homes, overwrite spare copies with a look-ahead | @sec-idx-p1-makeperm |
+| "Smallest missing positive among arbitrary integers" | Cyclic sort with a range test | @sec-idx-a2 |
+| "Keep the original order / restore the input; presence or first occurrence" | Sign marking (or a seen-table) | @sec-idx-a3, @sec-idx-p2-merger |
+| "Count occurrences of each value without a counter array" | Add $n$ per occurrence, read `// n` and `% n` | @sec-idx-a3 |
+| "Fewest additions and deletions so that the MEX is $x$" | Presence table, one closed-form count | @sec-idx-p2-mex |
+| "After how many steps does each element return" | Cycle lengths, one walk per cycle | @sec-idx-p3-books |
+| "Minimum swaps to sort", "reach a target arrangement by swaps" | $n - c$, cycles split or merge by one per swap | @sec-idx-a4, @sec-idx-p3-lucky |
+| "Can it be done with exactly $m$ swaps / only even moves" | Parity of the permutation | @sec-idx-a4 |
+| "Build a permutation whose cycles have given lengths" | Tile $N$ with block lengths, rotate each block | @sec-idx-p3-cycle |
+| "Largest $k$ such that swaps at distance $k$ can sort" | Residue classes, gcd of displacements | @sec-idx-p3-permswap |
+| "One value missing, array read-only" | Sum (64-bit) or XOR | @sec-idx-a5, @sec-idx-p4-missing |
+| "One value missing and one doubled, read-only" | Sum and sum of squares, or the XOR split | @sec-idx-a5 |
+| "Shortest array with given MEX and XOR" | Prefix XOR by $t \bmod 4$, three cases | @sec-idx-p4-mexor |
+| "Invert a digit-wise operation without carries" | Solve each digit independently | @sec-idx-p4-ternary |
+| "Who maps to whom", "undo the permutation" | Inverse by scatter | @sec-idx-a6, @sec-idx-p5-presents |
+| "Apply the permutation $k$ times", "first time it repeats" | Powers along cycles, order $=$ lcm | @sec-idx-a6, @sec-idx-p5-shift |
+| "Position after $k$ steps of a rule on a circle" | Rotation power plus counted extra steps | @sec-idx-p5-catcycle |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Guarding cyclic sort with `a[i] != i + 1` instead of `a[home] != a[i]`.** With a duplicate whose home is taken, the first guard swaps two equal values forever (@sec-idx-a2).
+- **Forgetting the range test.** A value $0$, a negative value or a value above $n$ has no home; indexing with it reads outside the array, or in Python silently wraps to the end (@sec-idx-a2).
+- **Reading a negation-marked cell without `abs`.** After marking, the sign is data: the value at slot $i$ is $|a_i|$, and `a[a[i] - 1]` with a negative `a[i]` indexes from the end of a Python list instead of failing (@sec-idx-a3).
+- **Negation marking when a value can be $0$.** Zero has no sign to flip; shift the range or use add-$n$ (@sec-idx-a3).
+- **Add-$n$ without the `% n` read-out, or in 32-bit.** Mid-loop a cell may already carry multiples of $n$, so the index is `a[i] % n`; cells reach about $n^2$, which overflows `int` once $n$ passes $46340$ (@sec-idx-a3).
+- **Feeding 1-based values straight into a cycle walk.** For values $1..n$ the step is `j = p[j] - 1`; otherwise the walk visits the wrong positions or runs off the end (@sec-idx-a4).
+- **Counting misplaced elements instead of cycles.** Misplaced elements overestimate the swaps: $n - c$ is the minimum, and a swap can fix two elements at once (@sec-idx-a4).
+- **Computing $\frac{n(n+1)}{2}$, $\sum a_i$ or $\sum a_i^2$ in 32-bit.** The product $n(n+1)$ already overflows at $n = 46341$; the sum-of-squares constant overflows even 64 bits near $n = 1.7 \cdot 10^6$ (@sec-idx-a5).
+- **One equation for two unknowns.** A sum or an XOR alone cannot separate a missing value from a duplicate; add the sum of squares or split the XOR by a set bit (@sec-idx-a5).
+- **Simulating $k$ applications of a permutation.** Use cycle positions modulo the cycle length and the lcm for the order; the order can be astronomically larger than $n$ (@sec-idx-a6).
+- **Gather versus scatter.** `r[i] = p[q[i]]` composes; `s[p[i]] = i` inverts. Swapping the two computes a different permutation without any error (@sec-idx-a6, @sec-idx-p5-presents).
+:::
+
+## Exercises
+
+**1. [E] Trace `cyclic_sort` on $a = [3, 5, 1, 2, 4]$. Give the array after every swap, then check the swap count against $n - c$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Cursor $0$ holds $3$: swap with slot $2$, giving $[1, 5, 3, 2, 4]$. Cursor $0$ now holds $1$, which is home, so advance. Cursor $1$ holds $5$: swap with slot $4$, giving $[1, 4, 3, 2, 5]$. Cursor $1$ holds $4$: swap with slot $3$, giving $[1, 2, 3, 4, 5]$. Everything else is home. Three swaps. As 0-based positions the permutation is $i \mapsto a_i - 1 = [2, 4, 0, 1, 3]$ with cycles $(0\ 2)$ and $(1\ 4\ 3)$, so $c = 2$ and $n - c = 3$: cyclic sort meets the lower bound, as the theorem of @sec-idx-a2 says it always does on a permutation.
+:::
+
+**2. [E] Give an input on which the guard `a[i] != i + 1` makes cyclic sort loop forever, and explain why `a[home] != a[i]` stops.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[1, 1]$. At $i = 1$ the value $1$ is not at index $1$, so the bad guard swaps $a_1$ with its home $a_0$; both are $1$, nothing changes, and the guard is still true: an infinite loop. The guard `a[home] != a[i]` asks whether the home already holds this value; here it does, so the cursor advances. On a permutation the two guards make the same swaps, because a value equal to $a_i$ can only be $a_i$ itself (@sec-idx-a2).
+:::
+
+**3. [E] Run negation marking on $a = [3, 4, 3, 4]$ by hand. Which values are reported as duplicates, which as missing, and what is the array before the restore pass?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Read $3$: negate cell $2$, giving $[3, 4, -3, 4]$. Read $4$: negate cell $3$, giving $[3, 4, -3, -4]$. Read $|-3| = 3$: cell $2$ is negative, so $3$ is a duplicate. Read $|-4| = 4$: cell $3$ is negative, so $4$ is a duplicate. Before restoring, the array is $[3, 4, -3, -4]$; cells $0$ and $1$ are still positive, so values $1$ and $2$ are missing (@sec-idx-a3).
+:::
+
+**4. [E] The recoveries of @sec-idx-a5 assume values in $1..n$. Which change, and how, if the values should be $0..n - 1$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+XOR is unchanged in form: XOR $0..n-1$ with the array ($0$ contributes nothing). The sum constant becomes $\frac{n(n-1)}{2}$ and the sum of squares $\frac{(n-1)n(2n-1)}{6}$. Marking becomes simpler, because the home of $v$ is $v$ itself; but negation cannot mark the value $0$ stored *in* a cell, so use the complement trick $\lnot x = -x - 1$ (as in @sec-idx-a4's in-place application) or add-$n$, which handles $0$ directly. Cyclic sort uses `home = a[i]` (@sec-idx-a2).
+:::
+
+**5. [E] For $p = [2, 0, 1, 4, 3]$ (0-based), list the cycles, the minimum number of swaps to sort, and one optimal swap sequence.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Cycles $(0\ 2\ 1)$ and $(3\ 4)$: $c = 2$, minimum $5 - 2 = 3$. Swap positions $0, 2$: $[1, 0, 2, 4, 3]$. Swap $0, 1$: $[0, 1, 2, 4, 3]$. Swap $3, 4$: sorted. Each swap splits off one fixed point; the 3-cycle costs $2$ and the 2-cycle costs $1$ (@sec-idx-a4).
+:::
+
+**6. [E] What is the order of $p = [1, 2, 0, 4, 5, 3, 7, 6]$ (0-based)? Give $p^{10}$ without composing ten times.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Cycles $(0\ 1\ 2)$, $(3\ 4\ 5)$, $(6\ 7)$, lengths $3, 3, 2$: order $\operatorname{lcm}(3, 3, 2) = 6$. Then $p^{10} = p^{10 \bmod 6} = p^4$, and on each cycle $p^4$ moves $4 \bmod L$ steps: one step on the 3-cycles, none on the 2-cycle. So $p^{10} = [1, 2, 0, 4, 5, 3, 6, 7]$ (@sec-idx-a6).
+:::
+
+**7. [M] For CF 864D on input $[2, 2, 2]$, give $q$ and the lexicographically smallest result, justifying each write by the greedy's rule.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`freq[2] = 3`, missing $= [1, 3]$, so $q = 2$. Cell $0$: $2$ is not kept yet, the smallest missing value $1 < 2$, and two more copies of $2$ follow, so write $1$. Cell $1$: $2$ is still not kept; the next missing value $3 > 2$, so keep $2$ (and mark it kept). Cell $2$: $2$ is already kept, so this copy is spare; write $3$. Result $[1, 2, 3]$ (@sec-idx-p1-makeperm).
+:::
+
+**8. [M] Prove that the last occurrences in a CF 1385B merger also appear in $p$'s order.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Let $u$ precede $v$ in $p$. In the merged array, copy one of $u$ precedes copy one of $v$, and copy two of $u$ precedes copy two of $v$, because each copy of $p$ keeps its order. The last occurrence of $u$ is $\max(\text{copy}_1(u), \text{copy}_2(u))$, and each of these is smaller than the matching copy of $v$, which is at most $\max$ of $v$'s copies. So $\text{last}(u) < \text{last}(v)$. The first-occurrence proof in @sec-idx-p2-merger is the same argument with $\min$.
+:::
+
+**9. [M] For CF 862A, evaluate the closed form on $S = \{0, 2, 4\}$, $x = 3$ and on $S = \{1, 2, 3\}$, $x = 3$. Say which operations it counts.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$\{0, 2, 4\}$: two elements below $3$, and $3 \notin S$: $3 - 2 + 0 = 1$, one add (the value $1$). $\{1, 2, 3\}$: two elements below $3$ and $3 \in S$: $3 - 2 + 1 = 2$, one add (the value $0$) and one erase (the value $3$). Elements above $x$ never count (@sec-idx-p2-mex).
+:::
+
+**10. [M] For which of $(N, A, B) = (3, 2, 4)$, $(5, 2, 4)$, $(10, 4, 6)$ does CF 932C answer $-1$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$(3, 2, 4)$: $y = 0$ leaves $3$, odd; $y = 1$ overshoots: $-1$. $(5, 2, 4)$: $y = 0$ leaves $5$, $y = 1$ leaves $1$, both odd: $-1$. $(10, 4, 6)$: $y = 0$ leaves $10$, not a multiple of $4$; $y = 1$ leaves $4$: $x = 1$, one 4-cycle and one 6-cycle. Both $-1$ cases fail for parity: with $A$ and $B$ even, every tiling has even length, and $N$ is odd (@sec-idx-p3-cycle).
+:::
+
+**11. [M] For CF 1567B with $(a, b) = (3, 0)$, give the answer and prove that length $4$ is impossible.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$f(2) = 0 \oplus 1 \oplus 2 = 3$ and $d = 3 \oplus 0 = 3 = a$, so the answer is $a + 2 = 5$. A length-4 array with MEX $3$ contains $0, 1, 2$ and one more value $y \ne 3$; its XOR is $3 \oplus y$, which is $0$ only for $y = 3$. A length-5 witness: $[0, 1, 2, 4, 7]$, with XOR $3 \oplus 4 \oplus 7 = 0$ and no $3$ (@sec-idx-p4-mexor).
+:::
+
+**12. [M] An array of length $n$ holds $1..n$ with one value doubled and one missing, $[1, 2, 2, 4]$. Recover both with the XOR split, showing the groups.**
+
+::: {.callout-note collapse="true" title="Solution"}
+XOR of $1..4$ and the array: $(1 \oplus 2 \oplus 3 \oplus 4) \oplus (1 \oplus 2 \oplus 2 \oplus 4) = 4 \oplus 5 = 1 = m \oplus d$. Lowest set bit: $1$. Odd group: range $\{1, 3\}$ and array $\{1\}$, XOR $= 3$. Even group: range $\{2, 4\}$ and array $\{2, 2, 4\}$, XOR $= 2$. So $\{m, d\} = \{3, 2\}$; $2$ occurs in the array, so $d = 2$ and $m = 3$ (@sec-idx-a5).
+:::
+
+**13. [M] Show that rotating an array of length $n$ left by $k$ has exactly $\gcd(n, k)$ cycles, each of length $n / \gcd(n, k)$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+On positions the rotation is $i \mapsto (i - k) \bmod n$, so the cycle of $i$ is $\{i - tk \bmod n : t \ge 0\}$. Its length is the smallest $t \ge 1$ with $tk \equiv 0 \pmod n$, which is $n / \gcd(n, k)$, the same for every $i$. All cycles having that length, there are $n / (n / \gcd(n, k)) = \gcd(n, k)$ of them. Positions $i$ and $j$ share a cycle iff $i \equiv j \pmod{\gcd(n, k)}$, so the residues $0, \ldots, \gcd(n, k) - 1$ are one representative each: the juggling rotation starts one walk from each (@sec-idx-a4, @sec-part-rotate-recap).
+:::
+
+**14. [M] A permutation can be sorted with $3$ swaps. Can it be sorted with exactly $4$? With exactly $5$?**
+
+::: {.callout-note collapse="true" title="Solution"}
+If $3$ swaps suffice, then $n - c \le 3$ and $n - c \equiv 3 \pmod 2$, so $n - c \in \{1, 3\}$, odd. Every sorting sequence has the parity of $n - c$, so exactly $4$ is impossible. Exactly $5$ is possible: sort in $n - c$ swaps, then swap one pair twice to burn the remaining even number (@sec-idx-a4).
+:::
+
+**15. [M] Characterise the permutations that equal their own inverse, and count them for $n = 4$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$p = p^{-1}$ iff $p \circ p = \mathrm{id}$ iff every cycle has length $1$ or $2$: a cycle of length $L$ returns after two steps only if $L \mid 2$. For $n = 4$: the identity ($1$), one transposition ($\binom{4}{2} = 6$), two disjoint transpositions ($3$): $10$ in total (@sec-idx-a6).
+:::
+
+**16. [M] Prove that $(p \circ q)^{-1} = q^{-1} \circ p^{-1}$ and say what it means for undoing two shuffles.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$(q^{-1} \circ p^{-1}) \circ (p \circ q) = q^{-1} \circ (p^{-1} \circ p) \circ q = q^{-1} \circ q = \mathrm{id}$ by associativity, and the inverse is unique. To undo "first $q$, then $p$", undo $p$ first and then $q$: the last shuffle applied is the first one undone (@sec-idx-a6).
+:::
+
+**17. [H] Prove that one swap changes the number of cycles of a permutation by exactly $\pm 1$.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Swapping the values at positions $u \ne v$ changes only the two arrows leaving $u$ and $v$: $u \to p_v$ and $v \to p_u$. Every other cycle is untouched. Same cycle: it reads $u \to p_u \to \cdots \to v \to p_v \to \cdots \to u$; after rewiring, $u \to p_v \to \cdots \to u$ and $v \to p_u \to \cdots \to v$ are two separate loops, $+1$. Different cycles $u \to p_u \to \cdots \to u$ and $v \to p_v \to \cdots \to v$: after rewiring, $u \to p_v \to \cdots \to v \to p_u \to \cdots \to u$ is one loop, $-1$. Hence the minimum $n - c$ of @sec-idx-a4.
+:::
+
+**18. [H] Prove that the CF 864D greedy (@sec-idx-p1-makeperm) returns the lexicographically smallest permutation among those with $q$ changes.**
+
+::: {.callout-note collapse="true" title="Solution"}
+With exactly $q$ changes, every value that occurs keeps exactly one of its copies and every missing value is written once, so a solution is fixed by choosing one surviving copy per occurring value and assigning missing values to the remaining cells. Among assignments, increasing order of the missing values from left to right is smallest (swapping two out-of-order written values makes the earlier position smaller). Now compare the greedy with an optimal answer $r^*$ at the first cell $i$ where they differ; cell $i$ holds $v$. If the greedy writes $m < v$ there, then $v$ recurs later and $m$ is the smallest unwritten missing value; $r^*$ keeps $v$ at $i$ (writing any other missing value would be larger than $m$), so moving $v$'s survivor to a later copy of $v$ and writing $m$ at $i$ is valid and smaller, contradicting optimality. If the greedy keeps $v$, then either $v$ does not recur (overwriting it would lose $v$) or the smallest missing value exceeds $v$ (overwriting makes cell $i$ larger); either way $r^*$ cannot be smaller at $i$. If $v$ is already kept, both must overwrite with the same smallest missing value. So no first difference exists.
+:::
+
+**19. [H] Invert a permutation of $0..n-1$ in place, with $O(1)$ extra memory and $O(n)$ time.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Walk each cycle once and reverse its arrows, marking finished positions with the complement trick of @sec-idx-a4. For a start $s$ with $p_s \ge 0$: keep `prev = s`, `j = p[s]`; while $j \ne s$, read `nxt = p[j]`, write `p[j] = ~prev` (the inverse sends $j$ back to its predecessor, marked), set `prev = j`, `j = nxt`; finally `p[s] = ~prev`. After all cycles, complement every entry. Each position is written once and read twice: $O(n)$ time, $O(1)$ extra. On $[1, 2, 0]$: the cycle $0 \to 1 \to 2 \to 0$ becomes $p_1 = 0$, $p_2 = 1$, $p_0 = 2$, so $p^{-1} = [2, 0, 1]$. Knuth's TAOCP §1.3.3 gives a variant without the complement marks.
+:::
+
+**20. [H] An array of $n + 1$ integers from $1..n$ is read-only, and one value may repeat many times. Why do sums fail, and what replaces them?**
+
+::: {.callout-note collapse="true" title="Solution"}
+If the repeated value $d$ occurs $r$ times, the sum is $\frac{n(n+1)}{2} - (\text{missing values}) + (r - 1)d$, with an unknown number of unknown missing values: one equation cannot recover $d$. Read the array as the function $i \mapsto a_i$ on indices $0..n$. Index $0$ has no preimage (values are at least $1$), so the walk from $0$ enters a cycle after a tail, and the cycle's entry point has two preimages, one on the tail and one on the cycle: that entry is the repeated value. Floyd's tortoise and hare finds it in $O(n)$ time and $O(1)$ space without writing. This is LC 287, solved in @sec-gr-p5-duplicate.
+:::
+
+## Interview questions
+
+**1. Why is cyclic sort $O(n)$ when it has a `while` loop that does not always advance?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Count events, not loop shapes. Each iteration either advances the cursor (at most $n$ times) or swaps, and every swap writes a value into its home slot, after which that slot is never swapped again. So there are at most $n$ swaps and at most $2n$ iterations in total (@sec-idx-a2).
+:::
+
+**2. When would you use cyclic sort rather than a hash set or a counting array on $1..n$ data?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When $O(1)$ extra space is required and the array may be rearranged. A counting array is simpler when $O(n)$ memory is fine; a hash set when values are not in a small known range; marking (@sec-idx-a3) when the input order must survive; arithmetic (@sec-idx-a5) when the array is read-only.
+:::
+
+**3. Find all duplicates in an array of $n$ values from $1..n$ in $O(n)$ time and $O(1)$ extra space. What precondition does your method need, and how do you undo the damage?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Negation marking: for each $x$, look at cell $|x| - 1$; if it is negative, $|x|$ is a duplicate, else negate it. It needs values in $1..n$ and all positive (zero has no sign to flip). Read every value through `abs`, and restore with a final `abs` pass. Cyclic sort also works and reports the values left in misfit slots, but it rearranges the array (@sec-idx-p1-dups).
+:::
+
+**4. State and prove the minimum number of swaps to sort a permutation.**
+
+::: {.callout-note collapse="true" title="Answer"}
+$n - c$, with $c$ the number of cycles including fixed points. A swap rewires two arrows, so it splits one cycle or merges two: $c$ changes by exactly one. Sorted means $n$ cycles, so at least $n - c$ swaps; cyclic sort uses $L - 1$ swaps per cycle of length $L$, which is $n - c$ in total (@sec-idx-a4).
+:::
+
+**5. What is the minimum number of *adjacent* swaps to sort a permutation, and why is it different?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The number of inversions. An adjacent swap changes the inversion count by exactly one, and while the array is unsorted some adjacent pair is inverted, so swapping it reduces the count by one (bubble sort). Arbitrary swaps can fix far-apart elements at once, which is why $n - c$ can be much smaller. Both counts have the same parity (@sec-idx-a4).
+:::
+
+**6. Given a permutation and $K$ up to $10^{18}$, output the permutation applied $K$ times.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Decompose into cycles once, $O(n)$. On a cycle $c_0 \ldots c_{L-1}$, the element at offset $t$ goes to offset $(t + K) \bmod L$. Each position costs $O(1)$, so $O(n)$ in total, with no dependence on $K$. Repeated squaring of the permutation would cost $O(n \log K)$; simulation is hopeless (@sec-idx-a6).
+:::
+
+**7. When does a permutation first return to the identity under repeated application, and why can the answer be huge?**
+
+::: {.callout-note collapse="true" title="Answer"}
+At the lcm of its cycle lengths: each cycle of length $L$ is home exactly at multiples of $L$. Cycle lengths can be pairwise coprime ($2 + 3 + 5 + 7 + 11 = 28$ elements give order $2310$), so the order grows much faster than $n$; compute it with 64-bit lcm, never by simulation (@sec-idx-a6, @sec-idx-p5-shift).
+:::
+
+**8. One number is missing and one is doubled in $1..n$. Compare sum, XOR and marking when the array is read-only and $n$ is large.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Read-only rules out marking. A single sum gives $m - d$ and a single XOR gives $m \oplus d$: one equation each, two unknowns. Add the sum of squares ($m^2 - d^2$, so $m + d = S_2 / S_1$), watching for overflow of $\sum a_i^2$; or split the XOR by a set bit of $m \oplus d$, which never overflows, and use one more pass to tell $m$ from $d$ (@sec-idx-a5).
+:::
+
+**9. Define the MEX. How do you compute the MEX of $n$ integers in $O(n)$, and why is it at most $n$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The smallest non-negative integer not present. Among the $n + 1$ candidates $0..n$, at most $n$ can be present, so some value $\le n$ is missing. Mark the values in $0..n$ in a boolean table (ignore larger ones) and scan for the first unmarked entry; with a writable array of non-negative values, the marking can be done in place (@sec-idx-a3, @sec-idx-p2-mex).
+:::
+
+**10. Find a duplicate among $n + 1$ integers from $1..n$ without modifying the array and in $O(1)$ extra space.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Read the array as the function $i \mapsto a_i$ on indices $0..n$. There are $n + 1$ indices and only $n$ values, so some value has two preimages (pigeonhole), and the walk from index $0$ ends in a cycle whose entry point is that value. Floyd's tortoise and hare finds the entry in $O(n)$ time and $O(1)$ space. Solved in @sec-gr-p5-duplicate.
+:::
+
+**11. What exactly does add-$n$ marking store, and why can you recover both the count and the original value?**
+
+::: {.callout-note collapse="true" title="Answer"}
+After shifting to $0..n-1$, cell $j$ ends as $\text{orig}_j + n \cdot \text{count}_j$ with $0 \le \text{orig}_j < n$. Division by $n$ with remainder is unique, so `a[j] // n` is the count and `a[j] % n` is the original. During the pass, every index must be computed as `a[i] % n`, because the cell being read may already carry counts (@sec-idx-a3, @eq-arr-encode).
+:::
+
+**12. How do you apply a permutation to an array in place?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Follow each cycle once, carrying one value: pick up $a_s$, drop it at $p_s$ while picking up what was there, and continue until you are back at $s$. To skip finished cycles without a visited array, mark $p_j$ when visiting $j$ (by complementing it, which works even for the value $0$) and restore $p$ at the end. $O(n)$ time, $O(1)$ extra (@sec-idx-a4).
+:::
+
+**13. Can every permutation be sorted with exactly $m$ swaps for any large $m$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+No: only for $m \ge n - c$ with $m \equiv n - c \pmod 2$ (and $n \ge 2$). Each swap changes the number of cycles by exactly one, so the parity of the swap count is fixed by the permutation. Extra swaps can only be wasted in pairs (@sec-idx-a4).
+:::
+
+**14. Your function marks the input in place and restores it before returning. Is it really "read-only"?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Only from the caller's sequential view. During the call the array is visibly modified, so another thread or an alias holding a reference sees negative values; and an exception mid-pass leaves it corrupted. Say so in an interview: in-place marking trades memory for atomicity, and a truly read-only input calls for the arithmetic of @sec-idx-a5 or Floyd's walk (@sec-idx-a3).
+:::
+
+**15. For CF 864D, why is the number of changes fixed before you decide which copies to overwrite?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Each value that occurs $c > 1$ times has $c - 1$ spare copies, and each missing value is one gap. Both totals equal $n$ minus the number of distinct values, so $q = $ number of gaps is forced by the frequency table alone. What depends on the order is *which* copies to overwrite, and that only decides the lexicographic order of the result (@sec-idx-p1-makeperm).
+:::
+
+**16. Why is the inverse of a permutation a scatter and composition a gather?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Composition $r_i = p[q_i]$ *reads* from the position named by the data, which is a gather. The inverse needs, for each value $v$, the position holding it; knowing only $p$, the natural loop visits each position $i$ and *writes* $i$ to the position $p_i$, which is a scatter. Writing the inverse as a gather would need a search per value, $O(n^2)$ (@sec-idx-a6, @sec-idx-p5-presents).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Cyclic sort:** `while i < n: h = a[i]-1; if 0 <= h < n and a[h] != a[i]: swap(a[i], a[h]) else: i += 1`. At most $n$ swaps; exactly $n - c$ on a permutation (@sec-idx-a2, @sec-idx-p1).
+- **Marking:** negate cell $|x| - 1$ for a seen bit, read with `abs`; add $n$ to cell $a_i \bmod n$ for a count, read `// n` and `% n`; restore afterwards (@sec-idx-a3, @sec-idx-p2).
+- **Cycles:** one walk per cycle, $O(n)$. Minimum swaps $n - c$; parity of $n - c$ is the parity of any sorting sequence; apply a permutation in place by carrying a value round each cycle (@sec-idx-a4, @sec-idx-p3).
+- **Missing values by arithmetic:** $\frac{n(n+1)}{2} - \sum a_i$ (64-bit) or XOR of the range and the array; two unknowns need sum of squares or the XOR split; $f(t) = 0 \oplus \cdots \oplus t = [t, 1, t+1, 0][t \bmod 4]$ (@sec-idx-a5, @sec-idx-p4).
+- **Permutation algebra:** inverse `q[p[i]] = i`; composition `r[i] = p[q[i]]`; power along cycles with $(t + k) \bmod L$; order $=$ lcm of cycle lengths (@sec-idx-a6, @sec-idx-p5).
+:::
+
+- Every trick here is one observation: **values in $1..n$ are also indices in $0..n-1$**, so the array can index itself, remember for itself and point at itself (@sec-idx-a1).
+- Cyclic sort is counting sort performed inside its own output array; each swap fixes a slot for good, which is both the linear-time proof and the $n - c$ swap count (@sec-idx-a2).
+- Marking stores one bit (sign) or one counter (multiple of $n$) per value inside the cells; its preconditions are the price list: positive values, `abs` reads, `% n` reads, 64-bit cells, a restore pass (@sec-idx-a3).
+- A permutation is a set of independent loops. Swaps split or merge loops one at a time, which gives the minimum swap count, the parity, and the impossibility arguments (@sec-idx-a4, @sec-idx-p3).
+- Sums and XORs compare the array with what it should be without touching it; the number of equations must match the number of unknowns (@sec-idx-a5, @sec-idx-p4).
+- Composition, inverse and powers are $O(n)$ loops; repeated application is periodic per cycle, so large exponents reduce modulo cycle lengths and return times are lcms (@sec-idx-a6, @sec-idx-p5).
+- When the arrows $i \to a_i$ are not a bijection, walks become $\rho$-shaped and the tools move to the graphs volume (@sec-gr-p5).
+
+## Practice ladder
+
+Ordered by concept: cyclic sort, marking, cycles, arithmetic, permutation algebra. The `.solved` entries are written up in this chapter or, for the cards, in the chapter named.
+
+::: {.practice}
+- [LC 442 · Find All Duplicates in an Array](https://leetcode.com/problems/find-all-duplicates-in-an-array/){.solved difficulty="Medium"} — @sec-idx-p1-dups; cyclic sort, then the misfit slots.
+- [LC 448 · Find All Numbers Disappeared in an Array](https://leetcode.com/problems/find-all-numbers-disappeared-in-an-array/){difficulty="Easy"} — the misfit slots name the missing values; solved in @sec-lts-p2-a.
+- [LC 41 · First Missing Positive](https://leetcode.com/problems/first-missing-positive/){difficulty="Hard"} — cyclic sort with a range test; solved in @sec-lts-p2-b.
+- [CF 864D · Make a Permutation!](https://codeforces.com/problemset/problem/864/D){.solved rating="1500"} — @sec-idx-p1-makeperm; forced count, lexicographic repair.
+- [CF 1810C · Make It Permutation](https://codeforces.com/problemset/problem/1810/C){rating="1300"} — repair costs with deletions and insertions.
+- [CF 1385B · Restore the Permutation by Merger](https://codeforces.com/problemset/problem/1385/B){.solved rating="800"} — @sec-idx-p2-merger; first occurrences by marking.
+- [LC 645 · Set Mismatch](https://leetcode.com/problems/set-mismatch/){difficulty="Easy"} — one duplicate, one missing, by negation; solved in @sec-lts-p5-a.
+- [CF 1506E · Restoring the Permutation](https://codeforces.com/problemset/problem/1506/E){rating="1500"} — rebuild permutations from prefix maxima, tracking unused values.
+- [CF 862A · Mahmoud and Ehab and the MEX](https://codeforces.com/problemset/problem/862/A){.solved rating="1000"} — @sec-idx-p2-mex; presence table and a closed form.
+- [CF 1497A · Meximization](https://codeforces.com/problemset/problem/1497/A){rating="800"} — order values to maximise the sum of prefix MEX values.
+- [CF 1806B · Mex Master](https://codeforces.com/problemset/problem/1806/B){rating="900"} — MEX of adjacent sums; a presence-counting case split.
+- [CF 1249B2 · Books Exchange (hard version)](https://codeforces.com/problemset/problem/1249/B2){.solved rating="1300"} — @sec-idx-p3-books; cycle lengths, one walk per cycle.
+- [CF 1249B1 · Books Exchange (easy version)](https://codeforces.com/problemset/problem/1249/B1){rating="1000"} — the same with $n \le 200$; the brute force passes.
+- [CF 2086C · Disappearing Permutation](https://codeforces.com/problemset/problem/2086/C){rating="1300"} — cycles touched by each query.
+- [CF 1768D · Lucky Permutation](https://codeforces.com/problemset/problem/1768/D){.solved rating="1800"} — @sec-idx-p3-lucky; $n - c$ and one adjacent test.
+- [CF 2033E · Sakurako, Kosuke, and the Permutation](https://codeforces.com/problemset/problem/2033/E){rating="1400"} — split every long cycle into short ones with the fewest swaps.
+- [LC 765 · Couples Holding Hands](https://leetcode.com/problems/couples-holding-hands/){difficulty="Hard"} — minimum swaps as $n$ minus the number of cycles of the couple graph.
+- [LC 2471 · Minimum Number of Operations to Sort a Binary Tree by Level](https://leetcode.com/problems/minimum-number-of-operations-to-sort-a-binary-tree-by-level/){difficulty="Medium"} — $n - c$ per level after ranking the values.
+- [CF 932C · Permutation Cycle](https://codeforces.com/problemset/problem/932/C){.solved rating="1600"} — @sec-idx-p3-cycle; tile with cycle lengths, rotate blocks.
+- [CF 1741B · Funny Permutation](https://codeforces.com/problemset/problem/1741/B){rating="800"} — build a permutation without fixed points under a neighbour rule.
+- [CF 1711A · Perfect Permutation](https://codeforces.com/problemset/problem/1711/A){rating="800"} — one long cycle as a construction.
+- [CF 1828B · Permutation Swap](https://codeforces.com/problemset/problem/1828/B){.solved rating="900"} — @sec-idx-p3-permswap; residue classes and a gcd.
+- [CF 1525B · Permutation Sort](https://codeforces.com/problemset/problem/1525/B){rating="900"} — restricted rearrangements and a case analysis.
+- [LC 268 · Missing Number](https://leetcode.com/problems/missing-number/){.solved difficulty="Easy"} — @sec-idx-p4-missing; sum, XOR, cyclic sort.
+- [CSES 1083 · Missing Number](https://cses.fi/problemset/task/1083) — the same with $n$ up to $2 \cdot 10^5$: the sum needs 64 bits.
+- [LC 136 · Single Number](https://leetcode.com/problems/single-number/){difficulty="Easy"} — pairs cancel under XOR.
+- [CF 1759B · Lost Permutation](https://codeforces.com/problemset/problem/1759/B){rating="800"} — complete a permutation from a known sum of the missing values.
+- [CF 1567B · MEXor Mixup](https://codeforces.com/problemset/problem/1567/B){.solved rating="1000"} — @sec-idx-p4-mexor; prefix XOR and three cases.
+- [LC 1486 · XOR Operation in an Array](https://leetcode.com/problems/xor-operation-in-an-array/){difficulty="Easy"} — an XOR of an arithmetic progression; the $t \bmod 4$ formula again.
+- [CF 1863C · MEX Repetition](https://codeforces.com/problemset/problem/1863/C){rating="1100"} — a MEX operation that turns out to rotate an extended array.
+- [CF 136B · Ternary Logic](https://codeforces.com/problemset/problem/136/B){.solved rating="1100"} — @sec-idx-p4-ternary; carry-free base-3 digits.
+- [LC 137 · Single Number II](https://leetcode.com/problems/single-number-ii/){difficulty="Medium"} — count each bit modulo 3, the ternary idea on bits.
+- [CF 136A · Presents](https://codeforces.com/problemset/problem/136/A){.solved rating="800"} — @sec-idx-p5-presents; the inverse by scatter.
+- [LC 1920 · Build Array from Permutation](https://leetcode.com/problems/build-array-from-permutation/){difficulty="Easy"} — composition $p \circ p$ in place; solved in @sec-arr-p4-b.
+- [CF 1690F · Shifting String](https://codeforces.com/problemset/problem/1690/F){.solved rating="1700"} — @sec-idx-p5-shift; per-cycle periods and an lcm.
+- [LC 1806 · Minimum Number of Operations to Reinitialize a Permutation](https://leetcode.com/problems/minimum-number-of-operations-to-reinitialize-a-permutation/){difficulty="Medium"} — the order of one specific permutation.
+- [CF 1487B · Cat Cycle](https://codeforces.com/problemset/problem/1487/B){.solved rating="1200"} — @sec-idx-p5-catcycle; an implicit rotation with counted extra steps.
+- [CSES 2162 · Josephus Problem I](https://cses.fi/problemset/task/2162) — a pointer stepping around a circle that skips removed spots.
+- [CF 1020B · Badge](https://codeforces.com/problemset/problem/1020/B){rating="1000"} — walks in a functional graph that is not a permutation; solved in @sec-gr-p5-badge.
+- [LC 287 · Find the Duplicate Number](https://leetcode.com/problems/find-the-duplicate-number/){difficulty="Medium"} — Floyd on $i \mapsto a_i$, read-only; solved in @sec-gr-p5-duplicate.
+:::
+
+## Further reading
+
+- [Wikipedia — Permutation](https://en.wikipedia.org/wiki/Permutation) — cycle notation, composition, inverses and the order of a permutation, the algebra behind @sec-idx-a4 and @sec-idx-a6.
+- [Wikipedia — Cyclic permutation](https://en.wikipedia.org/wiki/Cyclic_permutation) — single cycles and transpositions, the building blocks of every decomposition.
+- [Wikipedia — Parity of a permutation](https://en.wikipedia.org/wiki/Parity_of_a_permutation) — the sign, its relation to cycles and inversions, and why it is well defined (@sec-idx-a4).
+- [Wikipedia — Cycle sort](https://en.wikipedia.org/wiki/Cycle_sort) — the general, write-minimising sort built on the same cycle-following idea as @sec-idx-a2.
+- [Wikipedia — Exclusive or](https://en.wikipedia.org/wiki/Exclusive_or) — the algebraic properties ($x \oplus x = 0$, associativity) behind the missing-number recoveries (@sec-idx-a5).
+- [Wikipedia — Mex (mathematics)](https://en.wikipedia.org/wiki/Mex_%28mathematics%29) — the minimum excluded value used in @sec-idx-p2-mex and @sec-idx-p4-mexor, and its role in game theory.
+- [USACO Guide — Functional Graphs](https://usaco.guide/silver/func-graphs) — walks on $i \mapsto a_i$ when the map is not a bijection: tails, cycles and Floyd's algorithm.
+- [Erickson — Algorithms (free textbook)](https://jeffe.cs.illinois.edu/teaching/algorithms/) — invariants and induction proofs in the style used for every algorithm in this chapter.

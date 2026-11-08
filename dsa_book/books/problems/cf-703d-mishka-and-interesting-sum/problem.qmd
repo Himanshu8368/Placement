@@ -1,0 +1,251 @@
+### Problem: Mishka and Interesting sum {#sec-mo-p2-interesting}
+
+::: {.p-statement}
+An array of non-negative integers $a_1, \ldots, a_n$ ($1 \le n \le 10^{6}$, $1 \le a_i \le 10^{9}$) and $m$ queries $[\ell, r]$ ($1 \le m \le 10^{6}$). For each query, write down every value that occurs an **even, positive** number of times in $a_\ell, \ldots, a_r$, and output their **XOR**; output $0$ if none qualify.
+
+Source: [CF 703D · Mishka and Interesting sum](https://codeforces.com/problemset/problem/703/D){.solved rating="2100"}
+
+Example — $a = [1, 2, 1, 3, 3, 2, 3]$: $[4,5] = [3,3]$ has only $3$ twice, answer `3`; $[1,7]$ has $1,2$ twice, answer $1 \oplus 2 = 3$; $[1,5] = [1,2,1,3,3]$ has $1,3$ twice, answer $1 \oplus 3 = 2$. (Checked against a per-query frequency-XOR oracle on the official samples, then stressed.)
+:::
+
+::: {.p-intuition}
+Only the *parity* of each value's count matters: a value is "in" the answer iff its count is even and at least $2$. Adding one more copy of $v$ flips that membership — it toggles whether $v$ is XOR-ed in — and XOR is its own inverse, so the running answer is just "XOR $v$ in again" on every flip. The catch: the flip on a copy depends on whether $v$ already had $\ge 1$ copies, so `add` is $O(1)$ but the whole thing is a **toggle**, exactly the shape that snapshot-and-restore handles cleanly (@sec-mo-a2). We use rollback Mo so the right pointer never retreats and there is no hand-written `remove` to get subtly wrong: within a left-block we add rightward monotonically, snapshot, temporarily add the $\le B$ left fringe, read the XOR, then roll the fringe back.
+:::
+
+::: {.p-approach}
+1. **Frequency rebuild.** Per query, count each value in $[\ell, r]$, XOR those with an even positive count. $O(r - \ell + 1)$ per query — reference only (too slow at $10^{6}$).
+2. **Rollback Mo.** Block by $\ell$. For each left-block, keep a monotone right pointer maintaining the aggregate over the *clean tail* $[\text{blockEnd}+1, R]$ (never removed). Per query, snapshot $(\mathit{hist}, X)$, add the fringe $[\ell, \text{blockEnd}]$, read $X$, restore the snapshot. A query wholly inside one block is brute-forced.
+
+**Invariant.** At a snapshot, $X$ is the XOR of values appearing an even positive number of times in the clean tail, and `hist` records every `add` since the block began. `add(i)` flips membership of $v = b[i]$ by XOR-ing `orig[v]` precisely when `freq[v]` was already $\ge 1$; restoring the snapshot resets every touched `freq[v]` from `hist` and puts $X$ back, so the clean tail is untouched by a fringe add — the window is exactly the query range when $X$ is read.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Rebuild frequencies per query
+
+::: {.form-next}
+For each query count occurrences in $[\ell, r]$ and XOR the values whose count is even and positive. $O(r - \ell + 1)$ per query, $O(nm)$ overall — reference code only.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def seven_brute(a, l, r):
+    x = 0
+    for v, cnt in Counter(a[l:r + 1]).items():
+        if cnt % 2 == 0:                 # present in the range, so cnt >= 1; even => >= 2
+            x ^= v
+    return x
+
+
+assert seven_brute([3, 7, 8], 0, 2) == 0
+assert seven_brute([1, 2, 1, 3, 3, 2, 3], 3, 4) == 3
+assert seven_brute([1, 2, 1, 3, 3, 2, 3], 0, 6) == 3
+```
+
+##### C++
+
+```cpp
+// brute force: count occurrences in one range and XOR values seen an even, positive number of times
+long long seven_brute(const vector<long long>& a, int l, int r) {
+    map<long long, int> cnt;
+    for (int i = l; i <= r; ++i) cnt[a[i]]++;
+    long long x = 0;
+    for (map<long long, int>::iterator it = cnt.begin(); it != cnt.end(); ++it)
+        if (it->second % 2 == 0) x ^= it->first;
+    return x;
+}
+```
+:::
+
+**Reading it line by line.** The judge is 1-indexed; the code is 0-indexed and inclusive, so query $[\ell, r]$ becomes $[\ell - 1, r - 1]$. A value occurring $0$ times never enters `cnt`, so "even" already means "at least $2$" — the empty result XORs to $0$.
+
+#### Rollback Mo (monotone right pointer, snapshot the fringe)
+
+::: {.form-next}
+Group queries by $\lfloor \ell / B \rfloor$, increasing $r$ inside a group. Maintain the clean tail $[\text{blockEnd}+1, R]$ by *only* advancing $R$ (never a delete). Per query: snapshot, add the $\le B$ fringe $[\ell, \text{blockEnd}]$, read $X$, roll the fringe back. Short queries inside one block use the brute scan. Total $O(n\sqrt n)$ with no deletes.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+sv_a = [1, 2, 1, 3, 3, 2, 3]
+sv_B = 3
+
+
+def draw(ax, p):
+    V.array(ax, p, sv_a, x=0.0, y=0.6,
+            regions=[(0, sv_B, "green", "fringe (rolled back)"),
+                     (sv_B, 7, "indigo", "clean tail: $R$ only grows")],
+            pointers=[(6, "$R$", "pink", "top")], label="a")
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-mo-p2-interesting-sol
+def seven_rollback(a, qs, B=None):
+    """qs are (l, r) 0-indexed inclusive; answer = XOR of values occurring an even, positive count."""
+    n = len(a)
+    if B is None:
+        B = max(1, int(round(n ** 0.5)))
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    orig = list(comp.keys())             # id -> original value, so the XOR is over real values
+    freq = [0] * len(comp)
+    x = 0
+    hist = []                            # (id, freq_before) per add
+
+    def add(i):
+        nonlocal x
+        v = b[i]
+        hist.append((v, freq[v]))
+        if freq[v] >= 1:                 # parity only flips membership once the value is present
+            x ^= orig[v]
+        freq[v] += 1
+
+    def snapshot():
+        return len(hist), x
+
+    def rollback(snap):
+        nonlocal x
+        hh, xx = snap
+        while len(hist) > hh:
+            v, old = hist.pop()
+            freq[v] = old
+        x = xx
+
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    ans = [0] * len(qs)
+    last_block, R = -1, -1
+    for i in order:
+        l, r = qs[i]
+        bl = l // B
+        block_end = min(n - 1, (bl + 1) * B - 1)
+        if bl != last_block:
+            rollback((0, 0))             # drop the whole tail when starting a fresh left-block
+            R = block_end
+            last_block = bl
+        while R < r:
+            R += 1
+            add(R)
+        if r <= block_end:
+            ans[i] = seven_brute(a, l, r)
+            continue
+        snap = snapshot()
+        for j in range(block_end, l - 1, -1):
+            add(j)
+        ans[i] = x
+        rollback(snap)
+    return ans
+
+
+assert seven_rollback([3, 7, 8], [(0, 2)]) == [0]
+assert seven_rollback([1, 2, 1, 3, 3, 2, 3],
+                      [(3, 6), (3, 4), (0, 2), (0, 6), (0, 4)]) == [0, 3, 1, 3, 2]
+for _ in range(300):
+    n = random.randint(1, 50)
+    a = [random.randint(0, 7) for _ in range(n)]
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(15)]
+    assert seven_rollback(a, qs, max(1, int(round(n ** 0.5)))) == [seven_brute(a, l, r) for l, r in qs]
+```
+
+##### C++
+
+```cpp
+// rollback Mo for Mishka and Interesting sum (full program; values compressed to ids, XOR over originals)
+int main() {
+    ios::sync_with_stdio(false);
+    int n;
+    if (!(cin >> n)) return 0;
+    vector<long long> raw(n);
+    for (int i = 0; i < n; ++i) cin >> raw[i];
+    map<long long, int> comp;
+    vector<long long> val;                       // id -> original value
+    vector<int> b(n);
+    for (int i = 0; i < n; ++i) {
+        if (!comp.count(raw[i])) { comp[raw[i]] = (int)val.size(); val.push_back(raw[i]); }
+        b[i] = comp[raw[i]];
+    }
+    int m; cin >> m;
+    int B = max(1, (int)sqrt((double)n));
+    vector<array<int, 3> > qs(m);                 // {l, r, id}
+    for (int i = 0; i < m; ++i) {
+        int l, r; cin >> l >> r; --l; --r;
+        qs[i] = {l, r, i};
+    }
+    sort(qs.begin(), qs.end(), [B](const array<int,3>& x, const array<int,3>& y) {
+        if (x[0] / B != y[0] / B) return x[0] / B < y[0] / B;
+        return x[1] < y[1];
+    });
+    vector<int> freq(val.size(), 0);
+    vector<long long> ans(m, 0);
+    vector<pair<int, int> > hist;                 // (id, freq before)
+    long long X = 0;
+    auto add = [&](int i) {
+        int v = b[i];
+        hist.push_back(make_pair(v, freq[v]));
+        if (freq[v] >= 1) X ^= val[v];
+        freq[v]++;
+    };
+    auto rollback_to = [&](int hh) {
+        while ((int)hist.size() > hh) {
+            int v = hist.back().first;
+            freq[v] = hist.back().second;
+            hist.pop_back();
+        }
+    };
+    int last = -1, R = -1;
+    for (int qi = 0; qi < m; ++qi) {
+        int l = qs[qi][0], r = qs[qi][1], id = qs[qi][2];
+        int bl = l / B;
+        int be = min(n - 1, (bl + 1) * B - 1);
+        if (bl != last) { rollback_to(0); X = 0; R = be; last = bl; }
+        while (R < r) { R++; add(R); }
+        if (r <= be) {
+            map<int, int> cnt;
+            for (int i = l; i <= r; ++i) cnt[b[i]]++;
+            long long x = 0;
+            for (map<int, int>::iterator it = cnt.begin(); it != cnt.end(); ++it)
+                if (it->second % 2 == 0) x ^= val[it->first];
+            ans[id] = x;
+            continue;
+        }
+        int hh = (int)hist.size(); long long x0 = X;
+        for (int j = be; j >= l; --j) add(j);
+        ans[id] = X;
+        rollback_to(hh); X = x0;
+    }
+    for (int i = 0; i < m; ++i) cout << ans[i] << "\n";
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** `add` XORs the value in only when `freq[v] >= 1` (before incrementing), so the transitions $1 \to 2$, $2 \to 3$, … flip membership while $0 \to 1$ does not — matching "even *and present*". Rollback restores each `freq[v]` from `hist` and then resets $X$ to the saved `x0` in one step, so the fringe leaves no trace on the clean tail. `val` and `ans` are `long long` because $a_i$ reaches $10^{9}$ (XOR needs the full 30-bit value); the frequency table is indexed by compressed id, never by the value itself.
+
+:::
+
+::: {.p-complexity}
+**Rebuild:** $O(n)$ per query, $O(nm)$ — reference only, far past $10^{6}$. **Rollback Mo:** with $B = \sqrt n$, each left-block sweeps $R$ across at most $n$ positions ($O(n)$ adds) and each query adds/rolls back $\le B$ fringe cells; over $n/B$ blocks the total is $O(n \cdot n/B + mB) = O(n\sqrt n)$ $O(1)$-toggle adds, space $O(n)$. At $n, m \le 10^{6}$ this is $\sim 10^{9}$ light operations — the classic rollback-mo target, and why a cheap-`remove` design is avoided entirely.
+:::
+
+::: {.p-edge}
+- Whole query inside one block ($b_r = b_\ell$): no clean tail exists, so it is brute-scanned directly — this branch is why the block size cannot be tiny.
+- A value appearing exactly once: odd, excluded. Appearing $0$ times: never in `cnt`, excluded. Both give the same contribution (none).
+- $a_i$ up to $10^{9}$: XOR operates on the original 30-bit values (`val[id]`), so it must not be done on compressed ids.
+- Rollback must restore **both** `freq` (via `hist`) and $X$; forgetting $X$ after a fringe add is the bug called out in @sec-mo-pit.
+:::
+
+::: {.practice}
+- [CF 868F · Yet Another Minimization Problem](https://codeforces.com/problemset/problem/868/F){rating="2500"} — the equal-pair cost this pattern maintains powers a divide-and-conquer DP there; the canonical rollback-mo judge problem
+- [CF 86D · Powerful array](https://codeforces.com/problemset/problem/86/D){rating="2200"} — the same window with a cheap `remove` available (classic Mo), for contrast (@sec-mo-p1-powerful)
+:::

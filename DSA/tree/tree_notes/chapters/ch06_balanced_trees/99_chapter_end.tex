@@ -1,0 +1,886 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  Chapter 8 review -- the 15-section revision contract (chapter_end.txt).
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\propref/\defref/\exref/\figref/\lemref/\corref.
+%  No derivations.  Summit: LC Hard 493 Reverse Pairs
+%  (a keyed order-statistic treap reads "how many seen keys c satisfy
+%   nums[i] > 2c" on one guaranteed-O(log n) descent -- the balanced
+%   upgrade of Chapter 7's fragile rank walk, with merge/Fenwick rivals).
+% =====================================================================
+
+\chaptersection{Chapter 8 Summary}
+
+Five sections, one sentence: \emph{restore the shape without ever breaking the inorder line}. Chapter~7
+spent the invariant $\text{left}<\text{node}<\text{right}$ to make a tree its own index, but every answer
+cost $\bigO{h}$ and $h$ was not yours to control. This chapter takes the wheel. The rotation view (8.1)
+proves a single local pointer surgery is the \emph{only} legal fix and that it leaves the sorted inorder
+identical; the strict view (8.2) is AVL, which keeps $|\bal|\le1$ and repairs any insertion with $\le2$
+rotations, buying $h\le1.44\,\lg(n+2)$; the randomised view (8.3) is the treap, which trades case-work for a
+coin flip and, via \code{split}/\code{merge}, becomes a dynamic sequence; the pragmatic view (8.4) is
+red-black, whose colour invariants repay Chapter~7's deferred $\bigO{\log n}$ promise for \code{std::set}; and
+the self-adjusting view (8.5) is splay, which stores \emph{nothing} and earns $\bigO{\log n}$ only amortised.
+Every entry below is a pointer, not a re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.25\linewidth} p{0.47\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement (with conditions)} & \textbf{Where} \\
+\midrule
+Height is the whole cost & Every search/insert/delete/rank is $\bigO{h}$; balance means forcing
+  $h=\bigO{\log n}$ \emph{by construction}, whatever the arrival order. & \defref{c06-heightcost} \\
+Rotation preserves inorder & A single left/right rotation re-weights a subtree while the sorted inorder
+  line is \emph{identical} -- the only legal local move. & \thmref{c06-rotation} \\
+Four violation cases & LL and RR need one rotation; LR and RL (a bend) need two -- child first, then
+  anchor. & \defref{c06-rotcases} \\
+AVL invariant & Every node obeys $|\bal(v)|\le1$ with $\bal=\height(L)-\height(R)$; a strict rule,
+  repaired on every edit. & \defref{c06-bal} \\
+AVL height bound & $N(h)=N(h-1)+N(h-2)+1$ (Fibonacci) forces $h\le1.44\,\lg(n+2)$. & \thmref{c06-avlbound} \\
+One-insert repair & After one insertion only the lowest violator on the access path is fixed, in $\le2$
+  rotations, then you stop early. & \thmref{c06-fixheight} \\
+Treap expected height & BST on keys \emph{and} heap on random priorities is $\bigO{\log n}$ tall \emph{in
+  expectation} over the coin flips. & \thmref{c06-exptheight} \\
+Split / merge & \code{split} cuts a treap by key or position, \code{merge} joins two with all-left
+  $<$ all-right; every keyed edit is two calls deep. & \defref{c06-splitmerge}, \lemref{c06-mergevalid} \\
+Implicit keys & Replacing the key by left-subtree size turns a treap into a \emph{dynamic array}: insert,
+  erase, reverse by position. & \propref{c06-implicit} \\
+Red-black invariants & Five colour rules; no two reds stack and all paths share a black-height -- lazier
+  than AVL, cheap to restore. & \defref{c06-rbcolor} \\
+Red-black height & Longest path $\le2\times$ shortest $\Rightarrow h\le2\,\lg(n+1)$: the exact guarantee
+  \propref{c05-logn} promised for \code{set}/\code{map}. & \thmref{c06-rbheight} \\
+Splay amortised & No stored balance; every access rotates to the root. $m$ operations cost
+  $\bigO{(n+m)\log n}$ -- $\bigO{\log n}$ \emph{amortised}, not worst-case. & \thmref{c06-amortized} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter -- rotate, then rebalance by rule, by chance, by colour, or
+by habit.}}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.19\linewidth} l l p{0.29\linewidth} p{0.155\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Time} & \textbf{Memory} & \textbf{When to use (deciding phrase)} & \textbf{Code} \\
+\midrule
+Left / right rotation
+  & $\bigO{1}$ & $\bigO{1}$
+  & ``fix a height violation without touching the sorted line''
+  & \coderef{c06-rotcode} \\
+AVL insert (balance on return)
+  & $\bigO{\log n}$ & $\bigO{\log n}$
+  & ``keep a hand-rolled BST shortest; read-heavy''
+  & \coderef{c06-avlins} \\
+Treap insert/erase via split+merge
+  & $\bigO{\log n}$ exp. & $\bigO{n}$
+  & ``a balanced tree you can actually code cold''
+  & \coderef{c06-split} \\
+Implicit-sequence ops
+  & $\bigO{\log n}$ exp. & $\bigO{n}$
+  & ``insert/reverse/range-sum a sequence by position''
+  & \coderef{c06-imp} \\
+Order-statistic rank (Summit)
+  & $\bigO{\log n}$ exp. & $\bigO{n}$
+  & ``count keys meeting a threshold, online, worst-case fast''
+  & \coderef{c06-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches. It decides \emph{which
+balancing philosophy} the situation asks for -- a follower never hand-rolls a treap when the library
+\code{set} already balances, nor trusts a plain BST when keys arrive sorted.
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You need an ORDERED set/map (or a dynamic sequence). Which balancer?
+  |
+  |-- keys can arrive in sorted / adversarial order and you MUST keep depth ~log n
+  |     +-- never trust a plain BST: its height is the enemy        [8.1, chain C]
+  |     +-- a rotation is the only inorder-preserving local fix      [8.1]
+  |
+  |-- you are implementing the tree yourself, read-heavy, want the shortest tree
+  |     +-- AVL: |BF|<=1 per node, <=2 rotations per insert          [8.2, GFG AVL]
+  |     +-- track balance factors up the path; fix the LOWEST one    [8.2]
+  |
+  |-- you want the simplest correct balanced tree, or you must cut/paste ranges
+  |     +-- treap: BST on keys + heap on random priority             [8.3, LC 307]
+  |     +-- split/merge are the whole toolkit; no rotation cases     [8.3]
+  |
+  |-- it is a SEQUENCE (positions, not values): insert at i, reverse a range
+  |     +-- implicit-key treap; key = left-subtree size              [8.3]
+  |
+  |-- you only need an ordered set/map and can use the library
+  |     +-- std::set / std::map: they ARE red-black, O(log n) proven [8.4]
+  |     +-- but no fast rank -- kth-smallest needs an order-stat tree[8.4, CF 1354D]
+  |
+  |-- hot keys dominate, or you want zero stored bookkeeping
+  |     +-- splay: rotate what you touch to the root, amortised      [8.5]
+  |     +-- dynamic trees / link-cut -> Ch25 [c23]; Cartesian/monotonic -> Ch9 [c26]
+  |
+  +-- the query is a rank / count-under-threshold, online, worst-case O(log n)
+      +-- augment a balanced tree with subtree size (Summit 493), or
+        let an array index do it: Fenwick [c14] / segment tree [c13] / merge split.
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Rotating the wrong way or forgetting a subtree.} A left rotation promotes the \emph{right}
+        child and re-parents that child's left subtree as the old root's right; mirror for right. Dropping
+        the moved subtree $B$ silently deletes keys (\thmref{c06-rotation}, \coderef{c06-rotcode}).
+  \item \textbf{Not updating heights bottom-up after a rotation.} Recompute the \emph{old} root first, then
+        its new parent -- in that order -- or a stale height mislabels the very balance factor you are about
+        to read (\coderef{c06-avlrot}).
+  \item \textbf{Treating LR/RL like LL/RR.} When the heavy child leans the \emph{opposite} way, one rotation
+        only converts the bend into a line; you must rotate the child first. Check the grandchild's balance
+        factor (\defref{c06-rotcases}, \figref{c06-zigzag}).
+  \item \textbf{Rotating at the highest violator on insertion.} Only the \emph{lowest} node with
+        $|\bal|=2$ needs a turn; after it, the subtree height is restored and every ancestor is already fine
+        -- fix once and stop (\thmref{c06-fixheight}).
+  \item \textbf{Breaking \code{merge}'s precondition.} \code{merge(a,b)} is only valid when every key in $a$
+        precedes every key in $b$; call it on two arbitrary treaps and the result is not a BST
+        (\lemref{c06-mergevalid}).
+  \item \textbf{Splitting an implicit treap by value.} With implicit keys the number you pass to \code{split}
+        is a \emph{position} count compared against $\mathit{size}(\text{left})$, not a stored key
+        (\propref{c06-implicit}).
+  \item \textbf{Assuming \code{std::set} answers ``$k$th smallest'' fast.} A red-black \code{set} exposes
+        \code{lower\_bound} in $\bigO{\log n}$ but rank in $\bigO{n}$; you must augment or switch to a
+        Fenwick/order-stat tree (\thmref{c06-rbheight}, practice CF 1354D).
+  \item \textbf{Splaying by rotating $x$ up one level at a time.} The naive single-step splay is
+        $\bigO{n}$ \emph{every} access; the amortised bound needs zig-zig to rotate the \emph{grandparent}
+        first (\defref{c06-zigzig}, \thmref{c06-amortized}).
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled. Diagnose top-down -- every
+leaf names the training problem.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=58mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 6mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=1mm of verdict] (tle) {\textbf{TLE}};
+  \node[b, below left=8mm and 1mm of verdict, xshift=30mm] (re) {\textbf{RE}};
+  \node[b, below right=8mm and 6mm of verdict] (mle) {\textbf{MLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {a rotation drops the moved subtree $B$ and loses keys (\thmref{c06-rotation}); LR done as a single
+     turn (\defref{c06-rotcases}); \code{merge} called on treaps that are not all-left-before-all-right
+     (\lemref{c06-mergevalid}); implicit split compares a value instead of $\mathit{size}(\text{left})$
+     (\propref{c06-implicit})};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {a plain BST fed sorted keys -- the chain $C$ again, $\bigO{n}$ per descent (\defref{c06-heightcost},
+     \figref{c06-chain}); the naive rotate-one-level splay, $\bigO{n}$ per access (\thmref{c06-amortized});
+     the Summit on a fragile unbalanced rank tree is $\bigO{n^2}$ (\probref{c06-summit})};
+  \node[l, below right=1mm and 2mm of re.south] (re1)
+    {dereferencing a null child in a rotation before the base case; stale height reads after forgetting
+     \code{upd} bottom-up (\coderef{c06-avlrot}); 32-bit overflow in a $2\cdot$-threshold compare
+     (\probref{c06-summit})};
+  \node[l, below right=1mm and 2mm of mle.south] (mle1)
+    {recursion depth on a treap whose priorities were a bad draw -- fixed by a fresh random seed
+     (\thmref{c06-exptheight}); leaking split/merge temporaries in a range-reverse loop (\coderef{c06-imp})};
+  \draw[flow] (verdict) -- (wa); \draw[flow] (verdict) -- (tle);
+  \draw[flow] (verdict) -- (re); \draw[flow] (verdict) -- (mle);
+  \draw[flow] (wa) -- (wa1); \draw[flow] (tle) -- (tle1);
+  \draw[flow] (re) -- (re1); \draw[flow] (mle) -- (mle1);
+\end{tikzpicture}
+\caption*{Chapter~8 verdict tree -- only the failures this chapter's problems can produce.}
+\end{figure}
+
+\medskip
+\noindent Backup table (same content, terse):
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llp{0.42\linewidth}l@{}}
+\toprule
+\textbf{Verdict} & \textbf{Usual cause} & \textbf{One-line fix} & \textbf{Trained in} \\
+\midrule
+WA  & rotation drops subtree $B$   & re-parent $B$ before re-attaching  & \thmref{c06-rotation} \\
+WA  & LR treated as LL/RR          & rotate the child first, then anchor & \defref{c06-rotcases} \\
+WA  & bad \code{merge} inputs      & only merge when all $a$ keys precede $b$ & \lemref{c06-mergevalid} \\
+TLE & sorted feed, plain BST       & balance by construction (AVL/treap) & \figref{c06-chain} \\
+TLE & Summit on fragile rank tree  & balance the tree, or Fenwick/merge & \probref{c06-summit} \\
+RE  & stale height after rotation  & \code{upd} old root then new parent & \coderef{c06-avlrot} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 8 at a glance]
+\textbf{One move, four policies.} The rotation is the only inorder-preserving local repair
+(\thmref{c06-rotation}); AVL, treap, red-black and splay are simply \emph{when to rotate and how much to
+care}. Keeping $h=\bigO{\log n}$ is the whole point -- every Chapter-7 descent is then guaranteed fast
+(\defref{c06-heightcost}).
+
+\medskip
+\textbf{Two repair orders.} \emph{AVL}: walk heights up, fix the lowest $|\bal|=2$ in $\le2$ rotations,
+stop (\thmref{c06-fixheight}). \emph{Red-black}: recolour when the uncle is red, rotate when it is black --
+mostly flips, at most two turns (\defref{c06-rbcolor}, \figref{c06-rbfix}).
+
+\medskip
+\textbf{Three running objects.} The chain $C$ (keys $1,\dots,7$ ascending, height $6$) is the villain; its
+balanced twin has height $2$ (\figref{c06-chain}). The zig-zag $Z$ ($30,10,40,20,25$) forces the LR double
+rotation (\figref{c06-zigzag}). The same keys as a treap under random priorities are short \emph{in
+expectation} (\thmref{c06-exptheight}).
+
+\medskip
+\textbf{The payoff.} A controlled height makes augmentation \emph{safe}: a size-augmented keyed treap reads
+an order statistic in guaranteed $\bigO{\log n}$, the honest upgrade of Chapter~7's fragile rank walk -- the
+Summit (\probref{c06-summit}) is that upgrade at LC Hard scale.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 8 code kit: the rotation, AVL balance and insert, treap merge and split, an implicit split, and an order-statistic rank}, label={lst:c06-kit}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Node { int key, pri, sz, ht; Node *l, *r;
+  Node(int k) : key(k), pri(rand()), sz(1), ht(0), l(nullptr), r(nullptr) {} };
+
+// (1) The atomic move -- left about x, right about y.                      [8.1]
+Node* rotateLeft(Node* x){ Node* y = x->r; x->r = y->l; y->l = x; upd(x); upd(y); return y; }
+Node* rotateRight(Node* y){ Node* x = y->l; y->l = x->r; x->r = y; upd(y); upd(x); return x; }
+
+// (2) AVL balance -- four cases, at most two rotations.                    [8.2]
+int H(Node* n){ return n ? n->ht : -1; }
+void upd(Node* n){ n->ht = 1 + max(H(n->l), H(n->r)); }
+int BF(Node* n){ return H(n->l) - H(n->r); }
+Node* balance(Node* n){ upd(n);
+  if (BF(n)==2){ if (BF(n->l)<0) n->l=rotateLeft(n->l); return rotateRight(n); }
+  if (BF(n)==-2){ if (BF(n->r)>0) n->r=rotateRight(n->r); return rotateLeft(n); }
+  return n; }
+// (3) AVL insert -- Ch7 plant, then balance on the way back up.            [8.2]
+Node* insert(Node* n, int k){ if(!n) return new Node(k);
+  if(k<n->key) n->l=insert(n->l,k); else if(k>n->key) n->r=insert(n->r,k);
+  return balance(n); }
+
+// (4) Treap merge / split -- rotation-free rebalancing.                    [8.3]
+int SZ(Node* t){ return t ? t->sz : 0; }
+Node* merge(Node* a, Node* b){ if(!a) return b; if(!b) return a;
+  if(a->pri > b->pri){ a->r=merge(a->r,b); t_upd(a); return a; }
+  else               { b->l=merge(a,b->l); t_upd(b); return b; } }
+void splitPos(Node* t, int cnt, Node*& a, Node*& b){    // a = first cnt positions
+  if(!t){ a=b=nullptr; return; }
+  if(SZ(t->l)>=cnt){ splitPos(t->l,cnt,a,t->l); b=t; t_upd(b); }
+  else             { splitPos(t->r,cnt-SZ(t->l)-1,t->r,b); a=t; t_upd(a); } }
+// (5) Order-statistic rank on a keyed treap -- count keys c with 2c < x.   [Summit]
+int countSmallerHalf(Node* t, long long x){ int res=0;
+  while(t){ if(2LL*t->key < x){ res += 1 + SZ(t->l); t=t->r; } else t=t->l; } return res; }
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter. Cover the key line,
+reproduce it from memory, then check the answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- the left rotation (from \coderef{c06-rotcode})}]
+Node* y = x->right;
+x->right = /* FILL: y->left */;   // subtree B moves under x
+y->left  = x;                      // x becomes y's left child
+upd(x); /* FILL: upd(y) */;        // old root first, then its new parent
+return y;                          // y is the new subtree root
+\end{lstlisting}
+\noindent{\scriptsize Key: the rotation re-parents exactly one subtree ($B$) and must refresh the
+\emph{changed} node's height before its parent's -- the inorder line never moves (\thmref{c06-rotation}).}
+
+\begin{lstlisting}[caption={Drill 2 -- AVL four-case balance (from \coderef{c06-avlrot})}]
+Node* balance(Node* n){ upd(n);
+  if (BF(n) == 2) { if (/* FILL: BF(n->left) < 0 */) n->left = rotateLeft(n->left);
+                    return rotateRight(n); }
+  if (BF(n) == -2){ if (BF(n->right) > 0) n->right = /* FILL: rotateRight(n->right) */;
+                    return rotateLeft(n); }
+  return n; }
+\end{lstlisting}
+\noindent{\scriptsize Key: heavy child leaning the \emph{other} way is the LR/RL bend -- rotate the child
+first to make a line, then the anchor (\defref{c06-rotcases}, \thmref{c06-fixheight}).}
+
+\begin{lstlisting}[caption={Drill 3 -- AVL insert (from \coderef{c06-avlins})}]
+if (n == nullptr) return new Node(key);         // plant, exactly as Ch 7
+if (key < n->key)      n->left  = insert(n->left,  key);
+else if (key > n->key) n->right = insert(n->right, key);
+else                   return n;                // distinct keys: no re-insert
+return /* FILL: balance(n) */;                  // fix THIS node on the return path
+\end{lstlisting}
+\noindent{\scriptsize Key: the only new line is the \code{balance} call on the way back up; the descent and
+the plant are Chapter~7 verbatim (\secref{c06-avl}).}
+
+\begin{lstlisting}[caption={Drill 4 -- treap merge (from \coderef{c06-treap})}]
+// precondition: every key in a precedes every key in b
+if (!a) return b;  if (!b) return a;
+if (a->pri > b->pri) { a->r = /* FILL: merge(a->r, b) */; upd(a); return a; }
+else                 { b->l = merge(a, b->l);           upd(b); return b; }
+\end{lstlisting}
+\noindent{\scriptsize Key: the higher-priority node is the root; recurse down its right (or the other's
+left) spine. No rotation ever -- the priorities \emph{are} the shape (\thmref{c06-exptheight}).}
+
+\begin{lstlisting}[caption={Drill 5 -- implicit split by position (from \coderef{c06-split})}]
+void splitPos(Node* t, int cnt, Node*& a, Node*& b){   // a = first cnt positions
+    if (!t){ a = b = nullptr; return; }
+    if (SZ(t->l) >= cnt) { splitPos(t->l, cnt, a, t->l); /* FILL: b = t */; upd(b); }
+    else { splitPos(t->r, cnt - SZ(t->l) - 1, t->r, b); a = t; upd(a); }
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: compare the \emph{position} count to $\mathit{size}(\text{left})$, not to any
+key -- that single swap makes a treap a dynamic array (\propref{c06-implicit}).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 3 fully solved in-section, 5 practice, one Summit, five mixed.
+Tick \emph{only} after an unaided solve; a hinted attempt counts as half. Cite by name and number --
+URLs appear once, in the solved and practice entries.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.24\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 8.1 -- why balance; the rotation}} \\
+W8.1.1 & Tree Construction & CF 675D & \lv{4} set \code{lower\_bound} parent & pick the \emph{later} of succ/pred; $-1$ root & $\square$ \\
+P8.1.2 & Balance a BST & LC 1382 & \lv{3} inorder $\to$ rebuild from middle & sorted line becomes a tree by halving & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 8.2 -- AVL trees}} \\
+W8.2.1 & AVL Tree Insertion & GFG & \lv{4} balance on return + preorder & update heights bottom-up; fix lowest violator & $\square$ \\
+P8.2.2 & AVL Tree Deletion & GFG & \lv{4} three-case delete + rebalance up & deletion may need rotations at \emph{several} levels & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 8.3 -- treaps, split/merge, implicit keys}} \\
+W8.3.1 & Range Sum Query -- Mutable & LC 307 & \lv{3} implicit sum-augmented treap & split to width 1 to write; read $\mathit{sum}$ of the middle & $\square$ \\
+P8.3.2 & Subarray Sum Queries & CSES 1190 & \lv{3} point-update range-max & treap or segment tree; max needs the right merge rule & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Sections 8.4--8.5 -- red-black (use) and splay (intro)}} \\
+P8.4.1 & Multiset & CF 1354D & \lv{3} order statistic by value & $k$th smallest needs a count, not a \code{set} descent & $\square$ \\
+P8.5.2 & Water Tree & CF 343D & \lv{5} subtree fill / path flush / query & splay or Euler-tour $+$ segtree; path-to-root is the hard part & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+S8 & Reverse Pairs & LC 493 & \lv{5} keyed treap rank $2c<x$ & right-to-left, count seen under threshold; mind $2\cdot$ overflow & $\square$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day 1 fixes the rotation as the one legal move; day 2 the AVL insert cold; day 3 the
+treap and its split/merge engine; day 4 the two \emph{reading} sections (red-black guarantee, splay
+amortisation); day 5 the Summit. Solve in this order even where it differs from section order -- each
+day's tool is already in hand the day before.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 8.1 & rotate the head triple of $C$ by hand (\exref{c06-rot-run}); resolve $Z$'s LR case; CF 675D \\
+2 & Read + do 8.2 & insert $1,\dots,7$ eagerly on $C$, then $Z$ (\exref{c06-avl-run}); GFG AVL insertion; write \code{balance} cold \\
+3 & Read + do 8.3 & draw the treap on $C$ with lucky priorities, split/merge $Z$ (\exref{c06-treap-run}); LC 307; CSES 1190 \\
+4 & Read + do 8.4--8.5 & colour the chain $C$ red-black (\exref{c06-rb-run}); splay the deep end of $C$ (\exref{c06-splay-run}); CF 1354D \\
+5 & Summit + revise & LC 493 with the keyed-treap rank; walk the decision flowchart on five questions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks, not just a rating
+bucket.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.36\linewidth}p{0.34\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+$\lv{2}$ \ $\bigstar\bigstar$
+  & rotate $C$ and $Z$ by hand
+  & you see the rotation as the only inorder-preserving move and never drop subtree $B$ \\
+$\lv{3}$ \ $\bigstar\bigstar\bigstar$
+  & LC 1382, LC 307, CSES 1190
+  & rebuild balanced from the sorted line; drive a sequence with \code{split}/\code{merge} \\
+$\lv{4}$ \ $\bigstar\bigstar\bigstar\bigstar$
+  & CF 675D, GFG AVL insert, GFG AVL delete, CF 1354D
+  & code AVL cold; reason about the \code{set} guarantee and its missing rank \\
+$\lv{5}$ \ $\bigstar\bigstar\bigstar\bigstar\bigstar$
+  & CF 343D, LC 493 (Summit)
+  & exploit a controlled height for online rank; see the fragile BST become quadratic \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+Balance is a disguise; each line collapses a family onto the one idea -- \emph{keep the descent short by
+construction, then spend it}. No new theory -- just where the rotation is already hiding.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``insert keys that may arrive sorted; the tree must stay fast'' (chain $C$) $\longrightarrow$
+        a balancing policy, not a smarter search (\defref{c06-heightcost}, \figref{c06-chain}).
+  \item ``fix a height violation'' $\longrightarrow$ one rotation on the lowest violator, child-first if it
+        bends (\thmref{c06-rotation}, \defref{c06-rotcases}).
+  \item ``implement an AVL tree'' (GFG) $\longrightarrow$ Chapter 7's insert with a \code{balance} call on
+        the return path (\coderef{c06-avlins}, \probref{c06-avl}).
+  \item ``rebuild a \emph{balanced} BST from a BST'' (LC 1382) $\longrightarrow$ its inorder, then halve --
+        the sorted line becomes the tree (\secref{c06-rotations}).
+  \item ``mutate an element, re-sum a range, online'' (LC 307) $\longrightarrow$ an implicit, sum-augmented
+        treap: split out the position, rewrite, merge back (\propref{c06-implicit}, \probref{c06-rpmq}).
+  \item ``point update, range max'' (CSES 1190) $\longrightarrow$ the same split/merge engine with a
+        different aggregate -- or a segment tree (\chref{c13}).
+  \item ``the $k$-th smallest, online, worst-case fast'' (CF 1354D) $\longrightarrow$ a size-\emph{count}
+        over values; a red-black \code{set} alone will not do it (\thmref{c06-rbheight}).
+  \item ``fill a subtree, flush a path to the root'' (CF 343D) $\longrightarrow$ splay the node up, or
+        Euler-tour the tree and range-update a segtree (\secref{c06-splay}, \chref{c24}).
+  \item ``count pairs $i<j$ with $a_i>2a_j$'' (LC 493) $\longrightarrow$ a right-to-left online rank on a
+        balanced keyed treap -- the guaranteed form of Chapter 7's fragile walk (\probref{c05-summit},
+        \probref{c06-summit}).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+These refuse to name their balancer; decide \emph{which structure keeps the descent short enough} before
+opening the code. A hint tells you the shape of the answer, never the tool.
+
+\begin{mixedset}
+  \practice{Second Order Statistics}{Codeforces 22A}
+    {https://codeforces.com/problemset/problem/22/A}{CF 800 · L2}
+    {Print the second \emph{distinct} smallest key. A \code{std::set} sorts and de-duplicates on the way
+    in, so the answer is the second element -- one \code{begin()} step. The lesson this chapter taught you
+    to distrust: a \emph{hand}-rolled BST on sorted-feeling input can rot into a chain, but the red-black
+    \code{set} is short by construction (\thmref{c06-rbheight}). Two lines, no rotation.}
+  \practice{Sliding Window Median}{CSES 1076}
+    {https://cses.fi/problemset/task/1076}{CSES · L4}
+    {Median of every length-$k$ window, sliding by one. Two \code{multiset}s held as a lower/upper pair
+    with a size invariant is the classic balance -- the same ``keep two halves within one of each other''
+    discipline as AVL's $|\bal|\le1$, but on containers (\secref{c06-avl}). Insert, evict, and \emph{rebalance
+    the split} so the sizes differ by at most one; the median is the top of the lower half.}
+  \practice{Sliding Cost}{CSES 1077}
+    {https://cses.fi/problemset/task/1077}{CSES · L4}
+    {Total cost to move every window element to the median, summed over windows. Get the median as in
+    CSES 1076, then need the \emph{sum} of each half too -- a size-and-sum-augmented structure, exactly the
+    augmentation that makes an implicit treap answer range sums (\propref{c06-implicit}). Or keep an order
+    statistic over values with a Fenwick pair (\chref{c14}): rank \emph{and} prefix sum, both logarithmic.}
+  \practice{Find Median from Data Stream}{LeetCode 295}
+    {https://leetcode.com/problems/find-median-from-data-stream/}{LC Hard L4}
+    {Online: add a number, report the running median. Two heaps (a max-heap low, min-heap high) with a
+    size invariant is the intended $\bigO{\log n}$ answer and needs no balance -- but notice it answers only
+    \emph{median}, not arbitrary rank. A keyed treap with subtree sizes answers \emph{any} $k$th smallest
+    online; that guaranteed-height augmentation is the Chapter-8 generalisation of this classic
+    (\probref{c06-rpmq} is the same engine with a different aggregate).}
+  \practice{Sequentially Ordinal Rank Tracker}{LeetCode 2102}
+    {https://leetcode.com/problems/sequentially-ordinal-rank-tracker/}{LC Hard L5}
+    {Add scenic spots, then ask for the $k$-th by a \emph{composite} score. This is a pure order-statistic
+    query over a changing set -- a red-black \code{set} cannot answer rank fast (\thmref{c06-rbheight}), so
+    you need a size-augmented balanced tree keyed by the score pair, or a Fenwick over compressed scores
+    (\chref{c14}). Ordering spots is the treap's heap-on-priority idea wearing a comparator; read the
+    $k$th with the same left-size descent as the Summit (\probref{c06-summit}).}
+  \practice{Count of Range Sum}{LeetCode 327}
+    {https://leetcode.com/problems/count-of-range-sum/}{LC Hard L4}
+    {A subarray sum is a difference of two prefix sums, so count pairs inside the
+    window as you walk: keep earlier prefixes in an order-statistic structure and
+    query the rank of $[p-\mathit{upper},\,p-\mathit{lower}]$ twice per prefix --
+    the same augmentation the Summit reads in one descent (\probref{c06-summit}).}
+  \practice{My Calendar III}{LeetCode 732}
+    {https://leetcode.com/problems/my-calendar-iii/}{LC Hard L4}
+    {Book every event and report the current maximum $k$-overlap: stamp $+1$ and
+    $-1$ at the two endpoints of an ordered \code{map} keyed by time and take the
+    best running prefix sum -- the \code{map} does the ordering for you
+    (\secref{c06-avl}), no rotations in sight.}
+  \practice{Longest Continuous Subarray With Absolute Diff Less Than or Equal to Limit}{LeetCode 1438}
+    {https://leetcode.com/problems/longest-continuous-subarray-with-absolute-diff-less-than-or-equal-to-limit/}{LC Medium L3}
+    {A window is legal while its max minus its min fits the limit: two monotone
+    deques ride along holding exactly those extremes -- the rank-free cousin of
+    \probref{c06-rpmq}'s ordered container, shrinking from the left by what the
+    deque heads say.}
+  \practice{Count Integers in Intervals}{LeetCode 2276}
+    {https://leetcode.com/problems/count-integers-in-intervals/}{LC Hard L5}
+    {Add ranges, then ask how many covered points a query range holds: keep the
+    disjoint intervals in an ordered structure \emph{augmented} with the covered
+    length of each node's span -- \propref{c06-implicit}'s store-more-than-keys
+    move aimed at ranges instead of ranks.}
+  \practice{Number of Flowers in Full Bloom}{LeetCode 2251}
+    {https://leetcode.com/problems/number-of-flowers-in-full-bloom/}{LC Hard L4}
+    {How many flowers are alive at each asked time: sort the start and end events
+    and walk the queries in key order with two cursors and a running count --
+    before building anything, ask which ordered structure you are simulating;
+    online, that question is \probref{c06-rpmq}'s.}
+\end{mixedset}
+
+\chaptersection{The Summit -- LC 493 Reverse Pairs}
+
+\begin{notebox}[Why this is the chapter's top rope]
+Chapter~7's Summit (LC 315) asked, for every element, ``how many keys already in my tree are strictly
+smaller?'' -- a \emph{rank} read off a size-augmented BST in one $\bigO{h}$ descent, correct but
+$\bigO{n^2}$ on sorted input, the cliffhanger this whole chapter exists to retire. Reverse Pairs is the
+same online rank with a twist: count $i<j$ with $\mathit{nums}[i]>2\cdot\mathit{nums}[j]$. Process
+right-to-left and it is again ``how many already-seen keys $c$ satisfy $2c<\mathit{nums}[i]$,'' a rank
+query with a $2\cdot$-threshold -- so you still descend a size-augmented tree, but now \emph{the height must
+be yours}. On a plain BST a sorted feed is a chain and the $\bigO{nh}$ collapses to $\bigO{n^2}$; on a keyed
+treap the height is $\bigO{\log n}$ \emph{in expectation by construction}, so the identical algorithm becomes
+$\bigO{n\log n}$. That is the chapter's thesis in one problem: \emph{the augmentation is not the win -- the
+controlled height is}. Merge-sort and a Fenwick tree reach the same $\bigO{n\log n}$ by refusing to let a
+descent's length depend on input order at all (\chref{c01}, \chref{c14}).
+\end{notebox}
+
+\solvedproblem{c06-summit}{Reverse Pairs}{LeetCode 493}
+  {https://leetcode.com/problems/reverse-pairs/}{LC Hard L5}
+  {right-to-left online rank, keyed order-statistic treap, count seen values under a 2x threshold, height control vs the fragile BST}
+
+\begin{problemstatement}[Reverse Pairs]
+Given an integer array \code{nums}, return the number of \term{reverse pairs}: pairs $(i,j)$ with
+$i<j$ and $\mathit{nums}[i] > 2\cdot\mathit{nums}[j]$. $1\le n\le 5\cdot 10^{4}$ and
+$-2^{31}\le \mathit{nums}[i]\le 2^{31}-1$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 45 minutes]
+A fair first attempt is the $\bigO{n^2}$ double loop (for each $i$, count $j>i$ with
+$\mathit{nums}[i]>2\mathit{nums}[j]$) -- correct, times out. The upgrade is to keep the ``seen to the
+right'' in a \emph{balanced, size-augmented} structure and ask its rank under the doubled threshold.
+\peek{Read the array right-to-left so everything you have already inserted lies to the \emph{right} of the
+current index. If those values lived in a size-augmented tree, what exactly must each node let you count
+when you want ``how many stored keys $c$ satisfy $2c<\mathit{nums}[i]$?''}
+\nudge{At a node with key $c$: if $2c<\mathit{nums}[i]$, then that node \emph{and its whole left subtree}
+(all keys $\le c$) satisfy the test -- add $1+\mathit{size}(\text{left})$ and step right; otherwise step
+left. This is \propref{c05-kth}'s rank descent with the comparison changed from $c<x$ to $2c<x$; using a
+\emph{treap} keyed by $c$ keeps the descent $\bigO{\log n}$ instead of $\bigO{n}$.}
+\fullhint{Insert values right-to-left into a keyed treap whose nodes store $\mathit{size}$. For the current
+$x=\mathit{nums}[i]$ call \code{countSmaller(root, x)}: walk down, and when $2\cdot$\code{node.key}$<x$ add
+$1+\mathit{size}(\text{node.left})$ and go right, else go left; accumulate into \code{ans}. Then
+\code{splitKey} at $x$ and merge the fresh node back in. Every comparison must use \code{long long} because
+$\mathit{nums}[j]$ can be $-2^{31}$. Total $\bigO{n\log n}$ expected, immune to input order. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+The naive loop is $\bigO{n^2}$. The reduction is to an \emph{online rank}: read the array right-to-left so
+the running structure holds precisely the elements after index $i$, then $\mathit{count}=|\{j>i:
+\mathit{nums}[i]>2\mathit{nums}[j]\}|$ is ``how many stored keys $c$ have $2c<\mathit{nums}[i]$.'' Chapter~7
+answered the $c<x$ version with a size-augmented BST and paid $\bigO{n^2}$ when the input was sorted, because
+that descent's length is the tree's height and the height was not controlled. Here we change only one thing:
+make the height logarithmic \emph{by construction} -- a keyed treap (\thmref{c06-exptheight}) -- and the
+identical rank descent becomes $\bigO{\log n}$, hence the whole pass $\bigO{n\log n}$. That single swap from
+``hope the input is random'' to ``guarantee the height'' is the entire chapter distilled.
+
+\solstep{Key Observations}
+\begin{observation}
+Right-to-left processing makes the stored multiset exactly $\{\mathit{nums}[j]:j>i\}$, so a rank query on it
+counts reverse pairs with first endpoint $i$. Summing over $i$ is the answer.
+\end{observation}
+\begin{observation}
+The rank test is $2c<\mathit{nums}[i]$, a monotone predicate in the key $c$: if it holds at a node it holds
+for that node's whole left subtree (all keys $\le c$), so a size-augmented descent accumulates
+$1+\mathit{size}(\text{left})$ and steps right -- the mirror of \propref{c05-kth} with a doubled comparison
+(\defref{c06-heightcost}).
+\end{observation}
+\begin{observation}
+Using a \emph{treap} keyed by value keeps the descent expected $\bigO{\log n}$ no matter the arrival order
+(\thmref{c06-exptheight}); the fragile plain-BST version of this exact algorithm is the $\bigO{n^2}$
+Chapter~7 Summit (\probref{c05-summit}). $2\mathit{nums}[j]$ overflows 32-bit at the endpoints -- every
+comparison is in \code{long long}.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Sort a copy and binary-search each element for its doubled rank.}
+{A static sort gives rank among \emph{all} elements, but you need rank among those \emph{to the right}.
+The query is inherently online -- you must insert incrementally, and reading rank must be fast \emph{and}
+correct after every insert.}
+\deadend{Keep seen values in a sorted \code{vector} and \code{lower\_bound} $x/2$.}
+{Reading is $\bigO{\log n}$ but \emph{inserting} into a vector is $\bigO{n}$ -- one quadratic traded for
+another, exactly the trap in Chapter~7's Summit. You need insert \emph{and} rank both logarithmic, which a
+balanced tree gives.}
+\aha{A keyed, size-augmented \emph{treap}: one descent per element both routes the insert (split/merge) and
+reads ``how many stored keys satisfy $2c<x$'' by summing left sizes while stepping right. The height is
+$\bigO{\log n}$ by construction, so the whole pass is $\bigO{n\log n}$ -- the guaranteed upgrade of the
+fragile BST of \probref{c05-summit}.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{2} double loop & test every pair $(i,j)$ & $O(n^2)$ & \tle \\
+2 & \lv{3} size-augmented \emph{plain} BST & Chapter 7's rank walk, doubled test & $O(n\,h)$ & \tle\ on sorted \\
+3 & \lv{5} keyed order-statistic \emph{treap} & same rank, height guaranteed & $O(n\log n)$ exp & \ac \\
+4 & \lv{5} merge-sort split / Fenwick & count cross pairs, or index the rank & $O(n\log n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 is the honest Chapter-7 answer and its verdict is ``correct, elegant, worst-case quadratic'' -- the
+problem this chapter was written to solve. Rung 3 is \emph{this} chapter's solution: the identical algorithm,
+but the treap's \thmref{c06-exptheight} makes the descent logarithmic. Rung 4 leaves the pointer world behind
+-- merge counting (\chref{c01}) and a Fenwick over coordinate-compressed values (\chref{c14}) both hit
+$\bigO{n\log n}$ worst case because an array index cannot rot.
+
+\solstep{Solution}
+Process \code{nums} from the last element to the first, keeping a keyed treap whose nodes store the number
+of nodes in their subtree ($\mathit{size}$). For the current value $x$, call \code{countSmaller(root, x)}:
+descend the treap as a BST; at each node with key $c$, if $2c<x$ then $c$ and its whole left subtree qualify,
+so add $1+\mathit{size}(\text{left})$ and step right, otherwise step left. Add the returned count to
+\code{ans}. Then insert $x$: \code{splitKey} the treap into keys $<x$ and keys $\ge x$, and
+\code{merge} in a fresh node. Duplicates live as separate nodes, so sizes count occurrences. Every threshold
+comparison uses \code{long long}. (Rung 4 gives the guaranteed-$\bigO{n\log n}$ merge and Fenwick variants.)
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The treap rank equals the count of right-side elements under the doubled threshold]
+\emph{Invariant:} before handling index $i$, the treap holds exactly the values $\mathit{nums}[j]$ for
+$j>i$, and each node's $\mathit{size}$ equals the number of nodes in its subtree (maintained by the
+\code{upd} on every split and merge, \lemref{c06-mergevalid}). Consider \code{countSmaller(root, x)} with
+$x=\mathit{nums}[i]$. By the BST invariant, a node's left subtree holds keys $\le$ the node key. When the
+descent is at a node with key $c$ and $2c<x$, every key $c'$ in that node's left subtree satisfies
+$c'\le c$, hence $2c'\le 2c<x$ -- so the node and its entire left subtree (exactly
+$1+\mathit{size}(\text{left})$ stored keys) qualify, and they are all disjoint from the right subtree, which
+the descent then explores for further qualifiers. When $2c\ge x$, the node and its right subtree (keys $\ge
+c$) all fail, so the only qualifiers lie in the left subtree, which the descent enters. The two branches
+therefore count, without duplication or omission, precisely the stored keys $c$ with $2c<x$. By the
+invariant those are exactly the indices $j>i$ with $2\mathit{nums}[j]<\mathit{nums}[i]$, i.e.\ the reverse
+pairs whose first endpoint is $i$. Summing over $i$ from $n-1$ down to $0$ counts every reverse pair exactly
+once. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Reverse Pairs -- keyed, size-augmented treap with a 2x-threshold rank (LeetCode 493; O(n log n) expected)}, label={lst:c06-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+mt19937 rng(chrono::steady_clock::now().time_since_epoch().count());
+struct Node { int key, pri, sz; Node *l, *r;
+    Node(int k) : key(k), pri(rng()), sz(1), l(nullptr), r(nullptr) {} };
+int  SZ(Node* t){ return t ? t->sz : 0; }
+void upd(Node* t){ if (t) t->sz = 1 + SZ(t->l) + SZ(t->r); }
+
+Node* merge(Node* a, Node* b){                 // all keys in a <= all keys in b
+    if (!a) return b; if (!b) return a;
+    if (a->pri > b->pri){ a->r = merge(a->r, b); upd(a); return a; }
+    else                { b->l = merge(a, b->l); upd(b); return b; }
+}
+void splitKey(Node* t, int k, Node*& a, Node*& b){   // a: keys < k, b: keys >= k
+    if (!t){ a = b = nullptr; return; }
+    if (t->key < k){ a = t; splitKey(t->r, k, t->r, b); upd(a); }
+    else           { b = t; splitKey(t->l, k, a, t->l); upd(b); }
+}
+// count stored keys c with 2*c < x  (== x > 2*c), one guaranteed-log descent
+int countSmaller(Node* t, long long x){
+    int res = 0;
+    while (t){
+        if (2LL * t->key < x){ res += 1 + SZ(t->l); t = t->r; }   // node + left subtree qualify
+        else                 { t = t->l; }                          // only the left subtree can qualify
+    }
+    return res;
+}
+class Solution {
+public:
+    int reversePairs(vector<int>& nums){
+        Node* root = nullptr; long long ans = 0;
+        for (int i = (int)nums.size() - 1; i >= 0; --i){
+            ans += countSmaller(root, nums[i]);           // seen j>i with nums[i] > 2*nums[j]
+            Node *a, *b;
+            splitKey(root, nums[i], a, b);
+            root = merge(merge(a, new Node(nums[i])), b); // insert nums[i]
+        }
+        return (int)ans;
+    }
+};
+\end{lstlisting}
+\begin{notebox}[The rung-4 guaranteed answers, for the record]
+\textbf{Merge sort:} recurse on both halves, then before merging count cross pairs -- both halves are
+sorted, so for each right value advance a left pointer while $\mathit{nums}[i]\le 2\mathit{nums}[j]$ and add
+the leftover left count. Counting uses the doubled test, merging the raw values: $\bigO{n\log n}$ worst case
+(\chref{c01}). \textbf{Fenwick:} coordinate-compress all $\mathit{nums}$ and their doubles; scan
+right-to-left, \code{ans += query(rank(nums[i])-1)} over the keys already present, then add one at
+$\mathit{rank}(2\mathit{nums}[i])$. Each update/query is $\bigO{\log n}$, immune to input order
+(\chref{c14}). Both sidestep the tree entirely -- the same robustness the treap buys with rotations-by-chance.
+\end{notebox}
+
+\solstep{Trace}
+\begin{tracebox}[Official example one -- nums equal to 1, 3, 2, 3, 1]
+Process right-to-left; the running tree holds the seen keys, \code{countSmaller} returns those with $2c<x$.
+\begin{itemize}[nosep,leftmargin=1.3em]
+  \item $i=4$, $x=1$: tree empty $\Rightarrow$ \code{countSmaller}$=0$; insert $1$. \checkmark
+  \item $i=3$, $x=3$: at key $1$, $2\cdot1=2<3$ so add $1+\mathit{SZ}(nil)=1$; go right (null). count $=1$;
+        insert $3$. \checkmark (only the trailing $1$ pairs with this $3$).
+  \item $i=2$, $x=2$: keys $\{1,3\}$. $2\cdot1=2<2$? no $\Rightarrow$ go left off node $1$, no more; count
+        $=0$; insert $2$. \checkmark
+  \item $i=1$, $x=3$: keys $\{1,2,3\}$. $2\cdot1=2<3$ add $1$; up to key $2$: $2\cdot2=4<3$? no $\Rightarrow$
+        its left offers nothing further; count $=1$; insert $3$. \checkmark
+  \item $i=0$, $x=1$: need $2c<1$ $\Rightarrow$ none; count $=0$. \checkmark
+\end{itemize}
+Total $0+1+0+1+0=2$ -- matches the reference \checkmark, the two pairs being $(1,4)$ and $(3,4)$.
+\end{tracebox}
+\begin{tracebox}[Official example two -- nums equal to 2, 4, 3, 5, 1]
+\begin{itemize}[nosep,leftmargin=1.3em]
+  \item $i=4$, $x=1$: empty, count $0$; insert $1$.
+  \item $i=3$, $x=5$: key $1$ has $2<5$, add $1$; count $1$; insert $5$.
+  \item $i=2$, $x=3$: key $1$ has $2<3$, add $1$; key $5$ has $10<3$? no; count $1$; insert $3$.
+  \item $i=1$, $x=4$: key $1$ has $2<4$, add $1$; deeper keys $3,5$ give $6,10<4$? no; count $1$; insert $4$.
+  \item $i=0$, $x=2$: need $2c<2$ $\Rightarrow$ none; count $0$.
+\end{itemize}
+Total $0+1+1+1+0=3$ -- matches the reference \checkmark: pairs $(1,4),(2,4),(3,4)$.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n\log n}$ \emph{expected}: each element is one rank descent plus one split and two merges, all
+$\bigO{h}$, and a treap's $h=\bigO{\log n}$ in expectation over the random priorities
+(\thmref{c06-exptheight}) -- not over the input, which is the point. The plain-BST twin is
+$\bigO{n\,h}$ worst-case $\bigO{n^2}$ (\probref{c05-summit}); merge and Fenwick are
+$\bigO{n\log n}$ \emph{worst} case. Space $\bigO{n}$. At $n=5\cdot10^{4}$ the quadratic form is
+$\approx2.5\cdot10^{9}$ -- \tle -- so the controlled height is exactly what separates \ac{} from \tle.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Sorted ascending input & treap still short by priorities -- $\bigO{n\log n}$; the case that kills the plain-BST twin \\
+All-equal elements & each key $c$ has $2c<x$ false against an equal $x$, so count stays $0$ (no pair) \\
+Negative / minimum values & $2\cdot(-2^{31})$ needs \code{long long}; the descent compares $2LL\cdot c$, never overflows \\
+Single element & tree empty at the only step, answer $0$ \\
+Duplicates & each occurrence is a separate node; $\mathit{size}$ counts them, so ranks stay exact \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to break it: (i) comparing $c$ against $x/2$ instead of $2c$ against $x$ -- integer division truncates
+toward zero and miscounts around negatives; keep the multiply and use \code{long long}. (ii) counting only
+$1+\mathit{size}(\text{left})$ after going right but forgetting to \emph{continue} into the right subtree --
+the qualifiers are not all on one side; the descent must keep walking. (iii) processing left-to-right -- the
+seen set must be the elements \emph{after} the current index. (iv) trusting a plain BST: it is correct but
+$\bigO{n^2}$ on sorted input -- the whole reason this is a \emph{balanced} tree. \emph{Variants / the real
+alternatives:} the merge-sort cross-count (\chref{c01}) and the Fenwick over compressed doubled values
+(\chref{c14}) both guarantee $\bigO{n\log n}$; a size-augmented red-black tree is the third way -- someone
+must keep $h$ logarithmic, whether by rotation, chance, colour, or an array index.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{The augmentation was never the win -- the height is.} LC 315 and LC 493 use the \emph{same}
+        rank descent; only the tree's height differs. Chapter~7 could not promise it; a balanced tree does
+        (\defref{c06-heightcost}, \thmref{c06-exptheight}).
+  \item \emph{Change one comparison, keep the whole machinery.} $c<x$ became $2c<x$ and every line -- split,
+        merge, size, descent -- survived intact. A balanced, augmented tree is a \emph{platform}, not a
+        trick (\propref{c05-kth}, \propref{c06-implicit}).
+  \item \emph{A pointer tree is one honest rival away from an array index.} Merge and Fenwick hit the same
+        $\bigO{n\log n}$ worst case with no tree at all -- know when the guaranteed height is worth the
+        pointers and when it is not (\chref{c13}, \chref{c14}).
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Worst-case $\bigO{n\log n}$}: the merge-sort cross-count (notebox) is the follow-up -- same
+        right-to-left essence, no tree to rot. Full divide-and-conquer is \chref{c01}.
+  \item \textbf{Deterministic balance}: swap the treap for an AVL with a \code{size} field -- the rank
+        descent is unchanged and the height is guaranteed, not expected (\thmref{c06-avlbound}).
+  \item \textbf{Generalises}: this ``online rank under a monotone predicate'' recurs for any order statistic
+        -- $k$th smallest, inversion count, and the dynamic-array aggregates of the implicit treap
+        (\propref{c06-implicit}); the Euler-tour flatten of \chref{c24} is the same idea on trees.
+\end{itemize}
+\end{hardeningbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled so far -- cumulative through Chapter~8. Chapters~1--7's rows are carried
+forward; Chapter~8's rows are appended. Pointers only, never prose.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} l c p{0.27\linewidth} p{0.16\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Level} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapters 1--7 -- carried forward} \\
+Three-slot DFS (pre/in/post) & 3.1 & \lv1 & a node sequence in a named order & \coderef{c03-dfs} \\
+BST search / insert / delete descent & 7.1 & \lv2 & ``a BST is given -- does/where does $x$ go?'' & \coderef{c05-search} \\
+Order statistics by streaming inorder & 7.3 & \lv2 & kth / min-gap / successor on the sorted line & \coderef{c05-mindiff} \\
+Ordered-map interval set (\code{set/map}) & 7.4 & \lv4 & ``add/query/remove intervals online'' & \coderef{c05-range} \\
+Size-augmented BST rank (fragile) & 7 (Summit) & \lv5 & ``count smaller to the right -- per-insert rank'' & \coderef{c05-summit} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 8 -- new this chapter} \\
+The rotation (LL/RR/LR/RL) & 8.1 & \lv2 & ``fix a violation, keep the inorder'' & \coderef{c06-rotcode} \\
+AVL insert/delete with balance factors & 8.2 & \lv3 & ``hand-rolled BST, shortest, read-heavy'' & \coderef{c06-avlins} \\
+Treap split/merge engine & 8.3 & \lv4 & ``balanced tree you can code cold; cut/paste ranges'' & \coderef{c06-split} \\
+Implicit-sequence treap & 8.3 & \lv4 & ``insert/reverse/range-sum a sequence by position'' & \coderef{c06-imp} \\
+Red-black guarantee for \code{set/map} & 8.4 & \lv3 & ``why is \code{std::set} $\bigO{\log n}$?'' & \thmref{c06-rbheight} \\
+Splay: self-adjust by locality & 8.5 & \lv4 & ``hot keys dominate; amortised, no stored state'' & \thmref{c06-amortized} \\
+Order-statistic treap rank (Summit) & Summit & \lv5 & ``count under threshold, online, worst-case fast'' & \coderef{c06-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c05} -- backward: this chapter is the answer to that one's cliffhanger. The BST descent, the
+        three-case delete, inorder$\equiv$sorted and the \code{set} API are assumed and \emph{never}
+        re-derived; every ``$\bigO{h}$'' there becomes a guaranteed ``$\bigO{\log n}$'' here, and its Summit
+        (\probref{c05-summit}) is reborn as ours (\probref{c06-summit}).
+  \item \chref{c03} -- backward: the rotation is proved by appealing to the inorder walk, taken as a black
+        box from that chapter (\thmref{c05-inorder}); we only lean on the fact that a rotation leaves it
+        unchanged (\thmref{c06-rotation}).
+  \item \chref{c26} -- forward: Cartesian trees and the monotonic stack -- the array$\to$tree bridge this
+        chapter \emph{deliberately leaves out}, and the direct successor on the next-chapter pointer.
+  \item \chref{c23}, \chref{c24} -- forward: the full splay analysis and link-cut (dynamic-tree) machinery
+        live in \chref{c23}; \secref{c06-splay} is only its prerequisite intro. Euler-tour trees
+        (\chref{c24}) answer the Water-Tree-style path/subtree queries that a splay also handles.
+  \item \chref{c13}, \chref{c14} -- forward: the segment tree and Fenwick tree answer the \emph{same} rank
+        and range questions over dense integer keys with array locality and no pointers; the Summit's notebox
+        and the mixed set hand their robust forms to those chapters.
+\end{itemize}
+
+\begin{lastword}[Last Word -- Chapter 8]
+\emph{``Chapter 7 borrowed a rule and spent it everywhere; this chapter paid the interest -- because the rule's
+worth depended entirely on a number Chapter 7 could not control.''}
+
+\medskip
+A balanced tree is a BST that \emph{knows its own height} (\defref{c06-heightcost}). From that one
+guarantee everything in this chapter is a corollary: the rotation is the unique inorder-preserving repair
+(\thmref{c06-rotation}); AVL enforces $|\bal|\le1$ and fixes any edit in $\le2$ turns, buying
+$h\le1.44\,\lg(n+2)$ (\thmref{c06-avlbound}, \thmref{c06-fixheight}); the treap replaces every case with a coin
+flip and wins $\bigO{\log n}$ in expectation, plus a \code{split}/\code{merge} engine that turns it into a
+dynamic array (\thmref{c06-exptheight}, \propref{c06-implicit}); red-black relaxes the rule to a colouring and
+still proves $h\le2\lg(n+1)$ -- the very promise \propref{c05-logn} deferred, now cashed for
+\code{std::set} (\thmref{c06-rbheight}); and splay stores nothing at all yet earns $\bigO{\log n}$ amortised by
+rotating habit toward the root (\thmref{c06-amortized}).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Never trust a plain BST's height.} If keys can arrive sorted, a ``$\bigO{\log n}$'' claim is a
+        lie unless a rotation, a priority, a colour, or an array index \emph{keeps} it logarithmic
+        (\defref{c06-heightcost}, \figref{c06-chain}).
+  \item \emph{One move, many policies.} Every structure here is the same local surgery
+        (\thmref{c06-rotation}) applied under a different rule -- so learn the rotation cold and the four cases
+        (\defref{c06-rotcases}), and the rest is bookkeeping you can \emph{choose}.
+  \item \emph{Controlled height makes augmentation safe.} A size field on a fragile tree is a nicer-looking
+        $\bigO{n^2}$; on a balanced tree it is $\bigO{\log n}$ rank, select, and range -- the Summit
+        (\probref{c06-summit}) is precisely that difference.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: on any ``ordered set under adversarial input'' problem, first ask
+``is the height mine to control?'' -- if not, pick a balancer before you code; write the AVL \code{balance}
+routine and the treap \code{split}/\code{merge} from memory once each, because they are the two engines every
+later dynamic-tree chapter reuses; and reach for \code{std::set}/\code{std::map} freely \emph{knowing} it is
+red-black -- then remember the one question it refuses to answer fast, rank, which is exactly what an
+augmented tree or a Fenwick is for.
+
+\medskip
+\textbf{Next:} \chref{c26} turns from trees you \emph{keep} balanced to trees you \emph{read out of an array}.
+A Cartesian tree is built in $\bigO{n}$ by a monotonic stack, trades rotations for ``the smallest element is the
+root,'' and unlocks largest-rectangle, subarray minimums, and next-smaller links -- the array$\to$tree bridge
+this chapter deliberately left unbuilt so you would feel the difference between balancing a search tree and
+deriving one from the shape of the data.
+\end{lastword}

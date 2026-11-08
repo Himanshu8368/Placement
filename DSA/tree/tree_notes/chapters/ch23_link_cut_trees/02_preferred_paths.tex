@@ -1,0 +1,363 @@
+% =====================================================================
+%  25.2  Preferred Paths and Access -- the rooted link-cut tree.
+%  Exports: sec:c23-prefer  def:c23-prefer  def:c23-access  thm:c23-access-lca
+%           fig:c23-aux  lst:c23-access  lst:c23-lct-core
+%           prob:c23-dynalca  lst:c23-dynalca
+%  Solved SPOJ DYNALCA (Dynamic LCA), live-verified via the SPOJ problem
+%  page (forest of N<=1e5 single-vertex trees; queries link A B / cut A /
+%  lca A B; M<=1e5). Official sample read live:
+%    5 9: lca 1 1, link 1 2, link 3 2, link 4 3, lca 1 4, lca 3 4, cut 4,
+%    link 5 3, lca 1 5  ->  1, 2, 3, 2.
+%  Hand-replayed in the tracebox against the rooted-LCT algorithm here.
+%  Back-cites Ch.8 splay (engine) and Ch.22 HLD (static heavy-path cousin).
+% =====================================================================
+\section{Preferred Paths and the Access Operation}\label{sec:c23-prefer}
+
+\begin{previouslybox}[Ch.~22 split a \emph{fixed} tree into heavy paths; do it on the fly]
+Heavy-light decomposition (\(\secref{c16-decomp}\)) cuts a tree into
+\(O(\log n)\) heavy paths so any root-to-node path meets only \(O(\log n)\) of
+them -- but it freezes the split in an array and cannot survive an edge edit. The
+link-cut tree keeps the same philosophy with one crucial change: the choice of
+"which child is preferred" is made \emph{lazily, by the access history}, and can
+flip in \(O(\log n)\) whenever you touch a different node. The result is the same
+"one root-to-node path is contiguous" power, now available on a forest whose edges
+link and cut. The engine under it is the Chapter~8 splay tree you just mastered;
+here each preferred path becomes one auxiliary splay, keyed by depth.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{represented tree} (the real forest) is stored as a collection of
+\term{auxiliary trees} -- splay trees, one per \term{preferred path}. A node's
+\emph{preferred child} is the single child whose edge is currently "solid"; maximal
+chains of solid edges are the preferred paths, and each is one aux splay whose
+in-order (left-to-right) sequence is the path from its shallow top to its deep
+bottom. Two pointers describe everything: a node's \emph{aux} children
+(\(\mathit{ls},\mathit{rs}\)) are the neighbours on its own preferred path, and its
+\emph{path-parent} (\(\mathit{fa}\) when not an aux child) points from the top of a
+preferred path to the node one step above it in the real tree. The single engine
+operation is \code{access(v)}: it makes the whole root-to-\(v\) path preferred, so
+that afterwards \(v\)'s aux splay holds exactly that path.
+
+\textbf{Prerequisites.} \(\secref{c23-splay}\) -- splaying and \code{is\_root}.
+Chapter~22 (\(\secref{c16-decomp}\)) -- the static heavy-path picture being made
+dynamic. Chapter~16 (\chref{c11}) -- \(\lca\), which we now compute without any
+lifting table. This section needs no \code{makeroot}: the forest stays rooted.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item run \code{access} on the running forest \(R\) and name the aux trees and
+        path-parent pointers before/after; \hfill\lv{4}
+  \item test aux-root status with \code{is\_root} and read the represented root
+        with \code{findroot}; \hfill\lv{4}
+  \item compute the LCA of two nodes with one \code{access} plus a path-parent
+        climb and no rerooting (\(\thmref{c23-access-lca}\)); \hfill\lv{5}
+  \item solve SPOJ~DYNALCA end to end (link / cut / lca on a moving forest). \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{definition}{Preferred path, auxiliary tree, path-parent}{c23-prefer}
+In the link-cut representation of a rooted forest, each node has at most one
+\term{preferred child}; the maximal chain of preferred (solid) edges through a node
+is its \term{preferred path}, stored as one \term{auxiliary splay tree} ordered by
+depth (shallower to the left, deeper to the right). The top node of a preferred
+path stores a \term{path-parent} pointer \(\mathit{fa}\) to the real-tree parent of
+the path's top; this pointer is \emph{not} an aux-child link, which is exactly what
+\code{is\_root(x)} detects: \(x\) is an aux root iff its \(\mathit{fa}\) (if any)
+does not name \(x\) as a left/right child.
+\end{definition}
+
+\begin{definition}{The access operation}{c23-access}
+\code{access(v)} makes the root-to-\(v\) path preferred. Walking from \(v\) upward
+through path-parent pointers, at each node \(u\) it: splays \(u\) to the top of its
+aux tree; replaces \(u\)'s right child (the previously-preferred, deeper segment,
+now \emph{unpreferred}) by the piece built so far; refreshes \(u\)'s aggregate; and
+moves up. After the loop the final splay leaves \(v\) as the root of a single aux
+tree containing the entire root-to-\(v\) path.
+\end{definition}
+
+\begin{lstlisting}[caption={The LCT core: is-root test, push-up, rotate, splay, access, findroot. Aux children are ls/rs; fa doubles as path-parent for an aux root. NO makeroot/reverse tag in this rooted section. ASCII only}, label={lst:c23-lct-core}]
+int ch[MAXN][2], fa[MAXN];
+bool isRoot(int x){ int f=fa[x]; return f==0 || (ch[f][0]!=x && ch[f][1]!=x); }
+void rot(int x){
+    int p=fa[x], g=fa[p], d=(ch[p][1]==x);
+    if(!isRoot(p)) ch[g][ch[g][1]==p]=x;
+    fa[x]=g;
+    ch[p][d]=ch[x][!d]; if(ch[x][!d]) fa[ch[x][!d]]=p;
+    ch[x][!d]=p; fa[p]=x;
+}
+void splay(int x){
+    while(!isRoot(x)){ int p=fa[x], g=fa[p];
+        if(isRoot(p)) rot(x);
+        else if((ch[g][0]==p)==(ch[p][0]==x)){ rot(p); rot(x); }
+        else { rot(x); rot(x); } }
+}
+void access(int x){                       // make root->x a single preferred path
+    for(int last=0; x; last=x, x=fa[x]){  // x climbs the path-parent spine
+        splay(x);
+        ch[x][1]=last;                    // deeper segment becomes non-preferred
+    }
+}
+int findroot(int x){                       // represented root = shallowest on x's path
+    access(x);
+    while(ch[x][0]) x=ch[x][0];            // leftmost in the aux = min depth
+    splay(x); return x;
+}
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.8, transform shape,
+   snode/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.7pt,
+                 minimum size=6mm, font=\scriptsize\bfseries, inner sep=1pt},
+   pref/.style={circle, draw=difforange, fill=difforange!16, line width=1pt,
+              minimum size=6.4mm, font=\footnotesize\bfseries, inner sep=1pt}]
+  % represented tree R
+  \node[pref] (n1) at (0,0) {1};
+  \node[pref] (n2) at (-2,-1.4) {2};
+  \node[snode] (n3) at (2.5,-1.4) {3};
+  \node[snode] (n4) at (-3.2,-2.8) {4};
+  \node[pref] (n5) at (-0.9,-2.8) {5};
+  \node[snode] (n8) at (2.5,-2.8) {8};
+  \node[snode] (n6) at (-1.8,-4.2) {6};
+  \node[pref] (n7) at (0.0,-4.2) {7};
+  \draw[difforange, line width=1.6pt] (n1)--(n2) (n2)--(n5) (n5)--(n7);
+  \draw (n1)--(n3) (n2)--(n4) (n3)--(n8) (n5)--(n6);
+  \node[annot, font=\scriptsize, text=difforange, anchor=west] at (1.4,0.4) {one aux splay (depth order): 1,2,5,7};
+  \node[annot, font=\scriptsize, anchor=west] at (3.4,-1.4) {path-parent 3 \(\to\) 1};
+  \node[annot, font=\scriptsize, anchor=west] at (-4.9,-2.8) {4 \(\to\) 2};
+  \node[annot, font=\scriptsize, anchor=west] at (1.4,-4.2) {6 \(\to\) 5};
+\end{tikzpicture}
+\caption{The running forest \(R\) of \(\figref{c23-tree}\) after \code{access(7)}.
+The solid orange preferred path \(1\!-\!2\!-\!5\!-\!7\) is a single auxiliary splay
+(aux nodes in orange, ordered by depth). The three off-path subtrees \(\{3,8\}\),
+\(\{4\}\), \(\{6\}\) are their own preferred paths; each path's top node keeps a
+dashed \emph{path-parent} pointer into the spine (\(3\!\to\!1\), \(4\!\to\!2\),
+\(6\!\to\!5\)). These dashed pointers are \(\mathit{fa}\) links that are
+\emph{not} aux children -- that is exactly what \code{is\_root} tests.}
+\label{fig:c23-aux}
+\end{figure}
+
+\begin{theorem}{Two accesses read the lowest common ancestor}{c23-access-lca}
+In a rooted link-cut tree (no \code{makeroot}), for nodes \(u,v\) in the same
+represented tree, after \code{access(u)} a path-parent climb from \(v\)
+\(\big(\)for \(x{=}v\); \(x\neq 0\); \(x{=}\mathit{fa}[x]\) after \code{splay(x)}\(\big)\)
+has its \emph{last} visited node equal to \(\lca(u,v)\).
+\end{theorem}
+\begin{proofbox}
+\code{access(u)} turns the whole root-to-\(u\) path into one aux tree whose top
+(the represented root) has \(\mathit{fa}=0\). The climb from \(v\) visits, in
+bottom-to-top order, one node from each preferred path that \(v\)'s ancestor chain
+passes through, because after \code{splay(x)} the value \(\mathit{fa}[x]\) is the
+path-parent, i.e.\ the real-tree parent of \(x\)'s path top -- never skipping an
+ancestor. Every visited node is an ancestor of \(v\). The loop stops the first time
+the visited node lies inside the root-to-\(u\) aux tree, since splaying such a node
+makes it that aux tree's root and forces \(\mathit{fa}=0\). That node is the
+deepest ancestor of \(v\) that also lies on root-to-\(u\), i.e.\ an ancestor of
+\(u\); being reachable from \(v\)'s chain and from \(u\)'s chain and maximal with
+that property, it is precisely \(\lca(u,v)\). \(\Box\)
+\end{proofbox}
+
+\begin{complexitybox}[Access and LCA]
+\textbf{Per operation} \(\bigO{\log n}\) amortised: an \code{access} is a sequence
+of splays along the spine, and (Sleator--Tarjan) the total splaying cost is
+logarithmic amortised -- the same potential as \(\thmref{c23-splay-amort}\) applied to
+each aux tree. \code{findroot} is one \code{access} plus a left-descent. The LCA
+query is \code{access(u)} plus a climb that is itself an \code{access}-style spine,
+so also \(\bigO{\log n}\) amortised. \textbf{Space} \(\bigO{n}\) for
+\(\mathit{ch},\mathit{fa}\).
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: SPOJ DYNALCA -- LCA while the forest is rewired}
+% ---------------------------------------------------------------
+
+\solvedproblem{c23-dynalca}{Dynamic LCA}{SPOJ DYNALCA}
+  {https://www.spoj.com/problems/DYNALCA/}{SPOJ classic L5}
+  {rooted link-cut tree; access; findroot; LCA by a path-parent climb}
+
+\begin{problemstatement}[Dynamic LCA (statement and sample verified against the live SPOJ page)]
+A forest starts as \(N\) single-vertex rooted trees (\(1\le N\le 10^5\)), vertices
+\(1..N\). Process \(M\le 10^5\) queries:
+\begin{itemize}[nosep]
+  \item \texttt{link A B}: add an edge making \(A\) a child of \(B\); \(A\) is
+        guaranteed to be a root, and \(A,B\) are in different trees.
+  \item \texttt{cut A}: remove the edge from \(A\) to its parent; \(A\) is
+        guaranteed non-root. Its subtree detaches into a new tree.
+  \item \texttt{lca A B}: print the lowest common ancestor of \(A\) and \(B\), which
+        are guaranteed to be in the same tree.
+\end{itemize}
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:              Output:
+5 9                 1
+lca 1 1             2
+link 1 2            3
+link 3 2            2
+link 4 3
+lca 1 4
+lca 3 4
+cut 4
+link 5 3
+lca 1 5
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 35 minutes]
+A rooted LCT has the pieces already: \code{access}, \code{findroot}, and the
+\(\thmref{c23-access-lca}\) climb. \peek{\texttt{link A B} with \(A\) a root is just
+\code{access(A); fa[A]=B;}.}
+\nudge{\texttt{cut A}: \code{access(A)} makes root\(\to\)A one path with A the aux
+root; A's left child is the whole ancestor block, so detach it
+(\(\mathit{ls}[A]=0,\ \mathit{fa}[\text{old-}ls]=0\)).}
+\fullhint{For \texttt{lca A B}: run \code{access(A)}; then climb from \(B\) with
+\code{for(x=B; x; x=fa[x]) splay(x), last=x;}. The recorded \texttt{last} is
+\(\lca(A,B)\) (\(\thmref{c23-access-lca}\)). Because DYNALCA never reroots, there is
+no reverse lazy tag and no \code{pushdown} to worry about -- the cleanest possible
+LCT.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Every query is a rooted-LCT primitive: link attaches a root's path-parent, cut
+detaches a node from its ancestor block, and lca is the two-access trick of
+\(\thmref{c23-access-lca}\). No \code{makeroot}, no aggregates, no lazy propagation
+-- the forest simply stays rooted and the aux splays track preferred paths. This is
+DYNALCA's gift to a first-time LCT author: it exercises the whole \code{access}
+machinery with none of the evert subtlety that makes general LCTs error-prone.
+
+\solstep{Key Observations}
+\begin{observation}
+\texttt{link A B} with \(A\) a represented root: after \code{access(A)}, \(A\) is an
+aux root with \(\mathit{fa}[A]=0\); writing \(\mathit{fa}[A]=B\) turns the singleton
+path \(A\) into a child whose path-parent is \(B\). No restructuring of \(B\) is
+needed because a path-parent may aim at any node, preferred or not.
+\end{observation}
+\begin{observation}
+\texttt{cut A} (\(A\) non-root): \code{access(A)} leaves \(A\) as aux root of the
+path root\(\to A\), with its left child being exactly the ancestor block
+root\(\to\!\text{parent}(A)\). Clearing \(\mathit{ls}[A]\) and its back-pointer severs
+the single represented edge \((\text{parent}(A),A)\) and strands \(A\)'s (empty, here)
+subtree as a new root -- the ancestors stay connected to each other inside the
+detached block.
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.26\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ BFS per lca & climb parents to root by brute force & \(O(N)\)/query & \tle \\
+2 & \lv{4}\ binary lifting & \(\lca\) tables (\chref{c11}) & \(O(\log n)\)/query & \textcolor{warningred}{\ding{55}\ \textbf{stale}} \\
+3 & \lv{5}\ \textbf{rooted LCT} & access + path-parent climb (\(\coderef{c23-lct-core}\)) & \(\bigO{\log n}\) amort & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is the tempting wrong tool: binary lifting answers a static LCA fast, but
+a single \texttt{link}/\texttt{cut} invalidates every descendant's table and forces
+an \(O(n\log n)\) rebuild -- hopeless with \(10^5\) edits. Rung~3 pays the topology
+change in the same \(O(\log n)\) as the query.
+
+\solstep{Solution}
+Maintain the \(\coderef{c23-lct-core}\) arrays. Map:
+\texttt{link A B} \(\to\) \code{access(A); fa[A]=B};
+\texttt{cut A} \(\to\) \code{access(A); if(ls) detach};
+\texttt{lca A B} \(\to\) \code{access(A); climb from B, return last}.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={SPOJ DYNALCA: the rooted LCT of lst:c23-lct-core plus link/cut/lca. Reuses isRoot/rot/splay/access/findroot verbatim. ASCII only}, label={lst:c23-dynalca}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MAXN = 100005;
+int ch[MAXN][2], fa[MAXN];
+#define ls(x) ch[x][0]
+#define rs(x) ch[x][1]
+// ... paste isRoot, rot, splay, access, findroot from lst:c23-lct-core ...
+void link(int a, int b){ access(a); fa[a]=b; }          // a is a represented root
+void cut(int a){ access(a); if(ls(a)){ fa[ls(a)]=0; ls(a)=0; } } // sever a->parent
+int lca(int a, int b){
+    if(findroot(a)!=findroot(b)) return 0;              // (guaranteed same tree here)
+    access(a);
+    int last=0;
+    for(int x=b; x; x=fa[x]){ splay(x); last=x; }       // Thm: last == lca(a,b)
+    splay(last);
+    return last;
+}
+int main(){
+    int N,M;  scanf("%d %d",&N,&M);
+    char op[8];
+    while(M--){
+        scanf("%s",op);
+        if(op[0]=='l' && op[1]=='i'){ int A,B; scanf("%d %d",&A,&B); link(A,B); }
+        else if(op[0]=='c'){ int A; scanf("%d",&A); cut(A); }
+        else { int A,B; scanf("%d %d",&A,&B); printf("%d\n", lca(A,B)); }
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official DYNALCA sample, rooted-LCT state]
+Start: five singletons \(1..5\), all roots.\\
+\(\texttt{lca }1\ 1\): \code{findroot(1)}=\(1\) both sides; \code{access(1)}; climb
+from \(1\) reaches \(1\) (\(\mathit{fa}=0\)) \(\Rightarrow\) \(\boxed{1}\).\\
+\(\texttt{link }1\ 2\): \(\mathit{fa}[1]{=}2\). \(\texttt{link }3\ 2\):
+\(\mathit{fa}[3]{=}2\). \(\texttt{link }4\ 3\): \(\mathit{fa}[4]{=}3\). Tree rooted at
+\(2\): \(2\!\to\!\{1,3\}\), \(3\!\to\!4\).\\
+\(\texttt{lca }1\ 4\): \code{access(1)} makes path \(2\!-\!1\) preferred
+(\(\mathit{fa}\) chain \(1\!\to\!2\)). Climb from \(4\): \(splay(4)\) (its own path),
+\(\mathit{fa}[4]{=}3\) \(\to splay(3)\), \(\mathit{fa}[3]{=}2\) \(\to splay(2)\): \(2\)
+is in the root\(\to1\) aux, so \(\mathit{fa}[2]{=}0\), loop ends,
+\(\mathit{last}=2\) \(\Rightarrow\) \(\boxed{2}\).\\
+\(\texttt{lca }3\ 4\): \code{access(3)} (path \(2\!-\!3\)). Climb from \(4\):
+\(splay(4)\), \(\mathit{fa}[4]{=}3\) \(\to splay(3)\) joins the aux,
+\(\mathit{fa}[3]{=}0\) \(\Rightarrow\) \(\mathit{last}=3\), \(\boxed{3}\).\\
+\(\texttt{cut }4\): \code{access(4)} (path \(2\!-\!3\!-\!4\)), clear
+\(\mathit{ls}[4]\) \(\Rightarrow\) \(4\) becomes a root, \(2\!-\!3\) intact.\\
+\(\texttt{link }5\ 3\): \(\mathit{fa}[5]{=}3\).\\
+\(\texttt{lca }1\ 5\): \code{access(1)} (path \(2\!-\!1\)). Climb from \(5\):
+\(splay(5)\), \(\mathit{fa}[5]{=}3\) \(\to splay(3)\), \(\mathit{fa}[3]{=}2\) \(\to
+splay(2)\) joins aux, \(\mathit{fa}[2]{=}0\) \(\Rightarrow\) \(\boxed{2}\).\\
+Printed: \(1,2,3,2\) -- matching the official output.
+\end{tracebox}
+
+\begin{warningbox}[access is not ``splay to the represented root'']
+The loop variable in \(\coderef{c23-lct-core}\)'s \code{access} climbs
+\(\mathit{fa}\) \emph{after} each splay, so it hops across path-parent edges -- but
+the very first \code{splay(x)} makes \(x\) the aux root, so \(\mathit{fa}[x]\) at
+that moment is the path-parent, not a splay parent. Reading \(\mathit{fa}[x]\)
+\emph{before} splaying, or forgetting to re-read it after, walks a wrong spine and
+silently corrupts the preferred-path split (WA that depends on access order). Also,
+in \texttt{cut} you must \code{access} first; cutting a raw edge pointer leaves a
+dangling aux child and breaks \code{is\_root}.
+\end{warningbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{No lazy tag here.} DYNALCA is rooted; do NOT introduce
+        \code{makeroot}/reverse, which would demand \code{pushdown} inside every
+        \code{splay} before rotating. Adding evert ``because LCT usually has it'' is
+        the classic way to break an otherwise-correct rooted LCT.
+  \item \textbf{findroot before lca.} Even though DYNALCA promises same-tree
+        queries, keeping \(\texttt{if(findroot(a)!=findroot(b)) return 0}\) is a cheap
+        guard that also makes the template reusable for connectivity problems.
+  \item \textbf{access(a) then access(b) is not the LCA.} A common mis-mnemonic:
+        two plain \code{access} calls leave \(b\) on top, not the lca. Use the
+        \emph{climb-and-record} of \(\thmref{c23-access-lca}\), or switch to the
+        \code{makeroot}-free \code{lca} in \(\coderef{c23-dynalca}\) verbatim.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[25.2 in one breath]
+\emph{Store the rooted forest as one aux splay per preferred path (ordered by
+depth); \(\mathit{fa}\) is an aux-parent or a path-parent, told apart by
+\code{is\_root}. \code{access(v)} walks the path-parent spine, splaying and
+reattaching right children, until root\(\to\)v is one contiguous splay. Then
+\code{findroot} is a left-descent, and \(\lca(u,v)\) is \code{access(u)} plus a
+path-parent climb from \(v\) whose last splayed node is the answer
+(\(\thmref{c23-access-lca}\)). SPOJ~DYNALCA is exactly link/cut/lca in that rooted
+setting -- the splay engine of 25.1, now driving a changing forest.}
+\selftest{
+  \item What does \code{is\_root(x)} distinguish? \emph{(aux-parent vs path-parent in the shared \(\mathit{fa}\) pointer, Def.~\defref{c23-prefer}.)}
+  \item After \code{access(v)}, what does \(v\)'s aux tree contain? \emph{(the whole root-to-\(v\) path, in depth order, \(v\) splayed to the top.)}
+  \item Give the two steps that read \(\lca(u,v)\) with no rerooting. \emph{(\code{access(u)}; climb \(v\)'s path-parents, last splayed node = lca, \(\thmref{c23-access-lca}\).)}
+}
+\end{recallbox}

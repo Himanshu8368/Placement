@@ -1,0 +1,309 @@
+% =====================================================================
+%  22.1  The Chain Decomposition: heavy child, the light-edge lemma,
+%        the two DFS passes, and the pos order that feeds a segtree.
+%  Exports: sec:c16-decomp  def:c16-chain  def:c16-pos
+%           thm:c16-lightedge  fig:c16-lightedge  lst:c16-build
+%           prob:c16-qtree3  lst:c16-qtree3
+%  Numbers agree with 00_opener (fig:c16-chains + fig:c16-pos): shared
+%  tree T (root 1; edges 1-2,1-3,2-4,2-5,3-6,3-7,5-8,7-9,9-10), node
+%  values v=(3,2,4,5,1,1,5,3,7,0).  Authoritative decomposition:
+%    size=(10,4,5,1,2,1,3,1,2,1); heavy(1)=3,heavy(2)=5,heavy(3)=7,
+%      heavy(5)=8,heavy(7)=9,heavy(9)=10; light edges 1->2,2->4,3->6;
+%    chains C1=[1,3,7,9,10] C2=[2,5,8] C4=[4] C6=[6];
+%    head=(1,2,1,4,2,6,1,2,1,1); pos=(1,7,2,10,8,6,3,9,4,5);
+%    B=(3,4,5,7,0,1,2,1,3,5) sum 31; subtree(3)=[2..6], subtree(2)=[7..10].
+%  SPOJ QTREE3 (live-verified on spoj.com, #problem-body): N nodes all white;
+%    op "0 i" toggles node i's colour; op "1 v" asks the id of the FIRST black
+%    node on the path 1..v else -1.  Test files: N in {5000,10000,100000},
+%    Q in {100000..400000}.  Official sample (n=9) reproduced in the section.
+% =====================================================================
+\section{The Chain Decomposition: Cutting a Tree into Heavy Paths}\label{sec:c16-decomp}
+
+\begin{previouslybox}[Ch.~5 made subtrees an interval; Ch.~19--20 made intervals queryable -- but a \emph{path} is still scattered]
+Chapter~5 (\chref{c24}) showed that a \term{tin}/\term{tout} Euler order turns every \emph{subtree} into one contiguous block, so ``sum the values under \(v\)'' is a range query on a flat array.  Chapters~19 and~20 gave us the array machinery: a segment tree that folds a range in \(\bigO{\log n}\), then a lazy tag that rewrites a range in the same time.  Bolt them together and subtree queries on a tree are solved.  But a \emph{path} \(u\)--\(v\) is a different animal: under the plain Euler order its nodes are scattered across the array, one per entry and rarely adjacent, so no single range captures it.  Ask ``the maximum value on the road from \(u\) to \(v\)'' and the flat array falls silent.
+
+The wish is a single ordering \(\mathit{pos}()\) that makes BOTH things ranges at once: every subtree one block (so the Ch.~5 property survives) \emph{and} every root-to-node path a union of only a few blocks.  This section builds that ordering -- the \term{heavy-light decomposition} -- and proves the handful-of-blocks property, the \(O(\log n)\) light-edge lemma (\(\thmref{c16-lightedge}\)).
+\end{previouslybox}
+
+\begin{topicintro}
+Colour the tree's edges with two colours by one greedy rule.  At each node, look at its children's subtree sizes; the child with the \emph{largest} subtree is the \term{heavy child}, and the edge to it is a \term{heavy edge}.  Every other edge is \term{light}.  The maximal runs of heavy edges are the \term{heavy chains}.  Two facts carry the whole chapter.  First, each chain is a straight root-to-leaf-ish path, so a \emph{depth-first order that visits the heavy child first} lays every chain down as one contiguous run of positions \(\mathit{pos}\) -- and, because it is still a DFS preorder, it keeps every \emph{subtree} contiguous too.  Second, a path never wanders far: any root-to-node path crosses at most \(\lfloor\log_2 n\rfloor\) light edges, since each light step at least doubles the subtree you are leaving behind.  Feed \(\mathit{pos}\) into Chapter~19's segment tree and a path query is only \(O(\log n)\) range queries.
+
+\textbf{Prerequisites.} Chapter~5 (\chref{c24}) -- the \(\tin/\tout\) flatten and why a subtree is one DFS interval.  Chapter~19 (\chref{c13}) -- the segment tree that will be built over \(\mathit{pos}\).  Subtree sizes and a first DFS (Ch.~5--11 material) are assumed; nothing here re-derives that the tree is acyclic.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item mark the heavy child of every node by subtree size and read off the chain list of a small tree; \hfill\lv{2}
+  \item state and prove the \(O(\log n)\) light-edge bound from the doubling argument; \hfill\lv{3}
+  \item write the two DFS passes that fill \(\mathit{size},\mathit{heavy},\mathit{head},\mathit{pos}\) from memory; \hfill\lv{3}
+  \item explain why the heavy-first preorder keeps subtrees contiguous, so one array answers subtree \emph{and} path; \hfill\lv{4}
+  \item decompose the running tree \(T\) by hand into its four chains, matching \(\mathit{pos}=(1,7,2,10,8,6,3,9,4,5)\). \hfill\lv{3}--\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``aggregates along tree paths on a fixed tree'']
+\reckey{a \emph{tree} (not a general graph, not a line) with a value or edge weight, and queries that ask an aggregate \emph{along the unique path} \(u\)--\(v\) (sum, max, count, min-then-max); the topology \emph{never changes} -- no link, no cut, no re-root that restructures; a \tle after a per-query ``walk the path with LCA parents'' that costs \(\bigO{n}\) on a deep tree.}
+\recuse{
+  \item path aggregate queries on a fixed tree -- decompose once (\(\coderef{c16-build}\)), answer in \(\bigO{\log^2 n}\) (\(\secref{c16-pathq}\));
+  \item path \emph{and} subtree mixed queries -- both are ranges in the same \(\mathit{pos}\) order (\(\secref{c16-subpath}\));
+  \item the tree is really a \emph{line} (a path graph) -- no decomposition needed, a plain Ch.~19 tree over index suffices.
+}
+\recnotuse{
+  \item the tree \emph{itself} changes (links and cuts) -- HLD's chains shatter; that is link-cut territory, Ch.~25 (\chref{c23});
+  \item the query is a distance or a \(k\)-th ancestor with \emph{no} aggregate -- plain LCA/binary lifting, Ch.~11 (\chref{c11});
+  \item the path asks for a \(k\)-th smallest but nothing is ever updated -- the persistent four-root engine, Ch.~21 (\chref{c19}).
+}
+One-line test: \emph{a fixed tree, values on it, and questions that run \emph{along paths} -- split into heavy chains, number them depth-first, and hand the line to a segment tree.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The heavy-child rule and the chains}
+% ---------------------------------------------------------------
+
+Root the tree at a fixed node (call it \(1\)).  For each node \(v\), let \(\mathit{size}(v)\) be the number of nodes in the subtree below \(v\), and among \(v\)'s children pick the one of maximum \(\mathit{size}\) -- that is its \term{heavy child} \(\mathit{heavy}(v)\).  Colour the edge \(v\!\to\!\mathit{heavy}(v)\) heavy; colour every other edge (to non-heavy children, and to no parent -- edges are classified from the parent down) light.
+
+\begin{definition}{Heavy--light edges, chains, head}{c16-chain}
+Let \(T\) be rooted at \(s\).  A child \(c\) of \(v\) is the \term{heavy child} if \(\mathit{size}(c)=\max\{\mathit{size}(w): w \text{ a child of } v\}\) (break ties by smaller id); the edge \((v,c)\) is \term{heavy}, every other parent--child edge is \term{light}.  A \term{heavy chain} is a maximal path of consecutive heavy edges.  The \term{head} \(\mathit{head}(x)\) of node \(x\) is the topmost node of the chain containing \(x\) -- the node just after a light edge (or the root) that starts that run.
+\end{definition}
+
+Read \(T\) through the rule (\figref{c16-chains} in the opener).  Node~1's children are \(2\) (\(\mathit{size}=4\)) and \(3\) (\(\mathit{size}=5\)), so \(3\) is heavy and \(1\!\to\!2\) is light.  Down the spine \(3\!\to\!7\!\to\!9\!\to\!10\) each single successor is its parent's heaviest child, so the run continues: \(\mathit{heavy}(3)=7\), \(\mathit{heavy}(7)=9\), \(\mathit{heavy}(9)=10\).  That gives the root chain \(C_1=\{1,3,7,9,10\}\).  The light edge \(1\!\to\!2\) starts a new chain; within it \(\mathit{heavy}(2)=5\) (\(\mathit{size}=2\) beats node~4's \(1\)) and \(\mathit{heavy}(5)=8\), giving \(C_2=\{2,5,8\}\).  The singletons \(C_4=\{4\}\) (off \(2\!\to\!4\)) and \(C_6=\{6\}\) (off \(3\!\to\!6\)) complete the four chains.
+
+% ---------------------------------------------------------------
+\subsection{The light-edge lemma: why a path meets few chains}
+% ---------------------------------------------------------------
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+   hn/.style={boxnode, fill=primaryblue!16, draw=primaryblue, minimum size=7mm, font=\scriptsize\bfseries},
+   ln/.style={boxnode, fill=difforange!16, draw=difforange, minimum size=7mm, font=\scriptsize\bfseries},
+   dim/.style={font=\scriptsize\ttfamily, text=darkgray}]
+  \node[hn] (p) at (0,0) {\(v\)};
+  \node[hn] (h) at (1.6,0) {\(c\)};
+  \node[ln] (l) at (1.6,-1.9) {\(\ell\)};
+  \draw[line width=2.2pt, draw=primaryblue] (p)--(h) node[dim, midway, above] {\(=\mathit{heavy}(v)\)};
+  \draw[line width=1.3pt, draw=difforange, densely dashed] (p)--(l) node[dim, midway, right, xshift=2pt] {\(=\) light child}
+     -- ++(-0.2,-0.35) -- ++(0.4,0);
+  \node[dim, anchor=west] at (2.35,0) {\(\mathit{size}(c)\ge \mathit{size}(\ell)\)};
+  \node[dim, anchor=west] at (2.35,-0.55) {and \(\ \mathit{size}(v)\ge \mathit{size}(c)+\mathit{size}(\ell)+1\)};
+  \node[dim, anchor=west] at (2.35,-1.1) {\(\Rightarrow\ 2\,\mathit{size}(\ell)\le \mathit{size}(v)-1\)};
+  \node[dim, anchor=west] at (2.35,-1.75) {\(\Rightarrow\ \mathit{size}(\ell) > (\mathit{size}(v)-1)/2\)};
+  \node[font=\scriptsize, text=difforange, anchor=west] at (2.35,-2.35) {leaving on a light edge more than HALVES your subtree};
+\end{tikzpicture}
+\caption{The doubling step.  At \(v\) the light child \(\ell\) is no bigger than the heavy child \(c\); together with \(v\) they account for the whole subtree, so \(\mathit{size}(\ell)\) is at most about half of \(\mathit{size}(v)\).  Walking to \(\ell\), the subtree you now stand above more than doubles -- it cannot keep doubling past \(n\).}
+\label{fig:c16-lightedge}
+\end{figure}
+
+\begin{theorem}{Light-edge bound}{c16-lightedge}
+In a heavy-light decomposition of a tree on \(n\) nodes, any path from the root to a node traverses at most \(\lfloor\log_2 n\rfloor\) light edges.  Consequently any \(u\)--\(v\) path meets at most \(2\lfloor\log_2 n\rfloor+1\) heavy chains.
+\end{theorem}
+\begin{proofbox}
+\textbf{Doubling.} Stand at node \(v\) about to leave along a light edge to child \(\ell\).  By \(\defref{c16-chain}\) the heavy child \(c\) has \(\mathit{size}(c)\ge\mathit{size}(\ell)\), and \(v\)'s subtree contains both child subtrees plus \(v\): \(\mathit{size}(v)\ge \mathit{size}(c)+\mathit{size}(\ell)+1\ge 2\,\mathit{size}(\ell)+1\).  Rearranged (as in \figref{c16-lightedge}), \(\mathit{size}(\ell)\le(\mathit{size}(v)-1)/2<\mathit{size}(v)/2\).  So crossing that light edge moves you to a node whose subtree is \emph{less than half} the one you were standing above; read from the leaf upward, each light step at least doubles the subtree.\\
+\textbf{Counting.} Along a root-to-node path, mark the light edges. Between consecutive marks the subtree size at least doubles, starting no lower than \(1\) and ending at most \(n\), so there are at most \(\lfloor\log_2 n\rfloor\) doublings, hence that many light edges.\\
+\textbf{Two endpoints.} A path \(u\)--\(v\) is root-to-\(u\) plus root-to-\(v\) with the shared root-to-\(\mathrm{lca}\) prefix cancelled; each of the two halves carries at most \(\lfloor\log_2 n\rfloor\) light edges, so at most \(2\lfloor\log_2 n\rfloor\) light edges lie on the path.  Chains are maximal heavy runs, so the number of chains the path touches is at most one plus the number of light edges on it, \(\le 2\lfloor\log_2 n\rfloor+1=O(\log n)\).
+\end{proofbox}
+
+\begin{insightbox}[The lemma is the whole complexity budget]
+Every later \(O(\log^2 n)\) in this chapter is this lemma (\(\bigO{\log n}\) chains per path) multiplied by Chapter~19's \(\bigO{\log n}\) per segment-tree query.  Nothing else about the decomposition buys speed -- the heavy-child rule exists \emph{only} to make light steps rare by forcing the doubling.  That is why a ``balanced'' split or a random colouring does not work: it is the \emph{heaviest} child that caps how small the leftover can be.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Two DFS passes: size and heavy, then head and pos}
+% ---------------------------------------------------------------
+
+The decomposition is computed by a pair of depth-first traversals.  The first (\(\mathit{dfs1}\)) is bottom-up: it returns subtree sizes and records each node's heavy child.  The second (\(\mathit{dfs2}\)) is top-down and \emph{heavy-child-first}: it assigns the head (the heavy child inherits its parent's head; a light child heads a brand-new chain) and the position \(\mathit{pos}\), incrementing a global counter on entry.
+
+\begin{definition}{The \(\mathit{pos}\) order (heavy-first preorder)}{c16-pos}
+\(\mathit{pos}(v)\) is the time at which \(v\) is entered in a DFS that, at every node, recurses into the heavy child \emph{before} any light child (light children among themselves in increasing id).  Order the values into \(B[\mathit{pos}(v)] = v(v)\).  A chain is then a set of nodes with consecutive \(\mathit{pos}\), and by the preorder property every subtree \(\mathrm{sub}(v)\) occupies the single interval \([\mathit{pos}(v),\,\mathit{pos}(v)+\mathit{size}(v)-1]\).
+\end{definition}
+
+\begin{lstlisting}[caption={Heavy-light build: dfs1 fills size and the heavy child, dfs2 fills head and the heavy-first pos. ASCII only; adj = adjacency, v() = node values}, label={lst:c16-build}]
+int sz[N], heavy[N], head[N], pos[N], timer_;   // timer_ counts positions
+bool isHeavyEdge[N];                            // edge from parent to v
+
+void dfs1(int v, int p){
+    sz[v] = 1; heavy[v] = -1;
+    int best = 0;                               // biggest child subtree
+    for (int to : adj[v]) if (to != p){
+        dfs1(to, v);
+        sz[v] += sz[to];
+        if (sz[to] > best){ best = sz[to]; heavy[v] = to; }  // heaviest child
+    }
+}
+void dfs2(int v, int p, int h){
+    head[v] = h;
+    pos[v] = timer_++;                          // preorder number
+    if (heavy[v] != -1) dfs2(heavy[v], v, h);   // HEAVY child first, same head
+    for (int to : adj[v]) if (to != p && to != heavy[v])
+        dfs2(to, v, to);                        // light child starts a new chain
+}
+void buildHLD(){ timer_ = 0; dfs1(1, 0); dfs2(1, 0, 1); }
+// chain of v is the run of nodes with this head; a segment tree is built
+// over B where B[pos[v]] = val[v].
+\end{lstlisting}
+
+\begin{tracebox}[Hand-decomposing T -- the two passes, chain by chain]
+\textbf{dfs1 (sizes, bottom-up).} Leaves \(4,6,8,10\) get \(\mathit{size}=1\).  Node~9 \(=\{9,10\}\to2\), heavy~\(10\). Node~5 \(=\{5,8\}\to2\), heavy~\(8\). Node~7 \(=\{7,9,10\}\to3\), heavy~\(9\). Node~2: children~4(1),5(2) \(\to\) \(\mathit{size}=4\), heavy~\(5\). Node~3: children~6(1),7(3) \(\to\) \(\mathit{size}=5\), heavy~\(7\). Node~1: children~2(4),3(5) \(\to\) \(\mathit{size}=10\), heavy~\(3\).\\
+\textbf{dfs2 (head, pos, heavy-first).} Enter~1: \(\mathit{head}=1,\mathit{pos}=1\). Go heavy \(1\!\to\!3\): \(\mathit{head}=1,\mathit{pos}=2\). Heavy \(3\!\to\!7\): head~1, pos~3. Heavy \(7\!\to\!9\): head~1, pos~4. Heavy \(9\!\to\!10\): head~1, pos~5. \(10\) has no child; backtrack to~3 and take its light child~6 (new head): head~6, pos~6. Backtrack to~1, light child~2 (new head): head~2, pos~7. Heavy \(2\!\to\!5\): head~2, pos~8. Heavy \(5\!\to\!8\): head~2, pos~9. Back to~2, light child~4: head~4, pos~10.\\
+\textbf{Read out.} \(\mathit{pos}=(1,7,2,10,8,6,3,9,4,5)\) over nodes \(1..10\); \(\mathit{head}=(1,2,1,4,2,6,1,2,1,1)\); four chains \(C_1=[1,2,3,4,5]\) in pos, \(C_2=[7,8,9]\), \(C_4=[10]\), \(C_6=[6]\).  Value array \(B=(3,4,5,7,0,1,2,1,3,5)\), sum \(31\).  Subtree~3 \(=[\mathit{pos}(3),\dots]= [2..6]\) and subtree~2 \(=[7..10]\) -- each one block, as \(\defref{c16-pos}\) promises.
+\end{tracebox}
+
+\begin{observation}
+\(\mathit{pos}\) is a genuine DFS preorder (heavy child just happens to come first), so the Ch.~5 ``subtree \(=\) interval'' fact survives untouched.  The \emph{only} change is the child visit order, and that single change is what also makes each chain an interval.  One reordering, two contiguousness guarantees -- this is the hinge the whole chapter balances on.
+\end{observation}
+
+\begin{complexitybox}[The decomposition]
+\textbf{Build} \(\bigO{n}\) -- two DFS passes, \(O(1)\) work per node per pass (the heavy-child pick is the max over a node's children, charged once per edge total). \textbf{Space} \(\bigO{n}\) for \(\mathit{size},\mathit{heavy},\mathit{head},\mathit{pos}\). \textbf{Per path op} \(O(\log n)\) chains by \(\thmref{c16-lightedge}\); building a segment tree over \(B\) adds \(\bigO{n}\) and makes each range op \(\bigO{\log n}\) (Ch.~19), so a path operation lands at \(\bigO{\log^2 n}\) -- \(\secref{c16-pathq}\) makes that precise.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: SPOJ QTREE3 -- first black node on a root path}
+% ---------------------------------------------------------------
+
+\subsection*{Root-to-node paths are the friendliest case}
+Because \(\mathit{head}(1)=1\) and the root chain is the spine, the path from the root \(1\) to any \(v\) is exactly the chains you cross walking from \(v\) up to \(1\).  QTREE3 asks for the \emph{first black node} on that root-path -- the shallowest black, found by folding a \(\min\) over the \(O(\log n)\) chain ranges.  No update is on the path itself; only single nodes flip colour -- a point write into the segment tree over \(\mathit{pos}\).  This makes QTREE3 the gentlest possible ``read the chains'' exercise: decompose (\(\coderef{c16-build}\)), build a \(\min\)-tree, and combine a handful of intervals.
+
+\solvedproblem{c16-qtree3}{Query on a tree again!}{SPOJ QTREE3}
+  {https://www.spoj.com/problems/QTREE3/}{SPOJ L4}
+  {heavy-light decomposition; segment tree of min-depth black over the pos order; point colour toggle; combine the O(log n) root-path chains}
+
+\begin{problemstatement}[SPOJ QTREE3 Query on a tree again!]
+A tree on \(N\) nodes (numbered \(1..N\)); every node starts \emph{white}.  Process \(Q\) instructions of two kinds: \code{0 i} flips node \(i\)'s colour (white \(\leftrightarrow\) black); \code{1 v} reports the id of the \emph{first} (closest to the root) black node on the path from node~\(1\) to node~\(v\), or \(-1\) if the path has no black node.
+
+\textbf{Input.} Line~1: \(N\) and \(Q\).  Next \(N-1\) lines: edges \(a\ b\).  Next \(Q\) lines: \code{0 i} or \code{1 v}.  The judge's files use \(N\in\{5000,10000,100000\}\) with \(Q\) up to \(400000\).
+
+\textbf{Output.} For each \code{1 v} instruction, one integer per line.
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+9 8
+1 2
+1 3
+2 4
+2 9
+5 9
+7 9
+8 9
+6 8
+1 3
+0 8
+1 6
+1 7
+0 2
+1 9
+0 2
+1 9
+
+Output:
+-1
+8
+-1
+2
+-1
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+The path is root-to-\(v\), so it decomposes into the chain-runs you hop through climbing from \(v\) to~\(1\).  A segtree over \(\mathit{pos}\) that can answer ``which is the shallowest black node in a range'' turns each run into one query. The subtlety: to compare two blacks in \emph{different} chains you need a common yardstick -- depth.
+\peek{what single number identifies ``how early'' a black node is on a root-path, no matter which chain it lives in?}
+\nudge{depth.  Keep, at each position, the node's depth if it is black and \(+\infty\) if white; the min over the path's ranges is the shallowest black node -- then map that depth/id back.}
+\fullhint{Store \(P[\mathit{pos}(u)] = \mathit{depth}(u)\) if \(u\) black else INF, and build a segtree that returns the minimum \(P\) over a range (Ch.~19). Colour toggle \(i\): point-write \(P[\mathit{pos}(i)]\) between \(\mathit{depth}(i)\) and INF. Query \code{1 v}: walk \(u=v\) upward -- while \(\mathit{head}(u)\ne 1\), query the range \([\mathit{pos}(\mathit{head}(u)),\mathit{pos}(u)]\), then \(u=\mathit{parent}(\mathit{head}(u))\); finally query \([\mathit{pos}(1),\mathit{pos}(u)]\). Take the global min; if INF print \(-1\), else print the node id whose depth attains it (keep a \code{nodeAtDepth} array, or store (depth, id) pairs and min by depth). Sample check: after \code{0 8}, path \(1..6=1,2,9,5,8,6\) has blacks \(\{8\}\) \(\to\) 8; after re-toggling 2, path \(1..9=1,2,9\) is black at 2 \(\to\) 2; toggling 2 again clears it \(\to\) \(-1\). \(\bigO{(N+Q)\log^2 N}\), \ac.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Root-path, point colour writes, ``first black'' \(=\) shallowest black. \(\thmref{c16-lightedge}\) caps the number of chain-ranges on a root-to-\(v\) path at \(\lfloor\log_2 N\rfloor\). Inside a range the shallowest black is the min-depth entry, and depth compares across ranges, so a plain \(\min\)-segment tree over \(\mathit{pos}\) solves it.
+
+\solstep{Key Observations}
+\begin{observation}
+``First on the path from the root'' is the same as ``minimum depth among blacks on the path'' -- a \(\min\) aggregate, which a Ch.~19 tree folds in \(\bigO{\log n}\) per chain range.
+\end{observation}
+\begin{observation}
+A colour flip changes only one node, hence one array slot \(\mathit{pos}(i)\) -- a point update, no lazy tag needed (that arrives with path writes in \(\secref{c16-pathupd}\)).
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.24\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Per query} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ walk + scan & climb parents to root, check colours & \(\bigO{N}\) & \tle \\
+2 & \lv{3}\ per-chain set & a \code{set} of blacks per chain, hop \(\mathit{head}\) & \(\bigO{\log^2 N}\) & \ac \\
+3 & \lv{4}\ \textbf{HLD + min segtree} & this section (\(\coderef{c16-qtree3}\)) & \(\bigO{\log^2 N}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~1 dies at \(N=10^5,Q=4\cdot10^5\).  Rung~2 is valid but re-implements a segtree by hand; rung~3 is the general shape reused all chapter.
+
+\solstep{Solution}
+Fill \(\mathit{pos},\mathit{head},\mathit{depth}\) with \(\coderef{c16-build}\) (record depth in \(\mathit{dfs1}\)). Build a segment tree whose combine keeps, over a range, the \emph{node id} of the shallowest black (id~0 = none, ranked at depth \(+\infty\)); seed every slot with 0 (all white). Toggle is a point write that swaps a slot between its node id and 0. A \code{1 v} query folds the shallowest-black over the \(O(\log N)\) chain-ranges from \(v\) to~\(1\) and prints the surviving id (or \(-1\) if it is 0).
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={SPOJ QTREE3: heavy-light build + a segment tree over pos that keeps the shallowest black id in each range; colour toggle is a point write, root-path query folds O(log n) ranges}, label={lst:c16-qtree3}]
+#include <bits/stdc++.h>
+using namespace std;
+const int N = 100005;
+vector<int> adj[N];
+int sz[N], heavy[N], head[N], pos[N], dep[N], par[N], cur;
+int seg[4*N];                                  // shallowest BLACK id in range
+
+int shallower(int a, int b){                   // rank by depth; 0 = none
+    if (!a) return b; if (!b) return a;
+    return dep[a] <= dep[b] ? a : b;
+}
+void dfs1(int v, int p){
+    par[v]=p; sz[v]=1; heavy[v]=-1; int best=0;
+    for (int to : adj[v]) if (to!=p){
+        dep[to]=dep[v]+1; dfs1(to,v); sz[v]+=sz[to];
+        if (sz[to]>best){ best=sz[to]; heavy[v]=to; }
+    }
+}
+void dfs2(int v, int p, int h){
+    head[v]=h; pos[v]=++cur;
+    if (heavy[v]!=-1) dfs2(heavy[v], v, h);    // heavy child first
+    for (int to : adj[v]) if (to!=p && to!=heavy[v]) dfs2(to, v, to);
+}
+void upd(int i,int l,int r,int p,int val){      // point write: id or 0
+    if (l==r){ seg[i]=val; return; } int m=(l+r)>>1;
+    if (p<=m) upd(i<<1,l,m,p,val); else upd(i<<1|1,m+1,r,p,val);
+    seg[i]=shallower(seg[i<<1],seg[i<<1|1]);
+}
+int qry(int i,int l,int r,int a,int b){          // shallowest black in [a,b]
+    if (a>b) return 0;
+    if (a<=l && r<=b) return seg[i]; int m=(l+r)>>1;
+    return shallower(qry(i<<1,l,m,a,min(b,m)), qry(i<<1|1,m+1,r,max(a,m+1),b));
+}
+int queryPath(int v){                            // first black on 1..v
+    int res=0;
+    while (head[v]!=1){
+        res=shallower(res, qry(1,1,cur,pos[head[v]],pos[v]));
+        v=par[head[v]];
+    }
+    return shallower(res, qry(1,1,cur,pos[1],pos[v]));
+}
+bool black[N];
+int main(){
+    int n,q; scanf("%d%d",&n,&q);
+    for (int i=1;i<n;i++){ int a,b; scanf("%d%d",&a,&b);
+        adj[a].push_back(b); adj[b].push_back(a); }
+    dep[1]=0; dfs1(1,0); cur=0; dfs2(1,0,1);
+    for (int i=1;i<4*n;i++) seg[i]=0;                   // all white -> id 0
+    while (q--){
+        int t,x; scanf("%d%d",&t,&x);
+        if (t==0){ black[x]=!black[x];                   // toggle colour
+            upd(1,1,cur,pos[x], black[x] ? x : 0);
+        } else {
+            int a = queryPath(x);
+            printf("%d\n", a ? a : -1);
+        }
+    }
+}
+\end{lstlisting}
+
+\begin{warningbox}[Rank black nodes by DEPTH, not by \(\mathit{pos}\)]
+``First black on the root path'' means shallowest, and depth is the one number that compares across chains -- \(\mathit{pos}\) does not: the root chain occupies \(\mathit{pos}=[1..5]\) here, yet a node at \(\mathit{pos}=6\) can be shallower than one at \(\mathit{pos}=5\). Ranking by \(\mathit{pos}\) picks the wrong node. The fix, \code{shallower()}, keys on \(\mathit{depth}\) and carries the id, and it is exactly the combine that \(\secref{c16-pathq}\) generalises to a two-ended \(u\)--\(v\) path.
+\end{warningbox}
+
+\begin{recallbox}[22.1 in one breath]
+\emph{Cut each node's heaviest child into the same chain; every other edge is light.  A light step at least halves your subtree, so a root-path crosses \(\le\lfloor\log_2 n\rfloor\) light edges (\(\thmref{c16-lightedge}\)).  Number nodes heavy-first so chains \emph{and} subtrees are both contiguous (\(\defref{c16-pos}\)), dump the values into \(B\), and hand \(B\) to a segment tree.}
+\selftest{\item Decompose \(T\): how many chains does the path from root to node~4 cross, and which are they? \emph{(Two light edges \(1\!\to\!2,2\!\to\!4\): chains \(C_1\) (the root alone at this depth), \(C_2\), and \(C_4\) -- three chains, \(\le 2\lfloor\log_2 10\rfloor+1=7\).)}}
+\end{recallbox}

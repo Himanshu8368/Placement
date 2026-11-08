@@ -1,0 +1,1446 @@
+# One-Dimensional DP {#sec-od}
+
+::: {.callout-note title="Sources"}
+**`dp_book` ch. 2** (the look-back lessons, then range look-back and weighted selection). This chapter generalises Frog 1 (@sec-dpi-p1-frog) and House Robber (@sec-dpi-p2-robber): the state is still one position, and the set of earlier positions it reads is no longer a fixed pair.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Name the look-back set of a one-dimensional transition, and read the naive cost off that picture.
+- Choose suffix, push, or pull from the way the statement describes the moves.
+- Turn "cut this sequence into pieces" into a DP on the start of the last piece.
+- Replace an inner loop by a prefix sum, a running optimum, a deque, a binary search, or a bucket.
+- Notice when the line has cycles, a monotone layer, a real greedy, or a state that is too small.
+- Solve a calendar of passes, a sliding-window score, and a take-or-skip problem whose jump is chosen by the input.
+:::
+
+```{python}
+#| include: false
+import math
+import random
+import sys
+from functools import lru_cache
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+import dp230_traces as Traces
+random.seed(0)
+MOD = 10**9 + 7
+```
+
+## Why this matters
+
+@sec-dpi ended with five small patterns, and in each of them a cell read a fixed pair of neighbours. This chapter keeps the state exactly as it was, one position on a line, and adds a single idea: the set of earlier cells a position reads can be wide, chosen by the input, or found by a search.
+
+Frog 1 and House Robber both read a fixed handful of earlier cells: $dp[i-1]$ and $dp[i-2]$. The state was the position. That part does not change. What changes is the **look-back set** $W(i)$, the earlier positions $dp[i]$ is allowed to read.
+
+A window of length $10^5$ and "the latest job that ends before this one starts" are both one array. They are different programs. The shape of $W(i)$ decides the running time, and it usually names the tool that removes the inner loop. The question to ask of every new 1D problem is: for a fixed $i$, which $j$ can be the previous position?
+
+## Lesson 1: the shape of the look-back {#sec-od-look}
+
+Write the transition as
+
+$$
+dp[i] = \mathrm{combine}_{j \in W(i)}\big(dp[j] \otimes \mathrm{cost}(j, i)\big).
+$$
+
+Six shapes cover almost every problem in this chapter. The first is the one you already write. The other five are what the fixed window grows into.
+
+| Shape | $W(i)$ | Naive total | What removes the loop |
+|---|---|---|---|
+| Fixed | $\{i-1, i-2\}$ | $O(n)$ | nothing; this is Frog 1 |
+| Chosen by the input | $\{i - s : s \in S\}$ | $O(n\lvert S\rvert)$ | keep $S$ small; divisors by pushing, $O(n \log n)$ |
+| Sliding range | $[i-k, i-1]$ | $O(nk)$ | prefix sums for a sum; a deque for a min or max |
+| All earlier positions | $[0, i-1]$ | $O(n^2)$ | a running optimum, when the cost separates |
+| Latest compatible | $\{i-1,\ p(i)\}$ | $O(n)$ plus finding $p(i)$ | sort, then binary search |
+| Indexed by value | the best chain ending at $v-1$ | $O(n)$ or $O(n \log n)$ | an array or a map keyed by the value |
+
+::: {#fig-od-shapes}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    specs = [
+        ("1 fixed", {8, 9}),
+        ("2 set", {3, 6, 9}),
+        ("3 window", {6, 7, 8, 9}),
+        ("4 prefix", set(range(10))),
+        ("5 p(i)", {4, 9}),
+        ("6 value", {2}),
+    ]
+    rows = []
+    for name, hot in specs:
+        colors = {10: "indigo"}
+        for j in hot:
+            colors[j] = "amber"
+        rows.append(dict(values=list(range(11)), label=name, colors=colors, cell_w=0.72, size=8))
+    V.trace(ax, p, rows, gap=2.55)
+V.show(draw)
+```
+
+Amber cells are what $dp[i]$ reads. The indigo cell is $i$. One line of states, six transitions.
+
+:::
+
+A phrase in the statement usually names the row. "Jump 1 or 2" is the fixed pair. "A pass of 1, 7, or 30 days", "subtract a square", "jump to a multiple" are an input set. "At most $k$ steps" and "somewhere in the last $k$" are a sliding range. "Split into parts" and "cut the array" read every earlier index. "Non-overlapping jobs" is the latest compatible predecessor. "The next value is the previous value plus $d$" indexes the state by the value.
+
+The same list of events can be indexed in two ways. Travel days $1, 4, 6, 7, 8, 20$ live on a calendar. A **day-indexed** table has one cell per day, and a 7-day pass is the fixed look-back $d-7$. An **event-indexed** table has one cell per trip, and the same pass looks back to "the first trip inside the window", which moves. Both describe the same subproblems. The day table is the one to write when the axis is short (365 days). The event table is the one that survives when coordinates reach $10^9$. @sec-od-p1-tickets solves one problem both ways.
+
+Four formulas, named:
+
+- $\sum_{j=i-R}^{i-L} dp[j]$ is a sliding range, $O(n(R-L))$ until prefix sums make it $O(n)$.
+- $\min_{j < i,\ a_j < a_i} dp[j]$ is the whole prefix with a filter on values. That is the longest-increasing family: $O(n^2)$ naively.
+- $dp[i-1] + dp[i - a_i]$ is an input set of size 2.
+- Meetings with a start, an end, and a weight are the latest compatible predecessor after sorting by end time: $O(n \log n)$.
+
+```{python}
+def window_max(a, k):
+    dp = [a[0]]
+    for i in range(1, len(a)):
+        dp.append(a[i] + max(dp[j] for j in range(max(0, i - k), i)))
+    return dp[-1]
+
+def divisor_jumps(v):
+    """v[1..n]: from i you may jump to a proper multiple, earning v there."""
+    n = len(v) - 1
+    dp = [-(10**18)] * (n + 1)
+    dp[1] = v[1]
+    for i in range(1, n + 1):
+        for j in range(2 * i, n + 1, i):
+            dp[j] = max(dp[j], dp[i] + v[j])
+    return dp[n]
+
+def plus_one_chain(a):
+    best, ans = {}, 0
+    for v in a:
+        best[v] = best.get(v - 1, 0) + 1
+        ans = max(ans, best[v])
+    return ans
+
+assert window_max([2, -2, -1, -5, 3, 2, 1], 3) == 7
+assert divisor_jumps([0, 3, 1, 4, 2, 1, 6]) == 13
+assert plus_one_chain([9, 1, 2, 3]) == 3
+```
+
+The window $dp[i] = a_i + \max_{i-3 \le j < i} dp[j]$ on $[2,-2,-1,-5,3,2,1]$ is 7. Pushing from each index to its multiples computes the divisor recurrence in $O(n \log n)$ pushes, because $\sum_{i \le n} n/i$ is the harmonic sum; on $[3,1,4,2,1,6]$ the best total is 13. A chain of values $x, x{+}1, x{+}2, \ldots$ stores the best length at the value, so $[9,1,2,3]$ has length 3.
+
+## Lesson 2: pull, suffix, and push {#sec-od-dir}
+
+When the moves are given by the input ("from $i$ you may leap $L_i$ cells"), one direction is the recurrence and another direction is an edge list you have to build. The three writings below are the same path on the same cells.
+
+Cells $0..n-1$ hold values $v_i$, possibly negative. You start at 0 and must finish at $n-1$. From $i$ you may step to $i+1$ or leap to $i+L_i$ when that cell exists. Maximise the sum of the visited cells. On $v = [2,-5,3,-1,4,-2,1]$ and $L = [2,3,3,1,2,1,1]$ the best path is $0 \to 2 \to 3 \to 4 \to 6$, and the sum is $2+3-1+4+1 = 9$.
+
+**Suffix.** $f(i)$ is the best sum of a path from $i$ to the end, including $v_i$. The moves out of $i$ are exactly what the input lists:
+
+$$
+f(n-1) = v_{n-1}, \qquad f(i) = v_i + \max\big(f(i+1),\ f(i+L_i)\big)
+$$
+
+with the leap omitted when it would leave the array. Fill from the right. The answer is $f(0)$.
+
+**Push.** $dp[i]$ is the best sum of a path from 0 to $i$. When $dp[i]$ is final, send it along the two outgoing moves:
+
+$$
+dp[i+1] \leftarrow \max(dp[i+1],\ dp[i] + v_{i+1}), \qquad dp[i+L_i] \leftarrow \max(dp[i+L_i],\ dp[i] + v_{i+L_i}).
+$$
+
+**Pull.** The same prefix $dp$, gathered from the left. The predecessors of $i$ are $i-1$ and every $j$ with $j + L_j = i$. The input does not hand you that second set, so you reverse the leap edges first. A leap of length 1 is already the step, so it is not stored twice.
+
+| | Suffix | Push | Pull |
+|---|---|---|---|
+| Natural when | moves are given *from* $i$ | moves are given *from* $i$, and the start is fixed | moves are given *into* $i$, or you need a window of earlier values |
+| Order | right to left | left to right | left to right |
+| Answer | $f(\mathrm{start})$ | $dp[\mathrm{end}]$ | $dp[\mathrm{end}]$ |
+| Memoises directly | yes | no; it is a loop | yes, after the edges are reversed |
+
+On every cell of an optimal path, $dp[i] + f(i) - v_i$ equals the answer: the best path through $i$ is the best way in plus the best way out. A push from an unreached cell is the other trap. That cell still holds $-\infty$, and adding a value to the smallest 64-bit integer overflows. Skip unreached states, or store a safe infinity such as `LLONG_MIN / 4`.
+
+```{python}
+def leap_suffix(v, L):
+    n = len(v)
+    f = [0] * n
+    f[-1] = v[-1]
+    for i in range(n - 2, -1, -1):
+        best = f[i + 1]
+        if i + L[i] < n:
+            best = max(best, f[i + L[i]])
+        f[i] = v[i] + best
+    return f
+
+def leap_push(v, L):
+    n = len(v)
+    neg = -(10**18)
+    dp = [neg] * n
+    dp[0] = v[0]
+    for i in range(n):
+        if dp[i] == neg:
+            continue
+        for t in (i + 1, i + L[i]):
+            if t < n:
+                dp[t] = max(dp[t], dp[i] + v[t])
+    return dp
+
+def leap_pull(v, L):
+    n = len(v)
+    incoming = [[] for _ in range(n)]
+    for j in range(n):
+        if L[j] > 1 and j + L[j] < n:
+            incoming[j + L[j]].append(j)
+    neg = -(10**18)
+    dp = [neg] * n
+    dp[0] = v[0]
+    for i in range(1, n):
+        best = dp[i - 1]
+        for j in incoming[i]:
+            best = max(best, dp[j])
+        if best > neg:
+            dp[i] = best + v[i]
+    return dp
+
+_v, _L = [2, -5, 3, -1, 4, -2, 1], [2, 3, 3, 1, 2, 1, 1]
+_f, _dp = leap_suffix(_v, _L), leap_push(_v, _L)
+assert _f[0] == leap_pull(_v, _L)[-1] == _dp[-1] == 9
+assert all(_dp[i] + _f[i] - _v[i] == 9 for i in (0, 2, 3, 4, 6))
+```
+
+Use suffix or push when the statement says "from $i$ you can go to …". Use pull when it says "position $i$ is reached from …", and whenever the speed-up is a window of earlier indices: the window is over the cells you read. Several starts and one end favour a suffix, because each start is one table entry. One start and several ends favour a prefix.
+
+## Lesson 3: the last segment {#sec-od-part}
+
+Cutting $n$ elements into contiguous pieces can be done in $2^{n-1}$ ways. One question turns every such problem into a DP: where does the **last** piece start?
+
+$$
+dp[i] = \mathrm{opt}_{0 \le j < i}\big(dp[j] \otimes \mathrm{cost}(j, i)\big), \qquad \text{answer } dp[n].
+$$
+
+$dp[i]$ is the best way to cut the prefix $a_0..a_{i-1}$. The cut before the last piece leaves a smaller prefix, which is itself cut optimally. Every cutting has exactly one last piece, so a counting version adds disjoint cases.
+
+Words of lengths $w_0..w_{n-1}$ are printed in order on lines of width $W$, with a single space between words on a line. A line holding words $j..i-1$ has width $\ell(j, i) = \sum w + (i-j-1)$, and it must be at most $W$. Its cost is the squared slack $(W - \ell)^2$, except the last line, which is free. "we do like real coffee so" with widths $[2,2,4,4,6,2]$ and $W = 10$ shows why the greedy line-fill loses. Filling the first line completely gives "we do like" (slack 0), then "real" (slack 6, cost 36), then a free last line: total 36. The optimal lines are "we do" (slack 5, cost 25), "like real" (slack 1, cost 1), and a free "coffee so": total 26. Squared slack punishes one large gap more than two moderate ones.
+
+$$
+dp[i] = \min_{\substack{j < i \\ \ell(j, i) \le W}} \Big(dp[j] + [i < n]\,(W - \ell(j, i))^2\Big), \qquad dp[0] = 0.
+$$
+
+Three habits make the inner loop cheap. Walk $j$ downward from $i-1$, so the last piece grows by one element and its width, sum, or maximum updates in $O(1)$. Stop when the piece becomes illegal: a longer piece will not become legal. Store $cut[i] = j$ if you need the pieces back.
+
+Counting replaces $\min$ by $+$ and sets $dp[0] = 1$. When the filter on $j$ depends only on a small property of $j$, aggregate $dp[j]$ by that property. Pieces with an even sum are the first example: a piece $[j, i)$ has even sum exactly when the prefix sums $P_j$ and $P_i$ have the same parity, so two running totals replace the scan. On $[2,1,1,4,3,3]$ there are 8 cuttings. A prefix with an odd sum contributes 0: it can never be a union of even pieces.
+
+"Exactly $k$ pieces" puts the count in the state, $dp[c][i] = \mathrm{opt}_{j < i}(dp[c-1][j] \otimes \mathrm{cost}(j, i))$, which is $O(kn^2)$. That recurrence is where the later speed-ups (divide and conquer, Knuth, the convex hull) attach. For this chapter it is enough to see the extra dimension.
+
+```{python}
+def wrap_cost(words, W):
+    n = len(words)
+    inf = 10**18
+    dp = [inf] * (n + 1)
+    dp[0] = 0
+    for i in range(1, n + 1):
+        width = -1
+        for j in range(i - 1, -1, -1):
+            width += len(words[j]) + 1
+            if width > W:
+                break
+            slack = 0 if i == n else (W - width) ** 2
+            dp[i] = min(dp[i], dp[j] + slack)
+    return dp[n]
+
+def greedy_wrap(words, W):
+    lines, cur, width = [], [], 0
+    for w in words:
+        add = len(w) if not cur else len(w) + 1
+        if width + add <= W:
+            cur.append(w)
+            width += add
+        else:
+            lines.append(cur)
+            cur, width = [w], len(w)
+    lines.append(cur)
+    cost = 0
+    for line in lines[:-1]:
+        used = sum(len(w) for w in line) + len(line) - 1
+        cost += (W - used) ** 2
+    return cost
+
+def even_pieces(a):
+    P = [0]
+    even, odd, last = 1, 0, 1
+    for x in a:
+        P.append(P[-1] + x)
+        last = even if P[-1] % 2 == 0 else odd
+        if P[-1] % 2 == 0:
+            even += last
+        else:
+            odd += last
+    return last
+
+_words = ["we", "do", "like", "real", "coffee", "so"]
+assert greedy_wrap(_words, 10) == 36 and wrap_cost(_words, 10) == 26
+assert even_pieces([2, 1, 1, 4, 3, 3]) == 8
+```
+
+## Lesson 4: faster transitions {#sec-od-fast}
+
+The state is already one index, so the lever is the transition: compute $\mathrm{opt}_{j \in W(i)} dp[j]$ without walking $W(i)$. Five tools cover the cases that come before the heavy geometry of later chapters.
+
+| The transition looks like | Tool | Cost |
+|---|---|---|
+| $\sum_{j=i-R}^{i-L} dp[j]$ | prefix sums | $O(n)$ |
+| $\mathrm{opt}_{j \le i-d}\, dp[j]$ (the window only grows) | one running optimum | $O(n)$ |
+| $\mathrm{opt}_{i-k \le j < i}\, dp[j]$ | a heap, or a monotonic deque | $O(n \log k)$, or $O(n)$ |
+| $\max(dp[i-1],\ w_i + dp[p(i)])$ after sorting | binary search for $p(i)$ | $O(n \log n)$ |
+| a sum or an opt over $j$ with a small $\mathrm{key}(j)$ | one aggregate per key | $O(n)$ or $O(n \log n)$ |
+
+**Prefix sums.** Counting climbs of length between $L$ and $R$ is $dp[i] = \sum_{s=L}^{R} dp[i-s]$. The summed indices are the contiguous range $[i-R, i-L]$. Keep $S[k] = dp[0] + \cdots + dp[k-1]$ while you fill the table:
+
+$$
+dp[i] = S[i-L+1] - S[\max(0, i-R)], \qquad S[i+1] = S[i] + dp[i].
+$$
+
+For $L = 2$, $R = 3$, $n = 10$ the answer is 7, and $dp[10] = S[9] - S[7]$. Under a modulus the difference of two reduced prefix sums can be negative. Add the modulus before the final reduction. Python's `%` already does; C++ `%` on a negative value does not.
+
+**A running optimum.** "Picks at least $d$ apart" is House Robber when $d = 2$. Let $best[i]$ be the best sum of a selection whose last pick is $i$: $best[i] = a_i + \max(0,\ \max_{j \le i-d} best[j])$. The window $[0, i-d]$ only grows, so one variable remembers its maximum. On $[5,1,4,7,2,6,3]$ with $d = 3$ the answer is 15, the picks $5+7+3$.
+
+**A sliding window.** When values also leave on the left, one variable is wrong: the maximum may be the cell that just expired. A max-heap (or a multiset) with lazy deletion is the easy correct version. Insert $dp[i]$, and before you read the top, discard indices that have left the window. A monotonic deque is the $O(n)$ version: keep indices whose $dp$ values are strictly decreasing. A new value pops every smaller-or-equal value from the back, because an older candidate that is not better can never be chosen again — the newer one stays in the window longer. Indices that fall off the left are popped from the front. Every index enters once and leaves once. @sec-od-p1-jump6 builds both on one sample.
+
+**Binary search.** Intervals sorted by end time have a prefix of jobs compatible with job $i$. The last of them is one `upper_bound` of the start time in the sorted ends. The DP then reads two cells, $dp[i-1]$ and $dp[p(i)]$. @sec-od-p2-sched is that recurrence.
+
+**Aggregate by a key.** If "$j$ may precede $i$" depends only on the parity of a prefix sum, the value, or a remainder, keep one total per key. The even-sum pieces above are two totals. A chain with step $d$ is a map from value to best length.
+
+```{python}
+def count_steps(n, L, R, mod=MOD):
+    dp = [0] * (n + 1)
+    S = [0] * (n + 2)
+    dp[0] = 1
+    S[1] = 1
+    for i in range(1, n + 1):
+        if i - L >= 0:
+            lo, hi = max(0, i - R), i - L
+            dp[i] = (S[hi + 1] - S[lo] + mod) % mod
+        S[i + 1] = (S[i] + dp[i]) % mod
+    return dp[n]
+
+def picks_apart(a, d):
+    best = []
+    for i, v in enumerate(a):
+        earlier = max(best[: i - d + 1], default=0) if i >= d else 0
+        best.append(v + max(0, earlier))
+    return max(best)
+
+def picks_brute(a, d):
+    n, ans = len(a), 0
+    for mask in range(1 << n):
+        idx = [i for i in range(n) if mask >> i & 1]
+        if all(b - a0 >= d for a0, b in zip(idx, idx[1:])):
+            ans = max(ans, sum(a[i] for i in idx) if idx else 0)
+    return ans
+
+def window_deque(a, k):
+    dp = [0] * len(a)
+    dq = [0]
+    dp[0] = a[0]
+    for i in range(1, len(a)):
+        while dq[0] < i - k:
+            dq.pop(0)
+        dp[i] = a[i] + dp[dq[0]]
+        while dq and dp[dq[-1]] <= dp[i]:
+            dq.pop()
+        dq.append(i)
+    return dp[-1]
+
+_a = [2, -2, -1, -5, 3, 2, 1]
+assert count_steps(10, 2, 3) == 7
+assert picks_apart([5, 1, 4, 7, 2, 6, 3], 3) == picks_brute([5, 1, 4, 7, 2, 6, 3], 3) == 15
+assert window_deque(_a, 3) == window_max(_a, 3) == 7
+```
+
+## Lesson 5: when 1D DP is the wrong tool {#sec-od-wrong}
+
+Many problems on a line look like a DP and can be written as one. Four situations are worth catching before you fill a table.
+
+**Moves go backwards.** "From $i$ jump to $i+a_i$ or $i-a_i$" makes cycles. A cell would depend on itself, so there is no evaluation order. Reachability and unit-cost distance are a BFS on the positions. Non-negative weights are Dijkstra. The forward-only special case is a DAG, and there the DP and the BFS agree. On jump lengths $[3,1,2,1,0]$, index 0 reaches index 3, index 3 reaches 2, and index 2 reaches 0: a cycle. BFS from 0 still reaches the 0 at the end, because visited positions are closed.
+
+**The table is monotone.** "Minimum jumps to reach $i$", when from $j$ you may land anywhere in $[j+1,\ j+a_j]$, is a non-decreasing $dp$. The positions reachable in exactly $t$ jumps form one contiguous layer. The $O(n^2)$ table collapses into the two boundaries of the current layer, an $O(n)$ sweep. After you have written a 1D table, print it on a random input. A monotone or piecewise-constant table is usually hiding a greedy or a two-pointer. Keep the DP anyway: it is the checker for the faster idea.
+
+**An exchange argument really does fix one choice.** Unweighted interval scheduling — the maximum *number* of non-overlapping intervals — is "always take the interval that ends first". In any optimal solution, replacing its first interval by the earliest-ending one keeps the solution feasible and the same size. Weights break the exchange. The interval $[1,4)$ of weight 1 ends first and blocks $[2,10)$ of weight 10. Earliest-end collects 1. The optimum is 10. Equal weights are the greedy; unequal weights are the DP of @sec-od-p2.
+
+**The position is not enough.** If the next jump must be $k-1$, $k$, or $k+1$ where $k$ was the previous jump, two visits to the same index have different futures. $dp[\mathrm{position}]$ is the wrong state. $dp[\mathrm{position}][\mathrm{last\ jump}]$ is the right one. That is a reason to enlarge the state, the same move as the multi-state pattern of the previous chapter.
+
+Every greedy shortcut needs a proof or an exhaustive stress test. A greedy that matches the samples is how a lot of wrong solutions are born. When the constraints allow it, write the DP first and use it to check the shortcut.
+
+```{python}
+def can_reach(a):
+    n = len(a)
+    seen = [False] * n
+    stack = [0]
+    seen[0] = True
+    while stack:
+        i = stack.pop()
+        for j in (i + a[i], i - a[i]):
+            if 0 <= j < n and not seen[j]:
+                seen[j] = True
+                stack.append(j)
+    return seen[-1]
+
+def earliest_end_profit(jobs):
+    jobs = sorted(jobs, key=lambda job: job[1])
+    total, prev = 0, -(10**18)
+    for s, e, w in jobs:
+        if s >= prev:
+            total += w
+            prev = e
+    return total
+
+_jobs = [(1, 4, 1), (2, 10, 10)]
+assert can_reach([3, 1, 2, 1, 0])
+assert _jobs[0][0] < _jobs[1][1] and _jobs[1][0] < _jobs[0][1]
+assert earliest_end_profit(_jobs) == 1 and max(w for _, _, w in _jobs) == 10
+```
+
+## Pattern 1: range look-back {#sec-od-p1}
+
+**Where we are.** The lessons named six shapes of the look-back set $W(i)$. The patterns use them one idea at a time: a window of earlier cells (this pattern), a single compatible predecessor found by sorting and binary search (Pattern 2), the same look-back counted with weights and then with the last symbol in the state (Pattern 3), arrows described at the source and pushed forward (Pattern 4), and finally a whole last block, filled from the right or cut into a fixed number of pieces (Pattern 5). Each problem inside a pattern adds one twist to the one before it.
+
+**Recognise it.** The states are a line, and the last move into $i$ can start at several earlier positions. The statement says "jump at most $k$", "a pass valid for $d$ days", "subtract any square". You can write the answer as a min, a max, or a sum over a set $W(i)$, plus a cost that is easy to compute. When $n$ and $k$ are both $10^5$, the hint is that $O(nk)$ is too slow and the window maximum has to be found faster.
+
+::: {.callout-important title="Template"}
+$dp[i] = \mathrm{opt}_{j \in W(i)}\big(dp[j] + \mathrm{cost}(j, i)\big)$. Naive time is $O(n \cdot \lvert W\rvert)$. The goal is $O(1)$ or $O(\log n)$ per state.
+
+When the cost does not depend on $j$, it factors out, and only the best $dp[j]$ in the window is needed. A window that only grows is one running variable. A window that also shrinks on the left is a heap or a deque. A sum over the window is a prefix sum. A cost that mixes $j$ and $i$ (a squared height difference, a product $b_j \cdot x_i$) needs a heavier tool than this pattern.
+:::
+
+Leave this pattern when $W(i)$ is a single latest-compatible index (@sec-od-p2), when the transition is the cost of a whole last segment (@sec-od-part), or when the question is only "can I reach the end?" with no weights (@sec-od-wrong).
+
+{{< include ../problems/lc-0983-minimum-cost-for-tickets/problem.qmd >}}
+
+[**From three offsets to a whole window.** Tickets reads three fixed look-backs, one per pass. Jump Game VI reads every one of the last $k$ cells, so the maximum over the window has to be kept up to date as it slides; the animation shows a deque doing it.]{.flow-bridge}
+
+::: {#fig-od-anim-deque}
+
+```{python}
+#| echo: false
+dq_a, dq_k = [1, -1, -2, 4, -7, 3], 2
+dq_dp, dq_q, dq_states = [], [], []
+for i, x in enumerate(dq_a):
+    while dq_q and dq_q[0] < i - dq_k:          # leave the window on the left
+        dq_q.pop(0)
+    dq_dp.append(x + (dq_dp[dq_q[0]] if dq_q else 0))
+    while dq_q and dq_dp[dq_q[-1]] <= dq_dp[i]:  # a newer, larger value retires the old ones
+        dq_q.pop()
+    dq_q.append(i)
+    dq_states.append(list(dq_q))
+assert dq_dp == [1, 0, -1, 4, -3, 7]
+
+def dq_frame(ax, p, k):
+    win = {j: "amber" for j in range(max(0, k - dq_k), k)}
+    win[k] = "indigo"
+    V.array(ax, p, dq_a, label="nums", colors=win)
+    V.array(ax, p, [dq_dp[j] if j <= k else None for j in range(len(dq_a))], 0, -1.9,
+            label="dp", colors={k: "green"}, index=False)
+    V.array(ax, p, [f"{j}:{dq_dp[j]}" for j in dq_states[k]], 0, -3.6, label="deque after",
+            colors={0: "cyan"}, index=False, cell_w=1.4)
+
+dq_caps = ["i = 0: dp[0] = nums[0] = 1; the deque holds index 0"]
+for i in range(1, len(dq_a)):
+    j = max(range(max(0, i - dq_k), i), key=lambda t: dq_dp[t])
+    dq_caps.append(f"i = {i}: front was index {j}, so dp[{i}] = {dq_a[i]} + ({dq_dp[j]}) = {dq_dp[i]}; deque now {dq_states[i]}")
+V.animate(dq_frame, len(dq_a), captions=dq_caps, interval=1100)
+```
+
+Jump Game VI on `[1,-1,-2,4,-7,3]` with $k = 2$, one index per frame. Amber is the window $dp[i-2..i-1]$. The deque (shown as index:value) keeps only the indices that can still become a window maximum, largest first, so its front (cyan) is the maximum and each $dp[i]$ costs $O(1)$ amortised. The answer is $dp[5] = 7$.
+
+:::
+
+{{< include ../problems/lc-1696-jump-game-vi/problem.qmd >}}
+
+## Pattern 2: weighted selection {#sec-od-p2}
+
+**From a window to one predecessor.** In Pattern 1 the look-back set was a range of indices, and the work was keeping its best value up to date. Now the items are intervals, and taking one forbids everything it overlaps. After sorting by end time the compatible items form a prefix, so the whole look-back collapses to **one** cell $p(i)$, found by a binary search.
+
+**Recognise it.** Each item is an interval with a weight. You take it or you skip it, and the taken items must not overlap. House Robber is the special case in which house $k$ is the tiny interval $[k,\ k+2)$: it overlaps only its two neighbours, so the latest compatible predecessor is always $p(k) = k-2$. Let the intervals be arbitrary and that jump becomes an input.
+
+Sort by **end time**. Skipping item $i$ leaves the first $i-1$ items. Taking it leaves exactly the items that end at or before it starts. If item $j < i$ is compatible with $i$, every item that ends even earlier is compatible too, because those end times are sorted. The compatible items are a prefix $1..p(i)$, with no holes. Sorting by start time breaks the prefix: a long job can sit in the middle of the jobs that would otherwise form it. That order wants the mirror DP, a suffix filled from the right.
+
+::: {.callout-important title="Template"}
+After sorting so that $e_1 \le e_2 \le \cdots \le e_n$,
+
+$$
+dp[i] = \max\big(dp[i-1],\ w_i + dp[p(i)]\big), \qquad p(i) = \#\{j < i : e_j \le s_i\},
+$$
+
+with $dp[0] = 0$ and answer $dp[n]$. Half-open intervals $[s, e)$, where touching is allowed, find $p(i)$ with `upper_bound` of $s_i$ in the ends. Closed intervals, where both endpoints are occupied, use `lower_bound`. The DP itself is $O(n)$. The sort and the searches are $O(n \log n)$.
+
+$dp$ is non-decreasing because of the skip branch, so $dp[p(i)]$ is already the best value over every shorter compatible prefix. Two cells, not a scan of the prefix.
+:::
+
+Equal weights are a different algorithm: take the interval that ends first, discard everything it overlaps, and repeat. The exchange argument is the one in @sec-od-wrong. A weight that varies between items is what breaks it, and then this DP is the tool. "At most $k$ items" adds the count to the state. A limited number of overlapping rooms is a different state entirely.
+
+{{< include ../problems/lc-1235-maximum-profit-in-job-scheduling/problem.qmd >}}
+
+[**From the best plan to how many plans.** Placing houses is weighted selection with every interval two plots long and no weights at all. The question is how many patterns exist, so `max` becomes `+`, and the two independent sides of the street multiply.]{.flow-bridge}
+
+{{< include ../problems/lc-2320-count-number-of-ways-to-place-houses/problem.qmd >}}
+
+## Pattern 3: counting under rules {#sec-od-p3}
+
+**From one way to many ways.** Counting house patterns gave every legal step a weight of 1. Here a last piece can stand for several objects at once (a `*` is nine digits), so each term of the sum is **multiplied** by the number of versions of that piece. When the rule also looks at the previous symbol, that symbol joins the state.
+
+**Recognise it.** The question is "how many", usually modulo $10^9+7$, and every object is built left to right from pieces. A piece is either allowed or not, and an allowed piece may have several versions (a `*` is nine digits, not one). If the rule looks only at the piece itself, one number $dp[i]$ is enough. If it looks at the previous symbol, that symbol joins the state and you are counting walks in a small graph.
+
+::: {.callout-important title="Template"}
+**Piece form.** $dp[i] = \sum_p \mathrm{mult}(p)\, dp[i-|p|]$ over valid last pieces, $dp[0] = 1$, answer $dp[n]$.
+
+**Last-symbol form.** $dp[i][s] = \sum_{s' \to s} dp[i-1][s']$, $dp[1][s] = 1$ for every legal start, answer $\sum_s dp[n][s]$.
+
+The groups are disjoint because every object has exactly one last piece (or one last symbol). The product rule applies only when the piece's validity does not depend on how the prefix was built. If it does, store the part of the prefix the rule reads.
+:::
+
+**Complexity.** Piece form is $O(n \cdot \#\text{lengths})$. Last-symbol form is $O(n \cdot \#\text{arrows})$, and two rows of the symbol alphabet are enough. A fixed graph raised to the power $n$ is the same recurrence when $n$ is $10^{18}$; that tool is a later chapter. Counts overflow a 32-bit integer: store `long long` and reduce after every product. A weight of $15$ times a reduced value is about $1.5 \cdot 10^{10}$, which fits in 64 bits and not in 32.
+
+::: {#fig-od-p3-tiles}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+dp = [1]
+for i in range(1, 5):
+    dp.append(2 * dp[-1] + (3 * dp[-2] if i >= 2 else 0))
+assert dp == [1, 2, 7, 20, 61]
+def draw(ax, p):
+    V.array(ax, p, dp, colors={4: "green", 3: "indigo", 2: "cyan"}, label="dp")
+    V.text(ax, p, 5.6, 0.5, "2·dp[i-1] + 3·dp[i-2]", ha="left", size=10)
+V.show(draw)
+```
+
+Squares in 2 colours and dominoes in 3 colours: the last tile contributes a multiplicity, not a 0/1 test. $dp[4] = 61$.
+
+:::
+
+{{< include ../problems/lc-0639-decode-ways-ii/problem.qmd >}}
+
+[**From the last piece to the last symbol.** In Decode Ways II a piece is legal or not on its own. A knight's next digit is legal only relative to the previous digit, so the length alone is no longer a state: the digit you stand on joins it, and the DP counts walks on a ten-node graph.]{.flow-bridge}
+
+{{< include ../problems/lc-0935-knight-dialer/problem.qmd >}}
+
+## Pattern 4: reachability {#sec-od-p4}
+
+**From the target to the source.** Every look-back so far was described at the cell being filled: which earlier cells lead here. In jump games the input describes the moves at the cell you **leave**, so the natural update is a push from each reachable cell. The weights disappear, and the question becomes "can you?" or "in how few moves?".
+
+**Recognise it.** Positions lie on a line, and the input at $i$ says where you may go next. The question is "can you?" or "in how few moves?". Because the arrows are described at the source, the natural update is a **push**: a reachable $i$ writes into every landing cell. If every arrow goes right, index order is a topological order. If an arrow can go left, the graph may have a cycle and the tool is BFS.
+
+::: {.callout-important title="Template"}
+Feasibility: $\mathrm{reach}[0] = \mathrm{true}$, and a reachable $i$ sets $\mathrm{reach}[j]$ for every move $i \to j$. Fewest moves: $dp[0] = 0$, every other cell starts at $+\infty$, and $dp[j] = \min(dp[j], dp[i] + 1)$. Never push from an unreachable cell. Most moves uses $-\infty$ as the identity, not 0: an unreachable cell must not look like a route of length 0.
+
+When the moves are a whole range $[i+1, i+\texttt{nums}[i]]$ and you want the fewest jumps, $dp$ is non-decreasing, the cells with a given distance form an interval, and the BFS queue collapses into two integers.
+:::
+
+**Complexity.** A naive push is $O(n \cdot \max a)$. The layer scan is $O(n)$. BFS on a graph with both directions is $O(n + \#\text{edges})$.
+
+::: {#fig-od-p4-reach}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+a = [2, 0, 2, 0, 1, 0, 1]
+reach = [False] * len(a)
+reach[0] = True
+for i in range(len(a)):
+    if not reach[i]:
+        continue
+    for j in range(i + 1, min(len(a), i + a[i] + 1)):
+        reach[j] = True
+assert reach == [True, True, True, True, True, True, False]
+def draw(ax, p):
+    V.array(ax, p, a, label="a")
+    V.array(ax, p, ["T" if v else "F" for v in reach], 0, -1.7, label="reach",
+            colors={i: "green" if v else "red" for i, v in enumerate(reach)})
+V.show(draw)
+```
+
+`[2,0,2,0,1,0,1]`. Only a reachable cell pushes. Index 5 is reached and has jump 0, so index 6 stays false.
+
+:::
+
+::: {#fig-od-anim-layers}
+
+```{python}
+#| echo: false
+ly_a = [2, 1, 3, 1, 1, 2, 1, 1, 1]
+ly_n = len(ly_a)
+ly_layers, lo, hi = [], 0, 0
+while True:
+    ly_layers.append((lo, hi))
+    if hi >= ly_n - 1:
+        break
+    far = max(i + ly_a[i] for i in range(lo, hi + 1))
+    lo, hi = hi + 1, min(far, ly_n - 1)
+ly_dist = [0] * ly_n
+for d, (l, h) in enumerate(ly_layers):
+    for i in range(l, h + 1):
+        ly_dist[i] = d
+ly_best = [0] + [math.inf] * (ly_n - 1)        # check against the plain fewest-jumps table
+for i in range(ly_n):
+    for j in range(i + 1, min(ly_n, i + ly_a[i] + 1)):
+        ly_best[j] = min(ly_best[j], ly_best[i] + 1)
+assert ly_dist == ly_best and ly_dist[-1] == 4
+
+ly_cols = ["indigo", "cyan", "green", "amber", "violet"]
+def ly_frame(ax, p, k):
+    colors = {i: ly_cols[d] for d, (l, h) in enumerate(ly_layers[: k + 1]) for i in range(l, h + 1)}
+    V.array(ax, p, ly_a, label="nums", colors=colors)
+    V.array(ax, p, [ly_dist[i] if i <= ly_layers[k][1] else None for i in range(ly_n)], 0, -1.9,
+            label="jumps", colors=dict(colors), index=False)
+
+ly_caps = ["layer 0: only index 0, reached with 0 jumps"]
+for d in range(1, len(ly_layers)):
+    (l, h), (pl, ph) = ly_layers[d], ly_layers[d - 1]
+    ly_caps.append(f"layer {d}: indices {l}..{h}, everything new that indices {pl}..{ph} can reach")
+ly_caps[-1] += "; the end needs 4 jumps"
+V.animate(ly_frame, len(ly_layers), captions=ly_caps, interval=1100)
+```
+
+Fewest jumps on `[2,1,3,1,1,2,1,1,1]`, one BFS layer per frame. The cells reached with $d$ jumps form a contiguous block that starts right after layer $d-1$ and ends at the farthest cell layer $d-1$ can reach, so two integers replace the whole queue. The cell checks the layers against the plain fewest-jumps table.
+
+:::
+
+{{< include ../problems/lc-0045-jump-game-ii/problem.qmd >}}
+
+[**From where you stand to how you got there.** Jump Game II's moves depend only on the cell. The frog's next jump depends on the length of its last one, so "the frog is on stone $i$" is not a state: the last jump $k$ joins it, and the table is indexed by $(i, k)$.]{.flow-bridge}
+
+{{< include ../problems/lc-0403-frog-jump/problem.qmd >}}
+
+## Pattern 5: suffix and partition {#sec-od-p5}
+
+**From one jump to a whole block.** In Pattern 4 a move went from one cell to another. Here a decision covers a **stretch** of the line: answering a question blocks the next $b_i$ questions, or a shelf holds a consecutive run of books. Either fill from the right, so the landing cell is always ready, or let the transition range over where the last block starts.
+
+**Recognise it.** A choice at index $i$ sends you to a later index that the data at $i$ computes ("skip the next $b_i$"), or the answer is a cut of the array into consecutive blocks. In the first case the natural question is "what is the best from here to the end?". In the second, the last block is some $[j, i)$ and the prefix before it is the same problem.
+
+::: {.callout-important title="Template"}
+**Suffix.** $f(i) = \mathrm{opt}\big(f(i+1),\; g_i + f(\min(n, i+b_i+1))\big)$, filled from the right, $f(n) = 0$, answer $f(0)$. The push twin sends the value at $i$ along the same two arrows; a chain of skips is a running maximum.
+
+**Partition.** $dp[i] = \mathrm{opt}_{j < i}\big(dp[j] + \mathrm{cost}(j, i)\big)$, $dp[0]$ the identity, answer $dp[n]$. Walk $j$ from $i-1$ downward so the block's max, sum, or width updates in $O(1)$. Stop when a monotone limit (width, length) fails. Exactly $k$ blocks adds the count: $dp[k][i]$ reads only layer $k-1$.
+:::
+
+**Complexity.** A data-dependent skip is $O(n)$ and does not fit in two variables, because the jump can land anywhere to the right. A partition with blocks of length at most $L$ is $O(nL)$. Exactly $d$ blocks is $O(d n^2)$, or $O(n)$ memory with one rolling layer.
+
+House robber is the suffix recurrence with every jump equal to 2. The moment the jump length comes from the input, the prefix "best on $0..i$" stops being enough: an earlier take may still be blocking $i$, and the cells that land on $i$ are an irregular set.
+
+::: {#fig-od-p5-suffix}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+p, b = [4, 2, 7, 1, 5, 3], [1, 0, 2, 0, 1, 0]
+n = len(p)
+f = [0] * (n + 1)
+for i in range(n - 1, -1, -1):
+    f[i] = max(f[i + 1], p[i] + f[min(n, i + b[i] + 1)])
+assert f[0] == 14
+def draw(ax, pax):
+    V.array(ax, pax, f, label="f", colors={0: "green", n: "amber"})
+V.show(draw)
+```
+
+Points $[4,2,7,1,5,3]$ with rests $[1,0,2,0,1,0]$. Filled from the right, $f(0) = 14$. The take from index 0 lands on index 2, not on a fixed neighbour.
+
+:::
+
+{{< include ../problems/lc-2140-solving-questions-with-brainpower/problem.qmd >}}
+
+[**From a skip to a block.** Brainpower's block is fixed by the data: answer question $i$ and the next $b_i$ are gone. On a bookshelf you choose where the last shelf starts, so the transition loops over every legal start $j$ and pays the tallest book in $[j, i)$.]{.flow-bridge}
+
+{{< include ../problems/lc-1105-filling-bookcase-shelves/problem.qmd >}}
+
+[**From any number of blocks to exactly $d$.** Bookcase allows as many shelves as you like. A job schedule must use exactly $d$ days, and the cheapest prefix with too few days is useless to the future, so the number of blocks used becomes a second index: one layer per day.]{.flow-bridge}
+
+{{< include ../problems/lc-1335-minimum-difficulty-of-a-job-schedule/problem.qmd >}}
+
+**Looking back.** Every problem in this chapter kept the state of @sec-dpi, one position on a line. What changed was the look-back set $W(i)$: a sliding window, one compatible predecessor, a weighted set of last pieces, the arrows out of a cell, a whole last block. Its shape named the tool that removed the inner loop: a deque, a binary search, a multiplicity, a BFS layer, a loop that grows the block to the left. When the position was not enough, we added exactly the fact the future needed (the last digit, the last jump, the number of blocks), the same move as the multi-state pattern of @sec-dpi-p4.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| The best at $i$ reads a window, a calendar, or a set the input names | Range look-back | @sec-od-p1 |
+| Passes cover a stretch of days | Range look-back | @sec-od-p1-tickets |
+| Sliding window of a min or a max | Range look-back, monotonic deque | @sec-od-p1-jump6 |
+| Weighted intervals; taking one blocks the ones it overlaps | Weighted selection, sort by end | @sec-od-p2 |
+| Count schedules of those intervals | Weighted selection, $+$ instead of max | @sec-od-p2-houses |
+| Count strings or walks; a symbol, a wildcard, or a last piece has a multiplicity | Counting under rules | @sec-od-p3 |
+| The same walk on a tiny graph, huge length | Counting, symmetry or a matrix | @sec-od-p3-knight |
+| Reach the end, or fewest jumps, and every move is a forward range | Reachability; layers when the min-jump table is non-decreasing | @sec-od-p4-jump2 |
+| The legal next move depends on the length of the last one | Reachability on $(index, k)$ | @sec-od-p4-frog |
+| A choice jumps over a data-dependent number of later items | Suffix, filled right to left | @sec-od-p5-brain |
+| The answer is a cut into consecutive blocks; the last block has a cost | Partition; grow the block left | @sec-od-p5-shelf |
+| Exactly $d$ blocks | One layer per block | @sec-od-p5-diff |
+| $W(i)$ is a sliding range and the combine is a sum | Prefix sums | @sec-od-fast |
+| A move can go backward, or the dependency graph has a cycle | BFS or DFS, not an index loop | @sec-od-wrong |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **The look-back is unnamed.** Write $W(i)$ before choosing a tool. A fixed pair, an input set, a sliding window, every earlier index, one compatible predecessor, and a cell keyed by value are six different algorithms (@sec-od-look).
+- **Pull written as a push, or the reverse, with the same loop bounds.** A pull reads cells that are already final. A push writes only to later indices. Filling a push into the cell you are iterating changes the set under your feet (a jump of length 0 in Frog Jump).
+- **A deque on the wrong shape.** The deque is the sliding-window minimum or maximum: indices enter in order, the front is the window's answer, and the back stays monotone. A sum wants prefix sums. An arbitrary set wants the set. A cost that is not the stored value itself is not a deque problem (@sec-od-fast).
+- **A table on a graph with a backward edge.** Jump Game III has a cycle. No index order makes every dependency final first; the search is a BFS with a visited array (@sec-od-wrong).
+- **Layers on a jump that is not a range.** Jump Game II's layers are legal because $dp[i]$ is non-decreasing on the reachable prefix. An exact length, a backward jump, or a gap test that is not "farthest $\le i$" needs the DP or a real queue.
+- **The last block is off by one.** A partition of the first $i$ items ends at $i$ and starts at $j$, so the block is $[j, i)$ and the previous answer is $dp[j]$. Solving question $i$ and skipping $b_i$ questions lands on $i + b_i + 1$, clamped at $n$.
+- **A sentinel that is added to.** $10^9$ plus a day's difficulty still fits in a 32-bit signed integer. `INT_MAX` plus that difficulty overflows, becomes negative, and wins the minimum. Impossible cells stay at the sentinel, and the transition adds only when the previous cell is strictly below it.
+- **A wildcard counted as one object.** `*` is nine digits, `**` is fifteen two-digit codes, and a knight's `*` is not this problem. The multiplicity is part of the transition (@sec-od-p3-decode).
+:::
+
+## Exercises
+
+**1. [E]** [LC 279 · Perfect Squares](https://leetcode.com/problems/perfect-squares/){difficulty="Medium"}. Least number of perfect squares that sum to $n$. ($12 \to 3$, $13 \to 2$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ is the fewest squares that sum to $i$. The look-back is the input set $\{i - s^2 : s^2 \le i\}$, so $dp[i] = 1 + \min dp[i - s^2]$ and $dp[0] = 0$.
+
+```{python}
+def squares(n):
+    dp = [0] + [10**9] * n
+    for i in range(1, n + 1):
+        s = 1
+        while s * s <= i:
+            dp[i] = min(dp[i], dp[i - s * s] + 1)
+            s += 1
+    return dp[n]
+
+assert squares(12) == 3 and squares(13) == 2 and squares(1) == 1
+```
+:::
+
+**2. [E]** [LC 2466 · Count Ways To Build Good Strings](https://leetcode.com/problems/count-ways-to-build-good-strings/){difficulty="Medium"}. Append a block of `zero` zeros or `one` ones. Count strings whose length lies in $[\mathrm{low}, \mathrm{high}]$, modulo $10^9+7$. ($(3,3,1,1) \to 8$, $(2,3,1,2) \to 5$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[L]$ counts strings of length exactly $L$. The last block is one of the two pieces, and reading a finished string from the left forces the cuts, so distinct block sequences are distinct strings. The answer adds $dp[L]$ for $L$ from low to high.
+
+```{python}
+def good_strings(low, high, zero, one):
+    dp = [1] + [0] * high
+    ans = 0
+    for L in range(1, high + 1):
+        if L >= zero:
+            dp[L] += dp[L - zero]
+        if L >= one:
+            dp[L] += dp[L - one]
+        dp[L] %= MOD
+        if L >= low:
+            ans = (ans + dp[L]) % MOD
+    return ans
+
+assert good_strings(3, 3, 1, 1) == 8 and good_strings(2, 3, 1, 2) == 5
+```
+:::
+
+**3. [E]** Count the binary strings of length $n$ with no three ones in a row. Give $n = 4$ and $n = 10$, and the number of length-10 strings that do contain `111`.
+
+::: {.callout-note collapse="true" title="Solution"}
+Keep the count of valid strings by their trailing ones: zero, one, or two. A `0` sends every string to the zero-state; a `1` moves zero to one and one to two, and two cannot take a `1`. The totals are $2, 4, 7, 13, 24, 44, 81, 149, 274, 504$ for $n = 1..10$. Strings that contain `111` are the rest of the $2^{10}$ binary strings: $1024 - 504 = 520$.
+
+```{python}
+def no_three(n):
+    e0, e1, e2 = 1, 0, 0
+    for _ in range(n):
+        e0, e1, e2 = e0 + e1 + e2, e0, e1
+    return e0 + e1 + e2
+
+assert no_three(4) == 13 and no_three(10) == 504
+assert 2**10 - no_three(10) == 520
+assert no_three(10) == sum("111" not in "".join(t) for t in __import__("itertools").product("01", repeat=10))
+```
+:::
+
+**4. [E]** [LC 55 · Jump Game](https://leetcode.com/problems/jump-game/){difficulty="Medium"}. From index $i$ you may jump forward by at most $\texttt{nums}[i]$. Can you reach the last index?
+
+::: {.callout-note collapse="true" title="Solution"}
+The reachable cells are a prefix $[0, R]$. Scan $i$ from the left; if $i > R$ there is a gap, and otherwise $R$ becomes $\max(R, i + \texttt{nums}[i])$.
+
+```{python}
+def can_jump(a):
+    reach = 0
+    for i, v in enumerate(a):
+        if i > reach:
+            return False
+        reach = max(reach, i + v)
+    return True
+
+assert can_jump([2, 3, 1, 1, 4]) is True
+assert can_jump([3, 2, 1, 0, 4]) is False
+```
+:::
+
+**5. [E]** [LC 1043 · Partition Array for Maximum Sum](https://leetcode.com/problems/partition-array-for-maximum-sum/){difficulty="Medium"}. Cut into blocks of length at most $k$. Every entry of a block is replaced by the block maximum. Maximise the sum. ($[1,15,7,9,2,5,10]$, $k = 3 \to 84$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ is the best sum of the first $i$ entries. The last block has length $L \le k$; growing $L$ adds one element on the left, so the block maximum is a running value and the block contributes $L$ times that maximum.
+
+```{python}
+def max_sum(a, k):
+    dp = [0] * (len(a) + 1)
+    for i in range(1, len(a) + 1):
+        mx = 0
+        for L in range(1, min(k, i) + 1):
+            mx = max(mx, a[i - L])
+            dp[i] = max(dp[i], dp[i - L] + L * mx)
+    return dp[-1]
+
+assert max_sum([1, 15, 7, 9, 2, 5, 10], 3) == 84
+assert max_sum([1], 1) == 1
+```
+:::
+
+**6. [M]** [LC 2944 · Minimum Number of Coins for Fruits](https://leetcode.com/problems/minimum-number-of-coins-for-fruits/){difficulty="Medium"}. Buying fruit $i$ (1-indexed) pays `prices[i-1]` and makes the next $i$ fruits free. You may still buy a free fruit. Minimum cost to obtain all $n$ fruits. ($[3,1,2] \to 4$, $[1,10,1,1] \to 2$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ is the cost of fruits $i..n$ given that fruit $i$ is bought. The next purchase lies in $i+1 .. \min(2i+1, n+1)$, and $dp[n+1] = 0$. Fill from the right. The window is shaped by $i$; for $n \le 1000$ the direct minimum is enough.
+
+```{python}
+def fruit_coins(prices):
+    n = len(prices)
+    dp = [0] * (n + 2)
+    for i in range(n, 0, -1):
+        hi = min(2 * i + 1, n + 1)
+        dp[i] = prices[i - 1] + min(dp[j] for j in range(i + 1, hi + 1))
+    return dp[1]
+
+assert fruit_coins([3, 1, 2]) == 4 and fruit_coins([1, 10, 1, 1]) == 2
+assert fruit_coins([26, 18, 6, 12, 49, 7, 45, 45]) == 39
+```
+:::
+
+**7. [M]** [LC 2266 · Count Number of Texts](https://leetcode.com/problems/count-number-of-texts/){difficulty="Medium"}. A key pressed $L$ times is one letter, $L \le 3$, or $L \le 4$ on keys 7 and 9. Count the messages for a press string, modulo $10^9+7$. (`"22233" → 8`, `"2222" → 7`, `"7777" → 8`.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ counts messages for the first $i$ presses. The last letter is a run of $L$ equal keys at the end, and the loop stops at the first press that differs, so runs of different keys multiply.
+
+```{python}
+def count_texts(s):
+    dp = [1] + [0] * len(s)
+    for i in range(1, len(s) + 1):
+        limit = 4 if s[i - 1] in "79" else 3
+        for L in range(1, limit + 1):
+            if L > i or s[i - L] != s[i - 1]:
+                break
+            dp[i] = (dp[i] + dp[i - L]) % MOD
+    return dp[-1]
+
+assert count_texts("22233") == 8
+assert count_texts("2222") == 7 and count_texts("7777") == 8
+```
+:::
+
+**8. [M]** [LC 2054 · Two Best Non-Overlapping Events](https://leetcode.com/problems/two-best-non-overlapping-events/){difficulty="Medium"}. Events $[s, e, v]$ occupy days $s..e$ inclusive. Choose at most two that do not overlap; maximise the total value. ($[[1,3,2],[4,5,2],[2,4,3]] \to 4$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort by end time and keep the best value among the first $j$ events. For event $i$ as the later one, binary search the events that end strictly before $s_i$ (a shared day overlaps) and add that prefix maximum, or take $v_i$ alone.
+
+```{python}
+def two_events(events):
+    events = sorted(events, key=lambda e: e[1])
+    ends, best, run = [], [], 0
+    for s, e, v in events:
+        ends.append(e)
+        run = max(run, v)
+        best.append(run)
+    ans = 0
+    for s, e, v in events:
+        lo, hi = 0, len(ends)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if ends[mid] < s:
+                lo = mid + 1
+            else:
+                hi = mid
+        ans = max(ans, v + (best[lo - 1] if lo else 0))
+    return ans
+
+assert two_events([[1, 3, 2], [4, 5, 2], [2, 4, 3]]) == 4
+```
+:::
+
+**9. [M]** [LC 2008 · Maximum Earnings From Taxi](https://leetcode.com/problems/maximum-earnings-from-taxi/){difficulty="Medium"}. Points are $1..n$. Ride $[s, e, \mathrm{tip}]$ earns $e - s + \mathrm{tip}$, and a new passenger may board where the last one left. ($n = 5$, $[[2,5,4],[1,5,1]] \to 7$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[t]$ is the best earnings on arriving at point $t$. Driving one point empty copies $dp[t-1]$. A ride that ends at $t$ adds its profit to $dp[s]$. Group the rides by drop-off so each point does work proportional to the rides that end there. The profit can exceed $2^{31}$, so the total is a 64-bit integer; Python's `int` already is.
+
+```{python}
+def taxi(n, rides):
+    ending = [[] for _ in range(n + 1)]
+    for s, e, tip in rides:
+        ending[e].append((s, tip))
+    dp = [0] * (n + 1)
+    for t in range(1, n + 1):
+        dp[t] = dp[t - 1]
+        for s, tip in ending[t]:
+            dp[t] = max(dp[t], dp[s] + (t - s + tip))
+    return dp[n]
+
+assert taxi(5, [[2, 5, 4], [1, 5, 1]]) == 7
+```
+:::
+
+**10. [M]** [LC 1306 · Jump Game III](https://leetcode.com/problems/jump-game-iii/){difficulty="Medium"}. From $i$ you may move to $i \pm \texttt{arr}[i]$. Starting at `start`, can you reach a cell whose value is 0? ($[4,2,3,0,3,1,2]$ from 5 and from 0 are true; $[3,0,2,1,2]$ from 2 is false.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The arrows go both ways. On $[3,0,2,1,2]$ the indices $2 \to 0 \to 3 \to 2$ are a cycle, so a recurrence on the index has no legal fill order and a memoised recursion that does not mark the cell before recurring never returns. BFS (or DFS) with a visited array expands each index once.
+
+```{python}
+def jump3(arr, start):
+    seen = [False] * len(arr)
+    stack = [start]
+    seen[start] = True
+    while stack:
+        i = stack.pop()
+        if arr[i] == 0:
+            return True
+        for j in (i - arr[i], i + arr[i]):
+            if 0 <= j < len(arr) and not seen[j]:
+                seen[j] = True
+                stack.append(j)
+    return False
+
+assert jump3([4, 2, 3, 0, 3, 1, 2], 5) and jump3([4, 2, 3, 0, 3, 1, 2], 0)
+assert jump3([3, 0, 2, 1, 2], 2) is False
+```
+:::
+
+**11. [M]** [LC 1024 · Video Stitching](https://leetcode.com/problems/video-stitching/){difficulty="Medium"}. Clips $[s, e]$ may be cut. Cover $[0, \mathrm{time}]$ with as few clips as possible, or return $-1$. (The six-clip sample at time 10 needs 3.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$\mathrm{reach}[s]$ is the farthest end of a clip that starts at second $s$. Covering the timeline is then Jump Game II on $0..\mathrm{time}$: a layer that does not grow leaves a second uncovered.
+
+```{python}
+def video(clips, time):
+    reach = [0] * (time + 1)
+    for s, e in clips:
+        if s <= time:
+            reach[s] = max(reach[s], e)
+    used = layer = far = 0
+    for i in range(time):
+        far = max(far, reach[i])
+        if i == layer:
+            if far <= i:
+                return -1
+            used += 1
+            layer = far
+    return used
+
+assert video([[0, 2], [4, 6], [8, 10], [1, 9], [1, 5], [5, 9]], 10) == 3
+assert video([[0, 1], [1, 2]], 5) == -1
+```
+:::
+
+**12. [M]** [LC 2369 · Check if There is a Valid Partition For The Array](https://leetcode.com/problems/check-if-there-is-a-valid-partition-for-the-array/){difficulty="Medium"}. Every block is two equal values, three equal values, or three consecutive increasing values. ($[4,4,4,5,6]$ is true; $[1,1,1,2]$ is false.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$ok[i]$ means the first $i$ elements have a valid cut. The only blocks have length 2 or 3, so each state reads $ok[i-2]$ and $ok[i-3]$, and $ok[0]$ is true. The lone 2 at the end of the second sample matches none of the three shapes.
+
+```{python}
+def valid_partition(a):
+    ok = [True] + [False] * len(a)
+    for i in range(1, len(a) + 1):
+        if i >= 2 and ok[i - 2] and a[i - 2] == a[i - 1]:
+            ok[i] = True
+        if i >= 3 and ok[i - 3] and (
+            a[i - 3] == a[i - 2] == a[i - 1]
+            or a[i - 2] == a[i - 3] + 1 and a[i - 1] == a[i - 2] + 1
+        ):
+            ok[i] = True
+    return ok[-1]
+
+assert valid_partition([4, 4, 4, 5, 6]) is True
+assert valid_partition([1, 1, 1, 2]) is False
+```
+:::
+
+**13. [H]** [LC 1425 · Constrained Subsequence Sum](https://leetcode.com/problems/constrained-subsequence-sum/){difficulty="Hard"}. Maximum sum of a non-empty subsequence whose consecutive chosen indices differ by at most $k$. ($[10,2,-10,5,20]$, $k = 2 \to 37$; $[-1,-2,-3]$, $k = 1 \to -1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ is the best sum of a valid subsequence that ends at $i$: $\texttt{nums}[i]$ plus the best of 0 and the window maximum of $dp$ on $[i-k, i)$. The 0 starts a new subsequence. The answer is the best $dp[i]$. The window is a sliding maximum, so a deque does it in linear time; the direct window is the same recurrence and is what the asserts check.
+
+```{python}
+def constrained(nums, k):
+    dp = [0] * len(nums)
+    ans = -10**18
+    for i, v in enumerate(nums):
+        window = 0
+        for j in range(max(0, i - k), i):
+            window = max(window, dp[j])
+        dp[i] = v + window
+        ans = max(ans, dp[i])
+    return ans
+
+assert constrained([10, 2, -10, 5, 20], 2) == 37
+assert constrained([-1, -2, -3], 1) == -1
+```
+:::
+
+**14. [H]** [LC 552 · Student Attendance Record II](https://leetcode.com/problems/student-attendance-record-ii/){difficulty="Hard"}. Strings over A, L, P with fewer than two A's and no three L's in a row. Count them for length $n$, modulo $10^9+7$. ($n = 1 \to 3$, $n = 2 \to 8$, $n = 10101 \to 183236316$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The rules look at two numbers: absences so far (0 or 1) and trailing L's (0, 1, or 2). P goes to trailing 0, A is allowed only from the zero-absence row, and L is allowed only when the trailing count is below 2. Length 0 is the empty record, one way, in state $(0, 0)$.
+
+```{python}
+def check_record(n):
+    dp = [[1, 0, 0], [0, 0, 0]]
+    for _ in range(n):
+        nxt = [[0, 0, 0], [0, 0, 0]]
+        for a in range(2):
+            for ell in range(3):
+                v = dp[a][ell]
+                nxt[a][0] = (nxt[a][0] + v) % MOD
+                if a == 0:
+                    nxt[1][0] = (nxt[1][0] + v) % MOD
+                if ell < 2:
+                    nxt[a][ell + 1] = (nxt[a][ell + 1] + v) % MOD
+        dp = nxt
+    return sum(sum(row) for row in dp) % MOD
+
+assert check_record(1) == 3 and check_record(2) == 8
+assert check_record(10101) == 183236316
+```
+:::
+
+**15. [H]** Frog Jump, fewest jumps. Same rules as @sec-od-p4-frog: first jump 1, then $k-1$, $k$, or $k+1$. Return the minimum number of jumps to the last stone, or $-1$. Stones $0,1,\ldots,10$ need 4; the sample $[0,1,3,5,6,8,12,17]$ needs 6; $[0,1,2,3,4,8,9,11]$ is impossible.
+
+::: {.callout-note collapse="true" title="Solution"}
+The state stays $(i, k)$. The value becomes the fewest jumps that reach stone $i$ with last jump $k$. Every jump still goes forward, so stones in increasing order are a valid push order, and $k \le i$ keeps the table at $n \times (n+1)$. The route $0 \to 1 \to 3 \to 6 \to 10$ is the four-jump answer on the unit stones.
+
+```{python}
+def frog_jumps(stones):
+    pos = {p: i for i, p in enumerate(stones)}
+    n = len(stones)
+    best = [[INF] * (n + 1) for _ in range(n)]
+    best[0][0] = 0
+    for i, p in enumerate(stones):
+        for k in range(i + 1):
+            if best[i][k] >= INF:
+                continue
+            for s in (k - 1, k, k + 1):
+                if s <= 0:
+                    continue
+                j = pos.get(p + s)
+                if j is not None:
+                    best[j][s] = min(best[j][s], best[i][k] + 1)
+    ans = min(best[-1])
+    return -1 if ans >= INF else ans
+
+assert frog_jumps(list(range(11))) == 4
+assert frog_jumps([0, 1, 3, 5, 6, 8, 12, 17]) == 6
+assert frog_jumps([0, 1, 2, 3, 4, 8, 9, 11]) == -1
+```
+:::
+
+**16. [H]** [LC 2478 · Number of Beautiful Partitions](https://leetcode.com/problems/number-of-beautiful-partitions/){difficulty="Hard"}. Cut a digit string into exactly $k$ pieces, each of length at least `minLength`, each starting with a prime digit ($2,3,5,7$) and ending with a non-prime. Count the cuttings modulo $10^9+7$. (`"23542185131"`, $k = 3$, min length 2 $\to 3$; the same string with min length 3 $\to 1$; `"3312958"`, $k = 3$, min length 1 $\to 1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+A legal piece is a rule on its two ends, so the only indices that can hold a cut are those where the previous digit is non-prime and the next digit is prime, plus 0 and $n$. If the string itself does not start prime and end non-prime, the answer is 0. On that list, $ways[g][i]$ sums the previous layer over cut points $j \le i - \mathrm{minLength}$. That set is a growing prefix, so one running sum per layer replaces the inner loop.
+
+```{python}
+def beautiful(s, k, min_length):
+    n = len(s)
+    prime = set("2357")
+    if s[0] not in prime or s[-1] in prime:
+        return 0
+    cut = [False] * (n + 1)
+    cut[0] = cut[n] = True
+    for i in range(1, n):
+        cut[i] = s[i - 1] not in prime and s[i] in prime
+    prev = [0] * (n + 1)
+    prev[0] = 1
+    for _g in range(k):
+        cur = [0] * (n + 1)
+        run = 0
+        for i in range(1, n + 1):
+            j = i - min_length
+            if j >= 0 and cut[j]:
+                run = (run + prev[j]) % MOD
+            if cut[i]:
+                cur[i] = run
+        prev = cur
+    return prev[n]
+
+assert beautiful("23542185131", 3, 2) == 3
+assert beautiful("23542185131", 3, 3) == 1
+assert beautiful("3312958", 3, 1) == 1
+```
+:::
+
+**17. [H]** [LC 1340 · Jump Game V](https://leetcode.com/problems/jump-game-v/){difficulty="Hard"}. From index $i$ you may jump to $i \pm x$ with $1 \le x \le d$, if $\texttt{arr}[i]$ is strictly larger than the landing value and than every value in between. Start anywhere. Return the most indices you can visit. ($[6,4,14,6,8,13,9,7,10,6,12]$, $d = 2 \to 4$. Equal bars of height 3 with $d = 3$ visit 1.)
+
+::: {.callout-note collapse="true" title="Solution"}
+A jump always lands on a strictly smaller bar, so fill the indices in increasing height. From a bar, walk at most $d$ steps each way and stop at the first bar that is not strictly shorter. That bar's answer is already final.
+
+```{python}
+def jump5(arr, d):
+    n = len(arr)
+    dp = [1] * n
+    for i in sorted(range(n), key=lambda t: arr[t]):
+        for j in range(i - 1, max(-1, i - d - 1), -1):
+            if arr[j] >= arr[i]:
+                break
+            dp[i] = max(dp[i], dp[j] + 1)
+        for j in range(i + 1, min(n, i + d + 1)):
+            if arr[j] >= arr[i]:
+                break
+            dp[i] = max(dp[i], dp[j] + 1)
+    return max(dp)
+
+assert jump5([6, 4, 14, 6, 8, 13, 9, 7, 10, 6, 12], 2) == 4
+assert jump5([3, 3, 3, 3], 3) == 1
+```
+:::
+
+**18. [M]** [LC 2770 · Maximum Number of Jumps to Reach the Last Index](https://leetcode.com/problems/maximum-number-of-jumps-to-reach-the-last-index/){difficulty="Medium"}. From $i$ you may jump to any $j > i$ with $|\texttt{nums}[j] - \texttt{nums}[i]| \le \texttt{target}$. Return the most jumps from index 0 to the last index, or $-1$. ($[1,3,6,4,1,2]$ with targets $2$, $3$, and $0$ gives $3$, $5$, and $-1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ is the most jumps that reach $i$ from 0. A later index reads earlier ones, so the array fills left to right. An index that stays $-1$ was never reached.
+
+```{python}
+def max_jumps(nums, target):
+    n = len(nums)
+    dp = [-1] * n
+    dp[0] = 0
+    for i in range(n):
+        if dp[i] < 0:
+            continue
+        for j in range(i + 1, n):
+            if abs(nums[j] - nums[i]) <= target:
+                dp[j] = max(dp[j], dp[i] + 1)
+    return dp[-1]
+
+assert max_jumps([1, 3, 6, 4, 1, 2], 2) == 3
+assert max_jumps([1, 3, 6, 4, 1, 2], 3) == 5
+assert max_jumps([1, 3, 6, 4, 1, 2], 0) == -1
+```
+:::
+
+**19. [M]** [AC dp_g · Longest Path](https://atcoder.jp/contests/dp/tasks/dp_g). A directed graph has no cycle. Return the most edges on any path. ($n = 4$, edges $1 \to 2$, $1 \to 3$, $3 \to 2$, $2 \to 4$, $3 \to 4$ gives 3. $n = 6$, edges $2 \to 3$, $4 \to 5$, $5 \to 6$ gives 2.)
+
+::: {.callout-note collapse="true" title="Solution"}
+The graph is a DAG, so a cell's predecessors are finished once the topological order reaches it. $dp[v]$ is the most edges on a path that ends at $v$.
+
+```{python}
+def longest_path(n, edges):
+    g = [[] for _ in range(n)]
+    indeg = [0] * n
+    for u, v in edges:
+        g[u - 1].append(v - 1)
+        indeg[v - 1] += 1
+    dp = [0] * n
+    q = [i for i in range(n) if indeg[i] == 0]
+    for u in q:
+        for v in g[u]:
+            dp[v] = max(dp[v], dp[u] + 1)
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                q.append(v)
+    return max(dp)
+
+assert longest_path(4, [(1, 2), (1, 3), (3, 2), (2, 4), (3, 4)]) == 3
+assert longest_path(6, [(2, 3), (4, 5), (5, 6)]) == 2
+```
+:::
+
+**20. [H]** [AC dp_m · Candies](https://atcoder.jp/contests/dp/tasks/dp_m). $n$ children share exactly $k$ candies. Child $i$ takes between 0 and $a_i$. Count the ways modulo $10^9+7$. ($k = 4$, $a = (1,2,3) \to 5$; $k = 10$, $a = (9) \to 0$; $k = 0$, $a = (0,0) \to 1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[j]$ is the number of ways to give the children seen so far exactly $j$ candies. Child $i$ adds a window of length $a_i + 1$. The window sum is a prefix of the previous row.
+
+```{python}
+def candies(k, a):
+    dp = [1] + [0] * k
+    for ai in a:
+        pref = [0]
+        for v in dp:
+            pref.append((pref[-1] + v) % MOD)
+        dp = [(pref[j + 1] - pref[max(0, j - ai)]) % MOD for j in range(k + 1)]
+    return dp[k]
+
+assert candies(4, [1, 2, 3]) == 5
+assert candies(10, [9]) == 0
+assert candies(0, [0, 0]) == 1
+```
+:::
+
+**21. [M]** [LC 2707 · Extra Characters in a String](https://leetcode.com/problems/extra-characters-in-a-string/){difficulty="Medium"}. Cut $s$ into dictionary words. Characters in no word are extra. Minimise the extras. (`"leetscode"` with `leet`, `code`, `leetcode` leaves 1. `"sayhelloworld"` with `hello`, `world` leaves 3.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ is the fewest extras in the first $i$ characters. The last piece is one dictionary word ending at $i$, or the single character $s[i-1]$ counted as extra.
+
+```{python}
+def extra(s, words):
+    bag = set(words)
+    n = len(s)
+    dp = [0] * (n + 1)
+    for i in range(1, n + 1):
+        dp[i] = dp[i - 1] + 1
+        for w in bag:
+            L = len(w)
+            if i >= L and s[i - L:i] == w:
+                dp[i] = min(dp[i], dp[i - L])
+    return dp[n]
+
+assert extra("leetscode", ["leet", "code", "leetcode"]) == 1
+assert extra("sayhelloworld", ["hello", "world"]) == 3
+```
+:::
+
+**22. [H]** [LC 3117 · Minimum Sum of Values by Dividing Array](https://leetcode.com/problems/minimum-sum-of-values-by-dividing-array/){difficulty="Hard"}. Cut `nums` into exactly $m$ pieces so piece $g$ has bitwise AND equal to `andValues[g]`. A piece is worth its last element. Minimise the total, or return $-1$. ($[1,4,3,3,2]$ with $[0,3,3,2] \to 12$; $[2,3,5,7,7,7,5]$ with $[0,7,5] \to 17$; $[1,2,3,4]$ with $[2] \to -1$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+$dp[i]$ is the best cost for the first $i$ elements using the pieces placed so far. The next piece starts at $i$ and grows to the right. Extending a piece only removes bits, so once the AND has lost a bit of the target the longer pieces are impossible. The piece costs its last element.
+
+```{python}
+def min_sum(nums, and_values):
+    n, m = len(nums), len(and_values)
+    INF = 10**18
+    dp = [INF] * (n + 1)
+    dp[0] = 0
+    for g, need in enumerate(and_values):
+        nxt = [INF] * (n + 1)
+        for i in range(g, n):
+            if dp[i] >= INF:
+                continue
+            mask = -1
+            for j in range(i, n - (m - g - 1)):
+                mask &= nums[j]
+                if mask == need:
+                    nxt[j + 1] = min(nxt[j + 1], dp[i] + nums[j])
+                if mask & need != need:
+                    break
+        dp = nxt
+    return -1 if dp[n] >= INF else dp[n]
+
+assert min_sum([1, 4, 3, 3, 2], [0, 3, 3, 2]) == 12
+assert min_sum([2, 3, 5, 7, 7, 7, 5], [0, 7, 5]) == 17
+assert min_sum([1, 2, 3, 4], [2]) == -1
+```
+:::
+
+**23. [M]** [CF 1994C · Hungry Games](https://codeforces.com/problemset/problem/1994/C){rating="1600"}. Eat $a_l, \ldots, a_r$ in order, starting from $g = 0$. After each mushroom, $g \gets g + a_i$, and if then $g > x$, set $g \gets 0$. Count the segments that finish with $g \ne 0$. ($x = 2$, $(1,1,1,1) \to 8$; $x = 2$, $(1,2,3) \to 2$; $x = 6$, $(10) \to 0$; $x = 3$, $(1,2,1,4,3,8) \to 10$.)
+
+::: {.callout-note collapse="true" title="Solution"}
+From a fixed left end the running toxicity is forced, and a reset to 0 is the only jump. The four samples are small enough to walk every segment. At $n = 2 \cdot 10^5$ the same resets partition the array, and each left end's bad right ends form one interval.
+
+```{python}
+def hungry(x, a):
+    ans = 0
+    for left in range(len(a)):
+        g = 0
+        for v in a[left:]:
+            g += v
+            if g > x:
+                g = 0
+            if g:
+                ans += 1
+    return ans
+
+assert hungry(2, [1, 1, 1, 1]) == 8
+assert hungry(2, [1, 2, 3]) == 2
+assert hungry(6, [10]) == 0
+assert hungry(3, [1, 2, 1, 4, 3, 8]) == 10
+```
+:::
+
+## Interview questions
+
+**1. What are the six look-back shapes, and why do you name the shape before you code?**
+
+::: {.callout-note collapse="true" title="Answer"}
+$W(i)$ is the set of earlier positions that $dp[i]$ reads (@sec-od-look). The six shapes are a fixed handful of neighbours, a set the input chooses, a sliding range, every earlier index, the one latest compatible predecessor, and a cell keyed by a value rather than by an index. The shape is the complexity: a window of width $k$ is $O(nk)$ until a deque or a prefix sum removes the inner loop, and "all earlier indices" is a partition. Naming it also picks the tool in @sec-od-fast instead of reaching for a deque on a sum.
+:::
+
+**2. When do you pull, when do you push, and when do you write a suffix?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Pull when the statement describes the last piece or the predecessors of $i$: $dp[i]$ reads cells that are already final (@sec-od-dir). Push when the statement lists the moves out of $i$: standing at $i$, write into each successor. A suffix, $f(i)$ = best from $i$ to the end, is the natural question when the move is "from here, jump forward", and it is filled from the right. The three are the same DAG. Push wins when the out-degree is tiny (Frog Jump's three lengths). Pull wins when a monotone test can stop the scan (a shelf that has grown too wide).
+:::
+
+**3. When is a monotonic deque the legal speed-up?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When $dp[i]$ needs the minimum or the maximum of a contiguous window that slides one step at a time, and the value stored in the deque is exactly the value being optimised (@sec-od-p1-jump6). Indices enter from the left, the front falls out when it leaves the window, and the back drops any index that the new index dominates. A range sum is prefix sums. A set of divisors is a loop over the set. A window whose cost is $dp[j]$ plus something that depends on both ends is not this deque.
+:::
+
+**4. When does BFS replace the DP?**
+
+::: {.callout-note collapse="true" title="Answer"}
+When a move can point backward, the dependency graph can contain a cycle and no index order is safe (@sec-od-wrong). Jump Game III is that case: visit each index once. BFS also replaces a shortest-path DP when every edge has cost 1. Jump Game II's layer scan is that BFS, collapsed to two integers because the reachable set of each layer is a prefix. The collapse uses the range lemma. An exact jump length keeps the queue.
+:::
+
+**5. Why is the min-jump table of Jump Game II non-decreasing, and what does that buy?**
+
+::: {.callout-note collapse="true" title="Answer"}
+From a reachable index $j$ you can land on every index in $(j, j + a_j]$. So if $j$ is reachable and $i < j$, then $i$ is reachable, and a shortest route to $j$ has already passed some cell of the prefix, which means $dp[i] \le dp[j]$. The cells with $dp \le t$ are therefore a prefix, and the frontier of layer $t$ is a single farthest index. The scan in @sec-od-p4-jump2 maintains that frontier in $O(n)$.
+:::
+
+**6. Where does a partition go off by one?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The last block of a solution for the first $i$ items is a half-open segment $[j, i)$, and the prefix in front of it is $dp[j]$, including $j = 0$ (@sec-od-part). The inner index runs from $i - 1$ downward so the block's max, sum, or width grows by one element. The first failing monotone test ends the loop. Scoring the block before the test records an infeasible shelf. In the suffix form, solving $i$ and skipping the next $b_i$ items lands on $i + b_i + 1$, and that index is clamped at $n$.
+:::
+
+**7. How do you keep an impossible state from overflowing?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Pick a sentinel you are allowed to add a real cost to. Daily difficulties sum to at most $n \cdot 1000$, so $10^9$ is above every real answer and $10^9 + 1000$ still fits in a signed 32-bit integer (@sec-od-p5-diff). `INT_MAX` plus a positive cost overflows and becomes negative, and the minimum then prefers the impossible cell. The transition adds only when the previous cell is strictly below the sentinel. Initialising impossible cells to 0 schedules empty days: $[1,1,1]$ with three days returns 1.
+:::
+
+**8. Why is the state of Frog Jump the pair $(i, k)$, and why is the first jump 1?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Two routes can stand on the same stone with different last jumps, and the next jump is chosen from $\{k-1, k, k+1\}$. Position alone throws away the only fact the future needs. The start is a virtual jump of length 0, so the first real jump is exactly 1. A jump of length 0 is rejected: it would land on the same stone. Because each jump grows by at most 1 and lands on a later stone, a reachable $k$ on stone $i$ satisfies $k \le i$, and the table is $n$ by $n+1$ (@sec-od-p4-frog).
+:::
+
+**9. Why can house robber use two variables, while brainpower cannot?**
+
+::: {.callout-note collapse="true" title="Answer"}
+House robber reads $f(i+1)$ and $f(i+2)$, a window of length 2. Brainpower's take branch reads $f(i + b_i + 1)$, and $b_i$ is data (@sec-od-p5-brain). While the fill walks left, a question still to the left may land on any cell to the right of $i$. A ring of width $\max b_i + 2$ is legal. Two variables are not. The answer is also up to $10^{10}$, so it is a 64-bit integer.
+:::
+
+**10. What is the difference between a prefix formulation and a suffix formulation on the same choices?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A prefix $dp[i]$ answers "best for the first $i$ items, the past is finished". A suffix $f(i)$ answers "best from $i$ to the end, $i$ is free to decide". They match when every jump has the same length. They stop matching when an earlier take can still be blocking $i$ through a data-dependent window: the prefix then has to remember how long the block lasts, which is a second index, while the suffix already stores that fact by where the jump landed (@sec-od-dir).
+:::
+
+**11. Decode Ways II gives 9 for `"*"`, 18 for `"1*"`, and 15 for `"2*"`. Where do those numbers come from?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A single `*` is the nine digits 1 through 9. `"1*"` is a one-digit letter followed by another (9 ways) or one of the two-digit codes 11 through 19 (9 ways), total 18. `"2*"` is nine one-digit pairs plus the six codes 21 through 26, total 15. `"**"` is $9 \cdot 9$ one-digit pairs plus the fifteen two-digit codes, total 96. Forgetting the multiplicity and treating `*` as one character is the bug (@sec-od-p3-decode).
+:::
+
+**12. The knight dialer at $n = 3131$ is too big for a recursion. What do you actually run?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The phone graph has ten vertices and the walks are counted modulo $10^9+7$. Symmetry leaves four classes: the corners 1, 3, 7, 9; the key 5 (only at $n = 1$); the side keys 2, 4, 6, 8; and the pair 0 and 8's partner structure used in @sec-od-p3-knight. One step updates the four class totals, in $O(n)$, and the answer for $n = 3131$ is $136006598$. The recursion and the memo are for the samples $n = 1$ and $n = 2$. A matrix power is the same recurrence written for a huge $n$ that is not this constraint.
+:::
+
+**13. You rolled a layered partition into one array and the answers became too small. What did the loop do?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Layer $k$ may read only layer $k-1$, and only at indices $j < i$. Filling $i$ downward leaves every $j < i$ on the old layer. Filling $i$ upward reads the value just written, so two days collapse into one (@sec-od-p5-diff). After the downward pass, index $k-1$ goes back to the sentinel: that cell is $dp[k][k-1]$, which cannot exist, and the next layer's lower bound never reads it.
+:::
+
+**14. A counting DP matches the samples and is too big on a long string. What do you check?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The product of multiplicities, not a missing transition, is the usual cause: the answer is taken modulo $10^9+7$ at every addition, in a 64-bit integer, because two partial counts already overflow a 32-bit `int`. Then check that a leading zero, a `*`, and a two-digit code each contribute the weight from the rule table rather than 1. A brute force that expands wildcards on strings of length at most 6 is the check that catches a wrong weight.
+:::
+
+## Summary
+
+::: {.callout-important title="Five templates"}
+- **Range look-back.** $dp[i] = v_i \otimes \mathrm{opt}_{j \in W(i)} dp[j]$. A sliding min or max is a deque; a range sum is a prefix sum; a calendar is one pointer per pass (@sec-od-p1).
+- **Weighted selection.** Sort by end time. $dp[i] = \max(dp[i-1], w_i + dp[p(i)])$, and $p(i)$ is a binary search. Closed intervals need the predecessor to end strictly before $i$ starts (@sec-od-p2).
+- **Counting under rules.** $dp[i][s] = \sum m \cdot dp[i-\ell][s']$ over legal pieces, modulo $10^9+7$. A tiny graph with a huge $n$ collapses by symmetry (@sec-od-p3).
+- **Reachability.** Push the moves out of every reached index. Forward ranges with a non-decreasing min-jump table become layers. A backward move becomes BFS (@sec-od-p4).
+- **Suffix and partition.** $f(i) = \mathrm{opt}(f(i+1), g_i + f(i+b_i+1))$, from the right. A cut is $dp[i] = \mathrm{opt}_j(dp[j] + c(j, i))$, with $j$ walking left and exactly $k$ blocks stored as a layer (@sec-od-p5).
+:::
+
+- Draw $W(i)$ before choosing the loop. The shape is the complexity and the speed-up.
+- A move described from $i$ wants a suffix or a push. A last piece ending at $i$ wants a pull.
+- The deque is a sliding min or max of the stored values. It is one of five tools, next to prefix sums, a running optimum, binary search, and aggregation by key (@sec-od-fast).
+- Jump Game II's layers are a BFS on prefixes. The proof is that $dp$ is non-decreasing, which is the range lemma.
+- Frog Jump remembers the last jump. A reachable jump onto stone $i$ has length at most $i$.
+- A data-dependent skip cannot live in two variables. The landing site can be any later cell.
+- A partition grows its last block to the left, updates the cost in $O(1)$, and stops at the first monotone failure. The block is $[j, i)$.
+- Impossible stays at a sentinel you can add to. $10^9$ is that sentinel here; the transition refuses to add when the previous cell is the sentinel.
+- Wildcard weights are part of the recurrence. `"*"` is 9, `"1*"` is 18, `"2*"` is 15, and the answer is modulo $10^9+7$.
+- The next chapter puts a second coordinate on the same questions: which neighbours a cell reads, the order that makes them final, and how much of the table has to stay in memory.
+
+## Practice ladder
+
+Ordered by the idea each problem adds. The 38 problems are the practice set of `dp_book` ch. 2. None of the links below is a solved problem of this chapter.
+
+::: {.practice}
+- [LC 343 · Integer Break](https://leetcode.com/problems/integer-break/){difficulty="Medium"}
+- [LC 264 · Ugly Number II](https://leetcode.com/problems/ugly-number-ii/){difficulty="Medium"}
+- [LC 1997 · First Day Where You Have Been in All the Rooms](https://leetcode.com/problems/first-day-where-you-have-been-in-all-the-rooms/){difficulty="Medium"}
+- [CF 1350B · Orac and Models](https://codeforces.com/problemset/problem/1350/B){rating="1400"}
+- [CF 1389B · Array Walk](https://codeforces.com/problemset/problem/1389/B){rating="1600"}
+- [CF 1992D · Test of Love](https://codeforces.com/problemset/problem/1992/D){rating="1200"}
+- [CF 1941D · Rudolf and the Ball Game](https://codeforces.com/problemset/problem/1941/D){rating="1200"}
+- [LC 1824 · Minimum Sideway Jumps](https://leetcode.com/problems/minimum-sideway-jumps/){difficulty="Medium"}
+- [LC 139 · Word Break](https://leetcode.com/problems/word-break/){difficulty="Medium"}
+- [CF 1472C · Long Jumps](https://codeforces.com/problemset/problem/1472/C){rating="1100"}
+- [LC 140 · Word Break II](https://leetcode.com/problems/word-break-ii/){difficulty="Hard"}
+- [CF 1881E · Block Sequence](https://codeforces.com/problemset/problem/1881/E){rating="1500"}
+- [CF 1842C · Tenzing and Balls](https://codeforces.com/problemset/problem/1842/C){rating="1500"}
+- [CF 2028C · Alice's Adventures in Cutting Cake](https://codeforces.com/problemset/problem/2028/C){rating="1600"}
+- [CF 467C · George and Job](https://codeforces.com/problemset/problem/467/C){rating="1700"}
+- [CF 1969C · Minimizing the Sum](https://codeforces.com/problemset/problem/1969/C){rating="1700"}
+- [CSES 2413 · Counting Towers](https://cses.fi/problemset/task/2413)
+- [CF 1245C · Constanze's Machine](https://codeforces.com/problemset/problem/1245/C){rating="1400"}
+- [CF 1105C · Ayoub and Lost Array](https://codeforces.com/problemset/problem/1105/C){rating="1500"}
+- [LC 2147 · Number of Ways to Divide a Long Corridor](https://leetcode.com/problems/number-of-ways-to-divide-a-long-corridor/){difficulty="Hard"}
+- [LC 2318 · Number of Distinct Roll Sequences](https://leetcode.com/problems/number-of-distinct-roll-sequences/){difficulty="Hard"}
+- [CF 1513C · Add One](https://codeforces.com/problemset/problem/1513/C){rating="1600"}
+- [CF 118D · Caesar's Legions](https://codeforces.com/problemset/problem/118/D){rating="1700"}
+- [CF 466C · Number of Ways](https://codeforces.com/problemset/problem/466/C){rating="1700"}
+- [CF 1067A · Array Without Local Maximums](https://codeforces.com/problemset/problem/1067/A){rating="1900"}
+- [CF 1783D · Different Arrays](https://codeforces.com/problemset/problem/1783/D){rating="2000"}
+- [CF 1767C · Count Binary Strings](https://codeforces.com/problemset/problem/1767/C){rating="2100"}
+- [LC 1218 · Longest Arithmetic Subsequence of Given Difference](https://leetcode.com/problems/longest-arithmetic-subsequence-of-given-difference/){difficulty="Medium"}
+- [LC 2786 · Visit Array Positions to Maximize Score](https://leetcode.com/problems/visit-array-positions-to-maximize-score/){difficulty="Medium"}
+- [LC 1911 · Maximum Alternating Subsequence Sum](https://leetcode.com/problems/maximum-alternating-subsequence-sum/){difficulty="Medium"}
+- [CF 1029B · Creating the Contest](https://codeforces.com/problemset/problem/1029/B){rating="1200"}
+- [CF 1285B · Just Eat It!](https://codeforces.com/problemset/problem/1285/B){rating="1300"}
+- [LC 2771 · Longest Non-decreasing Subarray From Two Arrays](https://leetcode.com/problems/longest-non-decreasing-subarray-from-two-arrays/){difficulty="Medium"}
+- [CSES 1746 · Array Description](https://cses.fi/problemset/task/1746)
+- [CF 1207C · Gas Pipeline](https://codeforces.com/problemset/problem/1207/C){rating="1500"}
+- [CF 1272D · Remove One Element](https://codeforces.com/problemset/problem/1272/D){rating="1500"}
+- [CF 711C · Coloring Trees](https://codeforces.com/problemset/problem/711/C){rating="1700"}
+- [CF 2029C · New Rating](https://codeforces.com/problemset/problem/2029/C){rating="1700"}
+:::
+
+| Problem | Idea it adds |
+|---|---|
+| Integer Break | the last factor is any $j$; the prefix is broken or left whole |
+| Ugly Number II | three pointers into the table, one per multiplier |
+| First Day Where You Have Been in All the Rooms | the look-back index comes from the input |
+| Orac and Models | predecessors are the divisors; push along multiples |
+| Array Walk | a budget of left moves, then the best pair inside the reached prefix |
+| Test of Love | reachability with a swim budget |
+| Rudolf and the Ball Game | the reachable set after each throw |
+| Minimum Sideway Jumps | three lanes; a switch costs 1 |
+| Word Break | a feasibility partition; the last word is a dictionary piece |
+| Long Jumps | suffix with no choice: $f(i) = a_i + f(i+a_i)$ |
+| Word Break II | the same partition, storing the list of sentences |
+| Block Sequence | delete $a_i$, or use it as a header that skips $a_i$ items |
+| Tenzing and Balls | aggregate the best $dp$ by value |
+| Alice's Adventures in Cutting Cake | a prefix answer and a suffix answer, with the middle left over |
+| George and Job | a partition with a count of blocks, window sum in $O(1)$ |
+| Minimizing the Sum | a segment spends $\ell-1$ operations and becomes its minimum |
+| Counting Towers | two shapes for the top row |
+| Constanze's Machine | each run of `u` or `n` is a Fibonacci factor |
+| Ayoub and Lost Array | three residue states, and how many values in $[l, r]$ have each residue |
+| Number of Ways to Divide a Long Corridor | between two seat pairs the cut has $\mathrm{gap}+1$ places |
+| Number of Distinct Roll Sequences | the state is the last two rolls |
+| Add One | length after $t$ operations, precomputed |
+| Caesar's Legions | counts of each troop so far, plus the last type and its streak |
+| Number of Ways | three equal parts by counting earlier cut points |
+| Array Without Local Maximums | position, value, and whether the left neighbour already covers it |
+| Different Arrays | only the next value matters; a zero collapses the two choices |
+| Count Binary Strings | the start of the last run, restricted by constraints that end here |
+| Longest Arithmetic Subsequence of Given Difference | the state is keyed by the value $x - d$ |
+| Visit Array Positions to Maximize Score | the best score ending even, and ending odd |
+| Maximum Alternating Subsequence Sum | the next chosen term is added or subtracted |
+| Creating the Contest | a run extends while $a_i \le 2 a_{i-1}$ |
+| Just Eat It! | the best proper segment is a Kadane answer that is not the whole array |
+| Longest Non-decreasing Subarray From Two Arrays | the current element came from the first array or the second |
+| Array Description | position and value; a value is reached from $v-1, v, v+1$ |
+| Gas Pipeline | height 1 or 2, and a crossroads forces height 2 |
+| Remove One Element | prefix and suffix increasing runs; try deleting each index |
+| Coloring Trees | groups so far and the colour of the last tree |
+| New Rating | before the skipped interval, inside it, and after it |
+
+## Further reading
+
+The next chapter, @sec-gd, gives a cell a row and a column; the questions of this chapter come back with two coordinates.
+
+- [Wikipedia: Interval scheduling](https://en.wikipedia.org/wiki/Interval_scheduling): the greedy for equal weights and the sorted-by-end DP for weighted intervals.
+- [CP-Algorithms: Minimum stack / minimum queue](https://cp-algorithms.com/data_structures/stack_queue_modification.html): the monotonic deque behind the sliding-window maximum.
+- [Wikipedia: Prefix sum](https://en.wikipedia.org/wiki/Prefix_sum): the tool that turns a window sum into two reads.
+- [Laaksonen, *Competitive Programmer's Handbook*](https://cses.fi/book/book.pdf), ch. 7: dynamic programming for contests, including LIS, grid paths and edit distance.
+- [CP-Algorithms: Introduction to dynamic programming](https://cp-algorithms.com/dynamic_programming/intro-to-dp.html): memoisation vs tabulation, and a list of classic DP problems to practise on.
+- [CP-Algorithms: Divide and conquer DP](https://cp-algorithms.com/dynamic_programming/divide-and-conquer-dp.html): the speed-up for "exactly $k$ blocks" partitions, used in a later chapter.

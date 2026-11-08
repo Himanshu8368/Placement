@@ -1,0 +1,738 @@
+% =====================================================================
+%  17.2  Weighted DSU and Rollback DSU              sec:c28-weighted
+%  Exports: def:c28-weighted  def:c28-pot  prop:c28-parity
+%           ex:c28-pottrace   lst:c28-weighted
+%           def:c28-rollback  lst:c28-rollback  prop:c28-rollback
+%           fig:c28-rollback  lst:c28-rb-driver
+%           prob:c28-impostors  lst:c28-impostors-soln
+%  All tables hand-computed on the running tree T (opener, fig:c28-tree).
+% =====================================================================
+\section{Weighted DSU and Rollback DSU}\label{sec:c28-weighted}
+
+\begin{previouslybox}[Section 17.1 left you with two questions]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item The plain DSU answers only ``same set or not?''  What if the input
+        talks in \emph{relations} -- \(x\) and \(y\) agree, \(y\) and \(z\)
+        disagree -- and you must answer ``same side?'' between any two items?
+  \item \(\secref{c28-dsu}\)'s warning said path compression is a one-way
+        street.  Yet \(\secref{c28-offline}\) will need to try a merge,
+        answer some queries, and then \emph{take it back}.  What does a DSU
+        look like when undo is legal?
+\end{enumerate}
+This section answers both -- they are the two \emph{variants} of the same
+parent-forest, and both are consumed later: potentials by CF~1594D here,
+undo by \secref{c28-offline}'s segment-tree-over-time machine.
+\end{previouslybox}
+
+\begin{topicintro}
+A \term{weighted DSU} (DSU with \term{potentials}) stores, beside each parent
+pointer, one extra number: the \emph{difference} between a node and its
+parent.  Climbing to the root accumulates the difference to the
+representative, so the structure answers \emph{relative} questions -- same
+side, opposite side, exact offset -- not just membership.  The parity
+\((0/1)\)-weighted DSU is the algebraic form of bipartiteness.
+
+A \term{rollback DSU} is the opposite trade: it keeps \emph{no} extra
+information but gives up path compression, so every union touches exactly two
+array cells and can be pushed onto an undo stack.  Snapshots cost \(O(1)\),
+restoring undoes exactly the merges taken since.
+
+\textbf{Prerequisites.} \secref{c28-dsu}: \(\coderef{c28-find}/\)-union, the
+size rule, the warning that compression is irreversible.  Parity
+\((0/1)\) arithmetic mod~2 from Chapter~14's games.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item carry a potential through \code{find} and \code{unite} without losing
+        or double-flipping it; \hfill\lv{4}
+  \item reduce ``\(A\) says \(B\) is the same/opposite kind'' constraints to a
+        parity DSU and extract the maximum-side count per component; \hfill\lv{4}
+  \item write a rollback DSU and explain why compression and undo are
+        mutually exclusive; \hfill\lv{4}
+  \item feed a rollback DSU through add/undo blocks in \(O(\log n)\) per
+        merge. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``relations, or merges that must be undone'']
+\reckey{``person \(a\) claims \(b\) is the same kind / opposite kind as
+\(a\)''; bipartiteness under streamed constraints; difference equations
+\(x_u - x_v = w\); ``try this batch of unions, answer, then rewind'';
+divide-and-conquer over time with edge lifetimes.}
+\recuse{
+  \item the constraint links \emph{two items} (same/different/exact offset)
+        and queries ask about a pair -- weighted DSU, \defref{c28-weighted},
+        CF~1594D here;
+  \item unions arrive in \emph{blocks} that are later retracted (binary
+        search on time, segment tree over time) -- rollback DSU,
+        \defref{c28-rollback}, used by \secref{c28-offline};
+  \item both at once: \emph{weighted} rollback is legal -- keep the
+        potential, still drop compression (CF~1594D's union pattern survives
+        an undo stack untouched).
+}
+\recnotuse{
+  \item only membership matters and nothing is undone -- stay with the plain
+        DSU of \secref{c28-dsu}; the potential is dead weight;
+  \item the graph's \emph{edges} are the objects and you can simply 2-colour
+        per component with BFS -- offline in one pass, plain BFS beats both
+        variants for pure bipartiteness (CSES~1668);
+  \item deletions must be answered \emph{online} -- no DSU variant survives
+        that; it is a link-cut tree, outside this book.
+}
+One-line test: \emph{is every operation ``relate two items'' (forward) or
+``undo the last relates'' (backward)?  Potentials answer the first, a stack
+answers the second -- and neither allows path compression to be forgotten
+about.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Weighted DSU: Potentials to the Root}
+% ---------------------------------------------------------------
+
+\begin{definition}{Weighted DSU}{c28-weighted}
+A weighted DSU adds an array \(\code{pot}[1..n]\) to the structure of
+\defref{c28-dsu}.  The invariant: for every \(v\),
+\[
+  \code{pot}[v] \;=\; \Phi(v) - \Phi(\code{parent}[v]),
+\]
+where \(\Phi\) is the hidden \term{potential} (here: which side of a
+bipartition \(v\) lives on).  \(\code{find}(v)\) returns the root \emph{and}
+accumulates \(\Phi(v)-\Phi(\text{root})\) on the way; a union with required
+offset \(w\) (meaning \(\Phi(u)-\Phi(v)=w\)) re-links the roots so that the
+invariant keeps holding.
+\end{definition}
+
+\begin{insightbox}[Everything lives in one equation]
+With roots \(r_u,r_v\) already found and offsets \(p_u=\Phi(u)-\Phi(r_u)\),
+\(p_v=\Phi(v)-\Phi(r_v)\), imposing \(\Phi(u)-\Phi(v)=w\) while attaching
+\(r_v\) under \(r_u\) forces
+\[
+  \code{pot}[r_v] \;=\; \Phi(r_v)-\Phi(r_u) \;=\; w - p_u + p_v .
+\]
+Derive it once, and the code in \(\coderef{c28-weighted}\) writes itself.
+Attach the \emph{other} way and the sign flips -- this single swap is the
+most common wrong answer in the whole family (see the traps below).
+\end{insightbox}
+
+\begin{definition}{Parity DSU}{c28-pot}
+The \term{parity DSU} is the weighted DSU with potentials in
+\(\{0,1\}\) and all arithmetic modulo~2 (XOR).  \(\Phi(v)=0\) or \(1\) names
+\(v\)'s side; two items are \emph{same-side} iff their potentials to the
+common root are equal, \emph{opposite} iff the potentials differ.
+``same kind'' contributes offset \(0\), ``opposite kind'' contributes \(1\).
+\end{definition}
+
+\begin{proposition}{Parity DSU \(=\) bipartiteness test}{c28-parity}
+Processing constraints ``\(u,v\) same'' \(\big(\Phi(u)\oplus\Phi(v)=0\big)\)
+and ``\(u,v\) opposite'' \(\big(\Phi(u)\oplus\Phi(v)=1\big)\): a contradiction
+appears exactly when some cycle demands a vertex differ from itself, i.e.\
+when the constraint graph is not bipartite; otherwise each component's two
+sides \(A,B\) are maintained in \(\code{gp}[r][0],\code{gp}[r][1]\) and every
+``same/opposite?'' query is answered in \(\bigO{\alpha(n)}\).
+\end{proposition}
+\begin{proofbox}
+A graph is bipartite iff no odd cycle exists.  Fix a component and any root
+\(r\); the DSU has assigned each \(v\) a value \(\Phi(v)\) by XOR-ing the
+edge parities along \emph{some} path \(v\leadsto r\).  If the graph is
+bipartite, every path between two vertices has the same parity (all cycles
+even), so \(\Phi\) is well defined and side-by-\(\Phi\) is a valid
+2-colouring; the \code{gp} counts track the two colour classes when a union
+merges them (matching sides if the offset is~0, crossed if it is~1).  If an
+odd cycle closes, the two paths from a vertex around the cycle disagree, and
+the ``same root, wrong parity'' test fires -- exactly the contradiction.
+\end{proofbox}
+
+\begin{lstlisting}[caption={find and unite with potentials (parity shown; any abelian group works by replacing xor with +/-)}, label={lst:c28-weighted}]
+int find(int v){                       // returns root, fixes pot[v] to root
+    if (parent_[v] == v) return v;
+    int r = find(parent_[v]);
+    pot[v] ^= pot[parent_[v]];         // Phi(v)-Phi(old parent)
+    return parent_[v] = r;             //   + (old parent - root) = to root
+}
+bool unite(int u, int v, int w){       // impose Phi(u) xor Phi(v) = w
+    int ru = find(u), rv = find(v);
+    if (ru == rv)                      // both potentials are now to ru
+        return (pot[u] ^ pot[v]) == w; // consistent? else: contradiction
+    int x = w ^ pot[u] ^ pot[v];       // needed pot[rv] if rv hangs on ru
+    if (sz_[ru] < sz_[rv]) {           // attaching the OTHER way flips the
+        parent_[ru] = rv;              // value to store: x -> x xor w-like
+        pot[ru] = x;                   // re-derive, or use the symmetric form
+        sz_[rv] += sz_[ru];
+        gp[rv][0] += gp[ru][0];        // same-side merge: 0-offset pairs
+        gp[rv][1] += gp[ru][1];        // crossed merge: swap the halves
+    } else {
+        parent_[rv] = ru;
+        pot[rv] = x;
+        sz_[ru] += sz_[rv];
+        gp[ru][0] += gp[rv][0];
+        gp[ru][1] += gp[rv][1];
+    }
+    return true;
+}
+// same/opposite query:
+//   find(u)==find(v) && (pot[u]^pot[v]) == 0/1
+\end{lstlisting}
+
+When the offset is always~1 (every constraint says ``opposite''), the two
+\code{gp} lines must \emph{cross}: \(\code{gp}[\text{surviving}][0]\mathrel{+}=\)
+\(\code{gp}[\text{absorbed}][1]\) and vice versa.  The listing keeps one
+\code{x} and merges matching counts because the caller's \(w\) already says
+which case it is -- reading \(\code{x}\) as ``the absorbed root's side,
+relative to the survivor'' makes both cases identical code.
+
+\begin{example}{Potentials on the running tree, every edge ``opposite''}{c28-pottrace}
+Take \(T\) (\(\figref{c28-tree}\)) and declare all nine edges ``opposite
+kind'' -- the same reduction as \(\exref{c28-merge}\)'s union order, now with
+potentials.  After the nine unions, \(\Phi(v)\) equals \(\depth(v)\bmod 2\),
+because each tree edge flips parity exactly once on the path to root~1.
+\end{example}
+\begin{tracebox}[Parity DSU over T's edges in input order]
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|c||cccccccccc|c}
+ & \text{unite} & 1&2&3&4&5&6&7&8&9&10 & \text{component sides}\\ \hline
+0 & - & 0&-&-&-&-&-&-&-&-&- & roots: $A=\{1\}$ only\\
+1 &(1,2) & 0&1&-&&&&&&& & $A=\{1\}$,\ $B=\{2\}$\\
+2 &(1,3) & 0&1&1&&&&&&& & $B=\{2,3\}$\\
+3 &(2,4) & 0&1&1&0&&&&&& & $A=\{1,4\}$\\
+4 &(2,5) & 0&1&1&0&1&&&&& & $B=\{2,3,5\}$\\
+5 &(3,6) & 0&1&1&0&1&1&&&& & $B=\{2,3,5,6\}$\\
+6 &(3,7) & 0&1&1&0&1&1&0&&& & $A=\{1,4,7\}$\\
+7 &(5,8) & 0&1&1&0&1&1&0&0&& & $A=\{1,4,7,8\}$\\
+8 &(7,9) & 0&1&1&0&1&1&0&0&1& & $B=\{2,3,5,6,9\}$\\
+9 &(9,10)& 0&1&1&0&1&1&0&0&1&0& \text{final}\\
+[2pt]
+\end{array}
+\]
+Row~9 reads $\Phi=(0,1,1,0,1,1,0,0,1,0)$ -- exactly $\depth\bmod 2$:
+\[
+  A=\{1,4,7,8,10\}\;(\text{even depth}),\qquad
+  B=\{2,3,5,6,9\}\;(\text{odd depth}),
+\]
+$5+5=10$ nodes, both sides of $T$'s bipartition (read the $\depth$ row off
+$\figref{c28-tree}$: $0,1,1,2,2,2,2,3,3,4$).  Cross-checks on raw paths, no
+compression needed:
+$\Phi(5)=\text{pot}[5]\oplus\text{pot}[2]=1\oplus1=0$;
+$\Phi(10)=\text{pot}[10]\oplus\text{pot}[9]\oplus\text{pot}[7]\oplus\text{pot}[3]=0\oplus1\oplus0\oplus1=0$.
+A \emph{tenth} edge inside $T$, say $(6,8)$, would demand
+$\Phi(6)\oplus\Phi(8)=1\oplus0=1$ -- and $6,8$ sit at depths $2,3$, an odd
+separation, so the demand is \emph{consistent}: trees are always bipartite,
+and the parity DSU never rejects one.  Re-asserting an off-tree edge between
+\emph{same}-parity nodes, $(1,5)$ with ``opposite'', is the first real
+contradiction: $\Phi(1)\oplus\Phi(5)=0\oplus1=1$ would have to equal~$0$.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Rollback DSU: Merges You Can Undo}
+% ---------------------------------------------------------------
+
+\begin{definition}{Rollback DSU}{c28-rollback}
+A \term{rollback DSU} is a plain \(\secref{c28-dsu}\) DSU
+\textbf{without path compression}: \(\code{find}\) only climbs, and
+\(\code{union}\) attaches by size/rank, writing one record
+\((\text{attached root},\ \text{surviving root},\ \text{old sizes})\) onto a
+stack.  \(\code{snapshot()}\) returns the current stack height (an
+\(\bigO{1}\) integer); \(\code{rollback}(s)\) pops until the height is \(s\),
+restoring \(\code{parent}\) and \(\code{sz}\) exactly.
+\end{definition}
+
+\begin{warningbox}[Compression and undo cannot coexist]
+Path compression rewrites \emph{every} node on the search path -- dozens of
+implicit writes with no record.  Undoing a union would then have to undo the
+compression, which cannot be attributed to that union at all (later finds
+compressed those same nodes under a different root).  Union \emph{by size}
+is not an optimisation here, it is the \emph{correctness condition}: it
+bounds the untouched tree depth by \(\bigO{\log n}\), so each find stays
+\(\bigO{\log n}\) forever and each union touches exactly two cells.
+\end{warningbox}
+
+\begin{proposition}{Cost of rollback DSU}{c28-rb-cost}
+On \(n\) items, \(\code{find}\) is \(\bigO{\log n}\) worst-case, and
+\(\code{unite}\) plus \(\code{rollback}\) are \(\bigO{1}\) per record.  Any
+algorithm that performs \(U\) union attempts along a DFS into a recursion
+tree of snapshots pays \(\bigO{n + U\log n}\) total -- typically
+\(\bigO{\log n}\) DSU-operations per level times \(\bigO{n}\) levels.
+\end{proposition}
+\begin{proofbox}
+Without compression the forest is exactly a union-by-size forest: a node's
+depth increases only when its whole tree is hung under a tree at least as
+large, so depth doubles each time it happens -- \(\le\log n\) times, so
+\(\le\log n\) climb.  Each genuine union writes one parent pointer and one
+size; a no-op union writes one sentinel record so a later rollback pops it
+symmetrically.  Rollback reverses precisely those fields, so the arrays are
+bit-identical to the snapshot state, and the \(\log n\) depth bound is
+restored along with every merge.
+\end{proofbox}
+
+\begin{lstlisting}[caption={rollback DSU: union by size only, stack of (attached, survivor, survivor's old size)}, label={lst:c28-rollback}]
+int stk_[ /* record: attached, survivor, old sz of survivor */ ];
+int top = 0;                        // stack height == snapshot token
+int find(int v){ while (parent_[v]!=v) v = parent_[v]; return v; }  // NO compression
+bool unite(int a, int b){           // every call pushes exactly one record
+    a = find(a); b = find(b);
+    if (sz_[a] < sz_[b]) { int t=a; a=b; b=t; }     // a = survivor (bigger)
+    stk_[top++] = {b, a, sz_[a]};   // record even for no-ops (see below)
+    if (a == b) return false;       // already together: no-op marker record
+    parent_[b] = a;
+    sz_[a] += sz_[b];
+    return true;
+}
+void rollback(int to){              // rewind to snapshot 'to' (a height)
+    while (top > to) {
+        --top;
+        int b = stk_[top][0], a = stk_[top][1], oldsz = stk_[top][2];
+        parent_[b] = b;             // b is a root again
+        sz_[a] = oldsz;             // survivor's size restored
+    }
+}
+\end{lstlisting}
+
+Two discipline rules make the stack trustworthy:
+\textbf{(1) push on every attempt}, including no-ops -- then ``\(k\) unions
+after snapshot \(s\)'' always means ``pop \(k\) records'', with no special
+case where a union failed; \textbf{(2) snapshot/rollback in strict LIFO
+order} -- the usage is a DFS or divide-and-conquer, never a random jump back
+three merges and forward again.
+
+\begin{lstlisting}[caption={the snapshot/rollback driver pattern used by secref:c28-offline}, label={lst:c28-rb-driver}]
+void solve(int lo, int hi) {          // any recursion over a time/answer axis
+    int snap = top;                   // O(1) token: current stack height
+    for (each union this block adds) unite(u, v);
+    /* ... answer queries that see exactly these unions ... */
+    solve(left child);                // deeper blocks add and remove freely
+    solve(right child);
+    rollback(snap);                   // state here == state at entry
+}
+\end{lstlisting}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+    dnode/.style={circle, draw=primaryblue, line width=0.9pt, fill=primaryblue!8,
+                  minimum size=6.5mm, font=\small\bfseries, text=primaryblue!60!black},
+    rnode/.style={circle, draw=accentorange, line width=1.1pt, fill=accentorange!16,
+                  minimum size=6.5mm, font=\small\bfseries, text=accentorange!70!black}]
+  % left: two trees, survivor root a (size 3) and root b (size 2), just after unite
+  \node[rnode] (a) at (0,0) {$a$};
+  \node[dnode] (a1) at (-1.1,-1.2) {};
+  \node[dnode] (a2) at ( 1.1,-1.2) {};
+  \node[dnode] (b)  at ( 2.6,-0.2) {$b$};
+  \node[dnode] (b1) at ( 2.6,-1.6) {};
+  \draw[tedge] (a)--(a1) (a)--(a2) (a)--(b) (b)--(b1);
+  \node[annot, font=\scriptsize, anchor=north] at (0.7,-2.1)
+    {just after $\mathit{unite}$: $b\!\to\!a$, $\mathit{sz}[a]=5$};
+  % right: after rollback, b is a root again
+  \node[rnode] (ra) at (7,0) {$a$};
+  \node[dnode] (ra1) at (5.9,-1.2) {};
+  \node[dnode] (ra2) at ( 8.1,-1.2) {};
+  \node[rnode] (rb)  at (10.4,0) {$b$};
+  \node[dnode] (rb1) at (10.4,-1.4) {};
+  \draw[tedge] (ra)--(ra1) (ra)--(ra2) (rb)--(rb1);
+  \node[annot, font=\scriptsize, anchor=north] at (7,-2.1)
+    {after $\mathit{rollback}(s)$: $\mathit{sz}[a]=3$, $b$ a root};
+  \draw[->, accentorange, line width=1.2pt] (4.0,-0.6) --
+    node[annot, font=\scriptsize, above] {$\mathit{rollback}(s)$} (5.2,-0.6);
+\end{tikzpicture}
+\caption{The rollback invariant in miniature (not \(T\) -- a generic step).
+A union overwrites exactly two cells, \(\code{parent}[b]\) and
+\(\code{sz}[a]\); the record \((b,a,\text{old}\ \code{sz}[a])\) captures both,
+so rewinding is a two-field restore, leaving every other pointer and the
+\(\bigO{\log n}\) depth bound untouched.  With path compression the same union
+would have silently rewritten a whole search path -- unrecoverable from a
+single record, which is why compression is forbidden here.  The full
+add/undo run on \(T\)'s nine edges is the table below.}
+\label{fig:c28-rollback}
+\end{figure}
+
+\begin{tracebox}[Add / snapshot / undo on T's nine edges, in input order]
+Start ten singletons, stack empty.  Every union resolves both endpoints to
+their roots first (no compression), so \(T\)'s growing root~1 (a genuine
+singleton is always the smaller side) absorbs each new node; records are
+\((\text{attached},\ \text{survivor},\ \text{old }\code{sz})\).
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|l|l|c}
+\text{step} & \text{operation} & \text{effect} & \text{stack height} \\ \hline
+0 & \mathit{snapshot}\ s_0 & & 0\\
+1 & \mathit{unite}(1,2) & (2,1,1)\ \text{pushed},\ \code{sz}[1]=2 & 1\\
+2 & \mathit{unite}(1,3) & (3,1,2),\ \code{sz}[1]=3 & 2\\
+3 & \mathit{unite}(2,4) & \code{find}(2)=1;(4,1,3),\ \code{sz}[1]=4 & 3\\
+4 & \mathit{unite}(2,5) & (5,1,4),\ \code{sz}[1]=5 & 4\\
+5 & \mathit{unite}(3,6) & \code{find}(3)=1;(6,1,5),\ \code{sz}[1]=6 & 5\\
+6 & \mathit{snapshot}\ s_1 & \text{token}=5 & 5\\
+7 & \mathit{unite}(3,7) & \code{find}(3)=1;(7,1,6),\ \code{sz}[1]=7 & 6\\
+8 & \mathit{unite}(5,8) & \code{find}(5)=1;(8,1,7),\ \code{sz}[1]=8 & 7\\
+9 & \mathit{unite}(7,9) & \code{find}(7)=1;(9,1,8),\ \code{sz}[1]=9 & 8\\
+10& \mathit{unite}(9,10)& \code{find}(9)=1;(10,1,9),\ \code{sz}[1]=10 & 9\\
+11& \mathit{rollback}(s_1) & \text{pop }4;(10,9,8,7)\to\text{roots},\ \code{sz}[1]=6 & 5\\
+12& \mathit{rollback}(s_0) & \text{pop }5\text{ more};\ \text{all singletons} & 0
+\end{array}
+\]
+At step~11 the four merges taken after \(s_1\) unwind in LIFO order
+\((9,10)\to(7,9)\to(5,8)\to(3,7)\); nodes \(7,8,9,10\) become roots again and
+\(\code{sz}[1]\) returns to~6.  \(\code{find}(4)=1\) but
+\(\code{find}(10)=10\): the connectivity that step~10 created has been erased
+bit-for-bit -- no cell touched by the first five unions was disturbed.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 1594D The Number of Imposters}
+% ---------------------------------------------------------------
+
+\solvedproblem{c28-impostors}{The Number of Imposters}{CF 1594D}
+  {https://codeforces.com/problemset/problem/1594/D}{CF 1700 L4}
+  {parity weighted DSU, bipartite components, per-component max side}
+
+\begin{problemstatement}[CF 1594D The Number of Imposters]
+In one game there are \(n\) players (besides Theofanis), labelled
+\(1..n\); each is either a \textbf{crewmate} (always tells the truth) or an
+\textbf{imposter} (always lies).  There are \(m\) comments, each
+``\, \(i\) \(j\) \texttt{c}'' meaning: player \(i\) says player \(j\) is a
+\texttt{c} (\texttt{crewmate} or \texttt{imposter}).  A set of comments is
+\textbf{contradictory} if no assignment of roles makes every comment follow
+truthfully/lying as appropriate.  For each test case output the
+\textbf{maximum possible number of imposters}, or \(-1\) if the comments
+contradict each other.
+
+\textbf{Input.} \(t\) test cases (\(1\le t\le10^4\)); per case: \(n\) and
+\(m\) (\(1\le n\le2\cdot10^5\), \(0\le m\le5\cdot10^5\)), then \(m\) lines
+\(i\ j\) \texttt{c}.  Sums over all cases: \(\sum n\le2\cdot10^5\),
+\(\sum m\le5\cdot10^5\).
+
+\textbf{Output.} One integer per test case.
+
+\textbf{Example (first test case).}
+\begin{verbatim}
+Input:
+3 2
+1 2 imposter
+2 3 crewmate
+
+Output:
+2
+\end{verbatim}
+Players 2 and 3 can be the imposters here (player~1 a crewmate): the truth-
+teller 1 names 2 an imposter, and the liar 2 calls 3 a crewmate -- read the
+reduction in \secref{c28-weighted} below.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 30 minutes]
+A fair first attempt: 2-SAT it, or brute-force the \(2^n\) role assignments
+for tiny \(n\) and stare at what breaks.  The real question is what a single
+comment \emph{means} as a constraint between two players.
+\peek{``imposter answers always lie'' sounds self-referential; test the two
+possible roles of the \emph{speaker} and see what each forces.}
+\nudge{In both cases the speaker and the target land on the \emph{same} or
+\emph{opposite} side -- the speaker's own role cancels out.  So every comment
+is just ``same kind'' or ``different kind'': the parity DSU of
+\defref{c28-pot}.}
+\fullhint{Build a parity weighted DSU (\(\coderef{c28-weighted}\)) with
+\(0\) for \texttt{crewmate}, \(1\) for \texttt{imposter}; a contradiction is
+a same-root wrong-parity union.  Each component ends bipartitioned into sides
+\((A,B)\); both colourings are valid, one has \(|A|\) imposters and the other
+\(|B|\), and components are independent -- take \(\max(|A|,|B|)\) per
+component and sum.  The full build is below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Three actors, two roles, and comments \emph{about} roles -- it reads like
+self-reference, which invites 2-SAT or case analysis on speakers.  The
+constraints link \emph{pairs}, queries concern whole components, and \(n\) is
+\(2\cdot10^5\): the shape is a DSU.  What is missing is the DSU's payload:
+membership alone cannot tell you \emph{how many} imposters a component can
+host -- you need which side of the bipartition each player sits on.  That is
+exactly a potential.
+
+\solstep{Key Observations}
+\begin{observation}
+\textbf{The speaker's role cancels.}
+If \(i\) is a crewmate, his comment is true; if an imposter, false -- either
+way, ``\(i\) says \(j\) is a crewmate'' holds iff \(i\) and \(j\) have the
+\emph{same} role, and ``\(i\) says \(j\) is an imposter'' iff they have
+\emph{opposite} roles.  A comment is a pure relation \(\Phi(i)\oplus\Phi(j)\).
+\end{observation}
+\begin{observation}
+\textbf{Consistency is bipartiteness.}
+The comments are edges of parity~0/1.  A valid assignment exists iff no
+cycle has odd total parity -- i.e.\ iff each component's parity constraints
+are consistent.  The parity DSU detects the first violation directly
+(\propref{c28-parity}); a violation anywhere means \(-1\) for the case.
+\end{observation}
+\begin{observation}
+\textbf{Each component picks its richer side.}
+Once a component is consistent, flipping \emph{all} its roles keeps every
+relation satisfied -- so both colourings are legal, and the imposter count
+for that component is either \(|A|\) or \(|B|\).  Components never constrain
+each other, so the global maximum is \(\sum_{\text{components}}\max(|A|,|B|)\).
+Players with no comments are size-1 components: \(\max(1,0)=1\), all
+imposters -- which is why \(m=0\) answers \(n\).
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.24\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ enumerate & try all \(2^n\) role strings, check comments &
+  \(\bigO{2^n m}\) & \tle \\
+2 & \lv{3}\ BFS colour & build parity graph, 2-colour per component, count
+  sides & \(\bigO{n+m}\) & \ac \\
+3 & \lv{4}\ parity DSU & \(\coderef{c28-weighted}\) online: unite + detect +
+  side counts in the roots & \(\bigO{(n+m)\,\alpha(n)}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rungs 2 and 3 are the same \(\bigO{n+m}\)-class; the DSU version wins the
+chapter slot because it is \emph{online} (comments could stream), because its
+per-root \(\code{gp}\) table is the pattern reused in the mixed set, and
+because it generalises to non-parity potentials the BFS cannot carry.
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Model each comment as a literal and run 2-SAT}
+{Overkill with a fatal flaw: 2-SAT finds \emph{a} satisfying assignment, not
+the \emph{maximum-imposter} one; optimising over satisfying assignments is
+Max-2-SAT, NP-hard in general.  The structure here is bipartite, not
+conjunctive -- exploiting it is the whole problem.}
+\deadend{DFS-colour the comment graph, but forget isolated players}
+{Sample~5 (\(n=5\), \(m=0\)) then answers \(0\) instead of \(5\): every
+unvisited player is its own component with sides \((1,0)\) and contributes
+\(\max(1,0)=1\).  A classic wrong-answer on exactly this problem.}
+\aha{A comment fixes only a \emph{relation}; relations compose by XOR along
+paths; a parity DSU carries the XOR to the root, and the two sides are just
+counters attached to the root.}
+\end{thinkbox}
+
+\solstep{Solution}
+Per test case: reset \(\code{parent},\code{sz},\code{pot},\code{gp}\) for
+\(1..n\) (the sums over all cases are bounded, so re-initialising the touched
+range is fine).  For each comment \((i,j,\texttt{c})\) call
+\(\text{unite}(i,\,j,\,w)\) with \(w=0\) if \texttt{c} is \texttt{crewmate}
+else \(w=1\).  If any call returns \texttt{false} (same root, mismatched
+parity), the case is contradictory: print \(-1\) and keep reading (do not
+break the input).  Otherwise sum \(\max(\code{gp}[r][0],\code{gp}[r][1])\)
+over all roots \(r\) (found via \(\code{find}(i)=i\)).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Relations.} By Observation~1, comment \((i,j,\texttt{c})\) is
+satisfiable exactly when \(\Phi(i)\oplus\Phi(j)=w_{\texttt{c}}\).
+\textbf{DSU invariant.} \(\code{find}\) maintains
+\(\code{pot}[v]=\Phi(v)\oplus\Phi(\text{root})\) along the parent chain: when
+re-parenting \(v\) under \(r\), \(\code{pot}[v]\) is replaced by the XOR over
+the whole path, so the invariant is compression-safe; a union attaches
+\(r_v\) with \(\code{pot}[r_v]=w\oplus\code{pot}[u]\oplus\code{pot}[v]\),
+which makes \(\Phi(u)\oplus\Phi(v)=w\) computable on any later find --
+induction over the operations.
+\textbf{Contradiction iff \(-1\).} If a union finds a common root and
+\(\code{pot}[u]\oplus\code{pot}[v]\neq w\), the cycle formed by the two paths
+to the root plus this edge has odd parity, so no assignment exists; conversely
+any unsatisfiable instance has an odd-parity cycle, and when its closing edge
+is processed its endpoints already share a root (all earlier cycle edges were
+merged) with a differing path parity, which the test detects
+(\propref{c28-parity}).
+\textbf{Optimality of the count.} On a consistent component, any valid
+assignment must place every vertex at potential \(\Phi(v)\oplus b\) for one
+global bit \(b\) (paths from the root force it), so exactly two assignments
+exist per component, with \(|A|\) resp.\ \(|B|\) imposters; \(\max\) is
+optimal, and summing over components is valid because they are independent.
+\textbf{Termination/AC.} All operations are \(\bigO{\alpha(n)}\) amortised,
+totals within the \(2\cdot10^5 / 5\cdot10^5\) bounds.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1594D full solution (parity weighted DSU)}, label={lst:c28-impostors-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+int parent_[MX], sz_[MX], pot[MX];    // pot[v] = Phi(v) xor Phi(parent[v])
+int gp[MX][2];                        // per root: |side0|, |side1|
+int find(int v){
+    if (parent_[v] == v) return v;
+    int r = find(parent_[v]);
+    pot[v] ^= pot[parent_[v]];        // re-base potential to the root
+    return parent_[v] = r;
+}
+bool unite(int u, int v, int w){      // impose Phi(u) xor Phi(v) = w
+    int ru = find(u), rv = find(v);   // pot[u], pot[v] now relative to roots
+    if (ru == rv) return ((pot[u] ^ pot[v]) == w);
+    int x = w ^ pot[u] ^ pot[v];      // Phi(ru) xor Phi(rv): the root offset
+    if (sz_[ru] < sz_[rv]) {          // attach ru under rv at offset x
+        parent_[ru] = rv; pot[ru] = x;
+        sz_[rv] += sz_[ru];           // ru's side-(x) nodes land on rv side 0,
+        int a = gp[rv][0] + gp[ru][x];// ru's side-(1^x) nodes on rv side 1
+        int b = gp[rv][1] + gp[ru][1 ^ x];
+        gp[rv][0] = a; gp[rv][1] = b;
+    } else {                          // attach rv under ru at the SAME x
+        parent_[rv] = ru; pot[rv] = x;
+        sz_[ru] += sz_[rv];           // (XOR is symmetric: Phi(ru)^Phi(rv)
+        int a = gp[ru][0] + gp[rv][x];// equals Phi(rv)^Phi(ru), so one x
+        int b = gp[ru][1] + gp[rv][1 ^ x];  // serves both attach directions)
+        gp[ru][0] = a; gp[ru][1] = b;
+    }
+    return true;
+}
+int main(){
+    int T; scanf("%d", &T);
+    while (T--){
+        int n, m; scanf("%d%d", &n, &m);
+        for (int i = 1; i <= n; i++){
+            parent_[i] = i; sz_[i] = 1; pot[i] = 0;
+            gp[i][0] = 1; gp[i][1] = 0;   // singleton: one node at potential 0
+        }
+        bool bad = false;
+        for (int k = 0; k < m; k++){
+            int i, j; char c[12];
+            scanf("%d%d%11s", &i, &j, c);
+            int w = (c[0] == 'i');        // imposter -> 1, crewmate -> 0
+            if (!unite(i, j, w)) bad = true;   // keep reading, mark bad
+        }
+        if (bad){ printf("-1\n"); continue; }
+        int ans = 0;
+        for (int i = 1; i <= n; i++)
+            if (find(i) == i) ans += max(gp[i][0], gp[i][1]);
+        printf("%d\n", ans);
+    }
+}
+\end{lstlisting}
+
+Two things to internalise from \(\coderef{c28-impostors-soln}\).
+\textbf{The side counts cross on an odd offset.} Attaching a root at offset
+\(x\) means every node on the absorbed side\(\,p\) re-emerges on the
+survivor's side \(p\oplus x\); so the merge reads \(\code{gp}[\cdot][x]\)
+and \(\code{gp}[\cdot][1\oplus x]\) rather than matching indices.  Get this
+backwards and the count is wrong only \emph{when a component has an odd
+number of imposter edges} -- a hard-to-see WA.  \textbf{The same \(x\) serves
+both attach directions}, because over \(\{0,1\}\) the XOR
+\(\Phi(r_u)\oplus\Phi(r_v)\) is symmetric -- subtraction \emph{is}
+addition.  Replace XOR by \(+/-\) (general weighted DSU) and the two branches
+need \(+x\) and \(-x\): the sign-flip trap the insightbox flags is real, it
+merely hides in the parity case.
+
+\solstep{Trace on the Official Sample}
+The five-case official sample prints \(\texttt{2 4 -1 2 5}\).
+\begin{tracebox}[CF 1594D case 1: n=3, comments (1 2 imposter), (2 3 crewmate)]
+Init \(\code{parent}=(1,2,3)\), \(\code{pot}=(0,0,0)\),
+\(\code{gp}[i]=(1,0)\) each (node \(i\) sits at potential~0 over itself).
+\textbf{unite(1,2,1)}: roots \(1,2\); \(x=1\oplus0\oplus0=1\); size tie keeps
+\(1\) the survivor, \(2\!\to\!1\), \(\code{pot}[2]=1\).
+Cross-merge by \(x=1\): \(\code{gp}[1][0]=1+\code{gp}[2][1]=1+0=1\),
+\(\code{gp}[1][1]=0+\code{gp}[2][0]=0+1=1\) -- \(\code{gp}[1]=(1,1)\),
+so side0\(=\{1\}\), side1\(=\{2\}\).
+\textbf{unite(2,3,0)}: \(\text{find}(2)=1\) leaves \(\code{pot}[2]=1\);
+\(x=0\oplus\code{pot}[2]\oplus\code{pot}[3]=0\oplus1\oplus0=1\);
+\(3\!\to\!1\), \(\code{pot}[3]=1\).
+Cross-merge: \(\code{gp}[1][0]=1+\code{gp}[3][1]=1+0=1\),
+\(\code{gp}[1][1]=1+\code{gp}[3][0]=1+1=2\) -- \(\code{gp}[1]=(1,2)\).
+One root \(1\): \(\max(1,2)=\boxed{2}\) (side1 \(=\{2,3\}\) are the
+imposters -- the official note's ``players 2 and 3'').
+\end{tracebox}
+\begin{tracebox}[CF 1594D case 3 (contradiction) and case 5 (empty)]
+\textbf{Case 3}, \(n=2\): \((1\ 2\ \text{imposter})\) then
+\((2\ 1\ \text{crewmate})\).  First union: \(2\!\to\!1\),
+\(\code{pot}[2]=1\).  Second: \(\text{find}(2)=\text{find}(1)=1\), so we test
+consistency -- \(w=0\) (crewmate) but \(\code{pot}[2]\oplus\code{pot}[1]=1\oplus0=1\neq0\);
+\(\text{unite}\) returns \texttt{false}, \(\mathit{bad}=\)true \(\to\)
+\(\boxed{-1}\).  \textbf{Case 5}, \(n=5,m=0\): no unions, five singleton roots,
+each contributing \(\max(1,0)=1\) -- \(\boxed{5}\), the isolated-player trap
+the thinkbox flagged.  Cases 2 and 4 give \(\boxed{4}\) and \(\boxed{2}\) by
+the same per-component \(\max\)-of-sides rule.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(\sum n\le2\cdot10^5\), \(\sum m\le5\cdot10^5\) across the file: every
+comment is one \(\bigO{\alpha(n)}\) \code{unite}, every final scan one
+\code{find} per node -- total \(\bigO{(n+m)\,\alpha(n)}\) per case, linear
+overall.  Memory \(\bigO{n}\) (\(\code{parent},\code{sz},\code{pot}\) and the
+two-column \(\code{gp}\)).  The reset loop over \(1..n\) is charged to the
+bounded \(\sum n\).  \textbf{AC.}
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: path compression inside a rollback DSU]
+The two variants are mutually exclusive.  A rollback DSU \emph{must not}
+compress \(\secref{c28-dsu}\)-style; only union-by-size keeps each tree
+\(\bigO{\log n}\) deep so the parent pointers you saved on the stack still
+describe the merge.  Mixing them silently corrupts the undo history -- see
+\(\secref{c28-offline}\) for the correct driver.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: wrong-offset side merge (the WA that only bites sometimes)]
+When the offset \(x=1\), the absorbed root's side counts swap before adding
+(\(\code{gp}[\mathit{surv}][0]+=\code{gp}[\mathit{abs}][1]\)).  Adding
+matching indices always gives a bipartite-looking answer that is right on
+even components and wrong on odd ones -- a sample-passing, judge-failing bug.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: no-op union skips the stack push]
+In the rollback DSU, push a record even when \(\code{find}(u)=\code{find}(v)\).
+Otherwise ``rollback to snapshot \(s\)'' pops a different number of merges
+than were taken, and the array state desynchronises from the recursion.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Is your potential measured to the \emph{root}, and did you re-base it
+        inside \code{find} before using it in a query?
+  \item On the swap branch, did the \(\code{gp}\) side counts \emph{cross}
+        when the offset is odd?
+  \item Rollback: did every union attempt push a record, no-op included?
+  \item Did you handle \(m=0\) (all singleton, every player an imposter)?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Desk Disorder}{CF 859E}
+    {https://codeforces.com/problemset/problem/859/E}
+    {CF 2100 L5}
+    {each of \(2n\) name-tags claims one of \(n\) desks, and two tags pinned to
+     the same desk force them apart -- a consistency question about \emph{which
+     desk} a tag sits at.  Model it as a weighted DSU whose per-set payload is
+     the implied desk offset (\(\defref{c28-weighted}\)): union the two tags of a
+     worker with a \(\pm1\) potential, and the answer is the product over
+     components of (number of valid shifts).  The exact ``carry one number per
+     root'' machinery of \(\coderef{c28-weighted}\), with no bipartite colouring
+     shortcut available.}
+  \practice{Largest Component Size by Common Factor}{LC 952}
+    {https://leetcode.com/problems/largest-component-size-by-common-factor/}
+    {LC Hard L4}
+    {numbers join when they share a factor \(>1\).  Union each number with its
+     prime factors (a DSU over \(n + \text{primes}\)), then read the largest
+     \(\code{sz}\) at each root -- weighted DSU's ``payload at the root'' idea
+     with a plain membership weight.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c28-dsu}\) -- both variants here are that forest with one field
+added (potential) or one habit removed (compression).  Chapter~14
+(\chref{c27}) -- parity is the \(\operatorname{mex}\)/XOR thinking of its
+Grundy fold.  Forward: the rollback DSU is the engine
+\(\secref{c28-offline}\) drives with a segment tree over time.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 17.2 in 10 seconds]
+\textbf{Weighted DSU} carries \(\code{pot}[v]=\Phi(v)-\Phi(\text{parent})\);
+\code{find} re-bases it to the root, and a union at offset \(w\) stores
+\(x=w\oplus\code{pot}[u]\oplus\code{pot}[v]\) on the attached root (XOR:
+same \(x\) both ways; \(+/-\): signs differ).  Parity DSU \(=\)
+bipartiteness; per component the answer is \(\max(|A|,|B|)\).  \textbf{Rollback
+DSU} drops compression, unites by size, logs two cells per merge on a stack,
+and \code{snapshot}/\code{rollback} are \(\bigO{1}\)/\(\bigO{\text{pops}}\).
+Compression and undo never coexist.
+\selftest{
+  \item State the potential invariant and the re-base line in \code{find}.
+  \item Why is the same \(x\) correct on both attach branches -- and what
+        breaks when the group is \((\mathbb{Z},+)\) instead of \(\{0,1\}\)?
+  \item CF~1594D: why \(m=0\) answers \(n\), not \(0\)?
+  \item Give the two rules that make a rollback stack trustworthy.
+  \item What is \(\code{find}\)'s cost in a rollback DSU, and why?
+}
+\end{recallbox}

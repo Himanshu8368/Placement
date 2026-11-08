@@ -1,0 +1,892 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  Chapter 10 review -- the 15-section revision contract (chapter_end.txt).
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\defref/\exref/\figref/\lemref.  No derivations.
+%  Summit: CF 721D Maxim and Array -- repeated extract-min of the smallest
+%  |value| from a priority queue, modify it by +/-x, reinsert; the sign of the
+%  product is steered by the PARITY of the negative count (even -> shrink the
+%  smallest toward zero / let it flip; odd -> grow the smallest in its own
+%  direction).  Lazy stale-skip on re-pushed keys; long long throughout.
+%  Greedy hand-verified against all four official samples before writing.
+% =====================================================================
+
+\chaptersection{Chapter 10 Summary}
+
+One sentence: \emph{keep a complete tree in an array you \textbf{edit}, and you always know the extreme in
+$\bigO{1}$}. Chapter~9 (\chref{c26}) read a heap order \emph{off} a static array -- the Cartesian tree whose
+minimum was the root, never touched again. This chapter keeps that promise \emph{alive under a stream of
+pushes and pops}: the \term{binary heap} stores the tree in level-order array slots so the shape costs no
+pointers, sacrifices all sibling order for one rule (parent $\le$ children, \defref{c07-heap}), and repairs
+that rule in $\bigO{\log n}$ with a sift (\defref{c07-sift}). A $\bigO{n}$ bottom-up build (\thmref{c07-floyd})
+and the \code{priority\_queue} wrapper (\coderef{c07-pq}) turn the structure into a habit; relaxing the rigid
+shape buys a mergeable heap (\thmref{c07-leftist}); and one extraction loop -- \emph{pop the extreme, push
+something back} -- runs through every classic problem here and up to the Summit. Every entry below is a
+pointer, not a re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.25\linewidth} p{0.47\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement (with conditions)} & \textbf{Where} \\
+\midrule
+Heap order & A binary heap is a \emph{complete} tree in an array with parent $\le$ children; there is
+  \emph{no} order between siblings, and slot $i$ has children $2i{+}1,2i{+}2$ (0-based). & \defref{c07-heap} \\
+Height & A heap of $n$ nodes has height $\lfloor\lg n\rfloor$ -- completeness forces the tree short, so a
+  sift is $\bigO{\log n}$. & \lemref{c07-height} \\
+Sift invariants & \emph{Sift-up}: a newly placed node may violate only with its parent; swap up until fixed.
+  \emph{Sift-down}: after the root leaves, a node may violate with its \emph{smaller} child; swap down. &
+  \defref{c07-sift} \\
+Linear build & Floyd's bottom-up heapify -- sift-down every internal node from $\lfloor n/2\rfloor$ to the
+  root -- is $\bigO{n}$, not $\bigO{n\log n}$, because most nodes sit near the bottom. & \thmref{c07-floyd} \\
+Mergeable shape & A leftist heap keeps only the heap order plus $\mathit{npl}(\text{left})\ge
+  \mathit{npl}(\text{right})$; all raggedness hides on a right spine of length $\le\lg(n{+}1)$. &
+  \defref{c07-npl}, \thmref{c07-leftist} \\
+Multiway merge & $k$ sorted streams merge in $\bigO{N\log k}$: a min-heap holds one current head per list;
+  pop the winner, push that list's successor. & \coderef{c07-multimerge} \\
+Two-heap median & A running median needs the \emph{middle}, not an extreme: a max-heap (low half) and a
+  min-heap (high half) balanced to within one have the median at their two roots. & \coderef{c07-median} \\
+Greedy extraction & ``merge the two cheapest, reinsert'' (Huffman / connect-sticks) and ``pop the extreme,
+  modify, push back'' (the Summit) are one loop on a priority queue. & \probref{c07-connect} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter -- keep the extreme on top, then spend it one pop at a time.}}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.19\linewidth} l l p{0.29\linewidth} p{0.155\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Time} & \textbf{Memory} & \textbf{When to use (deciding phrase)} & \textbf{Code} \\
+\midrule
+Hand sift push/pop
+  & $\bigO{\log n}$ & $\bigO{n}$
+  & ``maintain one extreme of a changing set''
+  & \coderef{c07-heapops} \\
+Floyd build
+  & $\bigO{n}$ & $\bigO{1}$ extra
+  & ``heapify a whole array at once''
+  & \coderef{c07-build} \\
+Size-$k$ heap (top-$k$)
+  & $\bigO{n\log k}$ & $\bigO{k}$
+  & ``$k$ largest / most-frequent of $n$''
+  & \coderef{c07-topk-soln} \\
+Leftist merge
+  & $\bigO{\log n}$ & $\bigO{n}$
+  & ``union two priority queues cheaply''
+  & \coderef{c07-leftist} \\
+$k$-way merge
+  & $\bigO{N\log k}$ & $\bigO{k}$
+  & ``emit a sorted stream from $k$ sources''
+  & \coderef{c07-multimerge} \\
+Two-heap median
+  & $\bigO{\log n}$ / insert & $\bigO{n}$
+  & ``running median / quantile of a stream''
+  & \coderef{c07-median} \\
+Extract-min, modify, reinsert (Summit)
+  & $\bigO{(n+k)\log n}$ & $\bigO{n}$
+  & ``$k$ edits to the extreme of a live set''
+  & \coderef{c07-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches. It decides \emph{whether a
+heap is even the right tool} -- a follower never pays $\bigO{\log n}$ for an extreme when a $\bigO{1}$
+peek or a single sort will do, nor reaches for a heap when items leave by \emph{position} (that is a deque).
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You have a set of items and keep needing one of them. Which one, and how often?
+  |
+  |-- only the single extreme (min OR max) of a set that is edited (push/pop)?
+  |     +-- binary heap / priority_queue : top O(1), push/pop O(log n)   [7.1, 7.2]
+  |
+  |-- the whole thing in sorted order, once?
+  |     +-- just sort, O(N log N); a heap does not beat it -- do not build one   [all]
+  |
+  |-- the k-th largest / top-k / k most frequent of a big stream?
+  |     +-- a size-k heap : O(n log k) time, O(k) memory, never holds it all   [7.2, LC 347]
+  |     +-- values are small integers -> counting/bucket sort is O(n + V), even cheaper
+  |
+  |-- extreme of a FIXED-SIZE window that slides one step at a time?
+  |     +-- NOT a heap: items expire by position -> monotonic DEQUE [Chapter 9, c26]
+  |
+  |-- you must MERGE two (or many) priority queues, often?
+  |     +-- an array heap merge is O(m+n) rebuild -> use a LEFTIST/skew merge O(log n)  [7.3]
+  |     +-- heavy decrease-key on handles -> Fibonacci heap (described, cost table only)
+  |
+  |-- emit items in increasing order from k pre-sorted sources?
+  |     +-- min-heap of the k current heads : O(N log k) multiway merge        [7.4, LC 23]
+  |
+  |-- the k best of an implicit space too big to enumerate (pairs, matrix cells)?
+  |     +-- best-first: seed a frontier heap at the smallest cell, pop k times  [7.4, LC 373/378]
+  |
+  |-- running median / quantile of a stream?
+  |     +-- TWO heaps (max-low + min-high) balanced to within one              [7.4; LC 295 -> c06]
+  |
+  +-- repeatedly pop the extreme, CHANGE it by a fixed step, push it back?
+        +-- the literal heap loop; watch sign/parity -> the Summit, CF 721D     [Summit]
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Treating the heap as sorted.} The heap order is only \emph{parent $\le$ children}
+        (\defref{c07-heap}): siblings carry no promise, so reading the array is not a sorted list. To emit
+        in order you must \code{pop} $n$ times ($\bigO{n\log n}$) or just sort -- never index the array
+        expecting inorder (\probref{c07-stone}).
+  \item \textbf{Forgetting \code{priority\_queue} is a \emph{max}-heap by default.} \code{priority\_queue<int>}
+        hands you the \emph{largest}; a min-heap needs the third template argument
+        \code{greater<int>} (\coderef{c07-pq}). Silently using the max-heap where a min is wanted flips every
+        greedy extract (\probref{c07-connect}).
+  \item \textbf{Building a size-$n$ heap to get the top $k$.} Push everything then pop $k$ is $\bigO{n\log
+        n}$ and $\bigO{n}$ memory; the size-$k$ min-heap (evict its own minimum whenever it exceeds $k$) is
+        $\bigO{n\log k}$ and $\bigO{k}$ -- the whole point of \secref{c07-build} (\probref{c07-topk}).
+  \item \textbf{Starting Floyd's build in the wrong place, or sifting the wrong way.} Begin at the
+        \emph{last internal node} $\lfloor n/2\rfloor-1$ (0-based) and sift \emph{down}; sifting up, or
+        starting at index $0$ forward, is correct but loses the $\bigO{n}$ bound (\thmref{c07-floyd},
+        \exref{c07-build-run}).
+  \item \textbf{Leaving stale keys in the heap after you change an element.} A priority queue cannot
+        \code{decrease-key} an item you already pushed; when the Summit modifies $a_i$ and re-pushes, the old
+        $(|a_i|,i)$ lingers. Skip it on pop by testing the stored key against the live value -- otherwise you
+        operate on a phantom (\probref{c07-summit}).
+  \item \textbf{Ignoring the \code{pair} comparison order.} \code{priority\_queue<pair<int,int>>} orders by
+        \emph{first}, then \emph{second}, as a max; wrap it with \code{greater<>} for a min-on-first, and
+        remember a tie on the first breaks on the second (\coderef{c07-pq}).
+  \item \textbf{Overflowing a 32-bit field.} In the Summit $|a_i|\le 10^{9}$, $x\le 10^{9}$ and $k\le
+        2\cdot10^{5}$, so one element can reach $\sim2\cdot10^{14}$ -- the array and the heap keys must be
+        \code{long long} (\probref{c07-summit}).
+  \item \textbf{Reaching for a heap where a deque belongs.} A sliding-window maximum expires items by
+        \emph{position}; a heap cannot evict the leaving element in $\bigO{\log n}$ (it is buried mid-array).
+        That family is Chapter~9's monotonic deque (\chref{c26}) -- the heap owns extremes of a set that
+        changes by \emph{value} (\secref{c07-classics}).
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled. Diagnose top-down -- every leaf
+names the training problem.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=58mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 6mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=1mm of verdict] (tle) {\textbf{TLE}};
+  \node[b, below left=8mm and 1mm of verdict, xshift=30mm] (re) {\textbf{RE}};
+  \node[b, below right=8mm and 6mm of verdict] (mle) {\textbf{MLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {max-heap where a min was needed (\coderef{c07-pq}); trusting sibling order that does not exist
+     (\defref{c07-heap}); acting on a stale re-pushed key the Summit never skipped (\probref{c07-summit});
+     wrong \code{pair} ordering in a multiway merge (\probref{c07-mergek})};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {size-$n$ heap for top-$k$ where size-$k$ suffices (\probref{c07-topk}); $\bigO{n\log n}$ build from
+     repeated sift-up instead of Floyd's $\bigO{n}$ (\thmref{c07-floyd}); array-heap melds costing
+     $\bigO{m+n}$ in a loop that wanted $\bigO{\log n}$ (\thmref{c07-leftist})};
+  \node[l, below right=1mm and 2mm of re.south] (re1)
+    {child index $2i{+}1$ read past \code{size()} in a hand sift (\coderef{c07-heapops}); sifting from an
+     out-of-range start in the build (\exref{c07-build-run})};
+  \node[l, below right=1mm and 2mm of mle.south] (mle1)
+    {pushing all $n$ pair-sums of an $n\times n$ grid when best-first keeps only a $\bigO{k}$ frontier
+     (\secref{c07-classics}); holding node objects for a leftist heap you could run as an index array};
+  \draw[flow] (verdict) -- (wa); \draw[flow] (verdict) -- (tle);
+  \draw[flow] (verdict) -- (re); \draw[flow] (verdict) -- (mle);
+  \draw[flow] (wa) -- (wa1); \draw[flow] (tle) -- (tle1);
+  \draw[flow] (re) -- (re1); \draw[flow] (mle) -- (mle1);
+\end{tikzpicture}
+\caption*{Chapter~10 verdict tree -- only the failures this chapter's problems can produce.}
+\end{figure}
+
+\medskip
+\noindent Backup table (same content, terse):
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llp{0.39\linewidth}l@{}}
+\toprule
+\textbf{Verdict} & \textbf{Usual cause} & \textbf{One-line fix} & \textbf{Trained in} \\
+\midrule
+WA  & wrong extreme (max/min) & add the \code{greater<>} template argument & \coderef{c07-pq} \\
+WA  & stale key acted on         & on pop, skip if stored $\ne$ live value      & \probref{c07-summit} \\
+TLE & size-$n$ heap for top-$k$  & cap the heap at $k$ and evict its minimum    & \probref{c07-topk} \\
+TLE & $\bigO{n\log n}$ build     & Floyd from $\lfloor n/2\rfloor{-}1$, sift down & \thmref{c07-floyd} \\
+RE  & child index out of range   & bound $2i{+}1,2i{+}2$ by \code{size()}        & \coderef{c07-heapops} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 10 at a glance]
+\textbf{One promise, cheaply kept.} A heap is a complete tree in an array that guarantees only
+\emph{parent $\le$ children} (\defref{c07-heap}); that single promise makes the top the extreme in
+$\bigO{1}$ and lets a sift restore it in $\bigO{\log n}$ (\lemref{c07-height}, \defref{c07-sift}).
+
+\medskip
+\textbf{Build once, in linear time.} Floyd's bottom-up heapify is $\bigO{n}$ because the work is a
+sum-over-heights dominated by the many shallow nodes (\thmref{c07-floyd}); pushing one-by-one is
+$\bigO{n\log n}$ and rarely what you want (\exref{c07-build-run}).
+
+\medskip
+\textbf{The loop is the algorithm.} Top-$k$ (a size-$k$ heap, \probref{c07-topk}), Huffman /
+connect-sticks (merge two smallest, reinsert, \probref{c07-connect}), multiway merge ($k$ heads in a
+min-heap, \probref{c07-mergek}), and the Summit (extract-min, modify by $\pm x$, reinsert,
+\probref{c07-summit}) are all \code{top}--\code{pop}--\code{push}.
+
+\medskip
+\textbf{Two running objects.} The array $R=(5,3,8,1,4,2,7)$ heapifies to $(1,3,2,5,4,8,7)$ whether by
+Floyd or by repeated sift-up (\exref{c07-build-run}, \exref{c07-sift-run}). The stones $S=(2,7,4,1,8,1)$
+shatter to the final weight $1$ (\probref{c07-stone}).
+
+\medskip
+\textbf{Know your boundaries.} The heap owns the extreme of a set edited by \emph{value}; the sliding
+window edited by \emph{position} is the deque (\chref{c26}); a \emph{read-only} heap order in a static
+array is the Cartesian tree (\chref{c26}); ordered-set splits and joins are the balanced tree
+(\chref{c06}). Running median is here, but its canonical problem LC 295 lives in \chref{c06}.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 10 code kit: hand sift push/pop, Floyd build, the priority\_queue idioms, a size-k top-k, the k-way merge, and the Summit loop}, label={lst:c07-kit}]
+#include <bits/stdc++.h>
+using namespace std;
+
+// (1) Binary MIN-heap in an array: sift-up on push, sift-down on pop.        [7.1]
+struct MinHeap {
+    vector<int> h;
+    void push(int v){
+        h.push_back(v); int i = (int)h.size()-1;
+        while(i>0){ int p=(i-1)/2; if(h[p]<=h[i]) break; swap(h[p],h[i]); i=p; } // sift-up
+    }
+    int top() const { return h[0]; }
+    void pop(){
+        h[0]=h.back(); h.pop_back(); int i=0, n=(int)h.size();
+        while(true){ int l=2*i+1, r=2*i+2, m=i;
+            if(l<n && h[l]<h[m]) m=l;  if(r<n && h[r]<h[m]) m=r;
+            if(m==i) break; swap(h[m],h[i]); i=m; }                              // sift-down
+    }
+};
+// (2) Floyd build: sift-down every internal node from n/2-1 down to 0 -> O(n). [7.2]
+void buildHeap(vector<int>& a){
+    int n=(int)a.size();
+    for(int i=n/2-1;i>=0;i--){ int k=i;
+        while(true){ int l=2*k+1, r=2*k+2, m=k;
+            if(l<n && a[l]<a[m]) m=l;  if(r<n && a[r]<a[m]) m=r;
+            if(m==k) break; swap(a[m],a[k]); k=m; }
+    }
+}
+// (3) std::priority_queue idioms.                                              [7.2]
+//   priority_queue<int> pq;                                // MAX-heap (default)
+//   priority_queue<int, vector<int>, greater<int>> mn;     // MIN-heap
+//   priority_queue<pair<int,int>, vector<pair<int,int>>, greater<>> byFirst;  // min on first
+// (4) Top-k largest via a size-k MIN-heap: O(n log k) time, O(k) memory.       [7.2]
+vector<int> topK(const vector<int>& a, int k){
+    priority_queue<int, vector<int>, greater<int>> mn;
+    for(int v : a){ mn.push(v); if((int)mn.size()>k) mn.pop(); }
+    vector<int> out; while(!mn.empty()){ out.push_back(mn.top()); mn.pop(); } return out;
+}
+// (5) k-way merge of sorted lists: a min-heap of current heads -> O(N log k).  [7.4]
+//     (see the full version in Code lst:c07-multimerge)
+// (6) Summit CF 721D: extract smallest |.|, modify by +/-x, reinsert; skip stale;
+//     parity of negatives chooses shrink (even) vs grow (odd). lst:c07-summit  [Summit]
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter. Cover the marked line,
+reproduce it from memory, then check the answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- sift-up on push (from \coderef{c07-heapops})}]
+h.push_back(v); int i = (int)h.size() - 1;
+while (i > 0) {
+    int p = (i - 1) / 2;
+    if (h[p] <= h[i]) break;         // parent already wins -> heap property holds
+    /* FILL: swap(h[p], h[i]) */;    // pull the smaller up
+    i = p;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: a fresh leaf can violate the order with only \emph{one} edge -- its parent; swap up
+until that edge is legal. This is the $\bigO{\log n}$ insert of \defref{c07-sift} (\exref{c07-sift-run}).}
+
+\begin{lstlisting}[caption={Drill 2 -- sift-down on pop (from \coderef{c07-heapops})}]
+h[0] = h.back(); h.pop_back(); int i = 0, n = (int)h.size();
+while (true) {
+    int l = 2*i+1, r = 2*i+2, m = i;
+    if (l < n && h[l] < h[m]) m = l;
+    if (r < n && h[r] < h[m]) m = r;         // m = index of the smaller child
+    if (m == i) break;
+    /* FILL: swap(h[m], h[i]) */;            // push the winner's loser down
+    i = m;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: after the root leaves you refill it from the last slot; it may violate with
+\emph{both} children, so swap with the \emph{smaller} one and keep walking -- one edge fixed per step
+(\defref{c07-sift}).}
+
+\begin{lstlisting}[caption={Drill 3 -- Floyd build loop (from \coderef{c07-build})}]
+for (int i = n/2 - 1; i >= 0; --i)   /* FILL: sift-DOWN node i */;   // last internal node upward
+\end{lstlisting}
+\noindent{\scriptsize Key: every node past $\lfloor n/2\rfloor-1$ is a leaf (nothing to fix); sifting each
+internal node \emph{down} in bottom-up order reuses already-heapified subtrees, and the cost is a
+sum-over-heights, not per-node $\log n$ -- hence $\bigO{n}$ (\thmref{c07-floyd}, \exref{c07-build-run}).}
+
+\begin{lstlisting}[caption={Drill 4 -- size-$k$ top-$k$ (from \coderef{c07-topk-soln})}]
+priority_queue<int, vector<int>, greater<int>> mn;   // MIN-heap of the k best so far
+for (int v : a) { mn.push(v); if ((int)mn.size() > k) /* FILL: mn.pop() */; }
+\end{lstlisting}
+\noindent{\scriptsize Key: keep the heap at size $k$ and evict \emph{its own minimum} -- the smallest of the
+current best -- so the survivors are the $k$ largest overall; $\bigO{n\log k}$ time, $\bigO{k}$ memory
+(\probref{c07-topk}).}
+
+\begin{lstlisting}[caption={Drill 5 -- two-heap median rebalance (from \coderef{c07-median})}]
+if ((int)low.size()  > (int)high.size() + 1) { high.push(low.top()); low.pop(); }
+if ((int)high.size() > (int)low.size())      /* FILL: low.push(high.top()); high.pop() */;
+\end{lstlisting}
+\noindent{\scriptsize Key: a max-heap \code{low} and min-heap \code{high} meet in the middle; keep
+$|\text{low}|\ge|\text{high}|$ differing by one, and the median is one root or the mean of both
+(\coderef{c07-median}; the canonical problem LC 295 sits in \chref{c06}).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, 6 practice, one internal lab, one Summit,
+five mixed. Tick \emph{only} after an unaided solve; a hinted attempt counts as half. Cite by name and
+number -- URLs appear once, in the solved and practice entries.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.235\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.1 -- the binary heap; sift up and down}} \\
+W10.1.1 & Last Stone Weight & LC 1046 & \lv{2} max-heap extract & pop two heaviest, push the difference, until $\le1$ stone & $\square$ \\
+P10.1.2 & Kth Largest in a Stream & LC 703 & \lv{2} size-$k$ min-heap & keep $k$ largest; the running answer is the heap's minimum & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.2 -- linear build and the \code{priority\_queue}}} \\
+W10.2.1 & Top K Frequent Elements & LC 347 & \lv{3} count + size-$k$ heap & frequency map, then a heap capped at $k$; bucket sort is the $\bigO{n}$ twin & $\square$ \\
+P10.2.2 & Kth Largest in an Array & LC 215 & \lv{3} size-$k$ / quickselect & a $k$-heap is $\bigO{n\log k}$; quickselect is expected $\bigO{n}$ & $\square$ \\
+P10.2.3 & K Closest Points to Origin & LC 973 & \lv{3} size-$k$ max-heap & keep $k$ smallest distances with a max-heap that evicts the farthest & $\square$ \\
+P10.2.4 & Sort Characters by Frequency & LC 451 & \lv{3} frequency max-heap & pop by count and append the character its many times & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.3 -- mergeable heaps}} \\
+W10.3.1 & Minimum Cost to Connect Sticks & LC 1167 & \lv{3} merge two smallest & the Huffman greedy: extract-min twice, push the sum, add it to cost & $\square$ \\
+P10.3.2 & Leftist merge, hand-written & internal lab & \lv{4} right-spine recursion & merge down the right spine, swap children to restore $\mathit{npl}$ & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 7.4 -- classic heap problems}} \\
+W10.4.1 & Merge $k$ Sorted Lists & LC 23 & \lv{4} min-heap of heads & seed one head per list; pop winner, push its successor & $\square$ \\
+P10.4.2 & Find $K$ Pairs with Smallest Sums & LC 373 & \lv{4} best-first frontier & seed $(i,0)$ cells, expand the $j{+}1$ neighbour, pop $k$ times & $\square$ \\
+P10.4.3 & Kth Smallest in a Sorted Matrix & LC 378 & \lv{4} frontier / binary search & min-heap from $(0,0)$, or $\bigO{n\log(V)}$ count-by-value search & $\square$ \\
+P10.4.4 & IPO (max capital) & LC 502 & \lv{4} greedy with repair & as capital grows, push newly-affordable profits to a max-heap, take $k$ tops & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+S10 & Maxim and Array & CF 721D & \lv{5} extract-min/modify/reinsert & edit the smallest $|a_i|$ each step; parity of negatives picks shrink vs grow; \code{long long} & $\square$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day 1 keeps the extreme alive by hand; day 2 builds it fast and reaches for the
+library; day 3 breaks the shape to make it merge; day 4 spends the extraction loop on the classics; day 5
+is the Summit. Solve in this order even where it differs from section order -- each day's tool is in hand
+the day before.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 7.1 & sift $R=(5,3,8,1,4,2,7)$ by hand to $(1,3,2,5,4,8,7)$ (\exref{c07-sift-run}); write the
+    push/pop cold; LC 1046, LC 703 \\
+2 & Read + do 7.2 & run Floyd's build on $R$ (\exref{c07-build-run}); internalise the \code{priority\_queue}
+    card (\coderef{c07-pq}); LC 347, then 215, 973, 451 \\
+3 & Read + do 7.3 & merge two leftist heaps by hand (\exref{c07-merge-run}); the size-two-extract greedy;
+    LC 1167, then the internal leftist-merge lab \\
+4 & Read + do 7.4 & trace the multiway merge of LC 23's heads (\figref{c07-multimerge}); the two-heap median;
+    LC 23, then 373, 378, 502 \\
+5 & Summit + revise & CF 721D with the extract-min/modify/reinsert loop (\probref{c07-summit}); walk the
+    decision flowchart on five questions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks, not just a rating bucket.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.36\linewidth}p{0.34\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+$\lv{2}$ \ $\bigstar\bigstar$
+  & LC 1046, LC 703
+  & you keep one extreme of a changing set and never trust the array to be sorted \\
+$\lv{3}$ \ $\bigstar\bigstar\bigstar$
+  & LC 347, 215, 973, 451, LC 1167
+  & you size the heap to $k$ and run a ``pop the extreme, push back'' greedy cold \\
+$\lv{4}$ \ $\bigstar\bigstar\bigstar\bigstar$
+  & the leftist lab, LC 23, 373, 378, 502
+  & you compose a heap with a second idea (a mergeable shape, a frontier, greedy repair) \\
+$\lv{5}$ \ $\bigstar\bigstar\bigstar\bigstar\bigstar$
+  & CF 721D (Summit)
+  & you see the extract-modify-reinsert loop where the problem hides it and steer the sign by parity \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+The heap is one loop; each line collapses a family onto \emph{pop the extreme, then push something back}.
+No new theory -- just where the extract is already hiding.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item "smash the two heaviest stones" (LC 1046) $\longrightarrow$ a max-heap, pop two, push the difference
+        (\probref{c07-stone}).
+  \item "the $k$ most frequent / $k$-th largest" (LC 347, 703, 215) $\longrightarrow$ a size-$k$ min-heap,
+        evict its own minimum (\probref{c07-topk}, \secref{c07-build}).
+  \item "cheapest way to connect all sticks / Huffman cost" (LC 1167) $\longrightarrow$ merge the two
+        smallest, reinsert the sum, accumulate (\probref{c07-connect}).
+  \item "merge $k$ sorted lists / files" (LC 23) $\longrightarrow$ a min-heap of $k$ current heads,
+        $\bigO{N\log k}$ (\probref{c07-mergek}, \coderef{c07-multimerge}).
+  \item "$k$ smallest pair sums / $k$-th in a sorted matrix" (LC 373, 378) $\longrightarrow$ best-first:
+        seed a frontier heap at the smallest cell and expand (\secref{c07-classics}).
+  \item "maximum capital after $k$ projects" (LC 502 IPO) $\longrightarrow$ greedy with repair -- a
+        max-heap of items your budget can now afford (\secref{c07-classics}).
+  \item "running median of a stream" (LC 295) $\longrightarrow$ two heaps meeting in the middle; the pattern
+        is here (\coderef{c07-median}), the canonical problem lives in \chref{c06}.
+  \item "minimise the product after $k$ edits of $\pm x$" (CF 721D) $\longrightarrow$ extract the smallest
+        magnitude, modify, reinsert -- with the sign set by parity (\probref{c07-summit}).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+These refuse to say ``heap''; decide \emph{which extreme you extract repeatedly, and what you push back}
+before opening the code. A hint tells you the shape of the answer, never the tool.
+
+\begin{mixedset}
+  \practice{Task Scheduler}{LeetCode 621}
+    {https://leetcode.com/problems/task-scheduler/}{LC Medium · L4}
+    {Tasks with a cooldown $n$ between identical ones; find the minimum spans. Greedy: each round pop the
+    $\le n{+}1$ most-frequent remaining tasks from a max-heap, run them, decrement and re-push -- the very
+    extract-modify-reinsert loop of \probref{c07-summit} wearing a cooldown. The closed form
+    $\max(\mathit{len},(\mathit{maxCount}-1)(n+1)+\mathit{ties})$ is the same picture, count-off.}
+  \practice{Reorganize String}{LeetCode 767}
+    {https://leetcode.com/problems/reorganize-string/}{LC Medium · L4}
+    {Rearrange so no two adjacent characters match. Keep a max-heap on frequency; repeatedly pop the two
+    most-frequent distinct characters, append both, decrement, re-push -- always separating the current
+    leaders, exactly the two-pops-and-a-repush discipline of \probref{c07-stone}. Fail when one character's
+    count exceeds $\lceil m/2\rceil$.}
+  \practice{Smallest Range Covering Elements from $K$ Lists}{LeetCode 632}
+    {https://leetcode.com/problems/smallest-range-covering-elements-from-k-lists/}{LC Hard · L4}
+    {One value from each of $k$ sorted lists to minimise the range. Put each list's head in a min-heap,
+    track the running maximum; pop the minimum, record the range, advance \emph{that} list and re-push --
+    the shrinking-window twin of \probref{c07-mergek}'s head-heap merge (\figref{c07-multimerge}).}
+  \practice{Ugly Number II}{LeetCode 264}
+    {https://leetcode.com/problems/ugly-number-ii/}{LC Medium · L4}
+    {The $n$-th number whose only prime factors are $2,3,5$. Three min-heaps seeded at $1$ (pop the smallest
+    product, push it times each factor, dedup) tell the story directly; the three-pointer DP is the
+    heap-free rewrite of the same ``emit the next-best in order'' idea of \secref{c07-classics}.}
+  \practice{Find $K$ Closest Elements}{LeetCode 658}
+    {https://leetcode.com/problems/find-k-closest-elements/}{LC Medium · L4}
+    {The $k$ values nearest to $x$ in a sorted array. A size-$k$ \emph{max}-heap keyed by distance keeps the
+    $k$ best and evicts the farthest -- \probref{c07-topk}'s cap-at-$k$ trick with a different key; the
+    two-pointer window after a binary search is the $\bigO{\log n+k}$ upgrade once you see why the heap's
+    order by distance is overkill on sorted input.}
+  \practice{Single-Threaded CPU}{LeetCode 630}
+    {https://leetcode.com/problems/single-threaded-cpu/}{LC Hard · L4}
+    {Jobs unlock at their own times; when idle, take the shortest processing time among
+    the released ones (index breaks ties): feed a (time, index) min-heap from a sorted
+    release cursor and let the clock absorb each pop -- the push-when-ready, pop-the-extreme
+    loop of \probref{c07-mergek} on a moving timeline.}
+  \practice{Remove Stones to Minimize the Total}{LeetCode 1962}
+    {https://leetcode.com/problems/remove-stones-to-minimize-the-total/}{LC Medium · L3}
+    {$k$ moves, each replacing the largest pile by its integer half: a max-heap pops the
+    leader and pushes the halving back -- \probref{c07-stone} taking one pile at a time,
+    with the same proof that editing the current leader is the only greedy that can win.}
+  \practice{Minimum Operations to Halve Array Sum}{LeetCode 2208}
+    {https://leetcode.com/problems/minimum-operations-to-halve-array-sum/}{LC Medium · L3}
+    {Halve the current maximum exactly (no flooring) until the sum drops by half: the same
+    max-heap loop, and halving the leader never unseats a bigger rival, so greed at the top
+    is provably the best next move; keep the heap in doubled integers to dodge the float.}
+  \practice{Longest Happy String}{LeetCode 1405}
+    {https://leetcode.com/problems/longest-happy-string/}{LC Medium · L4}
+    {No letter may appear three times running: a frequency max-heap, taking two of the leader
+    when the runner-up is exhausted, else alternating leaders -- the cooldown geometry of
+    Task Scheduler with the window fixed at three, same pop-append-repush as
+    \secref{c07-classics}.}
+  \practice{Minimum Cost to Hire K Workers}{LeetCode 857}
+    {https://leetcode.com/problems/minimum-cost-to-hire-k-workers/}{LC Hard · L5}
+    {Every hired worker must be paid at least their own ratio times one reference rate: sort
+    workers by $\mathit{wage}/\mathit{expectation}$ and sweep, keeping the $k$ smallest
+    expectations in a capped max-heap -- \probref{c07-topk}'s cap-at-$k$ discipline, and the
+    heap top prices each candidate fair rate.}
+\end{mixedset}
+
+\chaptersection{The Summit -- CF 721D Maxim and Array}
+
+\begin{notebox}[Why this is the chapter top rope]
+Every section of this chapter ended on the same loop: \emph{pop the extreme, push something back}.
+\emph{Maxim and Array} is that loop with a twist that separates $\lv{4}$ from $\lv{5}$ -- the thing you
+extract is not just an extreme, it is the element whose change moves the \emph{product} the most, and
+whether to push it up or down depends on a single global bit: the parity of how many entries are negative.
+You are handed an array and $k$ moves; each move nudges one element by $\pm x$; you must land on the
+smallest possible product. There is no range, no tree, no order to preserve -- just a live multiset you
+edit one extreme at a time, which is exactly the priority queue of \secref{c07-heap} and \secref{c07-build}
+run for $k$ rounds. The subtlety that hides the difficulty is that ``minimise the product'' is really two
+jobs -- get the sign negative (or zero), then make the magnitude as large as possible -- and the greedy
+that achieves both, always editing the smallest $|a_i|$, only makes sense once you see those two jobs
+separately.
+\end{notebox}
+
+\solvedproblem{c07-summit}{Maxim and Array}{Codeforces 721D}
+  {https://codeforces.com/problemset/problem/721/D}{CF 2000 · L5}
+  {extract-min by absolute value then modify by +/-x and reinsert, minimise the product via the parity of the negative count (shrink-when-even / grow-when-odd), lazy stale-key skip on re-push, long-long magnitudes}
+
+\begin{problemstatement}[Maxim and Array]
+Given an array $a$ of $n$ integers and two integers $k$ and $x$, you may perform \textbf{at most} $k$
+moves. In one move you choose an index $i$ and either add $x$ to $a_i$ or subtract $x$ from $a_i$
+($a_i := a_i + x$ or $a_i := a_i - x$). Over all arrays reachable in at most $k$ moves, minimise the
+product $a_1\cdot a_2\cdots a_n$. Print any array attaining the minimum.\\
+$1\le n\le 2\cdot10^{5}$, $0\le k\le 2\cdot10^{5}$, $1\le x\le 10^{9}$, $|a_i|\le 10^{9}$. Sample
+$n=3,k=2,x=7$, $a=(5,4,2)$ has answer $(5,11,-5)$, product $-275$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 40 minutes]
+A fair first attempt is to always subtract $x$ from the current maximum -- it feels like shrinking the
+product. That is wrong the moment a negative appears (subtracting from a negative \emph{grows} the
+magnitude) and wrong when the product should go negative. Slow down and split the goal.
+\peek{The product is $\mathit{sign}\times\mathit{magnitude}$. What single global fact about the array
+fixes the \emph{sign} of the product, and how does one move change it?}
+\nudge{The sign is fixed by the \emph{parity} of the number of negative entries. A move flips that parity
+only when $a_i$ crosses zero. So: if you want the smallest product you want it \emph{negative} with the
+largest magnitude -- or, if you cannot get negative, as close to $0$ from above as possible.}
+\fullhint{Keep a min-heap on $|a_i|$. Each move edit the \emph{smallest magnitude} (it changes the product
+by the largest \emph{ratio}). If the negative count is \textbf{odd}, grow that element away from zero
+($a_i\le 0\Rightarrow a_i-x$, else $a_i+x$) to deepen the negative product. If \textbf{even}, shrink toward
+zero ($a_i<0\Rightarrow a_i+x$, else $a_i-x$) -- which may push it negative and flip the parity to odd.
+Re-push the new $|a_i|$, skip stale heap entries, use \code{long long}. Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+We may spend up to $k$ independent $\pm x$ nudges and want to \emph{minimise} a product. Minimising a
+product is not minimising each factor: a negative product is smaller than every non-negative one, and among
+negatives the \emph{larger magnitude} is the \emph{smaller} value. So the objective has a lexicographic
+shape -- first make the sign negative (or the value zero), then maximise magnitude -- and each move touches
+exactly one element by exactly $x$. That is a live set you edit one extreme at a time: the priority queue,
+not a sort or a range structure.
+
+\solstep{Key Observations}
+\begin{observation}
+The sign of the product is determined \emph{only} by the parity of the count of strictly negative entries.
+A single move changes that parity if and only if the chosen element crosses $0$ (its sign flips);
+otherwise the parity is untouched. So the whole ``should the product be negative?'' question is one running
+bit, updated in $\bigO{1}$ per move by $(v<0)-(a_i<0)$.
+\end{observation}
+\begin{observation}
+Changing $a_i$ to $a_i\pm x$ multiplies the magnitude $|{\textstyle\prod}a|$ by $|a_i\pm x|/|a_i|$. The
+element with the \emph{smallest} $|a_i|$ offers the largest such ratio in whichever direction you move it,
+so every optimal move edits a current minimum-magnitude element -- the extract-min of \defref{c07-sift},
+re-run $k$ times.
+\end{observation}
+\begin{observation}
+Combining the two: when the negative count is \textbf{odd} the product is already negative, so we
+\emph{grow} the smallest $|a_i|$ away from zero (deeper negative = smaller). When it is \textbf{even} the
+product is non-negative, so we \emph{shrink} the smallest $|a_i|$ toward zero -- and the step that pushes it
+strictly negative flips the parity to odd, after which all remaining steps grow. One heap, one parity bit,
+$k$ rounds (\probref{c07-summit}).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Sort the array and always edit the first element.}
+{After one $\pm x$ a \emph{different} element may hold the smallest magnitude, and you would be editing the
+wrong slot; you must re-extract the minimum after every change, which is a heap, not a fixed sorted index.}
+\deadend{Enumerate how to spend $k$ moves across the $n$ elements (a DP on ``moves used'').}
+{$n,k$ are both up to $2\cdot10^{5}$; there is no small dimension to DP over, and the objective is not even
+additive -- it is a product whose value depends on a global parity bit. This is a greedy, not a knapsack.}
+\aha{Run a min-heap keyed on $|a_i|$. Pop the smallest magnitude, move it by $\pm x$ where the direction is
+chosen by the \emph{parity of the negative count} (grow if odd, shrink if even), update that parity,
+re-push, and repeat $k$ times. Skip stale keys whose stored magnitude no longer matches the live value.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} shrink the max & always subtract $x$ from the largest & $O(k\,n)$ & \textbf{WA} \\
+2 & \lv{4} re-scan for min & edit smallest $|a_i|$, but rescan each move & $O(k\,n)$ & \tle \\
+3 & \lv{5} heap + parity & extract-min $|a_i|$, grow/shrink by parity, re-push, lazy skip & $O((n+k)\log n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 ignores the sign flip -- a wrong \emph{direction}. Rung 2 is the honest ``I see the greedy but not
+the structure'' attempt: right element, wrong cost. Rung 3 is \emph{this} chapter's answer -- the minimum
+magnitude is always the heap's top, so each move is $\bigO{\log n}$ instead of a linear rescan.
+
+\solstep{Solution}
+Work $0$-based with an array $a$ of \code{long long}. Load the negatives into a min-heap of pairs
+$(|a_i|, i)$ using \code{greater<>}, and count how many entries are negative. Repeat while moves remain:
+pop the smallest key; if that stored $|a_i|$ no longer equals the live $|a_i|$ it is a stale entry from a
+previous edit of this index -- discard it \emph{without} spending a move. Otherwise, if the negative count is
+odd, move $a_i$ away from zero keeping its sign; if even, move it toward zero (it may flip sign). Adjust the
+negative count by $(v<0)-(a_i<0)$, write $v$ back, push $(|v|,i)$, and spend one move. Print $a$. Every push
+adds at most one stale entry, so the number of discards is bounded by the number of pushes -- $\bigO{n+k}$
+heap operations in total.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The parity greedy reaches the minimum product]
+\emph{Sign is primary.} Any negative product is smaller than any non-negative product. If an odd number of
+negatives is reachable within $k$ moves it is optimal to be in that regime; otherwise the best is the
+smallest non-negative product (drive toward $0$). \emph{Magnitude is secondary and direction-dependent.}
+Fix the parity. In the odd (negative) regime, smaller product means larger $|{\prod a_i}|$; a move on $a_i$
+multiplies the magnitude by $|a_i\pm x|/|a_i|$, which is maximised (over elements \emph{and} over the two
+signs that keep $a_i$'s own sign) by taking the \emph{smallest} $|a_i|$ and pushing it away from zero --
+moving away never flips the sign, so parity is preserved. In the even (non-negative) regime, smaller product
+means smaller magnitude, so push the smallest $|a_i|$ \emph{toward} zero; the step that overshoots to the far
+side of $0$ flips parity to odd and hands control to the previous case. Each individual move is therefore a
+locally optimal choice that also preserves the invariant ``parity is the right one for the remaining budget,''
+so by the standard greedy-exchange argument the sequence is globally optimal. \emph{The heap finds it.} A
+min-heap on $|a_i|$ always exposes the smallest magnitude, and lazy stale-skip guarantees we act only on
+current values -- the extract-min/reinsert discipline of \defref{c07-sift} run $k$ times.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Maxim and Array -- extract-min by |.|, move by +/-x under the negative-parity rule, reinsert with lazy stale-skip (Codeforces 721D; O((n+k) log n), long long)}, label={lst:c07-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+int main(){
+    int n; long long k, x;
+    if (scanf("%d %lld %lld", &n, &k, &x) != 3) return 0;
+    vector<long long> a(n);
+    long long neg = 0;                       // count of strictly negative entries
+    // min-heap keyed by absolute value: entry = {|a_i|, index}
+    priority_queue< pair<long long,int>, vector<pair<long long,int> >,
+                    greater<pair<long long,int> > > pq;
+    for (int i = 0; i < n; ++i){
+        scanf("%lld", &a[i]);
+        if (a[i] < 0) ++neg;
+        pq.push({ llabs(a[i]), i });
+    }
+    while (k > 0){
+        long long ab = pq.top().first; int i = pq.top().second; pq.pop();
+        if (ab != llabs(a[i])) continue;      // stale key from an earlier edit: no move spent
+        long long v;
+        if (neg & 1LL)                        // product negative -> GROW magnitude, keep sign
+            v = (a[i] <= 0) ? a[i] - x : a[i] + x;
+        else                                  // product non-negative -> SHRINK toward 0 / flip
+            v = (a[i] <  0) ? a[i] + x : a[i] - x;
+        neg += (v < 0) - (a[i] < 0);          // parity moves only when the sign crosses 0
+        a[i] = v;
+        pq.push({ llabs(v), i });
+        --k;
+    }
+    for (int i = 0; i < n; ++i) printf("%lld ", a[i]);
+    printf("\n");
+    return 0;
+}
+\end{lstlisting}
+\begin{notebox}[The parity rule, in one line]
+\textbf{Odd} negative count $\Rightarrow$ grow the smallest $|a_i|$ away from zero (deeper negative product).
+\textbf{Even} $\Rightarrow$ shrink the smallest $|a_i|$ toward zero, letting a step that overshoots flip the
+sign and hand you back to the odd case. Always re-push $|a_i|$ and \emph{skip} a popped key that no longer
+matches the live value -- a priority queue cannot decrease-key in place.
+\end{notebox}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample -- n=3, k=2, x=7, array 5 4 2 (answer 5 11 -5)]
+Start $a=(5,4,2)$, all positive so $\mathit{neg}=0$ (\textbf{even}); heap keys $\{(5,0),(4,1),(2,2)\}$.
+\begin{itemize}[nosep,leftmargin=1.3em]
+  \item Move 1: pop smallest $(2,i{=}2)$. Even $\Rightarrow$ shrink toward $0$: $v = 2-7 = -5$.
+        $\mathit{neg} += (v{<}0)-(a_2{<}0) = 1-0 = 1$, so $\mathit{neg}=1$ (\textbf{odd} now). $a_2=-5$,
+        push $(5,2)$. $k=1$. \checkmark
+  \item Move 2: pop smallest $(4,i{=}1)$ -- the re-pushed $(5,2)$ and old $(5,0)$ are larger.
+        Odd $\Rightarrow$ grow away from zero, keep sign: $v = 4+7 = 11$. $\mathit{neg} += 0-0 = 0$, stays
+        $1$. $a_1=11$, push $(11,1)$. $k=0$. \checkmark
+\end{itemize}
+Result $a=(5,11,-5)$, product $5\cdot 11\cdot(-5) = -275$ -- the reference answer \checkmark. The first move
+overshot the smallest element past zero to make the product negative; the second then deepened that negative
+by growing the next-smallest magnitude -- exactly the two-phase parity rule. (The samples $a=(5,4,3,5,2)$,
+$(5,4,3,5,5)$, $(5,4,4,5,5)$ with $k=3,x=1$ reduce to $(5,4,3,5,-1)$, $(5,4,0,5,5)$, $(5,1,4,5,5)$ by the
+same loop, all verified.)
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{(n+k)\log n}$: building the heap is $\bigO{n}$ (\thmref{c07-floyd}); each of the $k$ real moves
+is one pop and one push ($\bigO{\log n}$), and each push creates at most one future stale entry to discard,
+so total heap operations are $\bigO{n+k}$. Space $\bigO{n}$. Re-scanning for the minimum instead of a heap
+would be $\bigO{kn}$ -- at $n=k=2\cdot10^{5}$ that is $4\cdot10^{10}$, \tle; the heap is precisely the
+\emph{extract-min} step this chapter drilled. Magnitudes reach $10^{9}+2\cdot10^{5}\cdot10^{9}\approx
+2\cdot10^{14}$, so the array, keys and the $|a_i|$ compare must be \code{long long}.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+$k=0$ & loop never runs; original array printed unchanged \\
+Single element $n=1$ & every move edits it; parity logic reduces to ``shrink to negative once, then grow'' \\
+Already odd negatives & skips the even/shrink branch immediately and grows the smallest magnitude \\
+Element crosses exactly $0$ & $0$ counts as non-negative; the $(v<0)-(a_i<0)$ update flips parity only on a strict crossing \\
+Stale top on pop & stored key $\ne$ live $|a_i|$ $\Rightarrow$ discard, do not spend a move -- loop stays honest \\
+Values near $2\cdot10^{14}$ & \code{long long} array and heap keys prevent overflow \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to break it: (i) forgetting the stale-skip -- acting on a popped key whose value you already edited
+edits the wrong magnitude and can burn all $k$ moves on phantom states; (ii) growing when the count is
+\emph{even} or shrinking when \emph{odd} -- the two phases are easy to swap and each fails a different
+sample; (iii) \code{int} arithmetic -- $|a_i|$ exceeds $2^{31}$ the moment $k\cdot x$ does; (iv) treating
+$0$ as negative, which corrupts the parity count -- only strictly negative entries flip the product's sign.
+\emph{Variants:} if the task were to \emph{maximise} the product the phases mirror; if moves were
+``divide by $x$'' the same extract-extreme greedy applies with a different key; and the ``at most $k$''
+relaxation never costs you, because a move that would raise the product is simply skipped by exhausting the
+grow/shrink cycle -- the greedy spends $k$ and stays optimal.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{A product objective splits into sign, then magnitude.} The sign is one bit (parity of the
+        negatives); the magnitude wants ``largest change first'' -- and the largest relative change always
+        comes from the \emph{smallest} factor, which is a min-heap top (\probref{c07-summit}).
+  \item \emph{``Pop the extreme, edit, re-push'' is a full algorithm.} You have seen it as \probref{c07-stone}
+        and \probref{c07-connect}; the Summit is the same loop with a direction chosen by a global parity.
+  \item \emph{A priority queue cannot edit in place -- so skip stale keys.} Re-push the new value and discard
+        old entries on pop; lazy deletion is the standard price of $\bigO{\log n}$ without a decrease-key
+        (\coderef{c07-pq}).
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Generalises}: any ``spend $k$ unit edits on the currently cheapest-to-move element'' problem
+        (scheduling, load balancing, this product) is the extract-modify-reinsert loop with a
+        problem-specific direction rule (\secref{c07-build}).
+  \item \textbf{The parity was the whole game}: a min-heap alone is not enough -- you must decide the
+        \emph{direction} of each edit from a single global bit, which is why this is $\lv{5}$ and not a
+        template recall (\probref{c07-summit}).
+  \item \textbf{Alternatives}: a \code{set} with erase-and-reinsert gives the same bound and avoids stale
+        keys at the cost of bookkeeping; a Fibonacci/paired decrease-key is unnecessary because we always
+        re-insert a fresh value rather than decrease one in place (\coderef{c07-mergecost}).
+\end{itemize}
+\end{hardeningbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled so far -- cumulative through Chapter~10. Chapters~1--9's rows are carried forward;
+Chapter~10's rows are appended. Pointers only, never prose.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} l c p{0.27\linewidth} p{0.16\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Level} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapters 1--9 -- carried forward} \\
+Three-slot DFS (pre/in/post) & 3.1 & \lv1 & a node sequence in a named order & \coderef{c03-dfs} \\
+BST search / insert / delete descent & 7.1 & \lv2 & ``a BST is given -- does/where does $x$ go?'' & \coderef{c05-search} \\
+Balanced-tree split/merge engine & 8.3 & \lv4 & ``a dynamic ordered set that stays short'' & \coderef{c06-split} \\
+Treap $=$ BST-key + heap-priority & 8.3 & \lv4 & ``read a heap order off a second field'' & \defref{c06-treap} \\
+Cartesian stack build (read-only heap order) & 9.1 & \lv3 & ``the extreme of a \emph{static} array'' & \coderef{c26-stackbuild} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 10 -- new this chapter} \\
+Heap order in an array & 7.1 & \lv2 & ``the extreme of a set you edit'' & \defref{c07-heap} \\
+Sift up / down push/pop & 7.1 & \lv2 & ``$\bigO{\log n}$ insert and delete-min'' & \coderef{c07-heapops} \\
+Height is $\lfloor\lg n\rfloor$ & 7.1 & \lv3 & ``why one sift is logarithmic'' & \lemref{c07-height} \\
+Floyd linear build & 7.2 & \lv3 & ``heapify a whole array at once'' & \thmref{c07-floyd}, \coderef{c07-build} \\
+\code{priority\_queue} reference & 7.2 & \lv2 & ``do not hand-roll what the library sifts'' & \coderef{c07-pq} \\
+Size-$k$ top-$k$ heap & 7.2 & \lv3 & ``$k$ largest / most frequent of $n$'' & \coderef{c07-topk-soln} \\
+Leftist merge (right spine) & 7.3 & \lv4 & ``union two heaps in $\bigO{\log n}$'' & \thmref{c07-leftist}, \coderef{c07-leftist} \\
+Mergeable-heap cost table & 7.3 & \lv4 & ``which heap for which operation mix?'' & \coderef{c07-mergecost} \\
+$k$-way merge & 7.4 & \lv4 & ``emit a sorted stream from $k$ sources'' & \coderef{c07-multimerge} \\
+Two-heap running median & 7.4 & \lv4 & ``running middle of a stream'' & \coderef{c07-median} \\
+Extract-modify-reinsert (Summit) & Summit & \lv5 & ``$k$ edits to the extreme of a live set'' & \coderef{c07-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c05} -- backward: a heap is \emph{not} a search tree. Chapter~7 orders siblings by key and
+        reads them inorder; here siblings are unordered (\defref{c07-heap}) and you descend by
+        \emph{index arithmetic}, not comparison -- the descent you already own (\coderef{c05-search}) is a
+        different animal.
+  \item \chref{c06} -- backward: the treap (\defref{c06-treap}) and its \texttt{split}/\texttt{merge}
+        (\defref{c06-splitmerge}) are a \emph{keyed} join (every key of one tree $<$ the other); the leftist
+        merge of \secref{c07-trees} is a heap \emph{meld} -- same word, different invariant, never
+        re-derived. The running median's canonical problem (LC 295) also lives here, cited not re-listed.
+  \item \chref{c26} -- backward: Chapter~9's Cartesian tree is a \emph{read-only} heap order sitting in a
+        static array; this chapter's heap is the same parent-$\le$-children rule \emph{kept alive under
+        edits}. The sliding-window \emph{maximum} that chapter owns is a deque, not a heap -- extremes of a
+        window expire by position, not by value (\secref{c07-classics}).
+  \item \chref{c03}, \chref{c04} -- backward: traversals justify reading a tree by index, and the
+        array-as-tree layout previewed in Chapter~4 is exactly the structure we now specialise into the heap.
+  \item \chref{c13}, \chref{c14} -- forward: the segment tree and Fenwick engines answer \emph{range}
+        questions under edits, which a heap (knowing only its top) cannot; the decision flowchart hands
+        those onward.
+  \item Graph chapters -- forward: Dijkstra and Prim are this priority-queue loop over a frontier of
+        tentative distances -- previewed here, taught there, never re-run.
+\end{itemize}
+
+\begin{lastword}[Last Word -- Chapter 10]
+\emph{``Chapter 9 read a heap order straight out of a frozen array; this chapter keeps that order alive
+while the array changes under your hands.''}
+
+\medskip
+A binary heap is the smallest promise a tree can make and still be useful: parent $\le$ children, nothing
+more (\defref{c07-heap}). From that one promise the whole chapter is a corollary -- the top is the extreme
+in $\bigO{1}$ and a sift repairs it in $\bigO{\log n}$ (\defref{c07-sift}, \lemref{c07-height}); the array
+builds in $\bigO{n}$ once you heapify bottom-up (\thmref{c07-floyd}); relax the rigid shape and the heap
+melds down a logarithmic right spine (\thmref{c07-leftist}); and one loop -- pop the extreme, push something
+back -- runs top-$k$, Huffman merging, multiway merge, and the Summit alike (\probref{c07-topk},
+\probref{c07-connect}, \probref{c07-mergek}, \probref{c07-summit}).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{``Extreme of a set that changes'' is a heap; ``sorted order once'' is just a sort.} Do not pay
+        $\bigO{\log n}$ per extract when a single $\bigO{N\log N}$ sort solves the problem -- and do not sort
+        every step when a heap keeps the frontier for you (\secref{c07-build}).
+  \item \emph{Size the heap to what you keep.} Top-$k$ is a size-$k$ heap, best-first is a size-$k$ frontier,
+        and the Summit holds $n$ keys but spends only $k$ moves -- the memory is the answer, not the input
+        (\probref{c07-topk}, \probref{c07-summit}).
+  \item \emph{Know what you are handing off.} A window that expires by position is the deque (\chref{c26});
+        an ordered set you split and join is the balanced tree (\chref{c06}); range answers under edits are
+        the segment tree (\chref{c13}). The heap owns only the extreme.
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: write the sift-up and sift-down cold once each, because a dozen
+``Medium'' problems are that loop with a different payload; reach for \code{priority\_queue} with the
+\code{greater<>} third argument before hand-rolling anything (\coderef{c07-pq}); and when you edit an element
+already in a queue, \emph{re-push and skip stale keys} -- lazy deletion is the reflex that keeps a heap
+honest under edits (\probref{c07-summit}).
+
+\medskip
+\textbf{Next:} \chref{c08} trades the heap's one comparison-per-level for structure built \emph{character by
+character}. A trie stores a set of strings not as an ordered tree of keys but as branches of a prefix --
+where a heap hands you \emph{the extreme of a changing set} in $\bigO{\log n}$, a trie hands you
+\emph{every string sharing a prefix} in time proportional to the prefix length, independent of how many
+strings you hold. Both turn a raw comparison into a walk down a tree; Chapter~11 changes what you are
+walking on, from numbers to letters.
+\end{lastword}

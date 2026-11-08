@@ -1,0 +1,627 @@
+% =====================================================================
+%  19.4  The Iterative (Bottom-Up) Segment Tree       sec:c13-iter
+%  Exports: prop:c13-iter  lst:c13-iter  lst:c13-iter-range
+%           lst:c13-514-soln  fig:c13-iter2n  prob:c13-r2d2
+%  Solved: CF 514D R2D2 and Droid Army (2000), live-verified.
+%    Statement: n droids in a row, each has m (<=5) detail counts; m weapons,
+%    weapon j must fire (max over the window of column j) shots to clear type j
+%    across a consecutive run; at most k shots total. Maximise the run length;
+%    print the m per-column maxima of ONE such optimal run (any if ties; if the
+%    best run is empty, print m zeros).  Output is ONE line of m integers.
+%    Constraints (verified via DOM <sup>): 1<=n<=1e5, 1<=m<=5, 0<=k<=1e9,
+%    0<=a_i<=1e8.  (innerText had collapsed 1e5/1e9/1e8 to 105/109/108.)
+%    Samples (verbatim from CF):
+%      1) "5 2 4 / 4 0 / 1 2 / 2 1 / 0 2 / 1 3"  -> "2 2"
+%         (destroy droids 2,3,4; per-column max = (max 1,2,0, max 2,1,2)=(2,2),
+%          sum 4<=k; length 3 is maximal -- droids1-3 cost 6, droids2-5 cost 5)
+%      2) "3 2 4 / 1 2 / 1 3 / 2 2"              -> "1 3"
+%         (destroy droids 1,2; per-column max=(1,3), sum 4<=k; length-3 cost 5)
+%  Running numbers agree with 00_opener (fig:c13-tree): the 2n build over the
+%    shared 8-array (3,2,4,5,1,1,5,3) re-uses 19.1's min-tree t[1..15] exactly,
+%    since n=8 is a power of two -- the two layouts differ only in the walk.
+%  Discharges Ch.18's forward pointer: \secref{c14-range} drew the BIT-vs-segtree
+%    *expressiveness* line; this section settles the remaining axes (memory,
+%    constant factor, code, and the half-open walk), NOT re-listing expressiveness.
+% =====================================================================
+\section{The Iterative (Bottom-Up) Segment Tree}\label{sec:c13-iter}
+
+\begin{previouslybox}[Ch.~18 lived in one array with a \text{lowbit}; so can we]
+Chapter~18's entire power came from throwing away the tree \emph{shape} and
+keeping only an array indexed by the binary carries of the position.  A segment
+tree is usually presented the opposite way -- recursion, node intervals, three
+functions that call themselves.  But when the length is fixed, the tree is a
+\emph{perfect} binary tree, and a perfect binary tree fits in a flat array with
+no interval arguments at all: leaves in the back half, internal nodes in the
+front half, parent \(= i/2\), sibling \(= i \oplus 1\).  Everything in
+\(\secref{c13-core}\) survives; only the recursion is deleted.  This section
+builds that \(2n\) form, gives its half-open range walk, and then does the
+honest accounting Ch.~18 asked for: what the iterative tree buys, what it costs,
+and exactly when the recursive skeleton of \(\secref{c13-core}\) is the better
+tool.
+\end{previouslybox}
+
+\begin{topicintro}
+The recursive tree of \(\secref{c13-core}\) carries a node's interval \([tl,tr]\)
+as \emph{arguments}, because the \(4n\) heap layout lets the tree be ragged when
+\(n\) is not a power of two.  Pad the array to the next power of two (or, for a
+commutative fold, skip padding entirely) and the tree becomes complete: all
+leaves sit at depth \(\lceil\log_2 n\rceil\), and a complete binary tree over \(n\)
+leaves occupies exactly \(2n\) array slots, indices \(1..2n-1\), with the leaves
+at \(t[n..2n{-}1]\) and the internal nodes at \(t[1..n{-}1]\).  No recursion, no
+interval parameters, no \(4n\) slack -- just two loops and one walk.
+
+\textbf{Prerequisites.} \(\secref{c13-core}\) (heap layout, the fold \(\mathcal{M}\),
+the identity \(e\)).  \(\secref{c13-combine}\) (a node may be a record; order can
+matter).  The opener's \(2n\) fold table over the shared array \(A\)
+(\(\figref{c13-tree}\)).  Chapter~18's \(\secref{c14-core}\) for the array-only
+mindset this mirrors.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item write the \(2n\) build, point update, and half-open query loops from
+        memory, and say which fold each requires to be commutative; \hfill\lv{3}--\lv{4}
+  \item explain, with the two-accumulator walk, why a non-commutative combine is
+        where the recursive \(\coderef{c13-query}\) stays simpler; \hfill\lv{4}--\lv{5}
+  \item fill in the honest BIT / recursive-segtree / iterative-segtree cost table
+        that Ch.~18 left open; \hfill\lv{3}
+  \item solve CF~514D end to end -- \(m\) iterative max-trees plus a binary search
+        on the answer. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``fixed length, commutative fold, want terse code'']
+\reckey{the array size never changes across the whole run; the fold is
+\(\min/\max/\text{sum}/\gcd/\text{xor}/\)OR/AND (all commutative); you want the
+smallest constant factor and the least code; a range query over a
+\emph{half-open} \([l,r)\) window; or a problem that pairs a segment tree with an
+outer binary search so the \(\log n\) is spent inside a loop and must be cheap.}
+\recuse{
+  \item static length + commutative fold -- this \(2n\) form, it is the fastest to
+        type and runs;
+  \item the fold is non-commutative but associative (max-subarray, brackets) --
+        still fine here \emph{if} you keep both accumulators, or fall back to the
+        recursive \(\coderef{c13-query}\);
+  \item the tree is an inner subroutine called \(\bigO{\log}\) times -- the low
+        constant matters, use this form.
+}
+\recnotuse{
+  \item you must \emph{descend} for a threshold (\(\secref{c13-search}\)) -- the
+        bottom-up layout has no clean interval at each node, so the recursive
+        descend (or a padded power-of-two variant) reads better;
+  \item the array grows or nodes are inserted -- a balanced/BST structure
+        (Ch.~6) or a sparse dynamic tree, not a fixed \(2n\) array;
+  \item range \emph{updates} -- lazy tags need the top-down interval, Ch.~20
+        (\(\chref{c15}\)); this section keeps every write a single point.
+}
+One-line test: \emph{does the length stay put and is your combine commutative?
+Then the \(2n\) array-resident tree is the leanest thing that folds a range.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The \(2n\) Layout and Its Two Loops}
+% ---------------------------------------------------------------
+
+Put the leaves in the second half of the array and index a node's children the
+same way the recursive heap layout does -- \(2i\) and \(2i{+}1\) -- and a
+complete tree needs no arguments: a node's parent is just \(i/2\), so an update
+climbs by halving.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.92, transform shape]
+  % leaves t[8..15]
+  \foreach \i/\vv in {0/3,1/2,2/4,3/5,4/1,5/1,6/5,7/3} {
+    \draw[primaryblue, line width=0.5pt, fill=primaryblue!6] (\i*1.0,0) rectangle (\i*1.0+0.9,0.7);
+    \node[font=\scriptsize\ttfamily] at (\i*1.0+0.45,0.35) {\vv};
+    \node[font=\tiny\ttfamily, text=darkgray] at (\i*1.0+0.45,-0.26) {\(t_{\the\numexpr8+\i\relax}\)};}
+  % internal t[4..7]
+  \foreach \i/\x/\val in {4/0.45/2,5/2.45/4,6/4.45/1,7/6.45/3} {
+    \node[boxnode, successgreen, minimum size=6mm, font=\scriptsize] (n\i) at (\x,1.5) {\(t_{\i}{=}\val\)};}
+  % internal t[2..3]
+  \node[boxnode, successgreen, minimum size=6mm, font=\scriptsize] (n2) at (1.45,2.9) {\(t_{2}{=}2\)};
+  \node[boxnode, successgreen, minimum size=6mm, font=\scriptsize] (n3) at (5.45,2.9) {\(t_{3}{=}1\)};
+  % root
+  \node[boxnode, successgreen, minimum size=7mm, line width=1pt, fill=successgreen!16, font=\scriptsize] (n1) at (3.45,4.2) {\(t_{1}{=}1\)};
+  % edges
+  \draw[flow] (n1)--(n2); \draw[flow] (n1)--(n3);
+  \draw[flow] (n2)--(n4); \draw[flow] (n2)--(n5);
+  \draw[flow] (n3)--(n6); \draw[flow] (n3)--(n7);
+  \draw[flow] (n4)--(0.45,0.7); \draw[flow] (n4)--(1.45,0.7);
+  \draw[flow] (n5)--(2.45,0.7); \draw[flow] (n5)--(3.45,0.7);
+  \draw[flow] (n6)--(4.45,0.7); \draw[flow] (n6)--(5.45,0.7);
+  \draw[flow] (n7)--(6.45,0.7); \draw[flow] (n7)--(7.45,0.7);
+  \node[annot, font=\scriptsize, text=primaryblue, anchor=east] at (-0.1,0.35) {leaves \(t_{8..15}{=}A\)};
+  \node[annot, font=\scriptsize, text=green!45!black, anchor=east] at (-0.1,4.2) {internal \(t_{1..7}\)};
+\end{tikzpicture}
+\caption{The \(2n\) array-resident tree over the same \(n{=}8\) min-instance
+\((3,2,4,5,1,1,5,3)\) as \(\figref{c13-minbuild}\).  Leaves occupy the back half
+\(t[8..15]\); the front half \(t[1..7]\) is filled by \(\coderef{c13-iter}\)'s
+second loop, \(t_i=\min(t_{2i},t_{2i+1})\), from \(i{=}7\) down to \(1\).  The
+values are \emph{identical} to the recursive \(4n\) tree because \(n{=}8\) is a
+power of two -- only the walk changes, and no slots are wasted.}
+\label{fig:c13-iter2n}
+\end{figure}
+
+\begin{lstlisting}[caption={the 2n bottom-up tree: build and point update, no recursion}, label={lst:c13-iter}]
+int n;                        // number of leaves, fixed for the whole run
+vector<long long> t;          // 2*n slots, indices 1 .. 2n-1 used
+long long mergeOp(long long a, long long b){ return min(a, b); }  // the fold M
+const long long ID = (1LL<<60);   // identity e: min->+inf, sum/gcd->0, max->-inf
+
+void build(const vector<long long>& a){      // a indexed 0..n-1
+    t.assign(2*n, ID);
+    for (int i = 0; i < n; i++) t[n+i] = a[i];        // leaves in place
+    for (int i = n-1; i > 0; i--) t[i] = mergeOp(t[2*i], t[2*i+1]);  // bottom-up
+}
+// O(n): one merge per internal node, exactly like the recursive build
+void update(int p, long long val){           // set leaf p (0-based) to val
+    for (t[p += n] = val; p > 1; p >>= 1)    // climb to the root: parent = p/2
+        t[p >> 1] = mergeOp(t[p], t[p ^ 1]); // p^1 is p's sibling
+}
+// O(log n): touches only the ancestors of leaf p
+\end{lstlisting}
+
+\noindent The sibling trick \code{p\textasciicircum1} is the whole point of the
+array layout: because leaves and internal nodes share one heap, a node at index
+\(p\) and its sibling are the pair \((p, p\oplus 1)\) -- even index gets its odd
+neighbour and vice versa -- so the parent \(p/2\) can be re-folded from the just
+updated child and its untouched sibling without ever storing intervals.
+
+% ---------------------------------------------------------------
+\subsection{The Half-Open Range Query}
+% ---------------------------------------------------------------
+
+The recursive query \(\coderef{c13-query}\) passed intervals down and merged
+cover pieces as they unwound.  The iterative query walks \emph{up} from the two
+boundary leaves, grabbing a node exactly when the boundary steps \emph{out} of
+its parent on that side.  We phrase ranges half-open, \([l,r)\), which is what
+makes the two-boundary bookkeeping clean.
+
+\begin{lstlisting}[caption={half-open range fold on the 2n tree -- order-safe for any associative combine}, label={lst:c13-iter-range}]
+long long query(int l, int r){      // fold over the half-open range [l, r)
+    long long lres = ID, rres = ID; // TWO accumulators: keep left..right order
+    for (l += n, r += n; l < r; l >>= 1, r >>= 1){
+        if (l & 1) lres = mergeOp(lres, t[l++]); // left edge node: consumed L->R
+        if (r & 1) rres = mergeOp(t[--r], rres); // right edge node: consumed R->L
+    }
+    return mergeOp(lres, rres);
+}
+// O(log n): at most two nodes folded per level.  For a COMMUTATIVE fold the
+// two accumulators collapse into one variable and either merge order is fine.
+\end{lstlisting}
+
+\begin{proposition}{The \(2n\) tree supports point set and half-open range fold in \(\bigO{\log n}\)}{c13-iter}
+For any associative \(\mathcal{M}\) with identity \(e\), \(\coderef{c13-iter}\)
+builds a tree whose front-half node \(i\) holds \(\mathcal{M}\) applied to a fixed
+dyadic block of leaves, \(\coderef{c13-iter}\)'s \code{update} restores that
+invariant along the leaf's root path in \(\bigO{\log n}\), and
+\(\coderef{c13-iter-range}\) returns \(\mathcal{M}\) over \([l,r)\) by folding
+\(\le 2\lceil\log_2 n\rceil\) of those blocks.  If \(\mathcal{M}\) is also
+\emph{commutative} (min, max, sum, gcd, xor, and, or), a single accumulator
+suffices; otherwise the two-accumulator form above is required and is correct
+because its left accumulator collects the cover blocks left-to-right and its
+right accumulator collects them right-to-left, re-joined in order at the end.
+\end{proposition}
+\begin{proofbox}
+The build loop fills indices \(n{-}1\) down to \(1\), so when \(t_i\) is written
+its children \(t_{2i},t_{2i{+}1}\) (larger indices) already hold their blocks'
+folds -- hence \(t_i\) becomes the fold of the union block; the invariant holds
+by downward induction.  \code{update} rewrites one leaf and then re-runs
+\(t_{p/2}=\mathcal{M}(t_p,t_{p\oplus 1})\) up the unique root path, exactly the
+recursive \(\coderef{c13-update}\)'s re-folds, so the invariant is restored.  The
+query maintains ``the answer is \(\mathcal{M}\) applied to (covered-left, the
+still-open middle, covered-right): each halving step either leaves a boundary inside
+its parent (nothing to grab, keep climbing) or steps to a boundary that is a
+right child on the left edge (\code{l\&1}) / a left child on the right edge
+(\code{r\&1}), and precisely then the sibling block lies wholly inside \([l,r)\)
+and is folded in.  Blocks are folded in left-to-right order by the two
+accumulators, and associativity lets them be re-associated into \(\mathcal{M}\)
+of the whole range; commutativity makes the single-accumulator shortcut legal.
+The number of grabbed blocks is at most two per level (one per boundary), so
+\(\bigO{\log n}\).
+\end{proofbox}
+
+\begin{tracebox}[Half-open min query over positions 2..6 of the shared array]
+Fold \(\min\) over \(A[1..5]\) (0-based), i.e.\ the half-open range
+\([1,6)=\{2,4,5,1,1\}\), on the tree of \(\figref{c13-iter2n}\).  Start
+\(\mathit{lres}{=}\mathit{rres}{=}e{=}{+}\infty\); \(\mathit{l}=1{+}8{=}9\),
+\(\mathit{r}=6{+}8{=}14\).
+\textbf{Step 1} \(\mathit{l}{=}9,\mathit{r}{=}14\): \(\mathit{l}\) odd \(\Rightarrow\)
+\(\mathit{lres}{=}e\!\wedge\!t_9{=}\min(\infty,2){=}2\), \(\mathit{l}{=}10\);
+\(\mathit{r}\) even \(\Rightarrow\) nothing; halve \(\mathit{l}{=}5,\mathit{r}{=}7\).
+\textbf{Step 2} \(\mathit{l}{=}5,\mathit{r}{=}7\): \(\mathit{l}\) odd \(\Rightarrow\)
+\(\mathit{lres}{=}\min(2,t_5{=}4){=}2\), \(\mathit{l}{=}6\); \(\mathit{r}\) odd
+\(\Rightarrow\) \(\mathit{rres}{=}\min(t_6{=}1,\infty){=}1\), \(\mathit{r}{=}6\);
+halve \(\mathit{l}{=}3,\mathit{r}{=}3\).  Loop ends (\(\mathit{l}<\mathit{r}\) fails).
+Return \(\min(\mathit{lres},\mathit{rres}){=}\min(2,1){=}1\).  The cover grabbed
+\(\{t_9,t_5,t_6\}=\{A_1\}\uplus\{A_2,A_3\}\uplus\{A_4,A_5\}=[1,6)\) -- three
+disjoint blocks, minimum \(1\), cross-checking \(\secref{c13-core}\)'s recursive
+answer on the same array.
+\end{tracebox}
+
+\subsection{Where Each Shape Wins}
+
+The \(2n\) form is not strictly better -- it trades the recursive tree's
+interval-awareness for array compactness.  Concretely: iterative \(2n\) wins on
+memory (\(2n\) vs \(4n\)), constant factor (a flat loop, no call overhead, half
+the cache lines of the padded tree), and code size; recursive wins wherever the
+\emph{interval of a node is used} -- descending for a threshold
+(\(\secref{c13-search}\)) needs \([l,r]\) at each node, and a non-commutative
+range query is far less error-prone when the cover comes back in order from the
+recursion instead of via the two-accumulator dance above.
+
+\begin{comparisonbox}[Completing the boundary Ch.~18 drew (sum/min/max workload)]
+Chapter~18's \(\secref{c14-range}\) settled \emph{expressiveness}: a BIT folds an
+invertible or monotone accumulator, a segment tree folds \emph{any} associative
+record.  With all five combines and both tree shapes now in hand, here are the
+\emph{remaining} axes -- the ones Ch.~18 left as ``the code is there'':
+\begin{center}\renewcommand{\arraystretch}{1.2}\footnotesize
+\begin{tabular}{@{}p{0.115\linewidth} p{0.235\linewidth} p{0.255\linewidth} p{0.31\linewidth}@{}}
+\toprule
+ & \textbf{BIT} & \textbf{Rec. segtree} & \textbf{Iterative \(2n\) segtree}\\
+\midrule
+memory    & \(n{+}1\) & \(4n\) & \(2n\); pad to \(2^{\lceil\log_2 n\rceil{+}1}\) for ordered folds \\
+point set & \(O(\log n)\) add only & \(O(\log n)\) set & \(O(\log n)\) set, one loop \\
+range fold & \(O(\log n)\) \emph{prefix} only & \(O(\log n)\) any \([l,r]\) & \(O(\log n)\) any \([l,r)\) \\
+combines  & invertible / monotone & \emph{any} assoc.\ record & any assoc.; commutative simplest \\
+lines     & \(\sim\!8\) & \(\sim\!40\) & \(\sim\!15\) \\
+best for  & sums/counts, tiny code & descend, non-commutative, lazy (Ch.20) & fixed length, hot inner loop \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{comparisonbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 514D R2D2 and Droid Army}
+% ---------------------------------------------------------------
+
+\solvedproblem{c13-r2d2}{R2D2 and Droid Army}{CF 514D}
+  {https://codeforces.com/problemset/problem/514/D}{CF 2000}
+  {one iterative 2n max-segtree per column + binary search on the window length; cost of a run = sum of per-column range maxima}
+
+\begin{problemstatement}[CF 514D R2D2 and Droid Army]
+An army of \(n\) droids is lined up in one row.  Each droid is described by
+\(m\) integers \(a_1,\dots,a_m\), where \(a_i\) is the number of details of the
+\(i\)-th type in its mechanism.  R2-D2 wants to destroy a run of
+\emph{consecutive} droids of maximum length.  He has \(m\) weapons; the \(i\)-th
+weapon destroys one detail of type \(i\) from every droid it is aimed at.  A
+droid is destroyed once \emph{all} its details are gone, and R2-D2 may make at
+most \(k\) shots in total.  Decide how many shots of each weapon type to make so
+as to destroy the longest consecutive run.
+
+\textbf{Input.} \(n,m,k\) with \(1\le n\le 10^5\), \(1\le m\le 5\),
+\(0\le k\le 10^9\); then \(n\) lines of \(m\) values, each \(0\le a_i\le 10^8\).
+
+\textbf{Output.} \(m\) space-separated integers: the shots of each type needed to
+destroy a maximum-length consecutive run (any optimal run; fewer than \(k\) shots
+is fine; the empty run gives all zeros).
+
+\textbf{Examples.}
+\begin{verbatim}
+Input:            Output:      Input:      Output:
+5 2 4             2 2          3 2 4       1 3
+4 0                              1 2
+1 2                              1 3
+2 1                              2 2
+0 2
+1 3
+\end{verbatim}
+(First test destroys droids 2,3,4; second destroys droids 1,2.)
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself one sitting]
+To clear a \emph{run} of droids you must, for each type \(j\), fire at least
+\(\max\) of \(a_j\) over the run -- the shots of type \(j\) is the run's
+\emph{column maximum}.  So a run costs \(\sum_j(\text{column }j\text{ maximum})\),
+and you want the longest run whose cost is \(\le k\).  Enumerating runs is
+\(\bigO{n^2}\).
+\peek{for a \emph{fixed} length \(L\), is it easy to test whether some window of
+length \(L\) costs \(\le k\)?}
+\nudge{``some window of length \(L\) works'' is monotone in \(L\): a sub-window's
+column maxima are all \(\le\) the window's, so if length \(L\) is affordable so is
+every \(L'<L\).  Binary-search the answer \(L\).}
+\fullhint{For each of the \(m\) columns build an iterative \(2n\) max-segtree
+(\(\coderef{c13-iter}\)).  \(\mathit{feasible}(L)\): slide a width-\(L\) window,
+each column's contribution is that column's \(\text{query}(i,i{+}L)\)
+(\(\coderef{c13-iter-range}\)); if the \(m\) maxima sum to \(\le k\) for some
+start, \(L\) works.  Binary-search the largest feasible \(L\), then re-run
+\(\mathit{feasible}\) once at that \(L\) to recover the printed vector.  Full
+program below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Fix a run of droids \([i, i{+}L)\).  To erase type \(j\) from every droid in it,
+weapon \(j\) must fire \(W_j=\max_{p\in[i,i{+}L)} a_p^{(j)}\) shots -- that many
+covers the droid with the most type-\(j\) details and harmlessly over-shoots the
+rest, since a weapon hits the whole column.  The run costs \(\sum_j W_j\).  The
+question ``is there a run of length \(L\) with cost \(\le k\)'' needs only the
+\(m\) per-column range maxima of every width-\(L\) window, which is \(m\)
+range-max structures -- the iterative \(2n\) tree, one per column (there are at
+most \(m\le5\) of them, so building them all is cheap).
+
+\solstep{Key Observations}
+\begin{observation}
+Feasibility is \textbf{monotone in \(L\)}: shrinking a window cannot raise any
+column maximum, so \(\sum_j W_j\) never increases.  Therefore the set of feasible
+lengths is a prefix \(0..L^\star\) and \(L^\star\) is found by binary search,
+with \(\mathit{feasible}(\cdot)\) as the predicate.
+\end{observation}
+\begin{observation}
+\(\max\) is associative, commutative, with identity \(-\infty\) (here values
+\(\ge 0\), so \(0\) is a safe stand-in identity), so a single-accumulator
+iterative query \(\coderef{c13-iter-range}\) is enough -- no order care needed.
+\end{observation}
+\begin{observation}
+The answer vector is not a fresh computation: it is exactly the \(m\) column
+maxima of \emph{any} optimal window.  Recover it by re-running the scan once at
+the final \(L^\star\).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Two pointers with a multiset per column}
+{The window ``cost \(\le k\)'' is not monotone under \emph{shrinking from the
+left} in a usable way -- removing a droid may or may not drop the maximum, and you
+would maintain \(m\) multisets to peek each column max.  Correct, but \(O(mn\log
+n)\) with heavy constant and no cleaner than binary search; it also hides the
+segment-tree lesson.}
+\deadend{Re-scan every window from scratch inside the binary search}
+{For a fixed \(L\), computing each window's column maxima naively is
+\(O(L)\) per window \(\Rightarrow\) \(O(nL)\) per check \(\Rightarrow\)
+\(O(n^2\log n)\) overall.  A range-max structure answers each window in
+\(O(\log n)\), turning the check into \(O(mn\log n)\).}
+\aha{One iterative max-segtree per column, binary-search the length, and read
+each window's \(m\) maxima with \(m\) half-open queries; total
+\(O(mn\log^2 n)\) with a tiny constant and about fifteen lines of tree code.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.22\linewidth} p{0.32\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ all windows & every \([i,j]\), column max on the fly & \(\bigO{m n^2}\) & \tle \\
+2 & \lv{4}\ BS \(+\) naive scan & fixed \(L\), re-scan each window & \(\bigO{m n^2\log n}\) & \tle \\
+3 & \lv{4}\ BS \(+\) multiset two-pointer & maintain \(m\) column maxes & \(\bigO{m n\log n}\) & passes, heavy \\
+4 & \lv{5}\ \textbf{BS \(+\) iterative max-segtree} & \(m\) \(2n\) trees, half-open queries & \(\bigO{m n\log^2 n}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Solution}
+Store each column \(c\) as \(a_c[0..n{-}1]\).  Build \(\mathit{seg}[c]\) for all
+\(c\).  \(\mathit{feasible}(L)\) returns false if \(L=0\) trivially (handled by the
+search floor); for \(L\ge1\) loop start \(i=0..n{-}L\), sum the \(m\) values
+\(\mathit{seg}[c].\mathit{query}(i,i{+}L)\), and succeed the moment that sum
+\(\le k\), recording the vector.  Binary-search the largest feasible \(L\) over
+\([0,n]\) (monotone by Observation~1), then print the vector from one more
+\(\mathit{feasible}(L^\star)\) call -- or \(m\) zeros if \(L^\star=0\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Cost lemma.} A run \([i,i{+}L)\) is destroyable within \(k\) shots iff
+\(\sum_j \max_{p\in[i,i{+}L)}a_p^{(j)}\le k\): each type \(j\) needs exactly its
+column maximum (enough for the worst droid, no less), and types are independent.
+\(\mathit{feasible}(L)\) tests this for every \(L\)-window by reading the column
+maxima from \(\mathit{seg}[c]\), which \propref{c13-iter} guarantees equals the
+half-open range max.  \textbf{Monotonicity.} If \(L\) is feasible via window
+\([i,i{+}L)\), then for any \(L'<L\) the sub-window \([i,i{+}L')\) has every
+column maximum \(\le\) the length-\(L\) one, so its cost \(\le k\): feasible is
+downward-closed, and binary search returns the largest feasible \(L^\star\).
+\textbf{Answer.} \(\mathit{feasible}(L^\star)\) records the column maxima of a
+concrete affordable length-\(L^\star\) window; printing them is a valid optimal
+solution, and \(L^\star=0\) (no affordable single droid) prints the all-zero
+vector, the empty run.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 514D full solution: per-column iterative max-segtrees + binary search on length}, label={lst:c13-514-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 100005;
+int n, m; long long k;
+int col[5][MX];                 // col[c][i] = type-c details of droid i, 0-based
+
+struct MaxSeg {                 // iterative 2n max tree, values >= 0
+    int N; vector<int> t;
+    void build(int a[], int n){
+        N = n; t.assign(2*N, 0);                // identity 0 (a_i >= 0)
+        for (int i=0;i<n;i++) t[N+i] = a[i];
+        for (int i=N-1;i>0;i--) t[i] = max(t[2*i], t[2*i+1]);
+    }
+    int query(int l, int r){                    // max over half-open [l, r)
+        int res = 0;                            // commutative fold -> one acc
+        for (l+=N, r+=N; l<r; l>>=1, r>>=1){
+            if (l&1) res = max(res, t[l++]);
+            if (r&1) res = max(res, t[--r]);
+        }
+        return res;
+    }
+} seg[5];
+
+bool feasible(int L, int out[]){
+    if (L == 0) return true;
+    for (int i=0; i + L <= n; i++){
+        long long cost = 0; int v[5];
+        for (int c=0;c<m;c++){ v[c] = seg[c].query(i, i+L); cost += v[c]; }
+        if (cost <= k){ for (int c=0;c<m;c++) out[c]=v[c]; return true; }
+    }
+    return false;
+}
+int main(){
+    scanf("%d%d%lld", &n, &m, &k);
+    for (int i=0;i<n;i++) for (int c=0;c<m;c++) scanf("%d", &col[c][i]);
+    for (int c=0;c<m;c++) seg[c].build(col[c], n);
+    int dummy[5];
+    int lo = 0, hi = n, bestL = 0;              // largest feasible length
+    while (lo <= hi){
+        int mid = (lo + hi) / 2;
+        if (feasible(mid, dummy)){ bestL = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    int out[5] = {0};
+    feasible(bestL, out);                        // recover the answer vector
+    for (int c=0;c<m;c++) printf("%d%c", out[c], c+1==m?'\n':' ');
+}
+\end{lstlisting}
+
+\solstep{Trace the Official Samples}
+\begin{tracebox}[CF 514D sample 1: n=5, m=2, k=4]
+Binary search on \(L\in[0,5]\).  \(\mathit{feasible}(3)\): windows of length 3 --
+\([0,3)\) gives column maxes \((\max 4,1,2,\ \max 0,2,1)=(4,2)\), cost \(6>4\);
+\([1,4)\) gives \((\max 1,2,0,\ \max 2,1,2)=(2,2)\), cost \(4\le4\) \(\Rightarrow\)
+success, record \((2,2)\).  \(\mathit{feasible}(4)\): \([0,4)=(4,2)\) cost 6,
+\([1,5)=(2,3)\) cost 5, both \(>4\) \(\Rightarrow\) fail.  So \(L^\star=3\); one
+more scan at \(L=3\) returns the affordable window \([1,4)\) (droids 2,3,4) with
+vector \((2,2)\).  Output \texttt{2 2}.
+\end{tracebox}
+\begin{tracebox}[CF 514D sample 2: n=3, m=2, k=4]
+\(\mathit{feasible}(2)\): \([0,2)=(\max 1,1,\max 2,3)=(1,3)\) cost \(4\le4\)
+\(\Rightarrow\) success.  \(\mathit{feasible}(3)\): \([0,3)=(\max 1,1,2,\max
+2,3,2)=(2,3)\) cost \(5>4\) \(\Rightarrow\) fail.  Hence \(L^\star=2\), the window
+\([0,2)\) (droids 1,2) prints \((1,3)\).  Output \texttt{1 3}.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Build: \(m\) trees of \(2n\) slots \(\Rightarrow\) \(\bigO{mn}\) time,
+\(\bigO{mn}\) memory (\(m\le5\), \(n\le10^5\): about \(10^6\) \code{int}s,
+\(\sim 4\) MB).  \(\mathit{feasible}(L)\) scans \(\le n\) windows, each folding
+\(m\) half-open \(\bigO{\log n}\) queries \(\Rightarrow\) \(\bigO{mn\log n}\).
+Binary search runs it \(\bigO{\log n}\) times: total \(\bigO{mn\log^2 n}\approx
+5\cdot10^5\cdot 17^2 \approx 1.4\cdot10^8\) max/compare operations -- \textbf{AC}
+at \(2\) s.  Swapping the per-window query for a width-\(L\) monotone deque would
+drop one \(\log\); we keep the segment tree because it is the point of this
+section and its \(2n\) constant is what makes the extra \(\log\) affordable.
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Print the maxima, not the length.}  The output is the \(m\) weapon
+        counts of one optimal window; a common misread is to print \(L^\star\).
+        A length-\(0\) answer is the all-zero vector, which the code emits for free.
+  \item \textbf{Identity for a max tree.}  \(\coderef{c13-514-soln}\) uses \(0\)
+        because \(a_i\ge0\); if negative values were allowed the identity would be
+        \(-\infty\) and a careless \(0\) would silently over-report.
+  \item \textbf{Half-open bounds.}  The query is \([i, i{+}L)\) for exactly \(L\)
+        droids; writing \(i{+}L{+}1\) (a closed-range habit) reads one droid too
+        many and breaks the monotone binary search's answer.
+  \item \textbf{Recover the vector at \(L^\star\) only.}  Storing the vector during
+        the search is a trap -- later feasible mids can be \emph{smaller} than
+        \(L^\star\) and overwrite it with a shorter window's answer.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: assuming the two accumulators can be merged]
+For a \emph{commutative} fold the left and right accumulators collapse to one,
+and the single-accumulator version of \(\coderef{c13-iter-range}\) is right.  For
+an order-sensitive combine (max-subarray, brackets) the right-side blocks are
+consumed right-to-left; folding them into one accumulator in the wrong order
+\emph{reverses part of the range}.  Keep two accumulators, or use the recursive
+\(\coderef{c13-query}\) which hands back the cover in order.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: non-power-of-two with a non-commutative fold]
+The \(2n\) layout without padding is cleanest when \(n\) is a power of two; for
+other \(n\) the implicit tree ``wraps'' a couple of ragged nodes, which is
+harmless for commutative folds but scrambles intervals for ordered ones.  When
+the fold is non-commutative and \(n\) is odd, pad to the next power of two with
+the identity \(e\) (leaves beyond \(n\) equal \(e\)) and every node interval
+becomes a proper dyadic block.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: forgetting the \(2n\) update climbs only siblings]
+\(\coderef{c13-iter}\)'s \code{update} sets \(t_{p/2}=\mathcal{M}(t_p,
+t_{p\oplus 1})\).  If you instead recompute a parent from two stale grandchildren
+or forget the \code{p>1} guard, you either read index \(0\) or leave a node
+un-propagated.  The recursion in \(\secref{c13-core}\) hides this because it
+rebuilds from the returned child; the flat loop must name the sibling itself.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: binary search on a non-monotone predicate]
+The \(2n\) tree made each \(\mathit{feasible}(L)\) cheap, but the \emph{outer}
+binary search is valid only because \(\mathit{feasible}\) is monotone (shrinking a
+window cannot grow a column maximum).  Before pairing a segtree with a
+binary-search-on-answer, prove the monotonicity; here it is Observation~1, and
+without it the search returns a wrong length even though every query was correct.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Is your combine commutative?  If not, are you keeping two accumulators?
+  \item Did you pad to a power of two (identity beyond \(n\)), or justify skipping
+        the pad because the fold is commutative?
+  \item In \code{update}, are you re-folding the parent from the child and its
+        sibling \code{p\textasciicircum1}, not from stale values?
+  \item For CF~514D: is the printed line the \(m\) maxima and not the length?
+  \item Is your outer binary search's predicate actually monotone?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Xenia and Bit Operations}{CF 339D}
+    {https://codeforces.com/problemset/problem/339/D}
+    {CF 1700 L3}
+    {A perfect binary tree on \(n=2^m\) leaves where the merge \emph{alternates by
+     level}: \(\mid\) (OR) one level above the leaves, then \(\oplus\) (XOR) above
+     that, alternating to the root; point updates, print the root each time.  The
+     fixed, complete shape is exactly the \(2n\) arena of \(\coderef{c13-iter},
+     \coderef{c13-iter-range}\); the one wrinkle is that the fold is not a single
+     \(\mathcal{M}\) but depends on the node's depth -- carry the parity (or build
+     level by level in the loop) so each re-fold picks OR vs XOR.  Watch that the
+     alternating merge is commutative, so a single accumulator still suffices.}
+  \practice{Sereja and Brackets}{CF 380C}
+    {https://codeforces.com/problemset/problem/380/C}
+    {CF 2000 L4}
+    {Given a bracket string, answer range queries: the length of the longest regular
+     bracket \emph{subsequence} inside \([l,r]\).  A node is the triple (matched
+     pairs, unmatched opens, unmatched closes) merged greedily; the merge is
+     \textbf{non-commutative} (opens and closes do not swap roles), so this is the
+     canonical stress test for \(\coderef{c13-iter-range}\)'s two accumulators -- a
+     careless single-accumulator iterative query fails it while the recursive
+     \(\coderef{c13-query}\) of \(\secref{c13-core}\) passes.  Reproduce the opener's
+     max-subarray lesson (from \(\secref{c13-combine}\)) on a range, not the whole
+     array.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c13-core}\) supplies the fold \(\mathcal{M}\), the identity \(e\), and
+the \(4n\) form this section compacts to \(2n\); \(\secref{c13-combine}\) explains
+the tuple records whose non-commutativity makes Trap~1 bite.  Chapter~18's
+\(\secref{c14-range}\) drew the expressiveness line that this chapter's
+comparison box completes.  Forward: \(\secref{c13-search}\)'s descend wants
+node intervals and so leans recursive rather than \(2n\); \(\secref{c13-static}\)
+pairs this fixed-length tree with offline range problems; and range \emph{updates}
+-- the reason the \(2n\) loop still keeps a recursive cousin -- are Ch.~20's lazy
+propagation (\(\chref{c15}\)).
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 19.4 in 10 seconds]
+A \textbf{complete} tree (fixed length) fits a flat \(\mathbf{2n}\) array: leaves
+\(t[n..2n{-}1]\), internal \(t_i=\mathcal{M}(t_{2i},t_{2i+1})\) filled
+\(i{=}n{-}1..\!1\); point set climbs by \(p{>}{>}1\) re-folding against sibling
+\(p\oplus1\); range fold is the half-open \([l,r)\) two-accumulator walk
+(\(\coderef{c13-iter-range}\), \(\propref{c13-iter}\)).  It wins on memory,
+constant, and code; the recursive form wins for descends, non-commutative ranges,
+and lazy.  CF~514D: one max-tree per column, binary-search the length on the
+monotone ``cost \(\le k\)'' predicate, print the optimal window's \(m\) maxima.
+\selftest{
+  \item Why does the \(2n\) build need no interval arguments, and what does that
+        cost you versus the recursive tree?
+  \item When can the two accumulators of \(\coderef{c13-iter-range}\) collapse into
+        one, and when must they stay separate?
+  \item Give the identity for a max-tree here and the value-range fact that makes
+        \(0\) safe.
+  \item State the monotone predicate that makes CF~514D's binary search valid.
+  \item Which is the honest answer to a length-\(0\) CF~514D case, and how does the
+        code produce it?
+}
+\end{recallbox}

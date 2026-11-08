@@ -1,0 +1,521 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  16.2  LCA by Euler tour + RMQ                       sec:c11-euler
+%  Exports: def:c11-tour  thm:c11-eulerthm  ex:c11-spq  fig:c11-tour
+%           lst:c11-euler  lst:c11-sparse  prob:c11-dist  lst:c11-1135-soln
+% =====================================================================
+\section{LCA by Euler Tour and Range Minimum}\label{sec:c11-euler}
+
+\begin{previouslybox}[Three questions from 16.1 and earlier chapters]
+\begin{enumerate}[nosep, leftmargin=1.8em]
+  \item From \(\exref{c11-census}\): \(\lca(8,10) = 1\) because the
+        chains \(8\to5\to2\to1\) and \(10\to9\to7\to3\to1\) share only
+        the root.  \emph{(If you had a sequence recording every DFS
+        visit, where would the shallowest entry between the first
+        sightings of~8 and~10 sit?)}
+  \item From Ch.~12 (\(\coderef{c09-dfs3}\)): the measuring DFS visits
+        each edge twice (down and up) and produces \(2n-1\) node
+        recordings in that walk.  \emph{(That is exactly what the tour
+        below records.)}
+  \item From Ch.~9 (\(\chref{c26}\)): the \emph{Cartesian tree} solves
+        RMQ-on-array by building a tree; here we run the reduction in
+        the \emph{opposite} direction -- turn LCA-on-tree into RMQ-on-array.
+        \emph{(Same algorithm, different port.  Which array do we RMQ?)}
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+The walk of \secref{c11-idea} is correct but \(\bigO{h}\).  This section
+converts LCA into a \emph{range-minimum query} on an array derived from
+the DFS walk: build the \(2n-1\) tour, mark the first occurrence of each
+node, and the LCA is the shallowest tour-entry between the two firsts --
+one sentence theorem (\thmref{c11-eulerthm}), then a \(\bigO{n\log n}\)
+sparse table answers \emph{any} such query in \(\bigO{1}\) per lookup.
+The result: \(Q\) distance/LCA queries in \(O(n\log n + Q)\) total.
+Static trees only -- the moment a value changes between queries, hand
+off to segment trees (Ch.~19/20).
+
+\textbf{Prerequisites.} \secref{c11-idea} (chains, \(\preceq\), the
+census), Ch.~12's DFS (\(\coderef{c09-dfs3}\)) for the walk discipline
+and the depth stamp.  Ch.~9's RMQ section is \emph{optional} -- we
+rebuild the sparse table here from scratch, but knowing the Cartesian
+direction makes the contrast vivid.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item build the \(2n\!-\!1\) tour, \(\code{first[]}\), and \(\code{dep[]}\)
+        by hand on \(T\); \hfill\lv{3}
+  \item state and prove the Euler-RMQ reduction (\thmref{c11-eulerthm}),
+        and read an LCA off a depth span; \hfill\lv{3}
+  \item construct a sparse table in \(O(n\log n)\) and query it in
+        \(O(1)\) via two \emph{overlapping} blocks; \hfill\lv{4}
+  \item explain why overlapping blocks are legal for idempotent
+        operations (\(\min\), \(\max\), \(\gcd\)) but \emph{never} for
+        sum, xor, or count; \hfill\lv{4}
+  \item solve a multi-query distance problem (CSES~1135) using this
+        machine end-to-end. \hfill\lv{3}--\lv{4}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{The \(2n-1\) Tour -- What It Is and Is Not}
+% ---------------------------------------------------------------
+
+\begin{definition}{Euler tour of a rooted tree}{c11-tour}
+Run the root's DFS; append the current node to \(\code{tour}\) \emph{when
+you enter it and every time a child's call returns to it}.  For \(n\)
+nodes this records \(n\) entries + \(n-1\) returns = \(2n-1\) slots.
+Alongside each slot store the \emph{depth} of the node at that slot.
+Define \(\code{first}[v]\) = the \emph{earliest} index of \(v\) in
+\(\code{tour}\) (0-based).
+\end{definition}
+
+\begin{insightbox}[This tour is NOT Ch.~5's flattening tour]
+Chapter~5 (\(\chref{c24}\)) records \(n\) entries \emph{only} (enter a
+node; never re-log on return) and produces the \(\tin/\tout\) interval
+view that makes subtree queries array-range queries.  The \(2n-1\) LCA
+tour here is a \emph{different object}: it logs \emph{every} visit (enter
+\emph{and} each return), and its whole purpose is to create an array
+whose range-minimum of depths answers LCA.  The two tours coexist freely
+in the same problem -- \(\tin/\tout\) for ancestry tests and subtree
+ranges, the \(2n\!-\!1\) tour for LCA -- but do not confuse them.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Hand-Computing the Tour on T}
+% ---------------------------------------------------------------
+
+The DFS visits children in ascending label order.  Walk \(T\)
+(root~1, edges as in \figref{c11-tree}) and record:
+
+\begin{tracebox}[Tour construction on T (0-based index)]
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|ccccccccccccccccccc}
+i & 0&1&2&3&4&5&6&7&8&9&10&11&12&13&14&15&16&17&18\\ \hline
+\code{tour}[i] & 1&2&4&2&5&8&5&2&1&3&6&3&7&9&10&9&7&3&1\\
+\code{dep}[i]  & 0&1&2&1&2&3&2&1&0&1&2&1&2&3&4&3&2&1&0
+\end{array}
+\]
+\medskip
+\(\code{first}[\,]\): 1\(\to\)0, 2\(\to\)1, 3\(\to\)9, 4\(\to\)2,
+5\(\to\)4, 6\(\to\)10, 7\(\to\)12, 8\(\to\)5, 9\(\to\)13, 10\(\to\)14.
+
+\medskip
+\textbf{Verify:} \(\lca(8,10)\): span is \([\code{first}[8],\;\code{first}[10]]
+= [5,14]\).  The minimum depth in \(\code{dep}[5..14] = (3,2,1,0,1,2,1,2,3,4)\)
+is~\(0\) at \(i=8\), and \(\code{tour}[8] = 1\).  Census says
+\(\lca(8,10) = 1\).  \checkmark
+
+\(\lca(4,8)\): span \([2,5]\), \(\code{dep} = (2,1,2,3)\), min~\(1\) at
+\(i=3\), \(\code{tour}[3]=2\).  Census: \(\lca(4,5)=2\); since
+\(\lca(4,8)=\lca(4,5)=2\) (8 is below 5).  \checkmark
+
+\(\lca(9,10)\): span \([13,14]\), \(\code{dep}=(3,4)\), min~\(3\) at
+\(i=13\), \(\code{tour}[13]=9\).  Census: \(9 \preceq 10 \Rightarrow\)
+\(\lca=9\).  \checkmark
+\end{tracebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape]
+  % depth axis
+  \draw[-latex, darkgray] (-0.5,0) -- (10,0) node[right, font=\tiny] {i};
+  \draw[-latex, darkgray] (0,-0.5) -- (0,5) node[above, font=\tiny] {depth};
+  \foreach \y in {0,1,2,3,4} {
+    \draw[gray!25] (0,\y) -- (9.5,\y);
+    \node[font=\tiny, anchor=east] at (0,\y) {\y};}
+  % tour plotted as a path
+  \draw[primaryblue, line width=1pt]
+    plot[sharp plot] coordinates{
+      (0,0)(1,1)(2,2)(3,1)(4,2)(5,3)(6,2)(7,1)(8,0)
+      (9,1)(10,2)(11,1)(12,2)(13,3)(14,4)(15,3)(16,2)(17,1)(18,0)};
+  % annotate first[] for 8 and 10
+  \fill[accentorange] (5,3) circle (2.5pt) node[above, font=\tiny] {8};
+  \fill[accentorange] (14,4) circle (2.5pt) node[above, font=\tiny] {10};
+  \fill[successgreen] (8,0) circle (2.5pt) node[below, font=\tiny] {min=1};
+  \draw[dashed, warningred] (5,-0.3) -- (5,3.3);
+  \draw[dashed, warningred] (14,-0.3) -- (14,4.3);
+  \node[font=\tiny, anchor=north, text=warningred!70!black] at (9.5,-0.35)
+    {span [first[8], first[10]] = [5, 14]};
+\end{tikzpicture}
+\caption{The \(2n-1\) depth profile of~\(T\).  The LCA of~8 and~10 is the
+node at the shallowest point between their first occurrences: here the
+global minimum~0 at \(i=8\), which is node~1.}\label{fig:c11-tour}
+\end{figure}
+
+% ---------------------------------------------------------------
+\subsection{The Reduction Theorem}
+% ---------------------------------------------------------------
+
+\begin{theorem}{Euler-tour LCA = RMQ on depth}{c11-eulerthm}
+For any two nodes \(u,v\) in a rooted tree with the \(2n-1\) tour
+\(\code{tour}\), depth array \(\code{dep}\), and first-occurrence
+\(\code{first}\):
+\[
+  \lca(u,v) \;=\; \code{tour}\!\bigl[\arg\min_{\code{first}[u]\,\le\, i\,\le\, \code{first}[v]} \;\code{dep}[i]\bigr]
+\]
+(assuming \(\code{first}[u] \le \code{first}[v]\); swap otherwise).
+\end{theorem}
+
+\begin{proofbox}
+WLOG \(f_u = \code{first}[u] \le f_v = \code{first}[v]\).  The tour
+records the DFS walk.  Between \(f_u\) and \(f_v\) the walk must leave
+\(u\)'s subtree (to reach \(v\)) and can only do so by climbing to some
+ancestor of~\(u\).  Let \(w\) be the shallowest tour entry in
+\([f_u, f_v]\).  Since the walk starts at~\(u\) (of depth \(\depth(u)\)) and
+ends at~\(v\), the path \(\code{tour}[f_u..f_v]\) descends into the
+subtree(s) and always returns through the same ancestors.  \(w\) is on
+the walk from \(u\) up toward the root (so \(w \preceq u\)) and also on
+the walk from the root down toward \(v\) (so \(w \preceq v\)); hence \(w\)
+is a common ancestor.  If some common ancestor~\(a\) were strictly deeper
+than \(w\), both \(u\) and \(v\) would be in \(a\)'s subtree, so the DFS
+would visit both without ever surfacing above \(a\) -- contradicting that
+\(w\) is the minimum.  Hence \(w = \ell\) (the deepest common ancestor).
+\end{proofbox}
+
+% ---------------------------------------------------------------
+\subsection{The Sparse Table -- Building and Querying}
+% ---------------------------------------------------------------
+
+The theorem reduces LCA to an \emph{RMQ}: given an array \(A[0..N-1]\)
+(here \(N = 2n-1\)), answer \(\arg\min\) over any \([L,R]\) in \(O(1)\).
+The standard tool is the \term{sparse table}.
+
+\begin{definition}{Sparse table}{c11-spq}
+Let \(\code{st}[j][i]\) store the \emph{index of the minimum} \(A\)-value
+among \(A[i \;..\; i + 2^j - 1]\) (a \term{sparse-table block} of length \(2^j\)
+starting at~\(i\)).  Write \(a = \code{st}[j\!-\!1][i]\) and
+\(b = \code{st}[j\!-\!1][i+2^{j-1}]\) (the two halves).  Recurrence:
+\[
+\code{st}[0][i] = i; \qquad
+\code{st}[j][i] = \begin{cases}
+  a & \text{if } A[a] \le A[b]\\
+  b & \text{otherwise.}
+\end{cases}
+\]
+Build: \(O(N \log N)\), space \(O(N\log N)\).
+\end{definition}
+
+\noindent\textbf{Query for \([L,R]\):} let \(j = \lfloor\log_2(R-L+1)\rfloor\).
+Two \emph{overlapping} blocks of length \(2^j\) cover \([L,R]\):
+\[
+  \min = \begin{cases}
+    \code{st}[j][L] & \text{if } A[\code{st}[j][L]] \le A[\code{st}[j][R-2^j+1]]\\
+    \code{st}[j][R-2^j+1] & \text{otherwise.}
+  \end{cases}
+\]
+Correct because \(\min\) is \emph{idempotent}: duplicating elements in
+the overlap does not change the minimum.  \textbf{Warning:} this trick
+does \emph{not} work for sum, xor, or count -- their value depends on how
+many times an element appears.  Only \(\min/\max/\gcd/\text{and}/\text{or}\)
+are safe for overlapping blocks.
+
+\begin{lstlisting}[caption={Build tour, first[] and dep[] on a rooted tree (children ascending)}, label={lst:c11-euler}]
+void build_euler(int v, int p, int d) {
+    first[v] = (int)tour.size();   // record FIRST occurrence
+    tour.push_back(v);
+    dep.push_back(d);
+    for (int c : adj[v]) {
+        if (c == p) continue;
+        build_euler(c, v, d + 1);
+        tour.push_back(v);         // record RETURN to v
+        dep.push_back(d);
+    }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Build and query a sparse table on the tour depth array}, label={lst:c11-sparse}]
+// build: st[j][i] = index of min depth in dep[i .. i+2^j-1]
+int lg[N+1];  // precompute lg[1..N]
+void build_sparse() {
+    int N = (int)tour.size();      // N = 2n-1
+    for (int i = 0; i < N; i++) st[0][i] = i;
+    for (int j = 1; (1 << j) <= N; j++)
+        for (int i = 0; i + (1 << j) <= N; i++) {
+            int a = st[j-1][i], b = st[j-1][i + (1 << (j-1))];
+            st[j][i] = (dep[a] <= dep[b]) ? a : b;
+        }
+}
+// query: O(1) index of min-depth in [L, R]
+int rmq(int L, int R) {
+    int j = lg[R - L + 1];
+    int a = st[j][L], b = st[j][R - (1 << j) + 1];
+    return (dep[a] <= dep[b]) ? a : b;
+}
+int lca(int u, int v) {
+    int L = min(first[u], first[v]);
+    int R = max(first[u], first[v]);
+    return tour[rmq(L, R)];
+}
+\end{lstlisting}
+
+\begin{tracebox}[Sparse-table query on T: lca(8, 10)]
+\(N = 2n-1 = 19\), span \([L,R] = [5,14]\), length 10.
+\(j = \lfloor\log_2 10\rfloor = 3\), block size \(2^3 = 8\).
+
+Left block: \(\code{st}[3][5]\) covers \(\code{dep}[5..12] = (3,2,1,0,1,2,1,2)\),
+min at \(i=8\) (depth~0).  Right block: \(\code{st}[3][7]\) covers
+\(\code{dep}[7..14] = (1,0,1,2,1,2,3,4)\), min at \(i=8\) (depth~0).
+Winner: index~\(8\), \(\code{tour}[8] = 1\).  \(\lca(8,10)=1\).  \checkmark
+
+\(\lca(4,8)\): span \([2,5]\), length 4, \(j=2\), block size~4.
+Left \(\code{st}[2][2]\) covers \(\code{dep}[2..5]=(2,1,2,3)\), min at
+\(i=3\) (depth~1).  Right \(\code{st}[2][2]\) = same block.  \(\code{tour}[3]=2\).  \checkmark
+\end{tracebox}
+
+\begin{complexitybox}[Euler + RMQ method]
+\textbf{Setup:} \(O(n)\) tour + \(O(n \log n)\) sparse table on
+\(2n\!-\!1\) entries.  \textbf{Query:} \(O(1)\) per LCA.
+\textbf{Memory:} \(O(n \log n)\) for the table.
+\textbf{Limitation:} static tree only; answers LCA/distance; cannot
+produce a \(k\)-th ancestor or a path aggregate.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Variations and Twists}
+% ---------------------------------------------------------------
+
+\begin{itemize}[nosep]
+  \item \textbf{Farmer's linearithmic alternative.}  The \(2n\!-\!1\) tour
+        has \(\code{dep}[i+1] - \code{dep}[i] \in \{+1,-1\}\), a
+        \emph{\(\pm 1\) RMQ} which admits \(O(n)\) preprocessing and \(O(1)\)
+        query (Bender--Farach-Colton).  Contest-irrelevant: the \(O(n\log n)\)
+        sparse table already fits in 1~s for \(n\le2\cdot10^{5}\).  \hfill\lv{6}
+  \item \textbf{Multiple RMQ on one tour.}  A segment tree over
+        \(\code{dep}\) answers \(O(\log n)\) per query but supports point
+        \emph{updates} (change a depth = change the tree).  Deferred to
+        Ch.~19/22.  \hfill\lv{4}
+  \item \textbf{The reverse reduction.}  Ch.~9 (\(\chref{c26}\)) builds a
+        Cartesian tree from an array and reads RMQ as LCA \emph{on the
+        Cartesian tree}.  That is the mirror image; we do LCA \(\to\) RMQ
+        on the \emph{original} tree.  \hfill\lv{3}
+\end{itemize}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: Overlapping-blocks on non-idempotent operations]
+If you replace \(\min\) by \emph{sum} in the sparse-table query, the
+overlap double-counts.  Only \(\min/\max/\gcd/\text{AND}/\text{OR}\) are
+idempotent (\(x \oplus x = x\)); \(\text{SUM}(x,x) = 2x \ne x\).  For
+sum/xor on a \emph{static} array, use prefix sums; for path aggregates
+use lifting (\secref{c11-aggregates}).
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: Forgetting to log the RETURN visit]
+The tour must be \(2n-1\) entries, not \(n\).  If you skip the
+``push on return'' line, the span between two firsts might \emph{not}
+contain the LCA at all -- the DFS went below the LCA and jumped without
+logging the climb back.  The inductive invariant: consecutive entries
+differ by \(\pm 1\) in depth.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: Using 1-based vs 0-based indexing inconsistently]
+The sparse table and \(\code{first}[\,]\) in this section use
+\emph{0-based} indices.  Mixing with a 1-based \(\tin\) convention from
+Ch.~5 in the same code is a silent off-by-one: \(\code{first}[1]=0\)
+(root~1 at tour position~0) vs \(\tin(1)=1\).  Pick one, document it.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab}
+% ---------------------------------------------------------------
+
+\solvedproblem{c11-dist}{Distance Queries}{CSES 1135}
+  {https://cses.fi/problemset/task/1135}{CSES L3}
+  {Euler tour, sparse-table RMQ, distance formula}
+
+\begin{problemstatement}[CSES 1135 Distance Queries]
+You are given a tree consisting of \(n\) nodes (rooted at~1) and \(q\)
+queries.  Each query consists of two nodes \(a\) and~\(b\), and your task
+is to print the distance between them (number of edges on the unique
+path).
+
+\textbf{Input.} First line: \(n\) and~\(q\)
+($1 \le n \le 10^5$, $1 \le q \le 10^5$).  Next \(n-1\) lines: edges
+\(a_i\), \(b_i\).  Next \(q\) lines: queries \(a\), \(b\).
+
+\textbf{Output.} For each query print the distance.
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+5 3
+1 2
+1 3
+3 4
+3 5
+1 3
+2 5
+1 4
+
+Output:
+1
+3
+2
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}
+\peek{The formula \(\dist(u,v) = \depth(u) + \depth(v) - 2\depth(\lca(u,v))\)
+converts the problem to two depth lookups plus one LCA.}
+\nudge{Build the \(2n-1\) tour, sparse table, and answer each LCA in
+\(O(1)\) per \thmref{c11-eulerthm}.}
+\fullhint{Code: build Euler tour from root~1 via \coderef{c11-euler};
+build \coderef{c11-sparse} on the depth array; for each query compute
+\(\ell = \lca(a,b)\), print \(\depth(a)+\depth(b)-2\depth(\ell)\).}
+\end{attemptgate}
+
+\solstep{Understanding}
+The tree is \emph{static} (no updates between queries), so we can
+preprocess once.  Each query asks for a path length in edges.  Distance
+between two nodes is determined by the hinge (\thmref{c11-eulerthm} +
+the formula):
+\[
+  \dist(a,b) = \depth(a) + \depth(b) - 2\,\depth(\lca(a,b)).
+\]
+
+\solstep{Key Observations}
+\begin{observation}
+The formula is purely \emph{depth}-based.  We need: (i)~the depth of each
+node from a single DFS; (ii)~a fast LCA query.  No edge weights, no
+aggregates -- the RMQ machine suffices.
+\end{observation}
+\begin{observation}
+Constraints: \(n,q\le 10^5\) rule out \(O(h)\) per query in worst case
+(chain \(h = n\)).  The \(O(1)\) sparse-table query is the cleanest fit
+because no \(k\)-th-ancestor or path-aggregate is needed.
+\end{observation}
+
+\solstep{Think It Through}
+\begin{thinkbox}
+\deadend{BFS/DFS per query}
+{$q = 10^5\), BFS gives \(O(nq) = 10^{10}\).  TLE.}
+\deadend{Naive walk}
+{Correct, but worst-case \(O(h) = O(n)\) per query on a chain.  TLE.}
+\aha{Preprocess the \(2n-1\) tour + sparse table; each LCA is \(O(1)\);
+distance is one arithmetic expression.  Total \(O(n\log n + q)\).}
+\end{thinkbox}
+
+\solstep{Proof of the Distance Formula}
+\begin{proofbox}[Distance through the hinge]
+Let \(\ell = \lca(a,b)\).  The route \(a \to b\) goes \(a\to\ell\to b\).
+The segment \(a\to\ell\) has \(\depth(a)-\depth(\ell)\) edges (climb the
+chain), \(b\to\ell\) similarly \(\depth(b)-\depth(\ell)\).  No
+overlap: \(a\)'s segment is below~\(\ell\) and disjoint from \(b\)'s
+unless \(a \preceq b\), in which case \(\ell = a\) and the first term is
+zero.  Total: \((\depth(a)-\depth(\ell)) + (\depth(b)-\depth(\ell))\).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CSES 1135 full solution (Euler + RMQ)}, label={lst:c11-1135-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200001;  // 2n-1 for n=1e5
+vector<int> adj[MX], tour, dep;
+int firstOcc[MX], st[18][MX], lg[MX], depth_[MX];
+int timer_;
+
+void dfs(int v, int p, int d) {
+    firstOcc[v] = (int)tour.size();
+    tour.push_back(v); dep.push_back(d); depth_[v] = d;
+    for (int c : adj[v]) if (c != p) {
+        dfs(c, v, d+1);
+        tour.push_back(v); dep.push_back(d);
+    }
+}
+void build() {
+    int N = (int)tour.size();
+    lg[1] = 0;
+    for (int i = 2; i <= N; i++) lg[i] = lg[i/2] + 1;
+    for (int i = 0; i < N; i++) st[0][i] = i;
+    for (int j = 1; (1<<j) <= N; j++)
+        for (int i = 0; i + (1<<j) <= N; i++) {
+            int a = st[j-1][i], b = st[j-1][i+(1<<(j-1))];
+            st[j][i] = (dep[a] <= dep[b]) ? a : b;
+        }
+}
+int lca(int u, int v) {
+    int L = min(firstOcc[u], firstOcc[v]);
+    int R = max(firstOcc[u], firstOcc[v]);
+    int j = lg[R - L + 1];
+    int a = st[j][L], b = st[j][R-(1<<j)+1];
+    return tour[(dep[a] <= dep[b]) ? a : b];
+}
+int main(){
+    int n, q; scanf("%d%d", &n, &q);
+    for (int i = 0; i < n-1; i++) {
+        int a,b; scanf("%d%d", &a, &b);
+        adj[a].push_back(b); adj[b].push_back(a);
+    }
+    dfs(1, 0, 0);
+    build();
+    while (q--) {
+        int a,b; scanf("%d%d", &a, &b);
+        int l = lca(a,b);
+        printf("%d\n", depth_[a] + depth_[b] - 2*depth_[l]);
+    }
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CSES 1135 sample verification]
+Tree: \(1\!-\!2, 1\!-\!3, 3\!-\!4, 3\!-\!5\).  Root~1.
+Depths: \(d_1=0, d_2=1, d_3=1, d_4=2, d_5=2\).
+
+Query (1,3): \(\lca(1,3)=1\) (1 is root, hence ancestor of everything).
+\(\dist = 0+1-2(0) = 1\).  Expected: 1.  \checkmark
+
+Query (2,5): \(\lca(2,5)\): chains \(2\to1\) and \(5\to3\to1\); intersection
+\(\{1\}\); \(\lca=1\).
+\(\dist = 1+2-2(0) = 3\).  Expected: 3.  \checkmark
+
+Query (1,4): \(\lca(1,4)=1\).
+\(\dist = 0+2-2(0) = 2\).  Expected: 2.  \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Tour: \(O(n)\).  Sparse table: \(O(n \log n)\).  Each query: \(O(1)\).
+Total: \(O(n\log n + q)\).  Memory: \(O(n\log n)\) for \(\code{st}\).
+\textbf{AC.}
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Corner}
+% ---------------------------------------------------------------
+
+\begin{practiceset}
+  \practice{Lowest Common Ancestor (many queries)}{SPOJ LCA}
+    {https://www.spoj.com/problems/LCA/}{SPOJ L3}
+    {the textbook many-query LCA on a judge: build the \(2n\!-\!1\) Euler
+     tour and answer each query as a range-minimum-depth over it -- a
+     direct transcription of \thmref{c11-eulerthm} with
+     \coderef{c11-euler}~+~\coderef{c11-sparse}.  \(N,Q \le 10^{5}\).}
+\end{practiceset}
+
+\paragraph{Back-cites.}
+Ch.~5 (\(\chref{c24}\)) -- the \(n\)-entry flattening tour and the
+\(\tin/\tout\) convention are \emph{different} from the \(2n\!-\!1\) tour
+(contrasted above; never re-linked here).
+Ch.~9 (\(\chref{c26}\)) -- RMQ via Cartesian tree is the reverse
+reduction; we cite the \emph{concept} but own the general sparse table.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 16.2 in 10 seconds]
+The \(2n\!-\!1\) tour logs every DFS visit (enter \emph{and} return).
+\(\code{first}[v]\) is the 0-based index of \(v\)'s first entry.
+\thmref{c11-eulerthm}: \(\lca(u,v)\) = tour entry with minimum depth in
+\([\code{first}[u], \code{first}[v]]\).  Sparse table answers that in
+\(O(1)\) using two overlapping \(2^j\)-blocks (idempotent \(\min\) makes
+overlap harmless).  Setup \(O(n\log n)\), query \(O(1)\), static only.
+\selftest{
+  \item Tour length for \(n = 10\)?  (Answer: \(2(10)-1 = 19\).)
+  \item State the LCA theorem in one sentence.
+  \item Why are overlapping blocks safe for \(\min\) but not for \(\mathit{sum}\)?
+  \item \(\code{first}[8]\) on~\(T\)?  (5.)  \(\code{first}[10]\)?  (14.)
+  \item Give the distance formula.
+}
+\end{recallbox}

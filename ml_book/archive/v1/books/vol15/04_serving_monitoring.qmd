@@ -1,0 +1,77 @@
+---
+title: "Serving and monitoring"
+---
+
+# Serving and monitoring
+
+**Reference question.** What should a service check before it returns a prediction, and what should a monitor check after?
+
+Use the card to look the result up. Use the rest of the chapter when you need to derive it, implement it, or decide whether the result still applies.
+
+## Reference card
+
+| Item | Statement |
+|---|---|
+| Schema gate | Reject or default when the input fails the contract. Do not silently score a NaN. |
+| Version | Every response can be tied to a model hash. |
+| Timeout | A latency budget with a defined fallback. |
+| Monitor | Input distribution, output distribution, and, when labels arrive, a delayed outcome metric. |
+| Alert | A threshold on a predeclared statistic, with a human action. An alert with no action is a log. |
+
+## Theory
+
+Serving is the feature function plus the gates. A gate that fails open and returns a prediction for a malformed input will look available and be wrong. A gate that fails closed must have a fallback the product understands: a previous model, a constant decision, or an error. The fallback is a second policy and needs its own metric.
+
+Monitoring without labels can still see input shift and output shift. It cannot see that the mapping from inputs to outcomes broke while both margins look normal. When labels arrive late, schedule a delayed job that joins predictions to outcomes on the decision id. That job is the production form of the test set. It is biased if unlabeled cases are dropped without a reason.
+
+Dashboards follow Volume 03's reporting rules. A panel without a denominator, a baseline, or a window is not an alert source. The alert threshold is chosen from a quiet period or from a loss budget, not from the first bad day you want to dramatize.
+
+## Derivation
+
+Let $p_t$ be the fraction of requests whose features fail the schema in hour $t$, and let $\hat{y}_t$ be the mean prediction among accepted requests. A change in $p_t$ means the input contract is breaking. A change in $\hat{y}_t$ with stable inputs means the model or the feature code changed, or a real shift in the accepted population occurred. These are different incidents. An alert on prediction mean alone conflates them. Log $p_t$ beside $\hat{y}_t$. When outcomes $y$ arrive, the delayed loss is an average over the joinable subset. If joinability depends on $y$, the delayed loss is biased. Check the join rate.
+
+## Code
+
+```python
+def gate(features, required):
+    missing = [k for k in required if k not in features or features[k] is None]
+    if missing:
+        return {"ok": False, "fallback": "constant", "missing": missing}
+    return {"ok": True, "missing": []}
+```
+
+## Experiment
+
+**Hypothesis.** A request missing a required key takes the fallback and is counted in the failure fraction, and it does not produce a model score. A complete request does.
+
+**Protocol.** Two requests and a constant fallback value you record.
+
+**Metric.** Gate decision, whether a score was emitted, and the hourly failure fraction in a toy log of 100 requests with 5 missing keys.
+
+**Decision rule.** The failure fraction should be 0.05. If malformed requests emit scores, the gate is advisory and does not meet this chapter's contract.
+
+## Project
+
+**Deliverable.** A serving function with a gate, a version hash in the response, a fallback, and a monitor table: failure fraction, mean output, and a delayed loss on a synthetic label that arrives later for only some rows. State the join rate.
+
+**Constraints.** The fallback is a constant or a previous hash, not an unlogged exception.
+
+**Rubric.** You can reconstruct which hash served a given request id.
+
+## Depth tracks
+
+**Beginner.** Implement `gate` and a constant fallback.
+
+**University.** Add the monitor table and the delayed join.
+
+**Research.** Define a latency budget at the 99th percentile and a timeout policy. Explain why the mean latency can look fine while the budget is missed.
+
+## Failure modes
+
+- Scoring NaNs as if they were numbers.
+- A monitor that only exists the day after an incident.
+- Dropping unjoined labels and reporting a loss as if it were the population loss.
+
+## See also
+
+Volume 07 for the metric. Volume 16 for when the monitor's metric is the wrong harm.

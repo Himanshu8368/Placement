@@ -1,0 +1,605 @@
+% =====================================================================
+%  31.4  Which edges can be in an MST -- classification and uniqueness.
+%  Exports: sec:c17-classify  thm:c17-intersect  thm:c17-cycle  def:c17-forced
+%  lem:c17-group  lst:c17-group  prob:c17-unify  fig:c17-unify
+%  lst:c17-unify  fig:c17-groups
+%  Solved CF 1108F "MST Unification" (2100, L5), live-verified against the
+%  CF problem page (title "F. MST Unification", 3s TL, 256 MB, n,m<=2e5,
+%  w<=1e9).  Answer = sum over equal-weight Kruskal groups of
+%  (edges of the group joining distinct components BEFORE the group's unions)
+%  minus (merges the group performs).  SIX official samples replayed, all
+%  hand-verified to 1,0,0,1,0,2.
+%  Solved CF 160D "Edges in MST" (2300, L5), live-verified against the CF problem
+%  page (title "D. Edges in MST", 2s TL, 256 MB, 2<=n<=1e5,
+%  n-1<=m<=min(1e5,n(n-1)/2), 1<=w<=1e6, no loops/multiple edges).  Classify each
+%  edge any / at least one / none via per-weight group contraction + Tarjan
+%  bridge-finding on the component graph (a bridge = forced = any; a non-bridge
+%  usable edge = optional = at least one; endpoints already merged = none).
+%  THREE official samples replayed, hand-verified.
+%  Extra exports: prob:c17-edges  fig:c17-edges  lst:c17-edges  lem:c17-bridge
+% =====================================================================
+\section{Which Edges Can Be in an MST?}\label{sec:c17-classify}
+
+\begin{previouslybox}[Ch.31.1 built one MST; now we interrogate all of them]
+\(\secref{c17-kruskal}\) returned \emph{a} minimum spanning tree.  Questions
+like "must this road be built?", "could this edge ever help?", and "is the MST
+unique?" need the full picture: which edges appear in \emph{some} or \emph{every}
+MST.  Everything is decided by the same cut and cycle properties, applied inside
+each equal-weight group.
+\end{previouslybox}
+
+\begin{topicintro}
+Sort the edges and slice them into groups of equal weight -- Kruskal's order
+never interleaves groups.  Within a group, the components formed by all
+\emph{lighter} edges are fixed; the group's job is to merge some of them.  Two
+classical lemmas give the trichotomy: the \term{intersection property}
+(\(\thmref{c17-intersect}\)) says an edge is in some MST exactly when it is a
+minimum edge across the cut it induces; the \term{cycle property}
+(\(\thmref{c17-cycle}\)) says an edge that is strictly heaviest on a cycle is in
+no MST.  Putting them together splits every edge into forced (in every MST),
+optional (in some), or forbidden (in none).
+
+The payoff is a clean count: inside a weight group, let \(\mathit{usable}\) be
+the edges joining two \emph{distinct} lighter-components and \(\mathit{merged}\)
+the merges Kruskal actually performs there.  Then \(\mathit{usable}-\mathit{merged}\)
+is the number of edges that tie for a slot, and the number of MSTs is
+\(2^{\text{(free choices)}}\)-style -- we only need the excess count for solved
+CF 1108F (\(\probref{c17-unify}\)), which asks the minimum number of \(+1\)
+increments needed to make the MST unique without changing its weight.
+
+\textbf{Prerequisites.} \(\secref{c17-kruskal}\) -- Kruskal and its DSU;
+\(\thmref{c17-cut}\) and \(\lemref{c17-safe}\).  This section re-runs Kruskal
+group by group, so \(\coderef{c17-kruskal}\) is the base being modified.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item classify every edge as forced / optional / forbidden via the two properties; \hfill\lv{4}
+  \item count, per weight group, the edges that tie for an MST slot; \hfill\lv{5}
+  \item solve CF 1108F: minimum increments to force a unique MST. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{The two properties and the trichotomy}
+% ---------------------------------------------------------------
+
+\begin{definition}{Forced, optional, forbidden}{c17-forced}
+An edge is \term{forced} if it lies in every MST, \term{optional} if it lies in
+some but not all MSTs, and \term{forbidden} if it lies in none.
+\end{definition}
+
+\begin{theorem}{Intersection property}{c17-intersect}
+An edge \(e\) belongs to \textbf{some} MST if and only if \(e\) is a minimum-weight
+edge crossing the cut defined by removing from the graph every edge of weight
+strictly greater than \(w(e)\) and looking at the two components \(e\) would join.
+In particular, if \(e\) is the \emph{unique} minimum across its cut it is forced.
+\end{theorem}
+
+\begin{theorem}{Cycle property (global form)}{c17-cycle}
+An edge is forbidden if and only if it is the strictly heaviest edge on some
+cycle.  Equivalently, \(e\) is in no MST iff every path connecting its endpoints
+using edges of weight \(\le w(e)\) already exists without \(e\).
+\end{theorem}
+
+\begin{lemma}{Equal-weight group excess}{c17-group}
+Process the edges by nondecreasing weight in groups.  Just before a group acts,
+the DSU reflects all strictly-lighter edges.  In the group, let \(\mathit{usable}\)
+count the edges whose two endpoints lie in different components \emph{at that
+moment}, and \(\mathit{merged}\) count the successful unions the group performs.
+Then \(\mathit{usable}-\mathit{merged}\) edges in this group are \term{optional}
+(each is a tie that could replace another in the group), and the excess is added
+to the running "non-uniqueness" count.  No edge in the group is forced if it is
+part of a same-weight cycle.
+\end{lemma}
+
+\begin{lstlisting}[caption={Per-group Kruskal that returns the total optional-excess sum. Edges are pre-sorted; each maximal equal-weight block is scanned twice: once to count usable edges against the pre-group DSU, once to perform the merges}, label={lst:c17-group}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Edge { int u, v; long long w; };
+int par[200005];
+int findSet(int x){ return par[x]==x ? x : par[x]=findSet(par[x]); }
+long long optionalExcess(int n, vector<Edge>& edges){   // edges sorted by w
+  for(int i=1;i<=n;i++) par[i]=i;
+  long long excess=0; int m=(int)edges.size();
+  for(int i=0; i<m; ){
+    int j=i; while(j<m && edges[j].w==edges[i].w) j++;  // block [i,j) same weight
+    long long usable=0, merged=0;
+    for(int k=i; k<j; k++){                              // count BEFORE unioning
+      if(findSet(edges[k].u)!=findSet(edges[k].v)) usable++;
+    }
+    for(int k=i; k<j; k++){                              // now perform merges
+      int a=findSet(edges[k].u), b=findSet(edges[k].v);
+      if(a!=b){ par[a]=b; merged++; }
+    }
+    excess += (usable - merged);
+    i=j;
+  }
+  return excess;
+}
+\end{lstlisting}
+
+% ---------------------------------------------------------------
+\subsection{Solved: CF 1108F -- MST Unification (2100, L5)}
+% ---------------------------------------------------------------
+
+\solvedproblem{c17-unify}{MST Unification}{CF 1108F}{https://codeforces.com/problemset/problem/1108/F}{CF 2100 L5}{equal-weight Kruskal groups, cycle / intersection properties, DSU, MST uniqueness counting}
+
+\begin{problemstatement}[CF 1108F, verified against the live CF problem page]
+A connected weighted graph on \(n\) vertices and \(m\) edges is given (each edge
+\(u,v,w\)).  You may repeatedly increase the weight of any single edge by \(1\);
+each increment costs one operation.  Find the minimum number of operations needed
+so that the graph has a \textbf{unique} minimum spanning tree, \emph{without}
+changing the total weight of the MST (you are only allowed to break ties, not to
+make the tree more expensive).  Constraints: \(1\le n,m\le 2\cdot 10^5\),
+\(1\le w\le 10^9\), graph is connected.  Time limit 3 seconds, memory 256 MB.
+There are six sample tests with answers \(1,0,0,1,0,2\): an \(8\)-vertex graph
+answer \(1\); a \(4\)-vertex tree answer \(0\); a \(3\)-cycle of weights
+\(1,2,3\) answer \(0\); a \(3\)-cycle of weights \(1,3,3\) answer \(1\); a
+single vertex \(n=1\) answer \(0\); and a \(5\)-vertex graph answer \(2\).
+\end{problemstatement}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+   tnode/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.7pt,
+                 minimum size=6.5mm, font=\scriptsize\bfseries, inner sep=1pt}]
+  \node[tnode] (a) at (0,0) {1};
+  \node[tnode] (b) at (2.6,0) {2};
+  \node[tnode] (c) at (1.3,-2) {3};
+  \draw[successgreen!80!black, line width=1.6pt] (a)--node[fill=white,font=\scriptsize,inner sep=1pt] {1} (b);
+  \draw[warningred!80, line width=1.3pt] (b)--node[fill=white,font=\scriptsize,inner sep=1pt] {3} (c);
+  \draw[difforange, line width=1.3pt, dashed] (a)--node[fill=white,font=\scriptsize,inner sep=1pt] {3} (c);
+  \node[annot, font=\scriptsize, text width=6cm, align=center] at (1.3,-3)
+    {sample 4: two weight-3 edges tie; nudge one to 4 (red -> dashed) for uniqueness};
+\end{tikzpicture}
+\caption{Sample 4, the \(3\)-cycle \(1\!-\!2{:}1,\ 2\!-\!3{:}3,\ 1\!-\!3{:}3\).  The
+MST must take the weight-\(1\) edge and exactly one weight-\(3\) edge; the two
+weight-\(3\) edges tie, so the MST is not unique.  Bumping one of them to \(4\)
+(costs one increment) makes the \(1\!-\!3{:}3\) edge forced and the answer
+\(\mathbf{1}\).}
+\label{fig:c17-unify}
+\end{figure}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 45 minutes]
+Uniqueness fails only where two edges of \emph{equal} weight could occupy the same
+MST slot.  Rather than trying every increment, what does a single Kruskal run --
+grouped by weight -- tell you about how many such ties exist?
+\peek{Non-uniqueness comes entirely from equal-weight groups.  In each group,
+Kruskal picks a spanning forest among the components formed by lighter edges.
+Whenever more edges in the group could have been picked than the number of merges
+needed, there is a tie. (\(\secref{c17-classify}\), \(\lemref{c17-group}\).)}
+\nudge{Sort edges, walk them in equal-weight blocks.  For a block, first count
+\(\mathit{usable}\): edges whose endpoints sit in different DSU components
+\emph{before} any union of this block.  Then run the unions and count
+\(\mathit{merged}\).  Each of the \(\mathit{usable}-\mathit{merged}\) surplus edges
+sits on an equal-weight cycle and must be lifted by one to break the tie, and one
+lift fixes exactly one such edge.}
+\fullhint{Answer \(=\sum_{\text{groups}}(\mathit{usable}-\mathit{merged})\), computed
+by \(\coderef{c17-group}\).  Why one increment per surplus edge suffices and is
+necessary: a surplus edge is optional (lies in some MST), and lifting it by \(1\)
+removes it from every minimum cut it ties on, turning it forbidden, exactly
+resolving one degree of freedom; it never touches the MST weight because a
+different same-weight edge still fills the slot. Full build and six-sample replay
+below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The MST weight is fixed; we are only allowed to re-shuffle \emph{ties} into a
+strict order by adding \(1\) to chosen edges.  So we must not perturb lighter
+edges' decisions -- only break equal-weight ambiguity.  Grouping Kruskal by
+weight isolates exactly that ambiguity: inside a group, the number of edges that
+\emph{could} legally merge the lighter-components exceeds the number that
+\emph{must} merge them by precisely the count of optional edges, and each needs
+one bump.
+
+\solstep{Key Observations}
+\begin{observation}
+An increment that preserves the MST weight can only raise an edge that is
+\emph{not} forced and is currently tied at its weight -- i.e.\ an optional edge
+from \(\lemref{c17-group}\).  Raising a lighter or forced edge changes the tree
+cost, which is forbidden.
+\end{observation}
+\begin{observation}
+Within one equal-weight group, \(\mathit{usable}\) edges connect distinct
+lighter-components, but only \(\mathit{merged}\) of them can be in any spanning
+forest of the contracted graph.  The \(\mathit{usable}-\mathit{merged}\) extras
+are the interchangeable ones; each extra is one source of non-uniqueness.
+\end{observation}
+\begin{observation}
+A single \(+1\) on one surplus edge removes it from the tie (it becomes strictly
+heavier than its group) and thereby makes the remaining choice unique for that
+slot.  Different surplus edges need different bumps, so the operations add up:
+the minimum total is the sum of per-group excesses.
+\end{observation}
+
+\solstep{Think It With Me}
+\begin{thinkbox}
+\deadend{Recompute "is the MST unique?" after every candidate increment}{MST
+uniqueness per check is \(\bigO{m\log m}\); searching increments makes it
+quadratic at best -- hopeless at \(m=2\cdot 10^5\).}
+\deadend{Count pairs of equal-weight edges}{Equal weight alone is not the
+problem: two equal edges that connect four distinct lighter-components are both
+forced (no tie).  Sample 1 has many equal weights yet answer \(1\), so raw
+equal-edge counts overshoot.}
+\aha{Run Kruskal in weight groups and, per group, subtract merges from usable
+edges.  The surplus \(\mathit{usable}-\mathit{merged}\) is exactly the number of
+optional edges -- and the number of required increments.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.28\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ enumerate MSTs & list all MSTs, test uniqueness & exponential & \tle\\
+2 & \lv{4}\ count equal-weight pairs & ignore component structure & \(\bigO{m}\) & \textbf{WA}\\
+3 & \lv{5}\ \textbf{group usable \(-\) merged} & per weight block excess & \(\bigO{m\log m}\) & \ac\\
+\bottomrule
+\end{tabular}\end{center}
+Rung 2 counts equal-weight edges, but two equal edges on four distinct components
+are both forced and create no tie -- it overcounts (fails Sample 1).  Rung 3
+respects the lighter-component structure.
+
+\solstep{Solution}
+Sort edges by weight.  Walk maximal equal-weight blocks with the DSU frozen at the
+pre-block state.  For each block, \(\mathit{usable}\) is the number of block edges
+whose endpoints are in different components (checked \emph{before} any union in
+the block); then perform the unions counting \(\mathit{merged}\).  Accumulate
+\(\mathit{usable}-\mathit{merged}\).  \(\coderef{c17-group}\) is the whole
+algorithm; the answer fits in \(64\)-bit but is at most \(m\), so \texttt{int}
+would also do for the sum.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 1108F. Sort by weight; per equal-weight block count usable (against the pre-block DSU) then merged (after unioning), and add the difference. Exactly the two-scan loop of optionalExcess}, label={lst:c17-unify}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Edge { int u, v, w; };
+int par[200005];
+int findSet(int x){ return par[x]==x ? x : par[x]=findSet(par[x]); }
+int main(){
+  int n, m; scanf("%d %d", &n, &m);
+  vector<Edge> edges(m);
+  for(int i=0;i<m;i++) scanf("%d %d %d", &edges[i].u, &edges[i].v, &edges[i].w);
+  sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b){ return a.w<b.w; });
+  for(int i=1;i<=n;i++) par[i]=i;
+  long long ans=0;
+  for(int i=0;i<m;){
+    int j=i; while(j<m && edges[j].w==edges[i].w) j++;   // block [i,j)
+    long long usable=0, merged=0;
+    for(int k=i;k<j;k++)
+      if(findSet(edges[k].u)!=findSet(edges[k].v)) usable++;   // before unions
+    for(int k=i;k<j;k++){
+      int a=findSet(edges[k].u), b=findSet(edges[k].v);
+      if(a!=b){ par[a]=b; merged++; }                          // do unions
+    }
+    ans += usable - merged;
+    i=j;
+  }
+  printf("%lld\n", ans);
+  return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Samples}
+\begin{tracebox}[Sample 4: \, \(3\)-cycle \(1\!-\!2{:}1,\ 2\!-\!3{:}3,\ 1\!-\!3{:}3\) \(\to 1\)]
+Group \(w{=}1\): edge \(1\!-\!2\).  usable \(1\) (distinct), merged \(1\) -- excess
+\(0\).  Group \(w{=}3\): before it, comps \(\{1,2\},\{3\}\).  Edges \(2\!-\!3\) and
+\(1\!-\!3\) both join \(\{1,2\}\) to \(\{3\}\): usable \(=2\).  Unions: first merges
+(\(1\)), second now same component (skip): merged \(=1\).  Excess \(2-1=1\).  Total
+\(\mathbf{1}\).
+\end{tracebox}
+\begin{tracebox}[Sample 3: \, \(3\)-cycle \(1\!-\!2{:}1,\ 2\!-\!3{:}2,\ 1\!-\!3{:}3\) \(\to 0\)]
+Three groups \(w{=}1,2,3\), each a single edge.  Every group: usable \(=\) merged
+\(=1\) (or \(0\) for the last, which closes a cycle: usable \(0\)).  Excess \(0\)
+each.  Total \(\mathbf{0}\) -- distinct weights already force a unique MST.
+\end{tracebox}
+\begin{tracebox}[Sample 6: \, \(n=5\): \(1\!-\!2{:}2,2\!-\!3{:}1,4\!-\!5{:}3,2\!-\!4{:}2,1\!-\!4{:}2,1\!-\!5{:}3\) \(\to 2\)]
+\(w{=}1\): \(2\!-\!3\) usable \(1\) merged \(1\) excess \(0\).  \(w{=}2\): block
+\(\{1\!-\!2,2\!-\!4,1\!-\!4\}\) over comps \(\{1\},\{2,3\},\{4\},\{5\}\): all three
+endpoints distinct at check time \(=\) usable \(3\); unions merge into one
+component with \(2\) successful merges, third is a same-weight cycle edge \(=\)
+merged \(2\); excess \(1\).  \(w{=}3\): block \(\{4\!-\!5,1\!-\!5\}\) over
+\(\{1,2,3,4\},\{5\}\): usable \(2\), merged \(1\), excess \(1\).  Total
+\(0+1+1=\mathbf{2}\).
+\end{tracebox}
+The remaining samples -- Sample 1 (an \(8\)-vertex graph whose only surplus sits in
+the weight-\(3\) block) gives \(1\); Sample 2 (a tree) and Sample 5 (\(n=1\)) have
+no cycles, so every group merges everything it can: excess \(0\).  All six
+answers \(1,0,0,1,0,2\) are reproduced.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+   comp/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.8pt,
+               minimum size=7mm, font=\scriptsize\bfseries, inner sep=1pt},
+   grp/.style={rectangle, rounded corners=2pt, draw=difforange!70, fill=difforange!10,
+               line width=0.9pt, inner sep=2pt, font=\scriptsize}]
+  \node[comp] (A) at (0,0) {\(\{1\}\)};
+  \node[comp] (B) at (3,0) {\(\{2,3\}\)};
+  \node[comp] (C) at (1.5,2) {\(\{4\}\)};
+  \draw[difforange, line width=1.3pt] (A)--node[grp] {1-2} (B);
+  \draw[difforange, line width=1.3pt] (B)--node[grp] {2-4} (C);
+  \draw[difforange, line width=1.3pt, dashed] (A)--node[grp] {1-4} (C);
+  \node[annot, font=\scriptsize, text width=8cm, align=center] at (1.5,-1.1)
+    {weight-2 block: usable 3, merged 2, excess 1 (the dashed edge is optional)};
+\end{tikzpicture}
+\caption{Sample 6's weight-\(2\) group.  The three lighter-components
+\(\{1\},\{2,3\},\{4\}\) need only \(2\) merges, but \(3\) edges offer to connect
+them -- the triangle.  One edge is surplus (dashed) and must be lifted by \(1\).}
+\label{fig:c17-groups}
+\end{figure}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Sorting is \(\bigO{m\log m}\); the two-scan group loop is \(\bigO{m\,\alpha(n)}\)
+with path-compressed DSU (\chref{c28}).  Total \(\bigO{m\log m}\) time,
+\(\bigO{n+m}\) space -- comfortable for \(n,m\le 2\cdot 10^5\) in 3 seconds.  The
+counters are conceptually \(\bigO{m}\), but \texttt{long long} is used for the
+answer to be safe.
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+\item \textbf{Two scans are mandatory.}  Counting \(\mathit{usable}\) must read the
+      DSU \emph{before} any union in the block; merging in the same loop (single
+      scan) makes later edges of the block see already-merged components and
+      undercounts usable \(--\) a classic WA.
+\item \textbf{Block boundary.}  Group strictly by equal weight; a graph with
+      \(\bigO{m}\) distinct weights degenerates to single-edge blocks where excess
+      is always \(0\), matching "distinct weights \(\Rightarrow\) unique MST".
+\item \textbf{Disconnected check.}  The problem guarantees connectedness; if you
+      reuse \(\coderef{c17-group}\) elsewhere, verify \(\mathit{merged}\) totals
+      \(n-1\).
+\item \textbf{Overflow.}  The answer is at most \(m\le 2\cdot 10^5\); safe in
+      \texttt{int}, but \texttt{long long} avoids surprises if constraints grow.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Solved: CF 160D -- Edges in MST (2300, L5)}
+% ---------------------------------------------------------------
+
+\solvedproblem{c17-edges}{Edges in MST}{CF 160D}{https://codeforces.com/problemset/problem/160/D}{CF 2300 L5}{equal-weight group contraction, Tarjan bridge-finding, cut / cycle properties, MST edge classification}
+
+\begin{problemstatement}[CF 160D, verified against the live CF problem page]
+A connected weighted undirected graph on \(n\) vertices and \(m\) edges (no loops,
+no multiple edges) is given, each edge \(a,b,w\).  For \textbf{each} edge, decide
+whether it is in \emph{every} MST (print \texttt{any}), in \emph{at least one} MST
+(print \texttt{at least one}), or in \emph{no} MST (print \texttt{none}), reporting
+in input order.  Constraints: \(2\le n\le 10^5\), \(n-1\le m\le\min(10^5,
+n(n-1)/2)\), \(1\le w\le 10^6\).  Time limit 2 seconds, memory 256 MB.  Samples:
+\(4\ 5\) with edges \((1,2,101),(1,3,100),(2,3,2),(2,4,2),(3,4,1)\) \(\to\)
+\texttt{none,any,at least one,at least one,any}; \(3\ 3\) edges
+\((1,2,1),(2,3,1),(1,3,2)\) \(\to\) \texttt{any,any,none}; \(3\ 3\) edges
+\((1,2,1),(2,3,1),(1,3,1)\) \(\to\) \texttt{at least one,at least one,at least one}.
+\end{problemstatement}
+
+\begin{lemma}{Bridge \(\iff\) forced inside a group}{c17-bridge}
+Fix an equal-weight group and contract every strictly-lighter edge, so the group's
+usable edges become the edges \(H\) of a multigraph on the current components.  A
+usable edge lies in \emph{every} MST of \(G\) (is \texttt{any}) \(\iff\) it is a
+\term{bridge} of \(H\): deleting it disconnects \(H\), so it is the unique cheapest
+crossing of the cut its removal defines (\(\thmref{c17-intersect}\)).  A usable
+non-bridge sits on a cycle of \(H\) and is therefore \texttt{at least one}.
+\end{lemma}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.9, transform shape,
+   comp/.style={circle, draw=primaryblue!70, fill=primaryblue!8, line width=0.8pt,
+               minimum size=9mm, font=\scriptsize\bfseries, inner sep=1pt},
+   iso/.style={circle, draw=gray!70, fill=gray!8, line width=0.8pt, dashed,
+               minimum size=9mm, font=\scriptsize\bfseries, inner sep=1pt},
+   nb/.style={line width=1.4pt, draw=difforange}]
+  \node[iso] (A) at (6,0) {\(\{1\}\)};
+  \node[comp] (B) at (0,0.9) {\(\{2\}\)};
+  \node[comp] (C) at (0,-0.9) {\(\{3,4\}\)};
+  \draw[nb,bend left=16] (B)--node[right,font=\scriptsize] {2-3} (C);
+  \draw[nb,bend right=16] (B)--node[left,font=\scriptsize] {2-4} (C);
+  \node[annot, font=\scriptsize, text width=5cm, align=center] at (6,-1.3)
+    {\(\{1\}\) has no \(w{=}2\) edge -- isolated in \(H\)};
+  \node[annot, font=\scriptsize, text width=8cm, align=center] at (0,-2.7)
+    {two parallel edges form a \(2\)-cycle: neither is a bridge \(\to\) both at least one};
+\end{tikzpicture}
+\caption{Sample 1's weight-\(2\) group after contracting the lighter
+\(3\!-\!4{:}1\) edge: components \(\{1\},\{2\},\{3,4\}\).  The only usable edges are
+\(2\!-\!3\) and \(2\!-\!4\), which are \emph{parallel} in \(H\) (a \(2\)-cycle); a bridge must
+lie on no cycle, so neither is a bridge and both are \texttt{at least one}.  Vertex
+\(\{1\}\) has no weight-\(2\) edge, so it is isolated.  Contrast the lone \(w{=}1\) edge
+\(3\!-\!4\) and the lone \(w{=}100\) edge \(1\!-\!3\), each a single bridge in its group and
+therefore \texttt{any}.}\label{fig:c17-edges}
+\end{figure}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 45 minutes]
+A single Kruskal marks the edges it picked, but several MSTs exist -- "picked once"
+is not "in every MST."  You need three answers per edge.  Reduce to one weight
+group at a time: after contracting lighter edges, what graph property separates a
+forced edge from a merely-optional one?
+\peek{Inside a group the lighter components are fixed.  Draw the group's edges on
+those contracted components -- a multigraph \(H\).  Forced edges are exactly the
+bridges of \(H\); usable non-bridges are optional; edges whose endpoints were
+already joined are forbidden. (\(\lemref{c17-bridge}\), \(\thmref{c17-cycle}\).)}
+\nudge{Run group-Kruskal.  For each weight block, build \(H\) from the edges whose
+endpoints lie in distinct pre-block components, then find \(H\)'s bridges with
+Tarjan's \(\mathrm{low}/\mathrm{tin}\) DFS.  A usable edge that is a bridge
+\(\to\) \texttt{any}; a usable non-bridge \(\to\) \texttt{at least one}; an edge with
+both endpoints already in one component \(\to\) \texttt{none}.  Only union the block
+\emph{after} classifying it.}
+\fullhint{Because \(H\) is a multigraph, run bridge-finding keyed on the \emph{edge
+identity} (skip the exact reverse arc, not the parent vertex) so parallel edges are
+correctly seen as non-bridges.  Classify before merging so all block edges see the
+same frozen pre-block DSU.  Total \(\bigO{m\log m}\): the per-group Tarjan work
+sums to \(\bigO{m}\) over all groups.  Full code and three-sample replay below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The trichotomy is decided \emph{inside each equal-weight group} once lighter edges
+are contracted.  An edge forbidden by \(\thmref{c17-cycle}\) has its endpoints
+already joined before its group.  Among usable edges, \(\lemref{c17-bridge}\) makes
+forced-vs-optional a pure graph-connectivity question -- bridges -- on the
+contracted group graph.  So the algorithm is group-Kruskal wrapped around one
+bridge-finding pass per group.
+
+\solstep{Key Observations}
+\begin{observation}
+An edge is \texttt{none} iff, at the moment its weight group is about to run,
+its endpoints are already in the same DSU component -- it is the strictly heaviest
+edge on a cycle of lighter-or-equal edges (\(\thmref{c17-cycle}\)).
+\end{observation}
+\begin{observation}
+Among usable edges of a group, contracting the lighter components turns the group
+into a multigraph \(H\).  A bridge of \(H\) is the unique lightest crossing of the
+cut it induces, hence \texttt{any}; a non-bridge lies on a cycle of equal-weight
+edges, so an MST exists using it and an MST exists avoiding it -- \texttt{at least
+one} (\(\lemref{c17-bridge}\)).
+\end{observation}
+\begin{observation}
+Bridge-finding on a \emph{multigraph} must distinguish parallel edges by identity:
+skipping only the arc you came along (an edge slot), not every arc to the parent
+vertex, otherwise a pair of parallel edges is mis-flagged as two bridges.
+\end{observation}
+
+\solstep{Think It With Me}
+\begin{thinkbox}
+\deadend{Run Kruskal once and print \texttt{any} for taken edges, \texttt{none} for the rest}{Taken-once is neither forced nor even ``in some MST''; Sample 3 has every edge equal weight -- every pair forms an MST, so all are \texttt{at least one}, and single-Kruskal mislabels two of them \texttt{any}.}
+\deadend{For each edge, re-run Kruskal forcing and forbidding it}{\(\bigO{m}\) MST runs at \(\bigO{m\log m}\) each is \(\bigO{m^2\log m}\) -- \emph{TLE} at \(m=10^5\).}
+\aha{Contract lighter edges per weight group, then a single Tarjan bridge pass on
+the group's component graph separates bridges (\texttt{any}) from cycle edges
+(\texttt{at least one}); pre-merged endpoints are \texttt{none}.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.28\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{3}\ one Kruskal & taken \(\to\) any, else none & \(\bigO{m\log m}\) & \textbf{WA}\\
+2 & \lv{4}\ force/forbid per edge & rerun MST \(m\) times & \(\bigO{m^2\log m}\) & \tle\\
+3 & \lv{5}\ \textbf{group + bridges} & contract, Tarjan \(H\) & \(\bigO{m\log m}\) & \ac\\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 ignores ties (fails Sample 3); rung 2 is correct but quadratic.  Rung 3 uses
+the bridge characterisation to classify a whole group in linear time.
+
+\solstep{Solution}
+Sort edges by weight and walk maximal equal-weight blocks with the DSU frozen at
+the pre-block state.  For the block, discard edges whose endpoints are already
+together (\texttt{none}); renumber the surviving components and add the remaining
+(usable) edges as slots of a multigraph \(H\).  Run Tarjan bridge-finding on \(H\): a
+usable edge that is a bridge is \texttt{any}, otherwise \texttt{at least one}.  Only
+after classifying the block, union \emph{all} its usable edges so the next group
+sees the merged components.  Print the label per original edge index.
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 160D. Per weight group: contract lighter edges, build the multigraph H of usable edges, Tarjan bridges (skip only the reverse edge-slot, so parallel edges are never false bridges). bridge->any, non-bridge usable->at least one, pre-merged->none. Union the whole block only after classifying}, label={lst:c17-edges}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Edge { int u, v, w, id; };
+const int MAXN = 100005;
+int dsu[MAXN];
+int findSet(int x){ return dsu[x]==x ? x : dsu[x]=findSet(dsu[x]); }
+int res[MAXN];                     // 0 none, 1 at least one, 2 any
+vector<pair<int,int> > adj[MAXN];  // (compact neighbour, edge-slot) for H
+int tinA[MAXN], lowA[MAXN], clk;
+vector<int> isBridge;
+void dfsBridge(int v, int pe){
+  tinA[v]=lowA[v]=++clk;
+  for(size_t i=0;i<adj[v].size();i++){
+    int to=adj[v][i].first, eid=adj[v][i].second;
+    if(eid==pe) continue;                       // skip ONLY the reverse slot
+    if(tinA[to]) lowA[v]=min(lowA[v], tinA[to]);
+    else { dfsBridge(to,eid); lowA[v]=min(lowA[v],lowA[to]);
+           if(lowA[to]>tinA[v]) isBridge[eid]=1; }
+  }
+}
+int main(){
+  int n,m; scanf("%d %d",&n,&m);
+  vector<Edge> e(m);
+  for(int i=0;i<m;i++){ scanf("%d %d %d",&e[i].u,&e[i].v,&e[i].w); e[i].id=i; }
+  sort(e.begin(), e.end(), [](const Edge&a,const Edge&b){return a.w<b.w;});
+  for(int i=1;i<=n;i++) dsu[i]=i;
+  for(int i=0;i<m;){
+    int j=i; while(j<m && e[j].w==e[i].w) j++;            // block [i,j)
+    unordered_map<int,int> comp; int cn=0;
+    vector<pair<int,int> > us;                            // (ca,cb) per slot
+    vector<int> usId;                                      // original edge id per slot
+    for(int k=i;k<j;k++){
+      int a=findSet(e[k].u), b=findSet(e[k].v);
+      if(a==b){ res[e[k].id]=0; continue; }               // none
+      if(!comp.count(a)) { comp[a]=cn; adj[cn].clear(); cn++; }
+      if(!comp.count(b)) { comp[b]=cn; adj[cn].clear(); cn++; }
+      us.push_back(make_pair(comp[a], comp[b])); usId.push_back(e[k].id);
+    }
+    for(int s=0;s<(int)us.size();s++){                    // build H (multi-edge)
+      int ca=us[s].first, cb=us[s].second;
+      adj[ca].push_back(make_pair(cb,s)); adj[cb].push_back(make_pair(ca,s));
+    }
+    isBridge.assign(us.size(),0); clk=0;
+    for(int t=0;t<cn;t++) tinA[t]=0;
+    for(int t=0;t<cn;t++) if(!tinA[t]) dfsBridge(t,-1);    // Tarjan per component
+    for(int s=0;s<(int)us.size();s++)
+      res[usId[s]] = isBridge[s] ? 2 : 1;                 // bridge->any, else at least one
+    i=j;
+  }
+  for(int id=0;id<m;id++)
+    puts(res[id]==2?"any":(res[id]==1?"at least one":"none"));
+  return 0;
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Samples}
+\begin{tracebox}[Sample 1: \, \(4\) vertices, edges \(1\!-\!2{:}101,\ 1\!-\!3{:}100,\ 2\!-\!3{:}2,\ 2\!-\!4{:}2,\ 3\!-\!4{:}1\)]
+\(w{=}1\): \(3\!-\!4\) joins \(\{3\},\{4\}\) -- single bridge \(\to\) \texttt{any}; union
+\(\{3,4\}\).  \(w{=}2\): comps \(\{1\},\{2\},\{3,4\}\); edges \(2\!-\!3\) (\(\{2\}\!-\!\{3,4\}\))
+and \(2\!-\!4\) (\(\{2\}\!-\!\{3,4\}\)) are \emph{parallel} in \(H\) -- a \(2\)-cycle, no
+bridge \(\to\) both \texttt{at least one}; union \(\{2,3,4\}\).  \(w{=}100\): \(1\!-\!3\)
+joins \(\{1\},\{2,3,4\}\), single bridge \(\to\) \texttt{any}.  \(w{=}101\): \(1\!-\!2\)
+endpoints already together \(\to\) \texttt{none}.  Input order:
+\texttt{none,any,at least one,at least one,any}. \(\checkmark\)
+\end{tracebox}
+\begin{tracebox}[Sample 2: \, \(1\!-\!2{:}1,\ 2\!-\!3{:}1,\ 1\!-\!3{:}2\)]
+\(w{=}1\): \(H\) on \(\{1\},\{2\},\{3\}\) has edges \(1\!-\!2,\ 2\!-\!3\) -- a path, both
+bridges \(\to\) \texttt{any,any}; union all.  \(w{=}2\): \(1\!-\!3\) endpoints together
+\(\to\) \texttt{none}.  Output \texttt{any,any,none}. \(\checkmark\)
+\end{tracebox}
+\begin{tracebox}[Sample 3: \, triangle \(1\!-\!2{:}1,\ 2\!-\!3{:}1,\ 1\!-\!3{:}1\)]
+One group \(w{=}1\): \(H\) is the triangle on \(\{1\},\{2\},\{3\}\) -- no bridge, so all
+three are \texttt{at least one}.  Output \texttt{at least one, at least one, at least
+one}. \(\checkmark\)
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Sorting is \(\bigO{m\log m}\).  Each edge enters exactly one group's \(H\) and is
+touched once by the two-scan plus the Tarjan DFS, whose total work over all groups
+is \(\bigO{n+m}\).  Hence \(\bigO{m\log m}\) time overall and \(\bigO{n+m}\) space --
+comfortable for \(n,m\le 10^5\) in 2 seconds.  The strings are printed verbatim
+lowercase; a capital \texttt{Any} is a presentation-error WA.
+\end{complexitybox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+\item \textbf{Classify before unioning} the block: every usable edge must see the
+      same frozen pre-block DSU, or the group's \(H\) collapses and forced edges look
+      forbidden.
+\item \textbf{Multigraph bridges:} skip only the reverse edge-slot, never every arc
+      to the parent vertex; parallel edges must come out non-bridges (Sample 1's
+      \(w{=}2\) pair).
+\item \textbf{Reset per group:} clear the compact adjacency and re-initialise
+      \(\mathrm{tin}\)/timestamp for the \(0..cn{-}1\) nodes you use.
+\item \textbf{Forbidden first:} endpoints already merged \(\to\) \texttt{none}
+      must be excluded from \(H\) before bridge-finding, not classified afterwards.
+\end{itemize}
+\end{hardeningbox}
+
+\begin{recallbox}[Recall -- what \(\secref{c17-classify}\) gave you]
+\selftest{
+  \item State the intersection and cycle properties in one line each.
+  \item Why can two equal-weight edges impose \emph{no} tie?
+  \item Give the per-group formula for the optional-edge excess.
+  \item Why does one \(+1\) increment fix exactly one surplus edge, and never the MST weight?
+  \item In CF 160D, why is a bridge of the contracted group graph exactly a \texttt{any} edge?
+}
+\end{recallbox}

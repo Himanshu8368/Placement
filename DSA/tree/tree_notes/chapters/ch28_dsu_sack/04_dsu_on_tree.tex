@@ -1,0 +1,666 @@
+% =====================================================================
+%  17.4  DSU on Tree (Sack)                            sec:c28-sack
+%  Exports: def:c28-sack  thm:c28-sack  prop:c28-sack-handoff
+%           lst:c28-sack  ex:c28-sacktrace
+%           prob:c28-600e  lst:c28-600e-soln
+%  Tables hand-computed on T (fig:c28-tree).  colour
+%    c=(1,2,1,3,2,1,3,2,1,3);  subtree size=(10,4,5,1,2,1,3,1,2,1);
+%    big child=(3,5,7,-,8,-,9,-,10,-).
+%  CF-600E-style "sum of dominating colours" on T = (1,2,1,3,2,1,3,2,4,3).
+%  This section DISCHARGES the Ch.16 forward cite (ch11_lca/99_chapter_end,
+%  "DSU-on-tree takes the depth-bucket idea and makes subtree queries with
+%  per-node answers run in O(n log n)").
+% =====================================================================
+\section{DSU on Tree (Sack)}\label{sec:c28-sack}
+
+\begin{previouslybox}[Sections 17.1--17.3 kept a container per node; the sack keeps one]
+\secref{c28-s2l} handed every node its own set and merged small into large.
+That is correct and \(\bigO{n\log n}\), but it allocates a container per node
+and answers only what a set can.  \textbf{DSU on tree}, nicknamed
+\emph{sack}, throws the containers away: a \emph{single} global array holds the
+answer while a DFS visits every node, and the subtree you just finished is
+\emph{kept} exactly when the parent would have needed to rebuild it anyway.
+Same asymptotics, one allocation, and it answers far richer per-node questions
+-- the majority colour (CF~600E here), the deepest level, the count of a value.
+\end{previouslybox}
+
+\begin{topicintro}
+\term{DSU on tree} (a.k.a.\ \emph{sack}, a.k.a.\ \emph{heavy-light subtree
+accumulation}) answers \emph{every} subtree query of the form ``reduce the
+multiset of values under \(v\) to one number'' in a single
+\(\bigO{n\log n}\) DFS.  The schedule is the whole trick: process all
+\emph{light} children first and immediately \emph{clear} their contribution,
+process the one \emph{big} (largest-subtree) child last and \emph{keep} its
+contribution, then add only the node \(u\) and the light subtrees on top of the
+kept data.  A node's colour is re-added only when it lies on a light edge, and
+a node has \(O(\log n)\) light edges on its path to the root -- so the total
+add/clear work is \(\bigO{n\log n}\).
+
+The name is honest marketing and a little misleading: the structure is
+accumulated with \emph{an array and a recursion flag}, not with a union-find
+(\secref{c28-dsu}); what is ``on tree'' is the heavy/light decomposition of
+Section~\ref{sec:c28-s2l}'s merge argument.  We keep the community name.
+
+\textbf{Prerequisites.} \secref{c28-s2l} for the doubling/light-edge accounting
+(\thmref{c28-s2l}); Chapter~13 (\chref{c10}) for the bottom-up per-subtree
+template (\thmref{c10-subtree-template}); and Chapter~16 (\chref{c11}) for the
+\(\tin/\tout\) subtree interval (\propref{c11-interval}) and the depth-bucket
+query of CF~208E -- this section is exactly what Ch.16 promised to build on top
+of them (\propref{c28-sack-handoff} below discharges that promise).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item state the sack schedule and why the \code{keep} flag is set exactly once
+        per node; \hfill\lv{4}
+  \item prove the \(\bigO{n\log n}\) bound from the light-edge count; \hfill\lv{5}
+  \item choose between \(\coderef{c28-s2l}\)'s container merge and the sack for
+        a given per-subtree aggregate; \hfill\lv{4}--\lv{5}
+  \item solve subtree-majority and depth-dominance problems end to end.
+        \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``one aggregate per subtree, all answered'']
+\reckey{``for each vertex \(v\), the sum of the colours that dominate
+(subtree \(v\))''; ``the deepest level with a node, for every \(v\)''; ``count
+of colour \(c\) in subtree \(v\) for all \(v\)''; any problem that wants the
+\emph{same} multiset reduction at \emph{every} node, where the reduction needs
+more than a set can store.}
+\recuse{
+  \item per-node aggregates over the whole subtree, value range large (needing
+        a frequency map) -- the sack (\defref{c28-sack});
+  \item the aggregate is ``the dominant/most-frequent colour'' or ``the mode''
+        -- sack, since a container merge throws away the counts it would need;
+  \item you want the smallest constant and one global array beats \(n\) heap
+        containers -- sack.
+}
+\recnotuse{
+  \item only the \emph{number of distinct} values per subtree, no counts --
+        \(\coderef{c28-s2l}\)'s set merge is simpler and equally fast;
+  \item a \emph{fixed tiny} alphabet -- carry an array and fold in \(\bigO{n}\)
+        (Ch.13's CF~570D, \thmref{c10-subtree-template});
+  \item online updates between queries -- you need Euler-tour + segment tree
+        (Ch.~5, \chref{c24}), not one static DFS;
+  \item path (not subtree) queries -- heavy-light decomposition, later.
+}
+One-line test: \emph{must every node report a count/frequency-based summary of
+its subtree, over a large value range?  Then accumulate one global bag with the
+heavy child kept and the light children cleared.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The Bag You Refuse to Throw Away}
+% ---------------------------------------------------------------
+
+Split a node \(u\)'s children into the one with the \emph{largest subtree},
+\(\mathit{big}(u)\) (the \emph{heavy} child), and the rest (the \emph{light}
+children).  The sack computes, for each \(u\):
+
+\begin{enumerate}[nosep,leftmargin=1.5em]
+  \item the answer for every light child, \emph{each discarded right after}
+        (a \code{keep=false} pass);
+  \item the answer for the heavy child, \emph{kept} (\code{keep=true}) so that
+        its colour counts stay in the global array;
+  \item a single sweep that adds \(u\) itself and every node of every light
+        subtree into that kept array;
+  \item \(u\)'s answer, read straight off the now-complete bag;
+  \item if \(u\)'s own result will not be needed by its parent, a symmetric
+        sweep that clears \(u\)'s whole subtree.
+\end{enumerate}
+
+The data the heavy child built is \emph{reused} by \(u\) at zero cost, so a node
+is ever (re)inserted only for light edges it crosses on the way up.
+
+\begin{definition}{DSU on tree (sack)}{c28-sack}
+Root the tree and let \(\mathit{big}(u)\) be the child of \(u\) of maximum
+subtree size (ties by any fixed rule).  Maintain one global structure
+\(\mathcal{B}\) (the \emph{bag}) over colours, and a boolean array
+\(\mathit{keep}[\cdot]\) marking children currently exempt from a sweep.  The
+recursive routine \(\mathrm{dfs}(u,p,\mathit{keep})\) does, in order: for every
+child \(v\ne p\), \(v\ne\mathit{big}(u)\), \(\mathrm{dfs}(v,u,\mathsf{false})\);
+then \(\mathrm{dfs}(\mathit{big}(u),u,\mathsf{true})\) and mark
+\(\mathit{big}(u)\) exempt; then add \(u\) and all non-exempt descendants into
+\(\mathcal{B}\); record \(u\)'s answer from \(\mathcal{B}\); unmark
+\(\mathit{big}(u)\); and if \(\mathit{keep}=\mathsf{false}\), remove all of
+\(u\)'s subtree from \(\mathcal{B}\).
+\end{definition}
+
+\begin{theorem}{The sack runs in \(\bigO{n\log n}\)}{c28-sack}
+On \(n\) nodes, \defref{c28-sack} performs \(\bigO{n\log n}\) insertions and
+deletions from \(\mathcal{B}\).  With \(\bigO{1}\) bag updates the whole
+chapter-lane algorithm is \(\bigO{n\log n}\); each node's aggregate is produced
+by reading \(\mathcal{B}\) once, so \(n\) queries are answered for the price of
+one DFS.
+\end{theorem}
+\begin{proofbox}
+Call a tree edge \emph{light} if it goes from a parent to a non-\(\mathit{big}\)
+child, and \emph{heavy} otherwise.  Consider one node \(x\).  It is inserted
+into \(\mathcal{B}\) exactly when some ancestor \(a\) performs its ``add \(a\)
+and its light descendants'' sweep and the child of \(a\) on the path down to
+\(x\) is a light child -- i.e.\ once per light edge on the root-to-\(x\) path
+(plus its own subtree's one kept pass, which costs nothing extra because that
+pass is the heavy child's own kept bag).  Now count light edges on a root path.
+Whenever the path crosses a light edge into child \(w\), the subtree of \(w\) is
+strictly smaller than the subtree of the parent (else \(w\) would be the big
+child).  So crossing a light edge at least \emph{halves} the remaining subtree
+size; there are at most \(\log_2 n\) halvings from \(n\) to \(1\).  Hence each
+node crosses \(\le\lceil\log_2 n\rceil\) light edges, is inserted and deleted
+\(\bigO{\log n}\) times, and summing over the \(n\) nodes gives
+\(\bigO{n\log n}\) bag operations.  Clearing (the \(\mathit{keep}=\mathsf{false}\)
+sweep) is symmetric and adds no extra asymptotic term.  Each node reads
+\(\mathcal{B}\) once, so per-node answers are free within the same bound.
+\end{proofbox}
+
+\begin{proposition}{From depth buckets to per-node answers (the Ch.16 handoff)}{c28-sack-handoff}
+Chapter~16 (\chref{c11}) answered CF~208E's ``how many nodes at depth \(d\)
+inside the subtree of \(v\)?'' by building, \emph{once}, a global
+\(\mathit{bucket}[d]\) list of \(\tin\) values and, per query, binary-searching
+the \(\tin/\tout\) interval of \(v\) (\propref{c11-interval}): static buckets,
+one query at a time, \(\bigO{\log n}\) each.  The sack is the same
+``aggregate a subtree's node set'' posture made \emph{per-node and value-aware}:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item the bag \(\mathcal{B}\) replaces the bucket arrays -- it is rebuilt and
+        torn down by add/clear sweeps instead of being pre-sorted by \(\tin\);
+  \item the interval test of \propref{c11-interval} is \emph{replaced by
+        recursion}: a subtree is materialised in \(\mathcal{B}\) precisely for
+        the instant its root's answer is read, then discarded;
+  \item because \(\mathcal{B}\) can hold a \emph{frequency map} (not just a
+        membership list), the answer generalises from ``count at one depth'' to
+        ``sum of dominant colours'' (CF~600E) or ``dominant depth''
+        (Chapter~17's Summit, \(\probref{c28-summit}\)).
+\end{itemize}
+Thus the \(O(n\log n)\)-per-node promise Ch.16 attached to this section is met:
+all subtree aggregates fall out of one DFS, with no per-query binary search.
+\end{proposition}
+
+% ---------------------------------------------------------------
+\subsection{Implementation}
+% ---------------------------------------------------------------
+
+\begin{lstlisting}[caption={the sack skeleton: sizes first, then the keep/big schedule}, label={lst:c28-sack}]
+int sz_[MN], big[MN], col[MN];   // big[u] = heaviest child of u
+bool vis[MN];                  // child currently exempt from a sweep
+Bag B;                       // your global structure: counts, sums, whatever
+
+int getsz(int u, int p) {                 // 1. subtree sizes + big child
+    sz_[u] = 1; big[u] = 0;
+    int best = -1;
+    for (int v : adj[u]) if (v != p) {
+        int s = getsz(v, u);
+        sz_[u] += s;
+        if (s > best) { best = s; big[u] = v; }   // heaviest child
+    }
+    return sz_[u];
+}
+
+void add(int u, int p, int delta) {        // 2. sweep u's subtree into / out of B
+    B.update(col[u], delta);
+    for (int v : adj[u])
+        if (v != p && !vis[v]) add(v, u, delta);   // skip the KEPT heavy child
+}
+
+void dfs(int u, int p, int keep) {
+    for (int v : adj[u]) if (v != p && v != big[u])
+        dfs(v, u, 0);                      // light children: compute then clear
+    if (big[u]) { dfs(big[u], u, 1); vis[big[u]] = true; }  // heavy: KEEP + exempt
+    add(u, p, +1);                         // add u + all light subtrees
+    ans[u] = B.query();                    // the whole subtree of u is in B now
+    if (big[u]) vis[big[u]] = false;
+    if (!keep) add(u, p, -1);              // clear u's subtree unless kept
+}
+// call: getsz(1, 0); dfs(1, 0, 0);
+\end{lstlisting}
+
+Two things carry the correctness.  \code{vis[big[u]]=true} must be set
+\emph{after} the heavy child's \code{dfs} and cleared \emph{before} any outer
+subtree is cleared, so that the kept bag is neither double-added by
+\(\code{add}\) nor prematurely emptied.  And \code{add} walks \emph{only} the
+non-exempt children \code{!vis[v]}, so the heavy subtree -- already present --
+is skipped on the way in and (once un-exempted) fully removed on the way out.
+
+\begin{complexitybox}[Sack]
+\textbf{Bag operations:} \(\bigO{n\log n}\) (\thmref{c28-sack}); each node is
+inserted/deleted once per light edge above it.  \textbf{Time:}
+\(\bigO{n\log n}\) for \(\bigO{1}\) updates, \(\bigO{n\log^2 n}\) if each
+update is \(\bigO{\log n}\).  \textbf{Memory:} \(\bigO{n}\) for the single bag
+plus \(sz\)/\(\mathit{big}\)/\(\mathit{ans}\) -- \emph{one} structure, no per-node
+containers.  \textbf{Recursion:} depth \(O(n)\) on a chain; the sweeps add a
+second recursion, so a chain is a genuine \re\ risk -- see the hardening note.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Sack vs the Other ``Merge Upward'' Tools}
+% ---------------------------------------------------------------
+
+\begin{comparisonbox}[Three ways to fold a subtree, from cheapest data to richest]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Fixed-size fold} (\thmref{c10-subtree-template}, Ch.13) -- the
+        answer at \(u\) is a sum/max/count over children plus \(u\): \(\bigO{n}\),
+        no bag, no heavy child.  Use whenever the summary has \(O(1)\) shape.
+  \item \textbf{Small-to-large containers} (\secref{c28-s2l}) -- one set/map
+        \emph{per node}, merged small-into-big: \(\bigO{n\log n}\) /
+        \(\bigO{n\log^2 n}\).  Great for \emph{distinctness}; awkward once you
+        need live counts, because the container is a black box you re-scan.
+  \item \textbf{Sack} (this section) -- \emph{one global} bag, heavy child kept:
+        \(\bigO{n\log n}\) with a smaller constant than (2), and it answers
+        \emph{count/mode/depth-dominance} questions that need the whole
+        frequency profile in \(\bigO{1}\) per update.  The price is the fiddly
+        \code{keep}/exempt discipline and the double recursion.
+\end{itemize}
+Pick by the \emph{shape of the answer}, not the difficulty label: scalar ->
+(1); ``how many distinct'' -> (2); ``which value wins, by how much'' -> (3).
+\end{comparisonbox}
+
+% ---------------------------------------------------------------
+\subsection{Worked Example: The Sack Schedule on \(T\)}
+% ---------------------------------------------------------------
+
+\begin{example}{Sack on \(T\): heavy child kept, light children cleared}{c28-sacktrace}
+Run \(\coderef{c28-sack}\) on \(T\) (\figref{c28-tree}) with
+\(c=(1,2,1,3,2,1,3,2,1,3)\), subtree sizes \(\size=(10,4,5,1,2,1,3,1,2,1)\) and
+\(\mathit{big}=(3,5,7,\_,8,\_,9,\_,10,\_)\) (node~4,6,8,10 are leaves).  The bag
+\(\mathcal{B}\) records \((\#1,\#2,\#3)\) -- how many nodes of each colour are
+present -- and we read \(\mathrm{ans}(u)=\) the sum of colours at the current
+maximum frequency (CF~600E's dominating-colour sum).  Children are visited in
+adjacency order.
+\end{example}
+
+\begin{tracebox}[Sack on \(T\): answers in \code{dfs} order, bag snapshot at each read]
+{\small
+\[
+\renewcommand{\arraystretch}{1.18}
+\begin{array}{c|c|c|c|c|c|c}
+\text{node} & \text{keep} & \text{bag }(\#1,\#2,\#3) & \text{mf} & \text{dominant} & \text{ans} & \text{after}\\\hline
+4  & 0 & (0,0,1) & 1 & \{3\}   & 3 & \text{clear}\to(0,0,0)\\
+8  & 1 & (0,1,0) & 1 & \{2\}   & 2 & \text{kept}\\
+5  & 1 & (0,2,0) & 2 & \{2\}   & 2 & \text{kept}\\
+2  & 0 & (0,3,1) & 3 & \{2\}   & 2 & \text{clear}\to(0,0,0)\\
+6  & 0 & (1,0,0) & 1 & \{1\}   & 1 & \text{clear}\to(0,0,0)\\
+10 & 1 & (0,0,1) & 1 & \{3\}   & 3 & \text{kept}\\
+9  & 1 & (1,0,1) & 1 & \{1,3\} & 4 & \text{kept}\\
+7  & 1 & (1,0,2) & 2 & \{3\}   & 3 & \text{kept}\\
+3  & 1 & (3,0,2) & 3 & \{1\}   & 1 & \text{kept}\\
+1  & 1 & (4,3,3) & 4 & \{1\}   & 1 & \text{kept}
+\end{array}
+\]}
+Read top to bottom as the order \(\mathrm{dfs}(1)\) actually returns.  Nodes
+\(4,2,6\) are light children (keep\(=0\)): their bag is wiped the instant their
+answer is taken, which is why node~5 starts from \((0,0,0)\) despite node~4
+belonging to the same subtree as far as node~2 is concerned -- node~4's colour
+is \emph{re-added} by node~2's own sweep.  The chain \(10\to9\to7\to3\to1\) is
+all heavy edges, so \(\mathcal{B}\) only ever \emph{grows} through those five
+reads; that is the reuse the light-edge count of \thmref{c28-sack} bills for the
+first time and then never charges again.  Final vector
+\(\mathrm{ans}=(1,2,1,3,2,1,3,2,4,3)\).
+\end{tracebox}
+
+\begin{insightbox}[Why node 9 answers 4]
+Subtree(9)=\(\{9,10\}\) with colours \(1,3\) -- a two-way tie at frequency~1,
+so \emph{both} dominate and CF~600E sums them: \(1+3=4\).  The bag shows
+\((1,0,1)\), \(\mathit{mf}=1\), and the bucket at frequency~1 holds colours
+\(\{1,3\}\).  A single-mode query would have to break the tie arbitrarily;
+the ``sum of all dominators'' definition sidesteps the tie-break and is exactly
+what makes the frequency-bucket bookkeeping in \(\coderef{c28-600e-soln}\)
+necessary rather than decorative.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 600E Lomsat gelral}
+% ---------------------------------------------------------------
+
+\solvedproblem{c28-600e}{Lomsat gelral}{CF 600E}
+  {https://codeforces.com/problemset/problem/600/E}{CF 2300 L5}
+  {DSU on tree (sack), subtree frequency map, dominating-colour sum}
+
+\begin{problemstatement}[CF 600E Lomsat gelral]
+A tree of \(n\) vertices rooted at~1; vertex \(i\) has colour \(c_i\).  A colour
+\(c\) \textbf{dominates} the subtree of \(v\) if no other colour appears
+\emph{more often} than \(c\) in \(v\)'s subtree (several colours may dominate
+together).  For \textbf{every} vertex \(v\), print the \textbf{sum of all
+colours that dominate} the subtree of \(v\).
+
+\textbf{Input.} \(n\) (\(1\le n\le10^5\)); then \(n\) integers
+\(c_1..c_n\) (\(1\le c_i\le n\)); then \(n-1\) edges \(u\ v\).
+
+\textbf{Output.} \(n\) integers -- the dominating-colour sums for
+\(1,2,\dots,n\).
+
+\textbf{Examples.}
+\begin{verbatim}
+Input 1:            Output 1:
+4                   10 9 3 4
+1 2 3 4
+1 2
+2 3
+2 4
+
+Input 2:            Output 2:
+6                   6 4 3 4 4 2
+1 2 3 4 4 2
+1 2
+1 6
+2 3
+2 4
+2 5
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 40 minutes]
+A fair first attempt: DFS each subtree building a \code{map<colour,count>},
+track the max, sum the colours at the max.  That is \(\bigO{n^2}\) on a chain
+and \(n\le10^5\) says so.  The small-to-large of \secref{c28-s2l} gets you to
+\(\bigO{n\log^2 n}\) -- correct, but you re-scan a container to find the mode.
+The task is to make the \emph{mode read} \(\bigO{1}\) too.
+\peek{what single global frequency table could hold the current subtree, if you
+never had to rebuild it for the heaviest child?}
+\nudge{keep the heaviest child's table and only add the light subtrees on top
+(the sack, \defref{c28-sack}).  To read the mode-sum in \(\bigO{1}\), bucket
+colours by how often they occur: \code{freq\_sum[k]} = sum of colours seen
+exactly \(k\) times.}
+\fullhint{Sack (\(\coderef{c28-sack}\)) with bag = two arrays
+\code{cnt[colour]} and \code{freq\_sum[frequency]} plus a running
+\code{maxfreq}.  On every colour add/remove, move the colour between its old
+and new frequency buckets in \(\bigO{1}\) and slide \code{maxfreq}.  Then
+\(\mathrm{ans}(u)=\code{freq\_sum[maxfreq]}\).  Total \(\bigO{n\log n}\).  The
+full build is below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+The reduction ``dominating colour = maximal frequency; answer = sum over the
+colours tied at that maximum'' is a \emph{mode with a tie-sum}, so the object
+under each node is a full colour-frequency table, not a set -- \secref{c28-s2l}
+would work but must be augmented to answer ``which colour(s) are largest''
+\(\bigO{1}\) times, and re-scanning the map per node is \(\bigO{n}\) per node
+again.  Colours are already \(\le n\), so no hashing/compression is needed: a
+plain array indexed by colour works.  The problem is exactly the sack's
+signature -- one rich per-node aggregate, static tree, large value range.
+
+\solstep{Key Observations}
+\begin{observation}
+\textbf{A tie must be summed, not broken.} The definition explicitly allows
+several dominating colours, so the answer is a \emph{sum over all colours at the
+maximum frequency}, not \code{argmax}.  That is why the bag keeps a second
+array, \code{freq\_sum}: ``the sum of colours currently occurring \(k\) times''
+so that the query is \(\code{freq\_sum[maxfreq]}\) in \(\bigO{1}\).
+\end{observation}
+\begin{observation}
+\textbf{The mode is dynamic under add/clear.} As the sack inserts and removes
+whole subtrees, a colour's frequency moves \(\pm1\); every move must update
+\code{maxfreq} \emph{and} relocate the colour between two \code{freq\_sum}
+buckets.  Getting the decrement's \code{maxfreq} slide exactly right (it drops
+by one, and only when the top bucket empties) is the one non-trivial line --
+the rest is \(\coderef{c28-sack}\) verbatim.
+\end{observation}
+\begin{observation}
+\textbf{Colours are dense and \(n\) small.} \(c_i\le n\) and \(n\le10^5\):
+arrays sized \(n\) suffice, and \(\bigO{n\log n}\) with a tiny constant clears
+the limit.  No segment tree over time, no hashing -- the frequency array
+\emph{is} the bag.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{DFS each subtree into a fresh \code{unordered\_map}, take the max}
+{Correct and simple, but \(\bigO{n^2}\) on a chain -- \(2\cdot10^5\) nodes
+re-touched at every ancestor.  The brute force is the thing the sack exists to
+kill; do not ``optimise'' it with a faster map, restructure it.}
+\deadend{Small-to-large \code{map<colour,count>} from \(\coderef{c28-s2l-dp}\)}
+{This is legitimately \(\bigO{n\log n}\) if you also maintain the mode inside
+each map, but ``mode of a map that another map is being merged into'' forces you
+to recompute the max after every merge step.  Keep it if you like containers,
+but the global-bag sack answers the mode in \(\bigO{1}\) with less code and a
+smaller constant, and generalises to \(\probref{c28-summit}\)'s depth dominance.}
+\aha{Accumulate the whole subtree into one global frequency array, keep the
+heavy child for free, and bucket colours by their frequency so the dominating
+sum is \(\code{freq\_sum[maxfreq]}\).}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ per-node map & fresh \code{map} per subtree, scan for max & \(\bigO{n^2}\) & \tle \\
+2 & \lv{4}\ small-to-large & merge \code{count}-maps, re-find max & \(\bigO{n\log n}\) & \ac \\
+3 & \lv{5}\ \textbf{sack} & global bag + \code{freq\_sum} buckets (\(\coderef{c28-sack}\)) & \(\bigO{n\log n}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is the \secref{c28-s2l} tool applied honestly; rung~3 wins on constant
+and on the \(\bigO{1}\) mode read that rung~2 cannot amortise.
+
+\solstep{Solution}
+Precompute subtree sizes and \(\mathit{big}[\cdot]\) (\code{getsz}).  Run
+\(\mathrm{dfs}(1,0,\mathsf{true})\).  Maintain the bag as two arrays:
+\code{cnt[col]} (current frequency of a colour) and \code{freq\_sum[f]} (sum of
+colours at frequency \(f\)), plus \code{maxfreq}.  A helper \code{bump(col,+1/-1)}
+moves a colour from bucket \code{cnt[col]} to bucket
+\code{cnt[col]}\(\pm1\), adjusts \code{maxfreq} upward on insert and slides it
+down by one on a clear only when the top bucket has emptied.  \code{add} sweeps
+a subtree (skipping exempt heavy children) calling \code{bump}; after a node's
+light subtrees and self are added, \(\mathrm{ans}(u)=\code{freq\_sum[maxfreq]}\).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Bag completeness.} By induction on \defref{c28-sack}'s \(\mathrm{dfs}\):
+when \(\mathrm{ans}(u)\) is read, \(\mathcal{B}\) holds exactly the colour
+multiset of subtree(\(u\)).  Base: a leaf's heavy set is empty, \code{add} adds
+just it, so \(\mathcal{B}=\) its colour -- correct.  Step: the heavy child's
+\(\mathrm{dfs}(\mathit{big}(u),\cdot,\mathsf{true})\) leaves subtree
+(\(\mathit{big}(u)\)) in \(\mathcal{B}\); each light child's
+\(\mathrm{dfs}(\cdot,\mathsf{false})\) had cleared itself, and the following
+\code{add(\(u\),\(+1\))} re-inserts \(u\) plus every light subtree (it skips
+only the exempt heavy child).  Union = subtree(\(u\)), no duplicates.
+\textbf{Mode read.} \code{freq\_sum[f]} is maintained as the sum of colours at
+frequency \(f\), and \code{maxfreq} as the largest \(f\) with a nonempty bucket;
+so \(\code{freq\_sum[maxfreq]}\) is the sum of exactly the dominating colours.
+\textbf{Clear symmetry.} The \(\mathit{keep}=\mathsf{false}\) sweep calls
+\code{add(\(u\),\(-1\))} after un-exempting the heavy child, removing each of
+subtree(\(u\))'s nodes once -- the inverse of how they were added, restoring the
+parent's bag to exactly what it was before.  \textbf{Cost.} \thmref{c28-sack}
+gives \(\bigO{n\log n}\) bag operations, each \(\bigO{1}\) here, so the answers
+are produced in \(\bigO{n\log n}\).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 600E full solution (sack + frequency buckets)}, label={lst:c28-600e-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+const int MN = 100005;
+vector<int> adj[MN];
+int col[MN], sz_[MN], big[MN];
+bool vis[MN];       // child currently exempt from a sweep
+ll cnt[MN];         // cnt[c]  = how many nodes of colour c are in the bag
+ll freqsum[MN];     // freqsum[k] = sum of colours currently at frequency k
+int maxfreq;        // largest k with freqsum[k] != 0
+ll ans[MN];
+
+void bump(int c, int delta) {          // move colour c by +/-1 frequency
+    int o = cnt[c];
+    freqsum[o] -= c;                   // leaves bucket o  (o may be 0: harmless)
+    cnt[c] = o + delta;
+    freqsum[o + delta] += c;           // enters bucket o+delta
+    if (delta > 0) { if (o + delta > maxfreq) maxfreq = o + delta; }
+    else if (maxfreq == o && freqsum[o] == 0) maxfreq--;   // slide down on clear
+}
+void add(int u, int p, int delta) {    // sweep subtree of u, skipping kept heavy
+    bump(col[u], delta);
+    for (int v : adj[u]) if (v != p && !vis[v]) add(v, u, delta);
+}
+void dfs(int u, int p, int keep) {
+    for (int v : adj[u]) if (v != p && v != big[u]) dfs(v, u, 0);
+    if (big[u]) { dfs(big[u], u, 1); vis[big[u]] = true; }
+    add(u, p, 1);
+    ans[u] = freqsum[maxfreq];         // sum of the dominating colours
+    if (big[u]) vis[big[u]] = false;
+    if (!keep) add(u, p, -1);
+}
+int getsz(int u, int p) {
+    sz_[u] = 1;
+    int best = -1;
+    for (int v : adj[u]) if (v != p) {
+        int s = getsz(v, u);
+        sz_[u] += s;
+        if (s > best) { best = s; big[u] = v; }
+    }
+    return sz_[u];
+}
+int main() {
+    int n; scanf("%d", &n);
+    for (int i = 1; i <= n; i++) scanf("%d", &col[i]);
+    for (int i = 1; i < n; i++) {
+        int u, v; scanf("%d%d", &u, &v);
+        adj[u].push_back(v); adj[v].push_back(u);
+    }
+    getsz(1, 0);
+    dfs(1, 0, 1);
+    for (int i = 1; i <= n; i++) printf("%lld%c", ans[i], i == n ? '\n' : ' ');
+}
+\end{lstlisting}
+
+The only line to read twice is the \code{maxfreq} slide in \code{bump}.  On an
+\emph{insert} the new frequency can only raise the max, so a \code{max} suffices.
+On a \emph{clear} the colour that just left bucket \(o\) lands in \(o-1\); if it
+emptied the \emph{top} bucket (\(\code{maxfreq}=o\), \code{freqsum[o]}\(=0\)) the
+max is now \(o-1\) -- exactly \code{maxfreq--} -- because no colour can sit above
+\(o-1\) after removing the last one at \(o\).  If \(o<\code{maxfreq}\), the top
+is untouched and \code{maxfreq} stays.
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CF 600E sample 2: n=6, colours 1 2 3 4 4 2, edges (1,2)(1,6)(2,3)(2,4)(2,5)]
+Root~1; sizes: sub\(1\)=6, sub\(2\)=4, leaves \(3,4,5,6\) size~1;
+\(\mathit{big}(1)=2\) (size~4), \(\mathit{big}(2)\in\{3,4,5\}\) first of the size-1
+ties, say child~3; nodes \(4,5,6\) are light.  Answers read in \code{dfs} order:
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item leaf~3: bag \(\{3\}\), \code{maxfreq}=1, sum \(=3\).  light \(\to\) clear.
+  \item leaf~4: colour~4, sum \(=4\).  clear.
+  \item leaf~5: colour~4, sum \(=4\).  clear.
+  \item node~2 keeps big(2)=3 then re-adds 2,4,5: bag colours
+        \(\{c_2,c_3,c_4,c_5\}=\{2,3,4,4\}\) so colour~4 twice \(>\) others --
+        \code{maxfreq}=2, \code{freqsum[2]}=4.  \(\mathrm{ans}(2)=4\).  node~2 is
+        light (big(1)=2? no: \(2\) is \(1\)'s heavy child, so here keep=1).
+  \item leaf~6: colour~2, sum \(=2\).  clear.
+  \item node~1 keeps node~2's subtree (colours \(2,3,4,4\)), re-adds 1 and light
+        child~6: bag \(\{1,2,3,4,4,2\}\) -- colours~2 and~4 each twice, tied at
+        \code{maxfreq}=2, \code{freqsum[2]}=2+4=6.  \(\mathrm{ans}(1)=6\).
+\end{itemize}
+Leaves report their own colour (\(3,4,4,2\)); printed per vertex \(1..6\) the
+vector is \(\texttt{6 4 3 4 4 2}\), matching Output~2.  Sample~1 (a star-like
+tree, all colours distinct) gives \(10,9,3,4\): every present colour ties at
+frequency~1, so each subtree reports the plain sum of its colours.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}[CF 600E]
+\textbf{Time} \(\bigO{n\log n}\): \(\bigO{n\log n}\) bag updates
+(\thmref{c28-sack}) at \(\bigO{1}\) each.  \textbf{Memory} \(\bigO{n}\): three
+length-\(n\) arrays plus the adjacency.  For \(n=10^5\), \(\approx
+1.7\cdot10^6\) elementary operations -- comfortably inside the limit.
+\textbf{AC.}
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: keep flag set on a light child]
+A light child must be visited with \code{keep=false}; the heavy child with
+\code{keep=true}.  Keeping a light child leaves its colour counts in the bag, so
+the next sibling's answer is contaminated.  This is a \emph{wrong answer that
+passes any tree with a single child} -- chains, and even the sample you picked
+to test -- and only bites on a genuine two-light-child node.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: exempting the heavy child at the wrong moment]
+\code{vis[big[u]]=true} must be set \emph{after} \(\mathrm{dfs}(\mathit{big}(u))\)
+returns and reset to \code{false} \emph{before} the optional clear.  Set it too early
+and the heavy child's own \(\mathrm{dfs}\) skips its grandchildren; too late and
+the clear removes the kept bag you were reusing.  Both failures are silent on
+\(n\le3\).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: the maxfreq slide on a clear]
+On decrement, \code{maxfreq} drops \emph{by one}, not to the true max.  If you
+recompute \code{maxfreq} by scanning, you get \(\bigO{n}\) per clear and
+\(\bigO{n^2}\) total (TLE).  If you drop it unconditionally, a node whose second
+bucket is empty reports \code{freqsum[maxfreq]}\(=0\) (WA).  The exact guard --
+drop only when the emptied bucket \emph{was} the top -- is load-bearing.
+\end{warningbox}
+
+\begin{hardeningbox}[Chain trees and the double recursion]
+The sack recurses twice deep (\(\mathrm{dfs}\) and \code{add}); a
+\(10^5\)-chain can blow the default stack (\re).  Raise the stack
+(\texttt{\#pragma comment(linker, "/STACK:200000000")} on MSVC, or
+\texttt{ulimit -s unlimited} on Linux), or make \code{getsz}/\(\mathrm{dfs}\)
+iterative with an explicit stack.  Coordinate-colouring is \emph{not} needed for
+600E (\(c_i\le n\)) but is the fix when colours reach \(10^9\).
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Does the heavy child use \code{keep=true} and every light child
+        \code{keep=false}?
+  \item Is \code{vis[big[u]]} set only around the \code{add} sweep, and cleared
+        before the optional wipe?
+  \item On a clear, does \code{maxfreq} fall by exactly one, guarded by
+        ``did I just empty the top bucket''?
+  \item Does your \code{add} skip \emph{only} the exempt heavy child, not all
+        heavy descendants?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Unusual Entertainment}{CF 1899G}
+    {https://codeforces.com/problemset/problem/1899/G}
+    {CF 1900 L4}
+    {\(q\) queries ``does subtree \(v\) contain a node whose value lies in
+     \([l,r]\)?''  The bag is a frequency array over values; the answer for
+     \(v\) is whether any value in \([l,r]\) has a positive count, maintained as
+     a running nonzero tally while the sack adds and clears (\(\defref{c28-sack}\)).
+     The \(\mathit{keep}\) flag is what lets one DFS answer all \(q\) queries in
+     \(\bigO{n\log n}\) instead of a subtree scan per query.}
+  \practice{Unique Occurrences}{CF 1681F}
+    {https://codeforces.com/problemset/problem/1681/F}
+    {CF 2300 L5}
+    {for every vertex, reduce its subtree's multiset to one value by a rule that
+     depends on the \emph{frequency profile} (the largest value that appears
+     exactly once, tie-broken by count).  This is the CF~600E shape exactly --
+     the sack bag holds a value-to-count map plus a count-to-how-many-values
+     bucket (\(\coderef{c28-600e-soln}\)); only the rule that reads the answer
+     off the bag changes.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\(\secref{c28-s2l}\) -- the sack is its doubling argument re-cast as light-edge
+counting (\thmref{c28-s2l} vs \thmref{c28-sack}).  Chapter~16 (\chref{c11}) --
+\propref{c28-sack-handoff} discharges the depth-bucket \(\to\) per-node promise
+made at its chapter end.  Chapter~13 (\chref{c10}) -- the fixed-alphabet fold
+(\thmref{c10-subtree-template}) is the special case where you skip this whole
+machinery.  Forward: the Summit \(\probref{c28-summit}\) (CF~1009F) is the sack
+over \emph{depths} rather than colours.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 17.4 in 10 seconds]
+\textbf{Sack} answers every per-subtree aggregate in one \(\bigO{n\log n}\) DFS
+with \emph{one} global bag: process light children and clear them, process the
+big child and keep it, then add \(u\) plus the light subtrees on top and read
+the answer.  A node is re-inserted once per light edge above it and there are
+\(\le\log_2 n\) such edges (\thmref{c28-sack}).  It beats small-to-large for
+count/mode questions (no per-node containers, \(\bigO{1}\) reads given the right
+bucketing) and it is Ch.16's depth-bucket idea grown to per-node answers.
+\selftest{
+  \item Give the sack schedule in five ordered steps; where is \code{keep} true?
+  \item Why does crossing a light edge at least halve the subtree size, and what
+        does that buy?
+  \item CF~600E: why is a second array \code{freq\_sum[f]} needed, and what does
+        a tie of dominating colours do to the answer?
+  \item State the exact guard under which \code{maxfreq} decreases on a clear.
+  \item Which is better for ``how many distinct colours per subtree'', the sack
+        or \(\coderef{c28-s2l}\), and why?
+}
+\end{recallbox}

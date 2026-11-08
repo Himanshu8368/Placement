@@ -1,0 +1,312 @@
+### Problem: Machine Learning {#sec-mo-p3-ml}
+
+::: {.p-statement}
+An array of non-negative integers $a_1, \ldots, a_n$ ($1 \le n \le 10^{5}$, $0 \le a_i \le 10^{9}$) and $q$ operations of two kinds. A **query** $1\ \ell\ r$ asks about the subarray $a_\ell, \ldots, a_r$: for every non-negative integer value $s$ let $c_s$ be how many times $s$ occurs in that subarray, and output $\operatorname{MEX}(c_0, c_1, c_2, \ldots)$ — the smallest **positive** integer not among those counts. An **update** $2\ p\ x$ sets $a_p \leftarrow x$. Operations are answered in the state left by the updates that precede them ($1 \le q \le 10^{5}$).
+
+Source: [CF 940F · Machine Learning](https://codeforces.com/problemset/problem/940/F){.solved rating="2600"}
+
+Example — $a = [1, 2, 3, 1, 1, 2, 2, 2, 9, 9]$: query $[1,1] = [1]$ has counts $\{1\}$, so $1$ is present but $2$ is not, answer `2`; query $[2,8] = [2,3,1,1,2,2,2]$ has value $2$ four times, $1$ twice, $3$ once, so $1,2,3$ all occur as counts except none equals $3$? $3$ is absent, answer `3`; after update $2\ 7\ 1$ the same range $[2,8]$ has $1$ and $2$ each thrice and $3$ once, so count $2$ is missing, answer `2`. Output `2`, `3`, `2`. (Checked against a replay-and-count oracle on the official sample, then stressed.)
+:::
+
+::: {.p-intuition}
+Two ideas stack here. First the answer is not a window *sum* but a property of the **multiset of frequencies**: we need the smallest positive integer that is not the count of any value. That is maintained by a *frequency-of-frequency* table `ftf[k]` = how many distinct values currently occur exactly $k$ times in the window; the answer is the first $k \ge 1$ with `ftf[k] == 0`. Second, the input interleaves **point updates** with the queries, so a plain window is illegal — but the updates are offline and re-orderable, so we add a *time* pointer: a query becomes $(\ell, r, t)$ where $t$ is how many updates have been applied, and moving $t$ applies or reverts one update (@sec-mo-a3). Applying an update that lands inside the window swaps one value's count for another's, touching `ftf` in $O(1)$ — and it must **stash the old value** so the move is reversible.
+:::
+
+::: {.p-approach}
+1. **Replay and count.** Per query, apply the first $t$ updates to a fresh copy, tally $c_s$ over $[\ell, r]$, and scan for the smallest positive $k$ with no value having count $k$. $O(n)$ per query — reference only.
+2. **Mo with updates.** Compress values to ids. Sort queries by $\bigl(\lfloor \ell/B\rfloor, \lfloor r/B\rfloor, t\bigr)$ with $B = n^{2/3}$; move the window with $O(1)$ `add_val`/`rem_val` that update `freq` and `ftf`, and move time with `apply_time`/`revert_time` that stash the old value and, if the changed cell is inside the window, swap its contribution. Read the answer as `mex()` scanning `ftf`.
+
+**Invariant.** `freq[v]` is the current count of value $v$ in window $[cl, cr]$ under the first $ct$ updates, and `ftf[k]` counts how many $v$ have `freq[v] == k`. Every elementary move (add, remove, apply, revert) edits `freq[v]` by $\pm 1$ and adjusts `ftf[old]`, `ftf[new]` to match, so after the six loops the tables describe exactly $[\ell, r]$ after $t$ updates and `mex()` is the true answer.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Replay updates, then count frequencies
+
+::: {.form-next}
+For each query copy the array, apply the first $t$ updates, tally each value's count on $[\ell, r]$, and report the smallest positive integer missing from the set of counts. $O(n)$ per query — reference code only.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def nine_brute(a0, updates, l, r, t):
+    arr = list(a0)
+    for k in range(t):
+        pos, x = updates[k]
+        arr[pos] = x
+    present = set(Counter(arr[l:r + 1]).values())
+    f = 1
+    while f in present:
+        f += 1
+    return f
+
+
+assert nine_brute([1, 2, 3, 1, 1, 2, 2, 2, 9, 9], [(6, 1)], 0, 0, 0) == 2
+assert nine_brute([1, 2, 3, 1, 1, 2, 2, 2, 9, 9], [(6, 1)], 1, 7, 0) == 3
+assert nine_brute([1, 2, 3, 1, 1, 2, 2, 2, 9, 9], [(6, 1)], 1, 7, 1) == 2
+```
+
+##### C++
+
+```cpp
+// brute force: apply the first t updates, count values in [l, r], report MEX of the counts
+int nine_brute(const vector<long long>& a0, const vector<pair<int, long long> >& updates,
+               int l, int r, int t) {
+    vector<long long> arr = a0;
+    for (int k = 0; k < t; ++k) arr[updates[k].first] = updates[k].second;
+    map<long long, int> cnt;
+    for (int i = l; i <= r; ++i) cnt[arr[i]]++;
+    set<int> present;
+    for (map<long long, int>::iterator it = cnt.begin(); it != cnt.end(); ++it)
+        present.insert(it->second);
+    int f = 1;
+    while (present.count(f)) f++;
+    return f;
+}
+```
+:::
+
+**Reading it line by line.** Operations are read in order; a query carries $t$ = the number of updates seen *before* it, and only those are replayed. A value absent from the range has count $0$, so $0$ is always in the multiset and the MEX starts at $1$.
+
+#### Mo with a time pointer and a frequency-of-frequency table
+
+::: {.form-next}
+Compress values; sort queries by $(\lfloor \ell/B\rfloor, \lfloor r/B\rfloor, t)$ with $B = n^{2/3}$. Maintain `freq` and `ftf`; move $\ell, r$ with $O(1)$ add/remove and $t$ with apply/revert (stashing the old value). $O(n^{5/3})$ overall.
+:::
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ml_a = [2, 3, 1, 1, 2, 1, 2]     # a[1..7] (0-indexed 1..7) after the update a[6]=1
+ml_reg = (1, 7)
+
+
+def draw(ax, p):
+    V.array(ax, p, ml_a, x=0.0, y=0.4,
+            regions=[(ml_reg[0], ml_reg[1], "green", "window $[\\ell, r]$")],
+            pointers=[(ml_reg[0], "$\\ell$", "indigo"), (ml_reg[1], "$r$", "pink", "top")],
+            index=False,
+            note="counts: 1x3, 2x3, 3x1  ->  ftf[1]=1, ftf[3]=2  ->  mex=2")
+V.show(draw)
+```
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-mo-p3-ml-sol
+def nine_solve(a0, queries, updates):
+    """queries: (l, r, t) 0-indexed inclusive window after the first t updates are applied.
+    updates: list of (pos, newval). answer = MEX of the multiset of value-frequencies in [l, r]."""
+    a = list(a0)
+    n = len(a)
+    comp = {}
+
+    def id_of(v):
+        comp.setdefault(v, len(comp))
+        return comp[v]
+
+    b = [id_of(v) for v in a]
+    for pos, x in updates:
+        id_of(x)                       # every update value needs an id before the window touches it
+    freq = [0] * len(comp)
+    ftf = [0] * (n + 2)                # ftf[k] = number of DISTINCT values occurring exactly k times
+    cl, cr, ct = 0, -1, 0
+
+    def add_val(v):
+        old = freq[v]
+        if old > 0:
+            ftf[old] -= 1
+        freq[v] = old + 1
+        ftf[old + 1] += 1
+
+    def rem_val(v):
+        old = freq[v]
+        ftf[old] -= 1
+        freq[v] = old - 1
+        if old - 1 > 0:
+            ftf[old - 1] += 1
+
+    def mex():
+        f = 1
+        while f <= n and ftf[f] > 0:
+            f += 1
+        return f
+
+    ups = [[pos, x, None] for pos, x in updates]      # third slot: the stashed OLD value
+
+    def apply_time():
+        nonlocal ct
+        pos, x = ups[ct][0], ups[ct][1]
+        ups[ct][2] = a[pos]            # STASH the old value before overwriting — else no undo
+        nid = id_of(x)
+        if cl <= pos <= cr:            # only disturb the tables if the changed cell is inside
+            rem_val(b[pos])
+            add_val(nid)
+        a[pos] = x
+        b[pos] = nid
+        ct += 1
+
+    def revert_time():
+        nonlocal ct
+        ct -= 1
+        pos, x, old = ups[ct]
+        oldid = id_of(old)
+        newid = b[pos]
+        if cl <= pos <= cr:
+            rem_val(newid)
+            add_val(oldid)
+        a[pos] = old
+        b[pos] = oldid
+
+    B = max(1, int(round(n ** (2 / 3))))
+    order = sorted(range(len(queries)),
+                   key=lambda i: (queries[i][0] // B, queries[i][1] // B, queries[i][2]))
+    ans = [0] * len(queries)
+    for i in order:
+        l, r, t = queries[i]
+        while cr < r:
+            cr += 1; add_val(b[cr])
+        while cl > l:
+            cl -= 1; add_val(b[cl])
+        while cl < l:
+            rem_val(b[cl]); cl += 1
+        while cr > r:
+            rem_val(b[cr]); cr -= 1
+        while ct < t:
+            apply_time()
+        while ct > t:
+            revert_time()
+        ans[i] = mex()
+    return ans
+
+
+# official sample
+assert nine_solve([1, 2, 3, 1, 1, 2, 2, 2, 9, 9],
+                  [(0, 0, 0), (1, 7, 0), (1, 7, 1)], [(6, 1)]) == [2, 3, 2]
+for _ in range(120):
+    n = random.randint(1, 30)
+    a = [random.randint(1, 6) for _ in range(n)]
+    u = random.randint(0, 10)
+    updates = [(random.randrange(n), random.randint(1, 6)) for _ in range(u)]
+    q = random.randint(1, 12)
+    queries = [(*sorted((random.randrange(n), random.randrange(n))), random.randint(0, u))
+               for _ in range(q)]
+    assert nine_solve(a, queries, updates) == [nine_brute(a, updates, l, r, t) for l, r, t in queries]
+```
+
+##### C++
+
+```cpp
+// Mo with updates for Machine Learning (full program); values compressed, ftf = frequency-of-frequency
+int main() {
+    ios::sync_with_stdio(false);
+    int n, q;
+    if (!(cin >> n >> q)) return 0;
+    vector<long long> raw(n);
+    for (int i = 0; i < n; ++i) cin >> raw[i];
+
+    struct Op { int type, l, r; long long x; };
+    vector<Op> ops(q);
+    for (int i = 0; i < q; ++i) {
+        int t; cin >> t;
+        if (t == 1) { int l, r; cin >> l >> r; ops[i] = {1, l - 1, r - 1, 0}; }
+        else { int p; long long x; cin >> p >> x; ops[i] = {2, p - 1, 0, x}; }
+    }
+
+    // coordinate compression over the initial values and every update value
+    vector<long long> vals = raw;
+    for (int i = 0; i < q; ++i) if (ops[i].type == 2) vals.push_back(ops[i].x);
+    sort(vals.begin(), vals.end());
+    vals.erase(unique(vals.begin(), vals.end()), vals.end());
+    vector<int> a(n);
+    for (int i = 0; i < n; ++i)
+        a[i] = (int)(lower_bound(vals.begin(), vals.end(), raw[i]) - vals.begin());
+
+    // queries (l, r, time, original-id) and the list of updates (pos, newid, old)
+    vector<array<int, 4> > Q;                    // {l, r, t, id}
+    vector<array<long long, 3> > U;              // {pos, newid, old}
+    for (int i = 0; i < q; ++i) {
+        if (ops[i].type == 1) Q.push_back({ops[i].l, ops[i].r, (int)U.size(), (int)Q.size()});
+        else {
+            int nid = (int)(lower_bound(vals.begin(), vals.end(), ops[i].x) - vals.begin());
+            U.push_back({ops[i].l, nid, 0});
+        }
+    }
+    int M = (int)Q.size();
+    if (M == 0) return 0;
+    int B = max(1, (int)pow((double)n, 2.0 / 3.0));
+    sort(Q.begin(), Q.end(), [B](const array<int,4>& x, const array<int,4>& y) {
+        if (x[0] / B != y[0] / B) return x[0] / B < y[0] / B;
+        if (x[1] / B != y[1] / B) return x[1] / B < y[1] / B;
+        return x[2] < y[2];
+    });
+    vector<int> freq(vals.size(), 0), ftf(n + 2, 0);
+    vector<long long> ans(M);
+    int cl = 0, cr = -1, ct = 0;
+    auto add_val = [&](int v) {
+        int old = freq[v];
+        if (old > 0) ftf[old]--;
+        freq[v] = old + 1;
+        ftf[old + 1]++;
+    };
+    auto rem_val = [&](int v) {
+        int old = freq[v];
+        ftf[old]--;
+        freq[v] = old - 1;
+        if (old - 1 > 0) ftf[old - 1]++;
+    };
+    auto apply_time = [&]() {
+        int pos = (int)U[ct][0]; int nid = (int)U[ct][1];
+        U[ct][2] = a[pos];                         // stash old id before overwriting
+        if (cl <= pos && pos <= cr) { rem_val(a[pos]); add_val(nid); }
+        a[pos] = nid;
+        ct++;
+    };
+    auto revert_time = [&]() {
+        ct--;
+        int pos = (int)U[ct][0]; int oldid = (int)U[ct][2];
+        if (cl <= pos && pos <= cr) { rem_val(a[pos]); add_val(oldid); }
+        a[pos] = oldid;
+    };
+    for (int qi = 0; qi < M; ++qi) {
+        int l = Q[qi][0], r = Q[qi][1], t = Q[qi][2], id = Q[qi][3];
+        while (cr < r) add_val(a[++cr]);
+        while (cl > l) add_val(a[--cl]);
+        while (cl < l) rem_val(a[cl++]);
+        while (cr > r) rem_val(a[cr--]);
+        while (ct < t) apply_time();
+        while (ct > t) revert_time();
+        int f = 1;
+        while (f <= n && ftf[f] > 0) f++;
+        ans[id] = f;                           // stash by ORIGINAL query id
+    }
+    for (int i = 0; i < M; ++i) cout << ans[i] << "\n";   // print in input order
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** `add_val`/`rem_val` move `freq[v]` by one and keep `ftf` in step: leaving count `old` frees one `ftf[old]`, entering `old ± 1` claims one there. `apply_time` stashes the *whole* old value (`U[ct][2]`) before overwriting, and only disturbs the tables when `pos` lies inside the current window — the same guard the Python carries. The final scan `while (ftf[f] > 0) f++` is the MEX; because a value present in the window always has count $\ge 1$, the loop starts at $1$. `freq` is sized to the number of distinct values (compressed), while `ftf` is sized to $n + 2$ since a single value can be counted up to $n$ times.
+:::
+
+::: {.p-complexity}
+**Replay:** $O(n)$ per query, $O(nq) = 10^{10}$ — reference only. **Mo with updates:** with $B = n^{2/3}$, the $\ell, r$ pointers move $O(n^2/B)$ per the block structure and the time pointer $O(qB')$; balancing gives $O(n^{5/3})$ total $O(1)$ steps ($\approx 4.6\cdot 10^{8}$ at $n = 10^{5}$, tight but standard). Space $O(n + |\text{distinct values}|)$ for `freq` and `ftf`.
+:::
+
+::: {.p-edge}
+- Value absent from the range: count $0$, always present, which is why the MEX is at least $1$ and never reported.
+- Update landing outside the window: the tables are untouched, but the stored value *must* change so a later slide reads it correctly — forgetting this is the @sec-mo-pit "update outside window" trap.
+- Update stashing: reverting needs the old value; overwriting without saving it makes `revert_time` impossible (see @sec-mo-a3).
+- $a_i$ up to $10^{9}$ and $0$: compress on ids, never index `freq` by the raw value.
+- `ftf` size: a value can occur up to $n$ times, so the frequency-of-frequency table needs $n + 2$ slots, not the value count.
+:::
+
+::: {.practice}
+- [CF 86D · Powerful array](https://codeforces.com/problemset/problem/86/D){rating="2200"} — the same window without updates, for contrast (@sec-mo-p1-powerful)
+- [CF 375D · Tree and Queries](https://codeforces.com/problemset/problem/375/D){rating="2400"} — a frequency-of-frequency structure on tree subtrees (the value-table idea, deferred tree-Mo form)
+:::

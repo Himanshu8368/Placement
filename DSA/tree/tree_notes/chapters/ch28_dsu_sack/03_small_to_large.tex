@@ -1,0 +1,704 @@
+% =====================================================================
+%  17.3  Small-to-Large Merging                       sec:c28-s2l
+%  Exports: def:c28-s2l  thm:c28-s2l  prop:c28-s2l-doubling
+%           lst:c28-s2l  lst:c28-s2l-dp  lst:c28-naive
+%           ex:c28-buckets  fig:c28-s2l  prob:c28-dcolors  lst:c28-dcolors-soln
+%  Tables hand-computed on T (fig:c28-tree) with colour c=(1,2,1,3,2,1,3,2,1,3).
+%  Distinct-colour subtree answer on T: (3,2,2,1,1,1,2,1,2,1).
+% =====================================================================
+\section{Small-to-Large Merging}\label{sec:c28-s2l}
+
+\begin{previouslybox}[Sections 17.1--17.2 merged \emph{items}; this merges \emph{containers}]
+Both DSUs of \secref{c28-dsu} and \secref{c28-weighted} glue single elements
+into sets.  Now the objects carried around are \emph{containers} -- a set, a
+map, a frequency table \emph{per subtree} -- and the question is only ever one
+thing: \textbf{in which direction do I merge a child's container into its
+parent's?}  Answer that correctly and \(\bigO{n\log n}\) falls out; answer it
+carelessly and the same code is quadratic.
+\end{previouslybox}
+
+\begin{topicintro}
+\term{Small-to-large merging} (also \emph{merging by size}, \emph{heavy-to-light
+merging}, and, in the functional-language world, the ``DSU on sets'' trick) is
+one sentence: \textbf{when two containers must become one, always walk the
+elements of the \emph{smaller} and insert them into the \emph{larger}.}  A
+container's contents only ever move into a container at least as big, so the
+container holding an element at least doubles each time that element is moved;
+no element is moved more than \(\log n\) times, and the whole recursion costs
+\(\bigO{n\log n}\) element-insertions instead of \(\bigO{n^2}\).
+
+This is the mechanism behind ``for every subtree, report something about the
+\emph{multiset} of values inside it'': distinct colours (CSES~1139 here),
+majority/deepest colours (\secref{c28-sack}), mode of a subtree, number of
+distinct-value pairs.
+
+\textbf{Prerequisites.} \secref{c28-dsu} for the ``attach the smaller''
+instinct -- this is the same proof applied to sets.  Chapter~13
+(\chref{c10}) for the bottom-up subtree fold (\thmref{c10-subtree-template}):
+small-to-large is what you do when the folded object is a \emph{container}
+rather than a fixed-size tuple.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item write the pointer-rotating merge that keeps every element moving
+        \(O(\log n)\) times; \hfill\lv{4}
+  \item prove the doubling bound and derive \(\bigO{n\log n}\) (or
+        \(\bigO{n\log^2 n}\) with an ordered container); \hfill\lv{4}
+  \item decide between small-to-large, the fixed-alphabet variant, Ch.14's
+        knapsack merge and \secref{c28-sack}'s sack from the container's
+        shape; \hfill\lv{4}--\lv{5}
+  \item solve subtree distinct-colour counting end to end. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- ``one container per subtree, merged upward'']
+\reckey{``for each node, the number of distinct colours/values in its
+subtree''; ``the set of labels appearing below \(v\)''; ``how many pairs in
+the subtree sum to \(k\)''; ``the most frequent colour in each subtree''; any
+statement whose answer for a parent is \emph{the union of the children's
+answers plus one more element}.}
+\recuse{
+  \item the folded object is a growable container and every node needs its own
+        answer -- small-to-large here (\defref{c28-s2l});
+  \item the container is over a \emph{tiny fixed} alphabet (26 letters, bits
+        of a mask) -- just add arrays, \(\bigO{26n}\); no merge trick needed
+        (that is Ch.13's CF~570D);
+  \item the same per-subtree containers are wanted \emph{and} the queries are
+        many/complex -- \secref{c28-sack} does this merge once in one global
+        array with a \code{keep} flag, no \(n\) containers allocated;
+  \item children must be paired \emph{element-by-element} against each other
+        (capacity, exact weight) -- that is Ch.14's tree knapsack, not
+        this.
+}
+\recnotuse{
+  \item the answer is a fixed-size summary (sum, max, count): \thmref
+        {c10-subtree-template} folds it in \(\bigO{n}\); merging containers
+        would be pure overhead;
+  \item values change between queries -- you are in Euler-tour/segment-tree
+        territory (Ch.~5, \chref{c24});
+  \item only \emph{membership} in a dynamic partition is asked -- that is a
+        plain DSU (\secref{c28-dsu}), which cannot answer ``what is in this
+        set'', only ``are these two in the same set''.
+}
+One-line test: \emph{does the recursion have to hand a growing set/map upward
+at every node?  Then the direction of each merge \emph{is} the whole
+complexity analysis.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{Intuition: Always Walk the Smaller Side}
+% ---------------------------------------------------------------
+
+Suppose node \(u\) has children \(v_1,\dots,v_d\) and each \(v_i\) has already
+returned a set \(S_i\) of (say) the colours beneath it.  Building
+\(S_u=\bigcup_i S_i\cup\{c_u\}\) costs exactly as many element-insertions as
+you \emph{walk}, and the container you walk into is free -- only the walked
+side pays.  So keep the biggest \(S_i\) as the destination, pour the rest into
+it, and take over the pointer:
+
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{merge small into big:} an element that moves lands in a
+        container of size \(\ge\) its own, so its container at least
+        \emph{doubles}; from \(1\) to \(n\) takes \(\le\log_2 n\) doublings.
+  \item \textbf{merge big into small:} the heavy child's \(n/2\) elements are
+        re-inserted at the parent, and again at the grandparent -- a chain
+        tree degenerates to \(\bigO{n^2}\) (see \(\coderef{c28-naive}\)).
+\end{itemize}
+
+\begin{definition}{Small-to-large container merge}{c28-s2l}
+Let each node \(u\) of a rooted tree own a container \(S_u\) supporting
+insertion of a single element, initialised with \(u\)'s own value.  A merge is
+\emph{small-to-large} if, whenever containers \(A\) and \(B\) are unioned, the
+elements \emph{iterated over} are exactly those of the smaller: for every
+\(x\in\operatorname{arg\,min}\{|A|,|B|\}\) do \(\text{insert}(x)\) into the other, which
+becomes the surviving container.  \end{definition}
+
+\begin{theorem}{The \(\bigO{n\log n}\) merge bound}{c28-s2l}
+On a tree of \(n\) nodes, small-to-large merging of one element per node
+performs at most \(n\lceil\log_2 n\rceil\) element-insertions in total.  With
+a hash container each insertion is \(\bigO{1}\) expected (total
+\(\bigO{n\log n}\)); with an ordered container it is \(\bigO{\log n}\) (total
+\(\bigO{n\log^2 n}\)).
+\end{theorem}
+\begin{proofbox}
+Track one element \(x\).  Its container has some size \(s\) the moment \(x\) is
+walked; by \defref{c28-s2l} \(x\) belonged to a container of size \(\le s\),
+and it is inserted into one of size \(\ge s\), so the container holding \(x\)
+jumps from at most \(s\) to at least \(2s\).  Sizes are integers \(\le n\), so
+\(x\) is walked at most \(\lceil\log_2 n\rceil\) times.  Summing over the \(n\)
+elements gives \(n\lceil\log_2 n\rceil\) insertions; multiply by the per-insert
+cost of the chosen container.  (The bound holds for \emph{any} merge order, not
+only a DFS -- the doubling argument never uses the tree, only the rule
+``walk the smaller side''.)
+\end{proofbox}
+
+\begin{proposition}{Same proof, different data structure}{c28-s2l-doubling}
+\propref{c28-alpha}'s \(\bigO{\log n}\)-depth bound for union-by-size and this
+theorem are one statement: attaching the smaller \emph{tree} root (a DSU) and
+walking the smaller \emph{container} both rest on ``the object containing you
+at least doubles''.  This is also why a \textbf{DSU of sets} (each DSU node
+holds a set, and a union merges the two sets small-to-large) costs
+\(\bigO{n\log^2 n}\): \(\bigO{\log n}\) merges per element, \(\bigO{\log n}\)
+per insertion into the surviving set.  The union-find trick \emph{itself} does
+not make set-union cheap.
+\end{proposition}
+
+% ---------------------------------------------------------------
+\subsection{Implementation}
+% ---------------------------------------------------------------
+
+\begin{lstlisting}[caption={the merge mechanics: hand the biggest child container upward, pour the rest into it}, label={lst:c28-s2l}]
+set<int>* solve(int u, int p) {
+    set<int>* big = nullptr;                 // the surviving container
+    for (int v : adj[u]) if (v != p) {
+        set<int>* s = solve(v, u);
+        if (!big || s->size() > big->size()) // take the LARGEST child's pointer
+            { set<int>* t = big; big = s; s = t; }   // swap: s is now smaller
+        for (int x : *s) big->insert(x);     // walk ONLY the smaller side
+        delete s;                            // free the drained container
+    }
+    if (!big) big = new set<int>();          // leaf
+    big->insert(colour[u]);                  // u itself joins
+    return big;
+}
+\end{lstlisting}
+
+The rotation \textbf{must} be by pointer/reference: copying a container turns
+``walk the smaller'' into ``copy the larger'' and reintroduces the quadratic
+you just removed.  In C++ the swap of \code{big}/\code{s} inside the loop keeps
+the invariant ``\code{big} is the largest container seen so far among \(u\)'s
+processed children'', which is all the proof needs.
+
+\begin{lstlisting}[caption={the same idea as a DP returning by value, with the answer read at each node (hash container version)}, label={lst:c28-s2l-dp}]
+unordered_map<int,int>* dfs(int u, int p) {       // colour -> frequency
+    unordered_map<int,int>* big = nullptr;
+    for (int v : adj[u]) if (v != p) {
+        auto* s = dfs(v, u);
+        if (!big || s->size() > big->size()) { auto* t = big; big = s; s = t; }
+        for (auto& [col, cnt] : *s) (*big)[col] += cnt;   // small into big
+        delete s;
+    }
+    if (!big) big = new unordered_map<int,int>();
+    (*big)[colour[u]]++;                        // u's own colour
+    ans[u] = (int)big->size();                  // DISTINCT colours in subtree
+    return big;
+}
+\end{lstlisting}
+
+\begin{lstlisting}[caption={the careless direction: merge the big container into the first small one -- quadratic on a chain}, label={lst:c28-naive}]
+set<int> dfs_bad(int u, int p) {
+    set<int> acc;                       // starts EMPTY (size 0)
+    for (int v : adj[u]) if (v != p)
+        for (int x : dfs_bad(v, u)) acc.insert(x);  // heavy child walked last
+    acc.insert(colour[u]);              // or: always merge INTO the parent's
+    return acc;                         // accumulator -> big side gets walked
+}
+\end{lstlisting}
+
+A chain with distinct values costs \(\sum_u \depth(u)=\Theta(n^2)\) insertions
+in \(\coderef{c28-naive}\) -- the same \(2\cdot10^5\) that passes in
+\(\coderef{c28-s2l}\) TLEs here.
+
+\begin{complexitybox}[Small-to-large merge]
+\textbf{Element moves:} \(\le n\lceil\log_2 n\rceil\) (\(\thmref{c28-s2l}\)).
+\textbf{Time:} \(\bigO{n\log n}\) with a hash container (expected),
+\(\bigO{n\log^2 n}\) with \code{set}/\code{map}.  \textbf{Memory:}
+\(\bigO{n}\) live elements plus one container per node if you do not free --
+\emph{delete} the drained container or hold a pool, or the constant is large.
+\textbf{Recursion:} depth \(O(n)\) on a skewed tree; see the hardening note in
+the Problem Lab.
+\end{complexitybox}
+
+% ---------------------------------------------------------------
+\subsection{Where the Boundary Lies}
+% ---------------------------------------------------------------
+
+\begin{comparisonbox}[Three merges that look identical and are not]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{This section} -- one \emph{unbounded} container per subtree
+        (\(\le n\) colours, \(\le n\) keys); cost measured in \emph{element
+        moves}; nothing is paired element-by-element across children.
+        \(\bigO{n\log n}\).
+  \item \textbf{Chapter~14 (\chref{c27}), tree knapsack} -- per subtree an
+        \emph{array of size} \(V\) (budget/weight states); merging child \(A\)
+        into \(B\) is a double loop over the two ranges, \(\bigO{|A|\cdot|B|}\)
+        per pair, and the amortised saving comes from \emph{capping} the loops
+        by the budget, not from walking the smaller side.  Same
+        ``merge children upward'' posture, different cost model
+        (\(\bigO{nV}\) / \(\bigO{nV^2}\) budgeted).
+  \item \textbf{Section \ref{sec:c28-sack} (sack)} -- the container is
+        \emph{one global array} shared by all nodes; the heavy subtree's data
+        is \emph{kept} and the light ones rebuilt, so no per-node container
+        exists at all.  Same \(\bigO{n\log n}\) accounting, smaller constant,
+        and it answers far more per node than a set size can.
+\end{itemize}
+And when the alphabet is fixed and small (26 letters, a bitmask), the honest
+answer is to carry a \(26\)-entry array and skip this section -- Ch.~13
+(\chref{c10}) does exactly that on CF~570D (\emph{Tree Requests}), which is
+why that problem is not re-solved here.
+\end{comparisonbox}
+
+\begin{warningbox}[Small-to-large is not automatically the fastest]
+The bound counts \emph{element moves}, and each move carries the container's
+insertion cost plus a heap allocation.  When the folded value is a fixed-size
+tuple, \thmref{c10-subtree-template} wins outright; when the queries are many
+and per-node, \secref{c28-sack} usually beats this by a large constant because
+it allocates nothing per node.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Worked Example: Colour Buckets on the Running Tree}
+% ---------------------------------------------------------------
+
+\begin{example}{Small-to-large over \(T\)'s colours}{c28-buckets}
+Use the overlay of \figref{c28-tree}: colours
+\(c=(1,2,1,3,2,1,3,2,1,3)\) on nodes \(1..10\), subtree sizes
+\(\size=(10,4,5,1,2,1,3,1,2,1)\).  Children are visited in adjacency order
+(the DFS' normal order -- nothing is pre-sorted); after each return the
+\emph{largest} container seen so far at that node is the one kept.  A
+``walk'' is one element re-inserted into the surviving container; inserting a
+node's own colour is not a walk.  \(S_u\) is the resulting colour set and
+\(\abs{S_u}\) the answer for \(u\).
+\end{example}
+\begin{tracebox}[Bottom-up merges on \(T\): 10 nodes, 4 walked elements]
+{\small
+\[
+\renewcommand{\arraystretch}{1.2}
+\begin{array}{c|c|l|c|c}
+\text{\#} & \text{node} & \text{what happens (}S_v\text{ = child }v\text{'s set)} & \text{walked} & S \\ \hline
+1 & 4 & \text{leaf: own colour } 3 & 0 & \{3\}\\
+2 & 8 & \text{leaf: own colour } 2 & 0 & \{2\}\\
+3 & 10& \text{leaf: own colour } 3 & 0 & \{3\}\\
+4 & 6 & \text{leaf: own colour } 1 & 0 & \{1\}\\
+5 & 9 & \text{keep } S_{10}\text{;}\text{ own } 1 & 0 & \{1,3\}\\
+6 & 7 & \text{keep } S_{9}\text{;}\text{ own } 3\text{ dup} & 0 & \{1,3\}\\
+7 & 5 & \text{keep } S_{8}\text{;}\text{ own } 2\text{ dup} & 0 & \{2\}\\
+8 & 2 & \text{keep } S_{4}\text{, walk } S_{5}\text{;}\text{ own } 2\text{ dup} & 1 & \{2,3\}\\
+9 & 3 & \text{keep } S_{7}\text{, walk } S_{6} & 1 & \{1,3\}\\
+10& 1 & \text{keep } S_{2}\text{, walk } S_{3}\text{;}\text{ own } 1\text{ dup} & 2 & \{1,2,3\}
+\end{array}
+\]
+}
+Step~10 is the interesting one: both children's containers have
+cardinality~2 (\(S_2=\{2,3\}\), \(S_3=\{1,3\}\)), so the tie is broken by
+visit order -- child~2's container (returned first) is the one kept and
+child~3's is drained, contributing its \(2\) elements, one of which (colour~3)
+is a no-op insertion.  Walk totals are counted \emph{per element iterated},
+giving \(1+1+2=4\) for the whole run, plus \(10\) own-colour insertions.
+The tie also shows what the rule does \emph{not} look at: the drained child~3
+has the \emph{larger subtree} (\(\size(3)=5>\size(2)=4\)), because
+\thmref{c28-s2l} is a statement about \emph{set cardinalities}, not subtree
+sizes -- and since the two are tied here, either direction is legal.
+\end{tracebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.86, transform shape,
+    tnode/.style={circle, draw=primaryblue, line width=0.9pt, fill=primaryblue!8,
+                  minimum size=8mm, font=\small\bfseries, text=primaryblue!60!black}]
+  \node[tnode] (n1) at (0,0)     {$1$};
+  \node[tnode] (n2) at (-3,-1.6) {$2$};
+  \node[tnode] (n3) at ( 3,-1.6) {$3$};
+  \node[tnode] (n4) at (-5.2,-3.2) {$4$};
+  \node[tnode] (n5) at (-1.6,-3.2) {$5$};
+  \node[tnode] (n6) at ( 1.6,-3.2) {$6$};
+  \node[tnode] (n7) at ( 5.2,-3.2) {$7$};
+  \node[tnode] (n8) at (-1.6,-4.8) {$8$};
+  \node[tnode] (n9) at ( 5.2,-4.8) {$9$};
+  \node[tnode] (n10) at ( 5.2,-6.4) {$10$};
+  \draw[tedge] (n1)--(n2) (n1)--(n3) (n2)--(n4) (n2)--(n5)
+               (n3)--(n6) (n3)--(n7) (n5)--(n8) (n7)--(n9) (n9)--(n10);
+  % subtree colour sets, hand-computed.  Each list item is wrapped in its own
+  % braces: an un-braced comma inside a set would make \foreach split the item.
+  \foreach \nd/\st in {
+      n1/{\(\{1,2,3\}\)}, n2/{\(\{2,3\}\)}, n3/{\(\{1,3\}\)},
+      n4/{\(\{3\}\)}, n5/{\(\{2\}\)},
+      n6/{\(\{1\}\)}, n7/{\(\{1,3\}\)}, n8/{\(\{2\}\)},
+      n9/{\(\{1,3\}\)}, n10/{\(\{3\}\)}} {
+    \node[font=\scriptsize, text=successgreen!60!black, anchor=north]
+      at (\nd.south) {\st};}
+  \node[annot, font=\scriptsize, anchor=west, text=darkgray]
+    at (-6.4,-7.1) {$S_u$ = distinct colours in the subtree of $u$; $|S_u|$ is CSES 1139's answer per node};
+\end{tikzpicture}
+\caption{The containers that \(\coderef{c28-s2l}\) hands upward on \(T\), read
+bottom-up: e.g.\ \(S_5=S_{\{8\}}\cup\{c_5\}=\{2\}\) (both are colour~2, the
+set swallows the duplicate), \(S_3=\{1,3\}\) even though five nodes sit below
+it, and \(S_1=\{1,2,3\}\).  The answer vector is the sizes
+\((3,2,2,1,1,1,2,1,2,1)\) -- note it is \emph{not} the subtree-size vector
+\((10,4,5,1,2,1,3,1,2,1)\), which is the other thing these containers are
+often mistaken for.}
+\label{fig:c28-s2l}
+\end{figure}
+
+\begin{insightbox}[Count the moves, not the nodes]
+The run above walks \(4\) elements out of a worst-case allowance of
+\(n\lceil\log_2 n\rceil=10\cdot 4=40\), and inserts each node's own colour
+once more (\(10\) of those, unavoidable).  The nodes that \emph{never} move are
+those that always rode in the surviving container -- e.g.\ colour~3, inserted
+by node~4 at step~1, is walked exactly once in its whole life (at node~2, step
+8) and then never again, because from node~1 upward its container is always
+the one kept.  That is the doubling
+argument of \thmref{c28-s2l} made visible: an element that does move lands in a
+container at least as large, so at most \(\log_2 10\approx3.3\) moves are even
+available to it.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CSES 1139 Distinct Colors}
+% ---------------------------------------------------------------
+
+\solvedproblem{c28-dcolors}{Distinct Colors}{CSES 1139}
+  {https://cses.fi/problemset/task/1139}{CSES L4}
+  {small-to-large set merge, subtree containers, bottom-up DFS}
+
+\begin{problemstatement}[CSES 1139 Distinct Colors]
+A rooted tree of \(n\) nodes numbered \(1..n\) with root~\(1\) is given, and
+each node carries a colour \(c_i\).  For \textbf{every} node, print the number
+of \textbf{distinct colours in its subtree}.
+
+\textbf{Input.} \(n\) (\(1\le n\le 2\cdot10^5\)); the \(n\) colours
+\(c_1..c_n\) (\(1\le c_i\le10^9\)); then \(n-1\) edges \(a\ b\) (the tree is
+given undirected; root it at~1 yourself).
+
+\textbf{Output.} \(n\) integers: the distinct-colour count for nodes
+\(1,2,\dots,n\) in order.
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+5
+2 3 2 2 1
+1 2
+1 3
+3 4
+3 5
+
+Output:
+3 1 2 1 1
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, give yourself 25 minutes]
+A fair first attempt: for each node, DFS its subtree and drop everything into
+a fresh \code{set} -- \(O(n^2)\) in the worst case, and \(n\le2\cdot10^5\) says
+so loudly.  The task is to reuse the children's work instead of redoing it.
+\peek{what object would you like each child to hand you, so that the parent's
+answer is almost free?}
+\nudge{the child's \emph{set of colours}. The parent needs the union of the
+children's sets plus its own colour -- but whose set should end up being the
+union?}
+\fullhint{Keep the largest child set as the destination and insert the smaller
+ones into it (\(\defref{c28-s2l}\)); every colour is re-inserted
+\(O(\log n)\) times, so \(\bigO{n\log n}\) (or \(\bigO{n\log^2 n}\) with
+\code{set}) overall.  Report \code{set.size()} at each node.  The full build
+is below.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Two readings of the input exist: per-subtree \emph{node} sets (sizes already
+known from Ch.12's DFS) and per-subtree \emph{colour} sets -- the latter is the
+question, and it is a container question: the answer at \(u\) is
+\(\abs{S_u}\) where \(S_u=\{c_u\}\cup\bigcup_{v\text{ child}}S_v\).  Colours
+reach \(10^9\), so index by value with a hash container (or coordinate
+compress; no array of size \(10^9\) exists).  Nothing is being asked
+\emph{between} nodes, so no \(tin/tout\) interval machinery is needed -- this
+is a pure bottom-up fold whose folded object is a set.
+
+The brute force visits every subtree independently: \(\sum_u\abs{\text{subtree}
+(u)}\) insertions, which is \(\Theta(n^2)\) on a chain.  Everything the
+container of a child already learned is thrown away.
+
+\solstep{Key Observations}
+\begin{observation}
+\(S_u\) is a union of its children's sets plus one element, so the recursive
+structure is exactly a merge; the only free choice is the \emph{direction} of
+each merge, and that choice changes \(\bigO{n^2}\) into \(\bigO{n\log n}\)
+(\thmref{c28-s2l}).
+\end{observation}
+\begin{observation}
+Duplicate colours collapse for free: a set insertion of a colour already
+present adds nothing and costs \(\bigO{\log n}\) (\code{set}) or
+\(\bigO{1}\) (hash).  Hence \(\abs{S_u}\le\size(u)\), and it can be far
+smaller -- on \(T\), \(S_3=\{1,3\}\) has size~2 while \(\size(3)=5\)
+(\figref{c28-s2l}), so the answer vector is \emph{not} the subtree-size
+vector that Chapter~12's DFS produces.
+\end{observation}
+\begin{observation}
+The problem needs only \emph{distinctness}, not frequencies, so a set suffices;
+the moment a variant asks ``how many nodes share the majority colour'' the set
+must become a \texttt{colour\(\to\)count} map -- the same merge, one more
+field.  That variant is \secref{c28-sack}'s CF~600E.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Flatten with a DFS order and use a Fenwick/segment tree over the
+interval}
+{This answers ``distinct values in a \emph{range} of the array'' (the
+Ch.~5/Ch.~27 sweep), and a subtree \emph{is} one interval -- so it works, but
+it needs offline sorting by right end and returns to the same
+\(\bigO{n\log n}\).  It is a good \emph{alternative}, not the lane of this
+section; the reason to prefer the merge is that it generalises to
+\texttt{colour\(\to\)count} answers the sweep cannot carry.}
+\deadend{Return \code{set<int>} \emph{by value} from the DFS}
+{Correct, but each return moves/copies the whole container; with
+copy-elision-off or a standard container this silently re-implements
+\(\coderef{c28-naive}\)'s walk-the-bigger-side.  The bound in
+\thmref{c28-s2l} is a statement about \emph{which elements you iterate}, so the
+pointer rotation of \(\coderef{c28-s2l}\) is not a micro-optimisation -- it is
+the hypothesis of the theorem.}
+\aha{Every subtree's answer is a union of its children's answers plus one
+element, and a union is free in the direction you do not walk.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ per-node DFS & fresh set for every subtree & \(\bigO{n^2}\) & \tle \\
+2 & \lv{3}\ Euler $+$ offline & subtree \(=\) interval, distinct-in-range sweep & \(\bigO{n\log n}\) & \ac \\
+3 & \lv{4}\ \textbf{small-to-large} & merge child sets into the largest (\(\coderef{c28-s2l}\)) & \(\bigO{n\log n}\) exp. & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 is genuinely correct and is the Ch.~5 tool applied here for
+completeness -- rung~3 wins because the same code answers the frequency
+variants (\secref{c28-sack}) that the interval sweep cannot reach.
+
+\solstep{Solution}
+Root the tree at~1 by a DFS that passes the parent.  At each node, recurse into
+all children; among the returned containers keep the largest by \emph{pointer
+swap}; insert every element of each drained container into it and \code{delete}
+the drained one; insert \(c_u\); record \(\abs{S_u}\) as the answer for \(u\);
+return the surviving pointer.  Total: one insertion per element-move, bounded
+by \(\thmref{c28-s2l}\).
+
+Coordinate handling: colours go up to \(10^9\), but they are only ever
+\emph{hashed or compared}, never indexed -- so no compression is needed here
+(it becomes necessary the moment you swap the set for a count \emph{array},
+i.e.\ in the sack).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\textbf{Set invariant.} By induction on the DFS: for a leaf, \(S_u\) is
+initialised empty and receives \(c_u\), so \(S_u=\{c_u\}\), correct.  For an
+internal node, every child \(v\) returns (by hypothesis) exactly the colour set
+of \(v\)'s subtree; the merges insert the union of those sets (set union is
+commutative/associative, and inserting an already-present colour changes
+nothing), then add \(c_u\).  Since a subtree of \(u\) is the disjoint union of
+the child subtrees plus \(u\), the result is exactly \(S_u\).  The pointer
+rotation only renames which container object survives; it never changes which
+\emph{elements} are present.  \textbf{Answer.} \(\abs{S_u}\) is printed for
+each \(u\), which is the number of distinct colours in \(u\)'s subtree.
+\textbf{Cost.} \thmref{c28-s2l} bounds moves by \(n\lceil\log_2 n\rceil\);
+\code{set} insertion is \(\bigO{\log n}\), giving \(\bigO{n\log^2 n}\) worst
+case -- for \(n=2\cdot10^5\), about \(2\cdot10^5\cdot(18)^2\approx6.5\cdot10^7\)
+elementary steps with a small constant on the tiny containers that occur
+mostly, which passes 1.00\,s in practice; the hash variant is
+\(\bigO{n\log n}\) expected.  \textbf{Termination.} Each \code{delete} frees a
+drained container, so live elements are always \(\le n\).
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CSES 1139 full solution (small-to-large set merge)}, label={lst:c28-dcolors-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 200005;
+vector<int> adj[MX];
+int colour_[MX], ans_[MX];
+
+set<int>* solve(int u, int p){                 // returns distinct-colour set
+    set<int>* big = nullptr;                   //   of u's subtree
+    for (int v : adj[u]) if (v != p){
+        set<int>* s = solve(v, u);
+        if (!big || s->size() > big->size()){  // keep the LARGEST container
+            set<int>* t = big; big = s; s = t; // s becomes the side to walk
+        }
+        for (int x : *s) big->insert(x);       // small -> large only
+        delete s;                              // drained, release it
+    }
+    if (!big) big = new set<int>();            // leaf: fresh container
+    big->insert(colour_[u]);
+    ans_[u] = (int)big->size();
+    return big;
+}
+int main(){
+    int n; scanf("%d", &n);
+    for (int i = 1; i <= n; i++) scanf("%d", &colour_[i]);
+    for (int i = 1; i < n; i++){
+        int a, b; scanf("%d%d", &a, &b);
+        adj[a].push_back(b); adj[b].push_back(a);
+    }
+    solve(1, 0);                               // root the tree at 1
+    for (int i = 1; i <= n; i++) printf("%d%c", ans_[i], " \n"[i==n]);
+    for (int i = 1; i <= n; i++) ;             // (containers are freed as we go)
+}
+\end{lstlisting}
+
+Switching \code{set<int>} for \code{unordered\_set<int>} makes it
+\(\bigO{n\log n}\) expected; the \code{set} version above is deliberately the
+worst-case-safe one and still passes.
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CSES 1139: n=5, colours (2,3,2,2,1), edges 1-2,1-3,3-4,3-5]
+Root~1; children \(1\!\to\!\{2,3\}\), \(3\!\to\!\{4,5\}\); leaves \(2,4,5\).
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|c|l|l|l}
+\text{visit} & u & \text{children returned} & \text{merge} & S_u,\ \abs{S_u} \\ \hline
+1 & 2 & \text{none (leaf)} & \text{insert } 3 & \{3\},\ 1\\
+2 & 4 & \text{none (leaf)} & \text{insert } 2 & \{2\},\ 1\\
+3 & 5 & \text{none (leaf)} & \text{insert } 1 & \{1\},\ 1\\
+4 & 3 & \{2\},\{1\}\text{ (both size 1)} & \text{keep first, walk second: } 1\text{ insert} & \{1,2\},\ 2\\
+5 & 1 & \{3\},\{1,2\} & \text{keep } \{1,2\},\text{ walk } \{3\}\text{ (1 insert)} & \{1,2,3\},\ 3
+\end{array}
+\]
+Node~1 then adds its own colour~2, already present, so \(\abs{S_1}=3\).
+Printed in node order: \(\texttt{ans}[1..5]=(3,1,2,1,1)\) -- the official
+output \texttt{3 1 2 1 1}.  Element moves: \(1+1=2\) insertions over the
+whole run; the naive per-subtree DFS would have inserted
+\(\sum_u\size(u)=5+1+3+1+1=11\).
+\end{tracebox}
+
+The running tree \(T\) gives the other check (\figref{c28-s2l}):
+\(\texttt{ans}=(3,2,2,1,1,1,2,1,2,1)\), which the code reproduces node-for-node.
+
+\solstep{Complexity}
+\begin{complexitybox}
+\(\bigO{n\log^2 n}\) worst case with \code{set} (\(\bigO{n\log n}\) expected
+with \code{unordered\_set}); \(n=2\cdot10^5\) comfortably inside 1.00\,s and
+512\,MB.  Memory \(\bigO{n}\) live elements, plus \(\bigO{n}\) recursion depth
+on a chain.  \textbf{AC.}
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.30\linewidth} p{0.38\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code}\\
+\midrule
+\(n=1\) & no edges, no children & \code{big} stays null, leaf branch allocates, prints \(1\) \\
+all colours equal & every \(S_u=\{c\}\) & \(\abs{S_u}=1\) everywhere; sets deduplicate \\
+chain (depth \(n\)) & recursion depth \(2\cdot10^5\) & \textbf{stack risk}, see hardening note \\
+colours \(=10^9\) & no array indexed by colour & container keys only -- fine \\
+star \(1\!\to\!2..n\) & root has \(n-1\) size-1 children & every merge walks exactly one element, \(\bigO{n}\) total \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Depth:} the DFS recurses \(O(n)\) deep on a chain -- move the
+        traversal to an explicit stack (post-order: process node after all
+        children are done, popping a work list), or raise the stack limit.
+        The merge logic is unchanged; only the driver differs.
+  \item \textbf{Allocation:} \texttt{new set<int>} per node with \texttt{delete}
+        of the drained one is correct but allocator-heavy; a pool of containers
+        (or \code{vector<int>} buckets that are appended, since on a
+        \emph{distinct-count} question duplicates can be dropped at the end)
+        cuts the constant.
+  \item \textbf{Hashing:} switching to \code{unordered\_set} invites hacking on
+        the worst-case hash -- use a randomised hash or keep \code{set} when
+        the judge is adversarial.
+  \item \textbf{Memory ceiling:} if you forget \code{delete}, the drained
+        containers still hold \(\bigO{n\log n}\) element-copies over the run's
+        lifetime (though only \(\bigO{n}\) live at once if the DFS frees on
+        return) -- the leak shows up on wide trees.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: walking the big side]
+Writing \code{for (int x : *big) s->insert(x); ... swap} -- i.e. pouring the
+large container into the freshly-returned one -- is the quadratic bug, and it
+passes every balanced sample.  The loop's container must be the one you are
+\emph{about to delete}.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: comparing sizes after the containers changed]
+\code{s->size()} is read \emph{before} the insert loop.  Re-testing inside
+the loop (``is it still the smaller?'') is both wrong and slow: the comparison
+that decides the direction is a one-time snapshot per pair.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: returning containers by value under the belief that move semantics save you]
+Moves are cheap, but \thmref{c28-s2l} counts \emph{iterated elements}; a
+\code{std::set} return-by-value rebalances/copies structure per node regardless.
+Keep the pointer (or a \code{shared\_ptr}, at a small cost) so ``surviving
+container'' is a real object you reuse.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: treating this as Ch.14's knapsack merge]
+Merging two \emph{bounded arrays} of states is a double loop; there is no
+``smaller side'' to walk and the \(\log n\) argument does not apply.  If your
+DP table is indexed by capacity, you are in \chref{c27}, not here.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Is the object you fold \emph{one element} (then Ch.13's plain fold wins)
+        or a \emph{container} (this section)?
+  \item Does every element move into a container at least as large -- did you
+        swap the \emph{pointer}, not the contents?
+  \item Is the alphabet actually small? Then a fixed array beats the merge.
+  \item Are the colours indexed anywhere? Coordinate-compress first if so.
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Tree and Queries}{CF 375D}
+    {https://codeforces.com/problemset/problem/375/D}
+    {CF 2400 L5}
+    {coloured rooted tree, \(q\) queries ``how many colours appear at least
+     \(k_j\) times in the subtree of \(v_j\)?''  A \texttt{colour\(\to\)count}
+     map merged small-to-large plus a second \texttt{count\(\to\)how-many-
+     colours} table is the intended container upgrade of this section's set --
+     or solve it the \secref{c28-sack} way and compare constants.}
+  \practice{Replace the Numbers}{CF 1620E}
+    {https://codeforces.com/problemset/problem/1620/E}
+    {CF 1900 L4}
+    {start with \(n\) numbers; each operation relabels \emph{every} copy of \(x\)
+     to \(y\).  Keep one list of positions per value and, at each relabelling,
+     pour the smaller list into the larger (\(\thmref{c28-s2l}\)) rather than
+     walking every copy --- a flat \(\bigO{n\log n}\) instead of
+     \(\bigO{nq}\).  This is the container-merge mechanics of this section
+     stripped of the tree: the ``children'' are the successive relabellings,
+     and the rule (always merge small into big) is unchanged.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+Chapter~13 (\chref{c10}) -- \thmref{c10-subtree-template} is the fixed-size
+fold this section generalises, and its CF~570D (\probref{c10-distk-solved}) is the
+small-alphabet case deliberately not re-solved here.
+Chapter~14 (\chref{c27}) -- the tree-knapsack child merge, a different cost
+model, spelled out in the comparison table of \secref{c28-s2l}.
+Forward: \secref{c28-sack} turns these \(n\) containers into \emph{one} global
+array with a \code{keep} flag; \secref{c28-offline} merges containers over a
+time axis instead of a tree.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 17.3 in 10 seconds]
+One container per subtree; \textbf{always walk the smaller side} when two
+merge, so the container holding an element doubles each time it moves:
+\(\le n\log n\) moves (\thmref{c28-s2l}).  Pointer-rotate to keep the largest
+child's container as the destination, insert the drained ones, \code{delete}.
+Hash container \(\to\bigO{n\log n}\) expected, ordered \(\to\bigO{n\log^2 n}\).
+Fixed tiny alphabet \(\to\) just add arrays (Ch.13).  Bounded state
+\emph{arrays} merged pairwise \(\to\) Ch.14's knapsack, not this.
+\selftest{
+  \item State the doubling argument in one sentence.
+  \item Why is returning the container by value a violation of the theorem's
+        hypothesis, not just a slow style?
+  \item Give the task-shape that sends you to Ch.14 instead of here.
+  \item On \(T\), what is \(S_3\) and why is \(\abs{S_3}\ne\size(3)\)?
+  \item Which two containers does CSES~1139's merge need for the
+        ``at least \(k\) times'' variant?
+}
+\end{recallbox}

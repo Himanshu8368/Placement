@@ -1,0 +1,417 @@
+% =====================================================================
+%  18.5  Offline Sweeps: sort one axis, BIT the other   sec:c14-offline
+%  Exports: prop:c14-dom   lst:c14-dom
+%           prop:c14-nested lst:c14-nested
+%           prop:c14-pbs   lst:c14-pbs   fig:c14-schedule
+%  WORKED section (no \solvedproblem). Discharges Ch.17's forward pointer
+%  (\chref{c14} in ch17 99_chapter_end): PBS scheduling by reference
+%  (\secref{c28-offline}), predicate engine swapped to a BIT.
+%  Anti-repetition: Ch.17 (\chref{c28}) owns PBS-with-rollback-DSU -- we reuse
+%    the LOCKSTEP SCHEDULE only, and say why a BIT needs no rollback.
+%    Ch.1 (\chref{c01}) owns merge count; Ch.5 owns prefix/nested structure.
+%  Worked examples (hand-built so no sample is fabricated):
+%    * 2D dominance on points (1,1),(2,3),(3,2),(4,4): strict-dominator counts
+%      (0,1,1,3).
+%    * CSES 2169 Nested Ranges Count on ranges A=[1,6],B=[2,4],C=[8,10],D=[5,7]:
+%      (contains, contained-by) = A(1,0) B(0,1) C(0,0) D(0,0), brute-forced.
+%    * PBS k-th in static range on a=(4,1,3,2): Q[1,4] k=2 -> 2 ; Q[1,2] k=1 -> 1.
+%  Practice URLs (live-verified, urlsweep-free): CF 1284D (2100), CSES 2168.
+% =====================================================================
+\section{Offline Sweeps: Sort One Axis, BIT the Other}\label{sec:c14-offline}
+
+\begin{previouslybox}[Ch.~17 ran this schedule with a DSU; we swap the engine]
+Chapter~17 (\chref{c28}) introduced \term{parallel binary search} (PBS): many
+``largest value with property \(P\)'' questions that all binary-search in
+\emph{lockstep}, so one shared pass per bit level answers every query at once.
+There the predicate \(P\) (``are these two cells connected yet?'') was charged
+by a \emph{rollback} DSU, because union operations must be undone between
+rounds.  This section keeps the scheduling idea verbatim (\(\secref{c28-offline}\))
+and only changes the predicate engine to a BIT -- and notes that a BIT is even
+nicer, because \emph{adding to a BIT is monotone along the sweep}, so no
+rollback machinery is needed at all.  The wider lesson, back to Ch.~1
+(\chref{c01}): an inversion count was a divide-and-conquer there; offline it is
+just ``sort one axis, count the other with a running structure.''
+\end{previouslybox}
+
+\begin{topicintro}
+\textbf{Offline} means all queries are handed to you before any answer is
+required, so you may re-order them.  The recurring move is to identify a
+\emph{free} ordering axis (one you can sort by without changing answers), sweep
+it in monotone order, and let a frequency/sum BIT over the \emph{other} axis
+answer each query with the running structure.  Three shapes recur:
+\emph{2D dominance counting} (sort by \(x\), count \(y\)-prefixes), \emph{range
+nesting} (sort by left end, count right ends -- CSES~2169), and the
+\emph{threshold search} where the answer is a value, so you run PBS and each
+predicate is one dominance sweep.  In all three the BIT stores counts over a
+compressed coordinate, and the schedule -- not the data structure -- is the new
+idea.
+
+\textbf{Prerequisites.} \secref{c14-core} (the two walks), \secref{c14-range}
+(coordinate compression), \secref{c14-order} (frequency BIT counting by rank),
+and Ch.~17's PBS framing (\(\secref{c28-offline}\)) for the third example.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item count 2D dominated points with a sort and a \(y\)-BIT; \hfill\lv{3}--\lv{4}
+  \item solve range-containment \emph{counting} (CSES~2169) by sorting one end
+        and BIT-ing the other; \hfill\lv{4}
+  \item recognise a query whose answer is a \emph{threshold}, wrap it in PBS,
+        and compute the predicate with a fresh sweep each level; \hfill\lv{5}
+  \item state why a BIT predicate needs no rollback (unlike Ch.~17's DSU). \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card --``queries can be reordered; each is a prefix count over a second axis'']
+\reckey{``for each point, how many points have both coordinates smaller'';
+``for each interval, how many it contains / is contained in''; ``k-th smallest
+value inside a fixed subarray, many queries''; ``how many pairs \((i,j)\) with
+\(i<j\) and a condition on values''; ``the least \(t\) such that a sweep-count
+reaches \(k\)''; anything whose brute force is \emph{sort by one key, then a
+running tally over another}.}
+\recuse{
+  \item one comparison axis is free -- sort on it, BIT on the other
+        (\(\propref{c14-dom}\), \(\propref{c14-nested}\));
+  \item the answer is a value with a monotone predicate -- PBS (\(\secref{c28-offline}\))
+        wrapping a dominance sweep (\(\propref{c14-pbs}\));
+  \item containment of intervals -- sort left-ends, count right-ends
+        (CSES~2169, \(\coderef{c14-nested}\)).
+}
+\recnotuse{
+  \item you must answer \emph{online} (interleaved output, no re-ordering) --
+        use the plain/frequency BIT of \secref{c14-core}/\secref{c14-order} or
+        a segment tree, Ch.~19 (\chref{c13});
+  \item the second axis needs a non-invertible combine (range max with
+        arbitrary writes) -- segment tree, not a count BIT;
+  \item both axes genuinely need the full 2D structure with rectangle
+        updates -- a 2D BIT or range tree, whose \(\bigO{\log^2}\) cost and
+        memory are the warning below;
+  \item the array is a single static block of queries with no updates -- one
+        prefix array already answers in \(O(1)\).
+}
+One-line test: \emph{can I sort the queries without lying, so that each answer
+is ``how much of the other axis has the sweep already seen''?}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{2D Dominance: Sort by \(x\), Count \(y\)-Prefixes}
+% ---------------------------------------------------------------
+
+\begin{proposition}{Dominated-point counts in \(\bigO{n\log n}\)}{c14-dom}
+Given \(n\) points \((x_i,y_i)\) (comparable \(y\) after compression), the
+number of points that \(p\) \emph{strictly dominates} -- those \(q\) with
+\(q_x\le p_x\) and \(q_y\le p_y\), \(q\ne p\) -- is obtained by sorting points
+by \(x\) ascending (ties broken by \(y\) ascending), sweeping that order, and,
+just before inserting \(p\)'s \(y\)-rank, reading \(\code{count\_le}(\mathit{rank}_y)\)
+on a frequency BIT over \(y\).  The sweep guarantees the BIT holds exactly the
+points with smaller \(x\) (or equal \(x\) but not-yet-processed \(y\)), so the
+prefix count is the dominance tally.  Total \(\bigO{n\log n}\).
+\end{proposition}
+
+\begin{lstlisting}[caption={2D dominance count: sort by x, frequency BIT over compressed y}, label={lst:c14-dom}]
+// points[] = (x, yr) with yr = compressed y-rank; sorted by x asc, then y asc
+sort(points.begin(), points.end());
+vector<int> bit(m + 1, 0);                 // frequency BIT over y (18.3)
+for (auto& p : points){
+    int dom = 0;
+    for (int r = p.yr; r > 0; r -= r & -r) dom += bit[r];  // #seen with y<=p.y
+    // dom = points strictly dominated by p (excluding p itself)
+    for (int r = p.yr; r <= m; r += r & -r) bit[r]++;      // p joins the seen set
+}
+\end{lstlisting}
+
+\begin{tracebox}[Dominance on \((1,1),(2,3),(3,2),(4,4)\)]
+\(y\)-ranks are already \(1,2,3,4\); sorted by \(x\) (as listed).  Read the
+BIT \emph{before} inserting each point:
+\[
+\renewcommand{\arraystretch}{1.1}
+\begin{array}{c|c|c|c}
+(x,y) & \text{seen before it} & \code{count\_le}(y) & \text{dominated}\\ \hline
+(1,1) & \varnothing & 0 & 0\\
+(2,3) & \{(1,1)\} & \#y\!\le\!3=1 & 1\\
+(3,2) & \{(1,1),(2,3)\} & \#y\!\le\!2=1 & 1\\
+(4,4) & \{(1,1),(2,3),(3,2)\} & \#y\!\le\!4=3 & 3
+\end{array}
+\]
+Dominator counts \((0,1,1,3)\).  Nothing here is a new data structure -- it is
+\(\coderef{c14-freq}\) plus a \emph{sort}; the sort is the whole of the new
+idea.
+\end{tracebox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.8, transform shape]
+  \draw[->,gray!70] (0,0) -- (5.2,0) node[below right,font=\tiny]{\(x\)};
+  \draw[->,gray!70] (0,0) -- (0,4.2) node[above left,font=\tiny]{\(y\)};
+  \foreach \px/\py/\lab in {1/1/{(1,1)},2/3/{(2,3)},3/2/{(3,2)},4/4/{(4,4)}} {
+    \filldraw[primaryblue] (\px,\py) circle (2pt) node[above right,font=\tiny] {\lab};}
+  \draw[dashed,warningred] (0,0) rectangle (4,4);
+  \node[font=\tiny,text=warningred] at (2,-0.5) {sweep \(x\uparrow\): the BIT holds all points left of the dashed edge};
+\end{tikzpicture}
+\caption{The dominance sweep visualised.  Sorting by \(x\) turns ``count points
+below-and-left of \(p\)'' into ``count what the \(y\)-BIT has already swallowed
+when the vertical edge reaches \(p\)'s \(x\)''.  Point \((4,4)\) sits with all
+three earlier points inside its dominated quadrant, so it reads \(3\).}
+\label{fig:c14-schedule}
+\end{figure}
+
+% ---------------------------------------------------------------
+\subsection{Nested Ranges: sort one end, count the other (CSES 2169)}
+% ---------------------------------------------------------------
+
+Range \([l_i,r_i]\) \emph{contains} range \([l_j,r_j]\) iff \(l_i\le l_j\) and
+\(r_i\ge r_j\).  That is dominance with one axis flipped -- and after sorting by
+one end, the other end is a BIT prefix.
+
+\begin{proposition}{Contains / contained-by counts for every range}{c14-nested}
+Sort the ranges by \(l\) ascending, breaking ties by \(r\) \emph{descending}.
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \emph{contains\(_i\)} (how many ranges \(i\) contains): sweep the order
+        right-to-left, inserting each range's \(r\) into a frequency BIT; at
+        \(i\) read \(\code{count\_le}(r_i)\).  Everything already inserted has
+        \(l\ge l_i\), and among those the prefix \(r\le r_i\) are exactly the
+        ranges inside \(i\)'s span.
+  \item \emph{contained-by\(_i\)} (how many ranges contain \(i\)): sweep the
+        same order left-to-right; at \(i\) the number already inserted with
+        \(r\ge r_i\) equals \((\text{seen})-\code{count\_le}(r_i-1)\).
+\end{itemize}
+The tie-break (\(l\) equal \(\Rightarrow\) larger \(r\) first) is what makes
+equal-left ranges nest correctly and stops a range counting itself.  Total
+\(\bigO{n\log n}\) after compressing the \(r\)-values.
+\end{proposition}
+
+\begin{lstlisting}[caption={Nested Ranges Count (CSES 2169): sort left ends, BIT over right ends}, label={lst:c14-nested}]
+// rng[] = (l, r, id); r compressed to rank in 1..m
+sort(rng, [](A,B){ return A.l!=B.l ? A.l<B.l : A.r>B.r; });   // l asc, r DESC
+vector<int> bit(m+1,0);
+// contains[i]: sweep from the right
+for (int i=n-1;i>=0;i--){
+    int c=0; for(int x=rng[i].r;x>0;x-=x&-x) c+=bit[x];       // # with r<=rng[i].r
+    contains[rng[i].id]=c;                                    //   (all have l>=l_i)
+    for(int x=rng[i].r;x<=m;x+=x&-x) bit[x]++;
+}
+fill(bit.begin(),bit.end(),0);
+// contained_by[i]: sweep from the left, count r >= rng[i].r among seen
+for (int i=0;i<n;i++){
+    int le=0; for(int x=rng[i].r-1;x>0;x-=x&-x) le+=bit[x];   // # with r< rng[i].r
+    contained_by[rng[i].id]= i - le;                          // seen = i ; >= r_i
+    for(int x=rng[i].r;x<=m;x+=x&-x) bit[x]++;
+}
+\end{lstlisting}
+
+\begin{tracebox}[Nested Ranges on four hand-built ranges A,B,C,D]
+Sort by \(l\) asc, \(r\) desc: \(A(1,6), B(2,4), D(5,7), C(8,10)\).  Compress
+\(r\)-values \(4,6,7,10\to\) ranks \(1,2,3,4\).
+\emph{contains} (right-to-left sweep; BIT over \(r\)-rank):
+\(C\): query\((4){=}0\); insert~4.
+\(D\): query\((3){=}0\); insert~3.
+\(B\): query\((1){=}0\); insert~1.
+\(A\): query\((2){=}\)count of ranks\(\le2\) seen\(=\{1\}\)=1. So
+contains \(=(A\,1,\,B\,0,\,C\,0,\,D\,0)\).
+\emph{contained-by} (left-to-right; \(i-\)query\((r_i-1)\)):
+\(A\): \(0-\text{query}(1)=0\).  \(B\): \(1-\text{query}(0)=1\).
+\(D\): \(2-\text{query}(2)=2-0=0\).  \(C\): \(3-\text{query}(3)=3-2=0\).  So
+contained-by \(=(A\,0,\,B\,1,\,C\,0,\,D\,0)\).
+Pairing per original range: \(A(1,0),B(0,1),C(0,0),D(0,0)\) -- verified against
+a brute scan of the four pairs.  (This is a hand-built set; CSES~2169 has its
+own statement and samples.)
+\end{tracebox}
+
+\begin{insightbox}[Why the tie-break is load-bearing]
+Sorting equal-left ranges by \emph{descending} right end means the widest comes
+first, so a narrower same-left range is counted as contained by it, and neither
+sees itself (it is inserted only after its own query).  Use \emph{ascending}
+right on the tie and equal-left ranges mis-nest -- the classic off-by-one WA of
+this problem, and the reason \(\propref{c14-nested}\) states the order twice.
+\end{insightbox}
+
+% ---------------------------------------------------------------
+\subsection{Parallel Binary Search over a BIT: k-th in a Static Range}
+% ---------------------------------------------------------------
+
+The last two answers were \emph{counts}.  Some questions ask for a
+\emph{threshold}: the least value \(v\) making a dominance-count reach \(k\) --
+for instance the k-th smallest number inside a fixed subarray.  The predicate
+``is the k-th smallest of \(a[\ell..r]\) at most \(v\)?'' is ``\(\#\{i\in[\ell,r]:
+a_i\le v\}\ge k\)'', which is exactly a dominance count (\(\propref{c14-dom}\))
+if we sort by value.  Because the predicate is monotone in \(v\), we binary
+search it -- and, with many queries, we run Ch.~17's \term{parallel} version so
+one shared sweep serves every query at the same bit level.
+
+\begin{proposition}{k-th smallest in a range by PBS with a position BIT}{c14-pbs}
+Each query holds an interval \([\ell,r]\) and a target \(k\); the answer is a
+value.  Maintain per-query \((lo,hi)\) over the value range.  Repeat until all
+\((lo{=}hi)\): \emph{bucket} every unfinished query at its current \(mid\);
+sweep the value domain ascending, inserting each array element's \emph{position}
+into a BIT as its value becomes \(\le mid\); for every query bucketed at this
+\(mid\), the range count \(\code{query}(r)-\code{query}(\ell-1)\) is the
+predicate ``\(\ge k\)?'' -- if true set \(hi=mid\), else \(lo=mid+1\).  Because
+\(mid\)-values are processed in ascending order within a round, the BIT only
+gains elements (a \(y\)-prefix sweep), so there is \textbf{no rollback}: at the
+end of a round we discard the whole BIT and rebuild next round.  This is the
+only place Ch.~17's rollback DSU is replaced -- same schedule, easier engine.
+\end{proposition}
+
+\begin{lstlisting}[caption={PBS skeleton: lockstep binary search whose predicate is one BIT sweep}, label={lst:c14-pbs}]
+// a[] static with compressed values 1..m; queries (l,r,k) -> kth smallest value
+int lo[MQ], hi[MQ];                       // per query, over value ranks
+for (int it = 0; it < LOG; it++){         // LOG = ceil(log2 m) rounds, all in lockstep
+    vector<int> bucket[m + 1];            // queries grouped by their current mid
+    for (int q : open) bucket[(lo[q]+hi[q])/2].push_back(q);
+    fill(bit.begin(), bit.end(), 0);      // FRESH BIT each round (no rollback needed)
+    // sweep value v ascending; positions with a[] <= v sit in the BIT:
+    vector<int> pos = positions_sorted_by_value();   // precomputed once
+    for (int v = 1, ptr = 0; v <= m; v++){
+        while (ptr < n && val_at[pos[ptr]] <= v) add(bit, pos[ptr++], 1);
+        for (int q : bucket[v]) {                       // predicate at mid = v
+            long long cnt = query(bit, R[q]) - query(bit, L[q] - 1);
+            if (cnt >= K[q]) hi[q] = v; else lo[q] = v + 1;
+        }
+    }
+    open = queries with lo < hi;
+}
+// answer value = lo[q] for each q  (lo == hi at exit)
+\end{lstlisting}
+
+\begin{tracebox}[PBS on \(a=(4,1,3,2)\): k-th in a range]
+Compressed values \(1<2<3<4\) as ranks \(1,2,3,4\).  Two queries:
+\(Q_1=[1,4],k{=}2\); \(Q_2=[1,2],k{=}1\).  Both start \((lo,hi)=(1,4)\).\\
+\emph{Round~1, mid\(=2\):} fresh BIT, insert positions with value\(\le2\):
+value1@pos2, value2@pos4 \(\Rightarrow\) BIT holds \(\{2,4\}\).
+\(Q_1\): count in \([1,4]=2\ge2\) \(\Rightarrow\) \(hi=2\).
+\(Q_2\): count in \([1,2]=1\ge1\) \(\Rightarrow\) \(hi=2\).\\
+\emph{Round~2, mid\(=1\):} insert value\(\le1\): \(\{2\}\).
+\(Q_1\): count in \([1,4]=1\ge2\)? no \(\Rightarrow\) \(lo=2\).  Now \(lo{=}hi{=}2\)
+\(\Rightarrow\) answer \(2\).
+\(Q_2\): count in \([1,2]=1\ge1\)? yes \(\Rightarrow\) \(hi=1\), \(lo{=}hi{=}1\)
+\(\Rightarrow\) answer \(1\).\\
+So k-th smallest of \(\{4,1,3,2\}\) with \(k{=}2\) is \(\mathbf{2}\) (sorted
+\(1,2,3,4\)), and the 1st of \(\{4,1\}\) is \(\mathbf{1}\) \checkmark.  Two
+rounds, one shared sweep each -- the lockstep from Ch.~17, predicate now a BIT.
+\end{tracebox}
+
+\begin{comparisonbox}[PBS-with-BIT (here) vs PBS-with-rollback-DSU (Ch.~17)]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Same} \emph{schedule}: all queries advance one bit per round;
+        a round is one monotone pass; complexity \(\bigO{(n+q)\log(\text{domain})
+        \log n}\).
+  \item \textbf{Different} \emph{engine}: Ch.~17 connected cells with DSU, whose
+        unions are not invertible, so it \emph{rolls back} to the round's start.
+        Here the predicate is a \(y\)-prefix count: the BIT along an ascending
+        value sweep only \emph{appends}, so we rebuild it per round and never
+        roll back -- the \code{fill(bit,...)} reset in \(\coderef{c14-pbs}\).
+  \item \textbf{Different} \emph{shape of the predicate}: DSU answers
+        ``connected by threshold''; the BIT answers ``at least \(k\) elements
+        below threshold in a span''.  Recognising which one your problem needs
+        is the whole design step.
+\end{itemize}
+This is exactly the obligation Ch.~17 pinned on this chapter: the sweep-a-batch
+idea, run with a Fenwick predicate instead of a rollback DSU.
+\end{comparisonbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: sorting the wrong way on ties]
+In nested ranges (\(\propref{c14-nested}\)) equal left ends must order by
+\emph{descending} right end, or two ranges sharing a left end fail to nest and
+a range counts itself.  In dominance (\(\propref{c14-dom}\)) equal \(x\) must
+order by \(y\) so that a query never sees an equal-\(x\) point it should.  A
+tie-break is part of the reduction, not a cosmetic detail.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: rolling a BIT back when you can just rebuild]
+Carrying over Ch.~17's rollback habit here costs complexity and bugs.  The BIT
+predicate is monotone along the sweep, so a round only appends; discard and
+rebuild each round (an \(\bigO{m}\) clear).  If you find yourself writing an
+undo stack for a Fenwick, you have mis-identified the predicate's shape.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: forgetting to compress the second axis]
+The BIT indexes the \emph{other} axis (\(y\), or \(r\), or position).  If those
+coordinates reach \(10^9\), the array is impossible until you rank-compress
+them (\(\propref{c14-compress}\)).  Compress \emph{all} coordinates that appear
+in any query bound too, or a prefix query reads a rank that was never inserted.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: 32-bit counts and the \(\bigO{\log^2}\) temptation]
+Dominance and nesting counts reach \(\binom{n}{2}\) (accumulate in \code{long
+long}).  And when a problem really needs \emph{rectangle} updates rather than a
+sweep, a naive 2D BIT is \(\bigO{\log^2 n}\) and \(O(n\log n)\) memory -- often
+blowing the limit where a single-axis sweep would not.  Check whether a sort
+collapses your 2D problem to a 1D BIT before reaching for the heavier tool.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Which axis is genuinely \emph{free} to sort on without changing answers?
+  \item What does the running BIT store -- a count over compressed \(y\), over
+        right ends, or over positions?
+  \item Is your answer a \emph{count} (one sweep) or a \emph{threshold} (PBS
+        wrapping sweeps)?
+  \item Did you compress every coordinate, tie-break correctly, and use 64-bit
+        accumulators?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{New Year and Conference}{CF 1284D}
+    {https://codeforces.com/problemset/problem/1284/D}
+    {CF 2100 L5}
+    {Lecture \(i\) has interval \([sa_i,ea_i]\) at venue \(a\) and \([sb_i,eb_i]\)
+     at venue \(b\); Hyunuk is happy iff \emph{no} pair overlaps in exactly one
+     venue.  Reduce to: for every pair overlapping in \(a\), check they also
+     overlap in \(b\), then swap venues.  Sort lectures by \(sa\) and sweep,
+     keeping the currently \(a\)-active lectures in an ordered structure keyed
+     by their \(b\)-endpoints; if any active lecture's \(b\)-interval is
+     disjoint from the current one, that pair is the witness \(\Rightarrow\) NO.
+     The \emph{same} sort-one-axis/read-the-other sweep as \(\coderef{c14-dom}\),
+     but the live structure is a multiset (the combine is an interval test, not
+     a count -- the ``non-invertible combine'' case from the pattern card, made
+     concrete).}
+  \practice{Nested Ranges Check}{CSES 2168}
+    {https://cses.fi/problemset/task/2168}
+    {CSES L4}
+    {The boolean twin of the worked CSES~2169: for each range report only
+     ``does it contain some other / is it contained in some other''.  Run the
+     very sort of \(\coderef{c14-nested}\), but you no longer need a BIT -- a
+     running \(\min/\max\) of right ends suffices, because existence is a
+     prefix extremum, not a prefix sum.  The lesson: recognise when the sweep
+     wants a count (BIT) versus an extreme (\(\bigO{1}\) running value).}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+The lockstep \emph{scheduling} of \(\propref{c14-pbs}\) is Ch.~17's idea, cited
+by reference (\(\secref{c28-offline}\)); only the predicate engine is swapped to
+\secref{c14-core}'s BIT, discharging the forward pointer Ch.~17 left on this
+chapter.  The counting sweeps reuse \secref{c14-order}'s frequency BIT and
+\secref{c14-range}'s compression; Ch.~1 (\chref{c01}) owns the merge-count
+view of the same inversions.  Forward: the Summit CF~1181D is precisely a PBS
+whose predicate is a \(y\)-prefix count on a BIT (\(\thmref{c14-lift}\)'s
+lifting answers each bucketed query's ``which slot crosses \(k\)''), composing
+this section's schedule with \secref{c14-order}'s search.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 18.5 in 10 seconds]
+Offline \(=\) you may sort.  Find the free axis, sweep it, and let a BIT over
+the \emph{other} (compressed) axis answer a prefix count: dominance
+\(\propref{c14-dom}\) (sort \(x\), count \(y\)), nested ranges
+\(\propref{c14-nested}\) / CSES~2169 (sort left ends, count right ends).  When
+the answer is a \emph{threshold}, wrap that count in Ch.~17's parallel binary
+search (\(\propref{c14-pbs}\), \(\coderef{c14-pbs}\)) -- one shared sweep per
+bit level, and because a BIT only appends along the sweep, \textbf{no rollback}.
+Sort ties deliberately, compress both axes, accumulate in \code{long long}.
+\selftest{
+  \item For points \((1,1),(2,3),(3,2),(4,4)\), say which axis you sort and
+        what the BIT indexes, then give \((4,4)\)'s dominance count.
+  \item Why does Nested Ranges sort ties by \emph{descending} right end?
+  \item What makes the PBS-with-BIT predicate monotone, and why does that let
+        us skip Ch.~17's rollback?
+  \item Give the one change from Ch.~17's PBS and the one thing kept identical.
+  \item When does a range sweep want a running \(\min/\max\) instead of a BIT?
+}
+\end{recallbox}

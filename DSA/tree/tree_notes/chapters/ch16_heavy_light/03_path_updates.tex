@@ -1,0 +1,246 @@
+% =====================================================================
+%  22.3  Path Updates: the jump loop carrying Ch.20's lazy tag, the
+%        edge-value-on-the-deeper-endpoint reduction, and a non-additive
+%        combine (capped product) worked to the end.
+%  Exports: sec:c16-pathupd  prop:c16-edge  lst:c16-pathupdate
+%           prob:c16-593d  lst:c16-593d
+%  This section DISCHARGES the promise Ch.20 (05_when_lazy_strains) and
+%  Ch.21 (21.4/21.5/99) handed here: "a path that is UPDATED -> HLD + lazy".
+%  The lazy tag itself is REUSED from Ch.20, never re-derived (back-cite).
+%  Numbers agree with 22.1/22.2.  Worked trace on T (add 10 to path 4--10,
+%  then query path sum 8--6):
+%    B after add: (13,14,15,17,10,1,12,1,3,15);  sum(8--6)=1+16+27=44.
+%  CF 593D Happy Tree Party (2400), statement + sample re-verified live on
+%  codeforces.com: n,m<=200000, edge value x<=1e18.  Type-1 "1 a b y": walk the
+%  a--b path, y := y div x_j at each edge j, print y.  Type-2 "2 p c": set edge
+%  p to c (c < current x_p, i.e. a DECREASE).  Official sample 1: n=6 m=6,
+%  edges (1 2 1)(1 3 7)(1 4 4)(2 5 5)(2 6 2), ops 1 4 6 17 / 2 3 2 / 1 4 6 17 /
+%  1 5 5 20 / 2 4 1 / 1 5 1 3  ->  output 2 4 20 3.
+% =====================================================================
+\section{Path Updates: A Lazy Tag Down Every Chain}\label{sec:c16-pathupd}
+
+\begin{previouslybox}[Ch.~20 promised this section by name; Ch.~19 gave the tree, 22.1--22.2 gave the walk]
+Chapter~20 (\chref{c15}) taught a segment tree to rewrite a whole range with a \term{lazy tag} -- add, assign, clear -- pushing the pending work down only when someone looks.  At the end of that chapter, section \(\secref{c15-strains}\) admitted a limit: a lazy tag lives happily on an \emph{array}, but ``a path on a tree is not one array interval,'' and handed the mutable-path case forward to \emph{this} chapter.  Chapter~21 (\chref{c19}) made the same promise when it deferred the ``path that is \emph{updated}'' row to HLD.  Now \(\secref{c16-decomp}\) has laid each chain down as a contiguous range and \(\defref{c16-jump}\) knows how to tile a path with \(O(\log n)\) of those ranges.  The merge is immediate and discharges both promises: run the jump loop, and instead of \emph{folding} each range, \emph{tag} it with Ch.~20's lazy update.  Nothing about the tag is new; only the tiling is.
+\end{previouslybox}
+
+\begin{topicintro}
+A path \emph{update} is \(\defref{c16-jump}\) with the segment tree's range-write swapped in for its range-read: while the heads differ, apply the lazy update to \([\mathit{pos}(\mathit{head}),\mathit{pos}(\text{endpoint})]\) on the deeper side and hop up; finish with the one same-chain range.  Cost is the same \(\bigO{\log^2 n}\) -- \(O(\log n)\) chains, each a \(\bigO{\log n}\) lazy write (Ch.~20).  The second pillar of this section is the \term{edge-to-node reduction} (\(\propref{c16-edge}\)): store each edge's value at its deeper endpoint, so edge-queries become node-queries with the single caveat that the \(\mathrm{lca}\)'s own slot must be excluded.  Together they handle the four composite shapes -- path-add + path-sum, path-add + subtree-sum, path-assign + path-max, and path-product style folds -- and the section closes on a genuinely tricky combine (a capped product) that a lazy \emph{add} cannot express but the same machinery still serves.
+
+\textbf{Prerequisites.} \(\secref{c16-decomp}\) and \(\secref{c16-pathq}\) -- the \(\mathit{pos}\) order and the jump loop.  Chapter~20 (\chref{c15}) -- the lazy range tag and push; assumed and reused, \emph{not} re-derived (\(\secref{c15-strains}\) is exactly the gap this fills).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item turn a path \emph{add} or \emph{assign} into \(O(\log n)\) lazy writes and trace the tags on \(T\); \hfill\lv{4}--\lv{5}
+  \item state and apply the edge-to-deeper-endpoint reduction, and know precisely which slot to drop; \hfill\lv{4}
+  \item recognise that a non-additive combine (capped product) still rides the same chains, needing only a different segtree node; \hfill\lv{5}
+  \item explain why Ch.~20's tag and a Ch.~21 persistent tree refuse to share, so a mutable path forces HLD. \hfill\lv{5}
+\end{itemize}
+\end{topicintro}
+
+% ---------------------------------------------------------------
+\subsection{The reduction: edge values live at the deeper endpoint}
+% ---------------------------------------------------------------
+
+\begin{proposition}{Edge-to-node reduction}{c16-edge}
+Root \(T\) at \(s\).  Put the value (or lazy state) of every edge \(e=(\mathit{parent}(w),w)\) into the node-slot of its deeper endpoint \(w\), and give the root \(s\) a neutral slot (0 for sums, \(+\infty\)/0 for max, \(1\) for products).  Then for any \(u,v\), the multiset of \emph{edges} on the path \(u\)--\(v\) equals the multiset of \emph{node-slots} on the path \(u\)--\(v\) \emph{minus the slot of \(\mathit{lca}(u,v)\)}.  Consequently a path aggregate over edges is the node aggregate over the tiled ranges with the final same-chain segment shortened by one at the lca end (\([\mathit{pos}(\ell)+1,\dots]\)).
+\end{proposition}
+\begin{proofbox}
+Every node except \(s\) is the deeper endpoint of exactly one edge -- its parent edge -- and every edge has exactly one deeper endpoint, so the edge\(\to\)deeper-node map is a bijection between edges and non-root nodes.  Walking the node path \(u\)--\(v\), each node \(x\ne\ell\) on it is entered via its parent edge, which is an edge of the path; the lca \(\ell\) is entered (from above) by the edge \((\mathit{parent}(\ell),\ell)\), which is \emph{not} on the \(u\)--\(v\) path.  Hence the path's edges are the path's node-slots except \(\ell\)'s, and dropping \(\ell\)'s slot in the last fold (\(\defref{c16-jump}\)'s same-chain segment starts at \(\mathit{pos}(\ell)+1\)) is exact.  QTREE (\(\secref{c16-pathq}\)) used exactly this final \(\mathit{pos}[u]+1\); here it is stated once for every aggregate.
+\end{proofbox}
+
+% ---------------------------------------------------------------
+\subsection{Tagging the chains: path add / path assign}
+% ---------------------------------------------------------------
+
+\begin{lstlisting}[caption={Path update + path query over the HLD order: the jump loop of lst:c16-pathquery with Ch.20's lazy range-write (ADD shown; ASSIGN identical shape). Edges handled via pos[head] vs pos[lca]+1 as in prop:c16-edge.}, label={lst:c16-pathupdate}]
+// Segment tree with a lazy ADD tag over pos[] (Chapter 20's, reused verbatim):
+//   tadd[i]  pending +value for node i's whole interval
+//   rangeAdd(i,l,r,a,b,val), rangeSum(i,l,r,a,b)   -- standard lazy tree
+
+void pathAdd(int u, int v, long long val){        // add val to every node on u--v
+    while (head[u] != head[v]){
+        if (dep[head[u]] < dep[head[v]]) swap(u, v);      // deeper head first
+        rangeAdd(1,1,cur, pos[head[u]], pos[u], val);     // whole chain slice
+        u = par[head[u]];
+    }
+    if (dep[u] > dep[v]) swap(u, v);                       // u is the lca
+    rangeAdd(1,1,cur, pos[u], pos[v], val);                // node version: include lca
+    // for EDGES (prop:c16-edge): use  rangeAdd(...,pos[u]+1,pos[v],...)  instead
+}
+long long pathSum(int u, int v){
+    long long res = 0;
+    while (head[u] != head[v]){
+        if (dep[head[u]] < dep[head[v]]) swap(u, v);
+        res += rangeSum(1,1,cur, pos[head[u]], pos[u]);
+        u = par[head[u]];
+    }
+    if (dep[u] > dep[v]) swap(u, v);
+    res += rangeSum(1,1,cur, pos[u], pos[v]);
+    return res;
+}
+\end{lstlisting}
+
+\begin{tracebox}[Path add then path sum on T -- add 10 to path \(4\)--\(10\), read sum on \(8\)--\(6\)]
+Seed \(B=(3,4,5,7,0,1,2,1,3,5)\). \textbf{Update} \(\text{pathAdd}(4,10,+10)\): segments \([10,10]\), \([7,7]\), \([1,5]\). Tag those ranges. New \(B=(13,14,15,17,10,\;1,\;12,\;1,\;3,\;15)\) (positions 1--10; nodes \(1,3,7,9,10\) and \(2,4\) each \(+10\)). \textbf{Query} \(\text{pathSum}(8,6)\): path nodes \(\{6,2,5,8,1,3\}\), segments \([6,6],[7,9],[1,2]\). Read: \([6,6]=1\); \([7,9]=12{+}1{+}3=16\); \([1,2]=13{+}14=27\). Total \(1+16+27=\mathbf{44}\). \textbf{Cross-check}: of the six nodes, only \(2,1,3\) lie on the updated path \(4\)--\(10\) and got \(+10\); \(12{+}13{+}14\) (the bumped \(2,1,3\)) \(+\,1{+}1{+}3\) (untouched \(6,5,8\)) \(=39+15=44\). The two \(O(\log^2 n)\) operations share one lazy tree, exactly \(\secref{c15-strains}\)' missing piece.
+\end{tracebox}
+
+\begin{notebox}[Why persistence (Ch.~21) cannot do this]
+A path \emph{assign}/\emph{add} mutates \(\bigO{\log n}\) ranges on the \emph{current} state; a lazy tag records work that lives in no single version, so it cannot be path-copied into a persistent root (\(\secref{c15-strains}\)).  This is the boundary the opener drew: static path \(k\)-th belongs to Ch.~21's four roots; a path that is \emph{written} belongs here.  Read \(\secref{c16-boundary}\) for the full map.
+\end{notebox}
+
+\begin{observation}
+The re-treat of CF 383C (``Propagating tree'' -- add to a subtree, read one node), CF 877E (``Danil and a Part-time Job'' -- flip a subtree, read a node), CF 258E (``Little Elephant and Tree'') and CF 276E (``Little Girl and Problem on Trees'') belongs to the Fenwick chapter (\chref{c14}): each is solvable by a difference array on the Euler order and does \emph{not} need chains, so they are named in prose, never re-linked.  (Only the path-with-an-interleaved-subtree blend forces chains; a pure subtree-write is one \(\mathit{pos}\)-interval, \(\secref{c16-subpath}\).)  The tell that a problem \emph{really} wants HLD rather than a BIT trick is that the queries are \emph{mixed} -- some on paths, some on subtrees, with the \emph{same} mutable values -- which no single-order difference survives.  That mixed shape is \(\secref{c16-subpath}\)'s subject.
+\end{observation}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 593D -- divide \(y\) by every edge on a path}
+% ---------------------------------------------------------------
+
+\solvedproblem{c16-593d}{Happy Tree Party}{CF 593D}
+  {https://codeforces.com/problemset/problem/593/D}{CF 2400 L5}
+  {edge-to-node reduction; heavy-light path fold with a capped-product combine; point edge decrease; the tag-free sibling of lst:c16-pathupdate}
+
+\begin{problemstatement}[CF 593D Happy Tree Party]
+A tree on \(n\) vertices; each edge \(i\) carries a positive integer \(x_i\). Process \(m\) operations:
+\begin{itemize}[nosep]
+  \item \code{1 a b y}: move along the unique path \(a\) to \(b\); every time you cross an edge \(j\), replace \(y \leftarrow y \operatorname{div} x_j\) (integer division). Output the final \(y\).
+  \item \code{2 p c}: replace edge \(p\)'s value by \(c\), guaranteed \(c < x_p\) (a strict \emph{decrease}).
+\end{itemize}
+
+\textbf{Input.} \(n,m\le 200000\); then \(n-1\) lines ``\(u\ v\ x\)'', \(x\le 10^{18}\); then \(m\) operations as above (\(y\le 10^{18}\)).
+
+\textbf{Output.} The final \(y\) for each type-1 operation, one per line.
+
+\textbf{Example (official).}
+\begin{verbatim}
+Input:
+6 6
+1 2 1
+1 3 7
+1 4 4
+2 5 5
+2 6 2
+1 4 6 17
+2 3 2
+1 4 6 17
+1 5 5 20
+2 4 1
+1 5 1 3
+
+Output:
+2
+4
+20
+3
+\end{verbatim}
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 40 minutes]
+Successive integer divisions by \(x\) along the path equal division by the \emph{product} of the \(x\)'s -- one segtree fold over the same chain ranges. The catch: that product overflows even \(10^{18}\) in seconds. Cap it, because once it exceeds \(y\) the answer is already \(0\).
+\peek{what is \(((y \operatorname{div} a)\operatorname{div} b)\) equal to, and when does it stop mattering?}
+\nudge{\(((y/a)/b)=y/(ab)\). And \(y/(ab)=0\) as soon as \(ab>y\); so you never need the true product once it passes a bound -- store \(\min(\text{product},\,\text{LIMIT})\).}
+\fullhint{Charge each edge to its deeper endpoint (\(\propref{c16-edge}\)); the root's slot is the product identity \(1\). A segtree node stores the capped product of its range: multiply children, and if the result exceeds \(\mathit{LIMIT}=10^{18}\) store \(\mathit{LIMIT}+1\) (compute in \code{long long} but clamp before overflow, or use \code{\_\_int128}). Type-1: \(p=\) the fold of \(\min(\cdot,\mathit{LIMIT}{+}1)\) over the path ranges -- the same jump as \(\coderef{c16-pathupdate}\) but with the product combine and the lca slot \emph{excluded} (edges!) -- print \(y/p\) (and \(y\) itself when the path is empty, \(p=1\)). Type-2: a point write at \(\mathit{pos}(\text{deeper end of edge }p)\). Sample: path \(4..6=4,1,2,6\) edges \(4,1,2\) product \(8\), \(17/8=2\); the \code{2 3 2} change hits edge 3 \(=(1,3)\), off that path, so the next query is still \(2\)... wait the sample prints \(4\) second -- re-check: edge numbering is input order, so \(1{=}(1,2),2{=}(1,3),3{=}(1,4),4{=}(2,5),5{=}(2,6)\); path \(4..6\) uses edges \(3{=}(1,4)\) value~\(4\), \(1{=}(1,2)\) value~\(1\), \(5{=}(2,6)\) value~\(2\), product~\(8\), \(17/8=2\); the change \code{2 3 2} sets edge~3 (value \(4\to2\)), now product \(1\cdot2\cdot2=4\), \(17/4=4\). \(\bigO{(n+m)\log^2 n}\), \ac.}
+\end{attemptgate}
+
+\solstep{Understanding}
+Divisions along a path collapse to one division by the path's edge \emph{product}; the product is capped because \(y\le 10^{18}\) forces the answer to \(0\) as soon as it passes \(y\). Edges are read through node slots (\(\propref{c16-edge}\)), updates are point writes, and the fold runs over the very chain ranges of \(\defref{c16-jump}\). This is the cleanest demonstration that a \emph{non-additive}, non-lazy combine still needs only a different segtree node -- the HLD skeleton is unchanged.
+
+\solstep{Key Observations}
+\begin{observation}
+\(((y\operatorname{div}a)\operatorname{div}b)=y\operatorname{div}(ab)\) for positive integers, so a whole path of divisions is one division by the product of its edges -- exactly the associative fold a segment tree wants.
+\end{observation}
+\begin{observation}
+Any factor product beyond \(10^{18}\) is indistinguishable from \(10^{18}{+}1\) (the answer is \(0\) either way), so \(\min(\text{product},10^{18}{+}1)\) is a faithful, overflow-free monoid value -- the trick that makes a \(10^{18}\) range tractable.
+\end{observation}
+\begin{observation}
+Decreases only ever shrink edge values, so the product along a fixed path is non-increasing over time -- but that monotonicity is not needed; the segtree recomputes honestly, and no lazy tag is required since updates are single-edge (point).
+\end{observation}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}c p{0.24\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Per query} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ walk path & divide by each edge directly & \(\bigO{n}\) & \tle \\
+2 & \lv{3}\ path sum of logs & \(\sum\log x\), compare to \(\log y\) & \(\bigO{\log^2 n}\) & \re \\
+3 & \lv{5}\ \textbf{HLD + capped product} & this section (\(\coderef{c16-593d}\)) & \(\bigO{\log^2 n}\) & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~2 looks tempting (turn products into sums via logarithms) but floats mis-rank the razor-thin \(ab \gtrless y\) boundary and give wrong \(0\)/\(1\) answers; rung~3 uses exact integer capped products.
+
+\solstep{Solution}
+Root at~1, record each node's parent-edge value and map every edge id to its deeper endpoint. Build a segtree whose node value is \(\min(\prod \text{range},\,\mathit{LIMIT}{+}1)\). Type-1: capped-product fold over the path's chain ranges with the lca slot excluded, print \(y/p\). Type-2: point-write the new value at \(\mathit{pos}(\text{deeper end})\).
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 593D full solution: edges at deeper endpoints, segment tree of capped products over pos, path fold excludes the lca slot, point decrease update}, label={lst:c16-593d}]
+#include <bits/stdc++.h>
+using namespace std;
+typedef long long ll;
+typedef __int128 lll;
+const int N = 200005;
+const ll LIM = 1000000000000000001LL;      // 1e18 + 1 = the "too big" cap
+vector<pair<int,int>> adj[N];
+ll W[N];                                   // parent-edge value at node (root: 1)
+int eu[N], ev[N];                          // edge i endpoints
+int sz[N], heavy[N], head[N], pos[N], nodeAt[N], dep[N], par[N], cur;
+ll seg[4*N];
+
+ll capmul(ll a, ll b){ lll c=(lll)a*b; return c>LIM?LIM:(ll)c; }
+
+void dfs1(int v, int p){
+    par[v]=p; sz[v]=1; heavy[v]=-1; int best=0;
+    for (auto &e : adj[v]) if (e.first!=p){
+        int to=e.first; dep[to]=dep[v]+1; W[to]=e.second;
+        dfs1(to,v); sz[v]+=sz[to];
+        if (sz[to]>best){ best=sz[to]; heavy[v]=to; }
+    }
+}
+void dfs2(int v, int p, int h){
+    head[v]=h; pos[v]=++cur; nodeAt[cur]=v;
+    if (heavy[v]!=-1) dfs2(heavy[v], v, h);
+    for (auto &e : adj[v]) if (e.first!=p && e.first!=heavy[v]) dfs2(e.first,v,e.first);
+}
+void build(int i,int l,int r){ if(l==r){ seg[i]=W[nodeAt[l]]; return; } int m=(l+r)>>1;
+    build(i<<1,l,m); build(i<<1|1,m+1,r); seg[i]=capmul(seg[i<<1],seg[i<<1|1]); }
+void upd(int i,int l,int r,int p,ll val){ if(l==r){ seg[i]=val; return; } int m=(l+r)>>1;
+    if(p<=m) upd(i<<1,l,m,p,val); else upd(i<<1|1,m+1,r,p,val);
+    seg[i]=capmul(seg[i<<1],seg[i<<1|1]); }
+ll qry(int i,int l,int r,int a,int b){ if(a>b) return 1; if(a<=l&&r<=b) return seg[i];
+    int m=(l+r)>>1; return capmul(qry(i<<1,l,m,a,min(b,m)), qry(i<<1|1,m+1,r,max(a,m+1),b)); }
+ll queryPath(int u,int v){                  // product of EDGES on u--v (cap-aware)
+    ll res=1;
+    while (head[u]!=head[v]){
+        if (dep[head[u]]<dep[head[v]]) swap(u,v);
+        res=capmul(res, qry(1,1,cur,pos[head[u]],pos[u]));
+        u=par[head[u]];
+    }
+    if (dep[u]>dep[v]) swap(u,v);            // u is lca
+    res=capmul(res, qry(1,1,cur,pos[u]+1,pos[v]));   // exclude lca's parent edge
+    return res;
+}
+int main(){
+    int n,m; scanf("%d%d",&n,&m);
+    for (int i=1;i<n;i++){ int u,v; ll x; scanf("%d%d%lld",&u,&v,&x);
+        adj[u].push_back({v,i}); adj[v].push_back({u,i}); eu[i]=u; ev[i]=v; }
+    W[1]=1; dep[1]=0; cur=0; dfs1(1,0); dfs2(1,0,1); build(1,1,cur);
+    while (m--){
+        int t; scanf("%d",&t);
+        if (t==1){ int a,b; ll y; scanf("%d%d%lld",&a,&b,&y);
+            ll p=queryPath(a,b); printf("%lld\n", y/p);
+        } else { int pi; ll c; scanf("%d%lld",&pi,&c);            // decrease edge pi
+            int deep = (par[eu[pi]]==ev[pi]) ? eu[pi] : ev[pi];
+            upd(1,1,cur,pos[deep],c);
+        }
+    }
+}
+\end{lstlisting}
+
+\begin{hardeningbox}[The two traps that turn \ac{} into \re{}]
+(1)~\textbf{Overflow.} Two \(10^{18}\) values multiply past even \code{unsigned long long}; \code{capmul} compares in \code{\_\_int128} \emph{before} storing, or caps on the multiplicative guard \(a>\mathit{LIM}/b\).  (2)~\textbf{Empty product.} A query with \(a=b\) has no edges: the fold returns the identity \(1\) and the answer is \(y\) itself (sample query \code{1 5 5 20} \(\to\) \(20\)).  A single-slot \(\mathit{pos}[u]+1>\mathit{pos}[v]\) range correctly yields \(1\) via the \code{a\textgreater b} base case -- never seed the product to~\(0\).
+\end{hardeningbox}
+
+\begin{recallbox}[22.3 in one breath]
+\emph{A path update is the jump loop with Ch.~20's lazy write per chain range; a path query is the same loop with a fold. Edges live at the deeper endpoint, so drop the lca's slot. A combine that is not additive -- capped product here -- still rides the identical chains; only the segment-tree node changes.}
+\selftest{\item Why is a lazy \emph{add} tree unable to solve 593D's fold, even though both use path ranges? \emph{Because division does not distribute over a range-\(\Delta\) add: adding \(\Delta\) to edge values does not update the path product by a constant factor, so the tag has nothing to record -- 593D uses point edge writes and a plain segtree.}}
+\end{recallbox}

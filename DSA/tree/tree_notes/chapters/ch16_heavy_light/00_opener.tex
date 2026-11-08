@@ -1,0 +1,423 @@
+% =====================================================================
+%  Chapter 22 opener -- "Chapter at a Glance", three reading paths + the
+%  ladder staircase, THE running example (the shared 10-node tree T of
+%  Ch.12-21 with node values v=(3,2,4,5,1,1,5,3,7,0), hand-decomposed HERE
+%  once into the four heavy chains, the head/pos arrays, and the value
+%  array B over the chain order that a segment tree is built on), the
+%  who-owns-what comparison (Ch.19 owns the plain segtree, Ch.20 owns the
+%  lazy tag, Ch.11 owns LCA, Ch.5 owns the plain Euler flatten, Ch.21 owns
+%  the STATIC four-root path sibling; THIS chapter owns the chain split, the
+%  pos order, path queries/updates, the edge reduction, and subtree-under-HLD),
+%  the recognition guide, a constraint->tool table, and notation.
+%  Exports fig:c16-chains, fig:c16-pos, fig:c16-taxonomy.
+%  Hand-computed values the whole chapter re-uses (verified once here).
+%  Shared tree T (root 1; edges 1-2,1-3,2-4,2-5,3-6,3-7,5-8,7-9,9-10), node
+%  values v(1..10)=(3,2,4,5,1,1,5,3,7,0).  Authoritative decomposition:
+%    size=(10,4,5,1,2,1,3,1,2,1); heavy(1)=3,heavy(2)=5,heavy(3)=7,heavy(5)=8,
+%      heavy(7)=9,heavy(9)=10; light edges 1->2,2->4,3->6;
+%    chains C1=[1,3,7,9,10] C2=[2,5,8] C4=[4] C6=[6];
+%    head=(1,2,1,4,2,6,1,2,1,1); pos=(1,7,2,10,8,6,3,9,4,5);
+%    B[pos]=v(node) = (3,4,5,7,0,1,2,1,3,5), sum 31;
+%    subtree(2)=[7,10], subtree(3)=[2,6], subtree(7)=[3,5], subtree(5)=[8,9],
+%      subtree(9)=[4,5], subtree(1)=[1,10].
+%  If a section disagrees with this opener, the OPENER is authoritative.
+% =====================================================================
+
+\begin{chaptertheorybox}{Chapter at a Glance}
+Chapter~19 gave a segment tree over an \emph{array}; Chapter~20 taught it to
+rewrite whole ranges with a lazy tag.  Put values on the nodes of a \emph{tree}
+and both engines reach a dead end: a tree has no natural left-to-right order in
+which an arbitrary \(u\)--\(v\) \emph{path} is a contiguous interval -- only
+\emph{subtrees} are (Chapter~5's Euler flatten).  \term{Heavy-light
+decomposition} is the bridge.  Cut the tree into \term{chains} by always sending
+each node's \emph{heaviest} child the same colour; every other edge is
+\term{light}.  Two facts fall out.  First, a root-to-node path crosses at most
+\(\lfloor\log_2 n\rfloor\) light edges (each light step at least doubles the
+subtree below it), so any path is a union of \(O(\log n)\) chains.  Second, give
+each node a position \(\mathit{pos}(v)\) in the heavy-first depth-first order; then
+\emph{each chain is a contiguous run of positions} and, happily, so is
+\emph{every subtree}.  Feed \(\mathit{pos}\) into Chapter~19's segment tree and a path
+query becomes \(O(\log n)\) range queries -- \(O(\log^2 n)\) total -- and a path
+update reuses Chapter~20's lazy tag on those same ranges.  This is the engine
+Chapters~20 and~21 kept deferring mutable path work to.
+
+\textbf{You will learn to}
+\begin{itemize}[nosep]
+  \item split a tree into heavy chains and prove the \(O(\log n)\) light-edge
+        bound, then run the two DFS passes that fill \(\mathit{size},\mathit{heavy},
+        \mathit{head},\mathit{pos}\) (\(\secref{c16-decomp}\), \thmref{c16-lightedge}); \hfill\lv{2}--\lv{3}
+  \item answer a path sum/max/count by jumping head-to-head until \(u,v\) share a
+        chain, spending \(O(\log^2 n)\) and terminating \emph{at} the LCA
+        (\(\secref{c16-pathq}\), SPOJ~QTREE); \hfill\lv{3}--\lv{4}
+  \item update a whole path (add / assign) by carrying Chapter~20's lazy tag down
+        each chain, and reduce \emph{edge} values to the deeper endpoint
+        (\(\secref{c16-pathupd}\), \(\secref{c15-strains}\)); \hfill\lv{4}
+  \item answer subtree \emph{and} path queries from the \emph{one} heavy-first
+        order, and keep them straight against the plain Euler \(\tin\)
+        (\(\secref{c16-subpath}\), CF~916E); \hfill\lv{4}--\lv{5}
+  \item decide, on sight of a specification, whether the problem is HLD at all or
+        belongs to link-cut / persistent / beats / Mo / centroid
+        (\(\secref{c16-boundary}\), the engine map). \hfill\lv{5}
+\end{itemize}
+
+\textbf{Prerequisites.} Chapter~19 (\chref{c13}) -- the segment tree this chapter
+builds over the \(\mathit{pos}\) order, assumed and reused, never re-taught.  Chapter~20
+(\chref{c15}) -- the lazy range tag, bolted onto each chain in \(\secref{c16-pathupd}\).
+Chapter~11 LCA (\chref{c11}) -- \(\mathit{lca}()/\)binary lifting, which the chain
+jump reproduces for free and cites to name the last segment.  Chapter~5
+(\chref{c24}) -- the plain \(\tin/\tout\) flatten, contrasted (not replaced) in
+\(\secref{c16-subpath}\).
+\end{chaptertheorybox}
+
+% ---------------- Reading paths + ladder position ----------------
+\begin{chaptertheorybox}{How to Read This Chapter (three paths)}
+Level badges \(\lv2\)--\(\lv5\): \(\lv2\) is reading a chain off a coloured
+picture; \(\lv3\) is running the two DFS passes by hand on a small tree and
+naming the chains; \(\lv{4}\) is a working path query or path update that walks
+head-to-head correctly (SPOJ~QTREE is exactly this); \(\lv{5}\) is composing a
+path update with a subtree query in one structure, or reading the whole engine
+zoo off the constraints and ruling HLD \emph{out}.
+
+\textbf{Build-up path (\(\lv2\)--\(\lv4\), ``make the chains, then query them'').}
+\secref{c16-decomp} in full -- the heavy-child rule, the light-edge lemma, the two
+DFS passes, the four-chain trace of \(T\).  Then \secref{c16-pathq}: the
+chain-jump loop, the \(O(\log^2 n)\) cost, the \(4\text{--}10\) and \(8\text{--}6\)
+traces, and SPOJ~QTREE.
+
+\textbf{Update path (\(\lv3\)--\(\lv{5}\), ``the path is written, not just read'').}
+\secref{c16-pathq} for the traversal skeleton, then \secref{c16-pathupd}: the same
+jump carrying Chapter~20's lazy tag, the edge-to-node reduction, and CF~593D.  This
+is the promise Chapters~20 and~21 handed here.
+
+\textbf{Boundary path (\(\lv{4}\)--\(\lv{5}\), ``is this even HLD?'').}
+\secref{c16-subpath} (path \emph{and} subtree in one order, CF~916E) then
+\secref{c16-boundary}: the engine map that hands dynamic topology to Ch.~25
+(\chref{c23}), static path \(k\)-th to Ch.~21 (\chref{c19}), non-composable
+updates to Ch.~23 (\chref{c29}), offline to Ch.~27 (\chref{c21}), path counting
+to Ch.~24 (\chref{c18}).
+\end{chaptertheorybox}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, x=9mm, y=7mm]
+  \foreach \st/\lab in {1/lv1,2/lv2,3/lv3,4/lv4,5/lv5,6/lv6} {
+    \fill[\lab!22, draw=\lab, line width=0.8pt] (\st-1,0) rectangle (\st,\st*0.52);
+    \node[font=\scriptsize\bfseries, text=\lab] at (\st-0.5,\st*0.52-0.42) {L\st};}
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (0.05,0.62) {22.1 colour the heaviest child; read the chains off T};
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (1.05,1.14) {22.1 the O(log n) light-edge lemma + the two DFS passes};
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (2.05,1.66) {22.2 chain-jump a path; \(O(\log^2 n)\); solved SPOJ QTREE};
+  \node[annot, anchor=south west, font=\scriptsize]
+    at (3.05,2.18) {22.3 path update = lazy tag per chain; edge-to-node reduction (CF 593D)};
+  \node[annot, anchor=south west, font=\scriptsize, text=lv5]
+    at (4.05,2.70) {22.4 subtree AND path in one order; solved CF 916E};
+  \node[annot, anchor=south west, font=\scriptsize, text=lv6]
+    at (5.05,3.22) {22.5 the engine map -- when NOT to use HLD; Summit};
+\end{tikzpicture}
+\caption*{Chapter~22 on the six-step ladder: reading the chains is
+\(\lv2\)--\(\lv{3}\); a correct head-to-head path query is \(\lv{4}\); a path
+update composed with a lazy tag, and subtree-plus-path bookkeeping, are
+\(\lv{4}\)--\(\lv{5}\); the engine map and the Summit are step~6.  Ground-up
+path \(=\) steps 2--4; full contest path runs to~6.}
+\end{figure}
+
+% ---------------- The running example ----------------
+\subsection*{The Running Example: One Tree, Cut Into Four Chains}
+
+The whole chapter runs on the tree \(T\) Chapters~12--21 have shared -- nodes
+\(1..10\), root~\(1\), edges
+\[
+  1\!-\!2,\; 1\!-\!3,\; 2\!-\!4,\; 2\!-\!5,\; 3\!-\!6,\;
+  3\!-\!7,\; 5\!-\!8,\; 7\!-\!9,\; 9\!-\!10 ,
+\]
+with a value on each node, \(v=(3,2,4,5,1,1,5,3,7,0)\) for nodes \(1..10\) -- the
+first ten of the running array \(A\), so Chapter~21's \(21.4\) path trace reads
+the very same numbers.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.72, transform shape,
+   heavy/.style={line width=2.2pt, draw=primaryblue},
+   light/.style={line width=1.1pt, draw=difforange, densely dashed},
+   chain1/.style={boxnode, fill=primaryblue!16, draw=primaryblue, minimum size=8mm, font=\scriptsize\bfseries},
+   chain2/.style={boxnode, fill=successgreen!16, draw=successgreen, minimum size=8mm, font=\scriptsize\bfseries},
+   chainX/.style={boxnode, fill=warningred!14, draw=warningred, minimum size=7mm, font=\scriptsize\bfseries}]
+  \node[chain1] (n1) at (4,4) {\(1\)};
+  \node[chain2] (n2) at (2,2.8) {\(2\)};
+  \node[chain1] (n3) at (6,2.8) {\(3\)};
+  \node[chainX] (n4) at (1,1.6) {\(4\)};
+  \node[chain2] (n5) at (3,1.6) {\(5\)};
+  \node[chainX] (n6) at (5,1.6) {\(6\)};
+  \node[chain1] (n7) at (7,1.6) {\(7\)};
+  \node[chain2] (n8) at (3,0.4) {\(8\)};
+  \node[chain1] (n9) at (7,0.4) {\(9\)};
+  \node[chain1] (n10) at (7,-0.8) {\(10\)};
+  \draw[light] (n1)--(n2); \draw[heavy] (n1)--(n3);
+  \draw[light] (n2)--(n4); \draw[heavy] (n2)--(n5);
+  \draw[light] (n3)--(n6); \draw[heavy] (n3)--(n7);
+  \draw[heavy] (n5)--(n8); \draw[heavy] (n7)--(n9); \draw[heavy] (n9)--(n10);
+  % value labels
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (4.28,4.15) {\(v{=}3\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (6.28,2.95) {\(4\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (7.28,1.75) {\(5\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (7.28,0.55) {\(7\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (7.28,-0.65) {\(0\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (2.28,2.95) {\(2\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (3.28,1.75) {\(1\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (3.28,0.55) {\(3\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (1.28,1.75) {\(5\)};
+  \node[font=\tiny\ttfamily, text=darkgray, anchor=west] at (5.28,1.75) {\(1\)};
+  \node[font=\scriptsize, text=primaryblue,  anchor=north west] at (0.1,-1.4) {\(C_1=\{1,3,7,9,10\}\)};
+  \node[font=\scriptsize, text=successgreen, anchor=north] at (3.4,-1.4) {\(C_2=\{2,5,8\}\)};
+  \node[font=\scriptsize, text=warningred,   anchor=north] at (6.2,-1.4) {\(C_4=\{4\},\ C_6=\{6\}\)};
+\end{tikzpicture}
+\caption{The heavy-light cut of \(T\).  \textbf{Solid blue} edges are
+\emph{heavy} (a node's largest-subtree child inherits its chain); \textbf{dashed
+orange} edges are \emph{light} (\(1\!\to\!2,2\!\to\!4,3\!\to\!6\)).  Colour =
+chain membership: \(C_1=\{1,3,7,9,10\}\) is the heavy spine from the root,
+\(C_2=\{2,5,8\}\) hangs off the light edge \(1\!\to\!2\), and \(C_4=\{4\},
+C_6=\{6\}\) are singletons off \(2\!\to\!4,3\!\to\!6\).  Every root-to-node path
+crosses at most \(\lfloor\log_2 10\rfloor=3\) light edges (\thmref{c16-lightedge});
+the path \(1\!\to\!4\) meets \(1\!\to\!2\) and \(2\!\to\!4\) -- two of them.
+Node values \(v=(3,2,4,5,1,1,5,3,7,0)\).}
+\label{fig:c16-chains}
+\end{figure}
+
+Now assign positions \(\mathit{pos}\) by a DFS that always recurses into the
+\emph{heavy} child first -- so a chain's nodes get consecutive positions and a
+chain is exactly one interval of the segment tree.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.86, transform shape,
+   cell/.style={rectangle, draw, minimum width=8mm, minimum height=8mm, font=\scriptsize\ttfamily, inner sep=0pt},
+   ch1/.style={cell, fill=primaryblue!14, draw=primaryblue},
+   ch2/.style={cell, fill=successgreen!16, draw=successgreen},
+   chX/.style={cell, fill=warningred!12, draw=warningred}]
+  \node[font=\scriptsize\bfseries] at (0,2.4) {position};
+  \foreach \i in {1,...,10} { \node[cell] (h\i) at (\i-0.5,1.7) {\i}; }
+  \node[ch1] at (0.5,0.9) {\(1\)};  \node[ch1] at (1.5,0.9) {\(3\)};  \node[ch1] at (2.5,0.9) {\(7\)};
+  \node[ch1] at (3.5,0.9) {\(9\)};  \node[ch1] at (4.5,0.9) {\(10\)}; \node[chX] at (5.5,0.9) {\(6\)};
+  \node[ch2] at (6.5,0.9) {\(2\)};  \node[ch2] at (7.5,0.9) {\(5\)};  \node[ch2] at (8.5,0.9) {\(8\)};
+  \node[chX] at (9.5,0.9) {\(4\)};
+  \node[font=\scriptsize\bfseries] at (-0.3,0.9) {\tiny node};
+  \foreach \val [count=\k] in {3,4,5,7,0,1,2,1,3,5} {
+     \node[cell] at (\k-0.5,0.1) {\(\val\)};
+  }
+  \node[font=\scriptsize\bfseries] at (-0.3,0.1) {\tiny \(B\)};
+  \draw[primaryblue, line width=1pt] (0.05,1.28) -- (4.95,1.28);
+  \node[font=\tiny, text=primaryblue, anchor=west] at (0.1,1.32) {\(C_1\ [1..5]\)};
+  \draw[successgreen, line width=1pt] (6.05,1.28) -- (8.95,1.28);
+  \node[font=\tiny, text=successgreen, anchor=west] at (6.05,1.32) {\(C_2\ [7..9]\)};
+  \draw[warningred, line width=0.8pt] (5.05,1.28) -- (5.95,1.28);
+  \draw[warningred, line width=0.8pt] (9.05,1.28) -- (9.95,1.28);
+  \node[font=\tiny, text=warningred, anchor=west] at (8.9,1.32) {\(C_4,C_6\)};
+  \node[font=\tiny, text=darkgray, anchor=north] at (2.5,-0.45) {subtree(3) \(=[2..6]\)  (green brace below)};
+  \draw[deepblue, line width=1pt] (1.5,-0.12) -- (5.5,-0.12);
+  \node[font=\tiny, text=deepblue] at (3.5,-0.35) {contiguous!};
+\end{tikzpicture}
+\caption{The heavy-first \(\mathit{pos}\) order and the value array \(B\) a segment tree
+is built on.  Top row = position index; middle row = the node sitting at that
+position (\(1,3,7,9,10,6,2,5,8,4\)); bottom row = \(B[\mathit{pos}]=v(\text{node})
+= (3,4,5,7,0,1,2,1,3,5)\), sum \(31\).  A chain is one contiguous run:
+\(C_1=[1..5]\) (blue), \(C_2=[7..9]\) (green), \(C_6=[6..6]\) and \(C_4=[10..10]\)
+(singleton red).  Crucially \emph{subtrees stay intervals} too:
+\(\text{subtree}(3)=\{3,6,7,9,10\}=[2..6]\) and \(\text{subtree}(2)=\{2,4,5,8\}
+=[7..10]\) -- so \(\mathit{pos}\) answers paths \emph{and} subtrees for free.  This is
+\(\mathit{pos}=(1,7,2,10,8,6,3,9,4,5)\) for nodes \(1..10\).}
+\label{fig:c16-pos}
+\end{figure}
+
+\begin{tracebox}[Reading the four chains and the pos order off T, once and for all]
+\textbf{Sizes (bottom-up).} \(|4|{=}1,|6|{=}1,|8|{=}1,|10|{=}1,|9|{=}2,|5|{=}2,
+|2|{=}4,|7|{=}3,|3|{=}5,|1|{=}10\).\\
+\textbf{Heavy child = largest.} \(\mathit{heavy}(1){=}3\,(5{>}4)\),
+\(\mathit{heavy}(2){=}5\,(2{>}1)\), \(\mathit{heavy}(3){=}7\,(3{>}1)\),
+\(\mathit{heavy}(5){=}8\), \(\mathit{heavy}(7){=}9\), \(\mathit{heavy}(9){=}10\).
+Light edges: \(1\!\to\!2,2\!\to\!4,3\!\to\!6\).\\
+\textbf{Head.} A heavy child keeps its parent's head; a light child starts its
+own chain: \(\mathit{head}=(1,2,1,4,2,6,1,2,1,1)\).\\
+\textbf{Positions (heavy child recursed first).} \(\mathit{pos}=(1,7,2,10,8,6,3,9,4,5)\)
+so node \(1{\to}1, 3{\to}2, 7{\to}3, 9{\to}4, 10{\to}5\) (chain \(C_1\)),
+\(6{\to}6, 2{\to}7, 5{\to}8, 8{\to}9, 4{\to}10\).  Hence
+\(B=(3,4,5,7,0,1,2,1,3,5)\).\\
+\textbf{Cross-check contiguity.} \(\text{subtree}(2)=\{2,5,8,4\}\) occupies
+\(\mathit{pos}=7,8,9,10=[7..10]\); \(\text{subtree}(3)=\{3,7,9,10,6\}\) occupies
+\(2,3,4,5,6=[2..6]\).  Both single intervals -- the fact \(\secref{c16-subpath}\)
+cashes in.
+\end{tracebox}
+
+Three angles, three hand-computed overlays -- each lives in the section named on
+its row and never changes:
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.22\linewidth} p{0.52\linewidth} l@{}}
+\toprule
+\textbf{Angle} & \textbf{What comes out} & \textbf{Traced in} \\
+\midrule
+chains & four chains \(C_1,C_2,C_4,C_6\); path \(1\!\to\!4\) crosses 2 light edges \(\le\lfloor\log_2 10\rfloor\) & \secref{c16-decomp} \\
+pos / \(B\) & \(\mathit{pos}=(1,7,2,10,8,6,3,9,4,5)\), \(B=(3,4,5,7,0,1,2,1,3,5)\), sum \(31\) & \secref{c16-pathq} \\
+subtree & \(\text{subtree}(3)=[2..6]\) and \(\text{subtree}(2)=[7..10]\) stay single intervals & \secref{c16-subpath} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------- Which tool, cost chart ----------------
+\subsection*{Which Tool? (the question-shape chart)}
+
+Trees with aggregate queries split by \emph{what axis the query runs along} and
+\emph{whether the topology moves}.  HLD is the tool for \emph{mutable} path
+\emph{and} subtree aggregates on a \emph{fixed} topology; every other shape is a
+different engine.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.225\linewidth} p{0.115\linewidth} p{0.15\linewidth} p{0.305\linewidth} >{\raggedright\arraybackslash}p{0.11\linewidth}@{}}
+\toprule
+\textbf{Question} & \textbf{Updates?} & \textbf{Engine} & \textbf{Why} & \textbf{Where} \\
+\midrule
+sum/max/count on a path \(u\)--\(v\) & point / range & HLD + segtree & \(O(\log n)\) chain ranges, \(O(\log^2 n)\) & this chapter \\
+add / assign on a path, then query it & yes & HLD + lazy & chains are ranges, tag them (Ch.~20) & \secref{c16-pathupd} \\
+subtree query \emph{and} path query, mixed & yes & HLD order & \(\mathit{pos}\) keeps subtrees contiguous too & \secref{c16-subpath} \\
+distance / \(k\)-th ancestor, no aggregates & no & LCA (Ch.~11) & no per-node value to fold & \chref{c11} \\
+subtree sum with point updates only & point & Euler + BIT/segtree & subtree is one interval; no path & \chref{c24} \\
+\(k\)-th / count on a \emph{static} path & no & persistent roots (Ch.~21) & four roots, \(O(\log n)\) no chain log & \chref{c19} \\
+links/cuts that change the tree itself & yes & link-cut / ET-tree & HLD's chains break on a re-root & \chref{c23} \\
+offline path queries, cheap add/remove & reorder ok & Mo on trees (Ch.~27) & \(O(n\sqrt n)\) offline beats \(\log^2\) & \chref{c21} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{insightbox}[One cut, two payoffs -- \(\mathit{pos}\) makes a path a few ranges and a subtree one range]
+The whole chapter is the observation in \figref{c16-pos}: heavy-first \(\mathit{pos}\) is
+\emph{simultaneously} chain-contiguous (so a path, being \(O(\log n)\) chains, is
+\(O(\log n)\) ranges) \emph{and} subtree-contiguous (so a subtree is one range).
+Chapter~5's plain Euler order only had the second property -- it flattens
+subtrees but leaves paths scattered.  HLD buys the first without losing the
+second, and that single trade is why path \emph{and} subtree queries share one segment
+tree here. This is exactly what \(\secref{c16-subpath}\) cashes in.
+\end{insightbox}
+
+% ---------------- Taxonomy chart ----------------
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.95, transform shape,
+    mnode/.style={circle, draw=#1, line width=0.9pt, fill=#1!8, minimum size=8mm,
+                  font=\scriptsize\bfseries, text=#1!60!black}]
+  \node[mnode=primaryblue] (a) at (0,0)   {size};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.6cm, align=left] at (1.35,0) {dfs1 computes each subtree size and the heaviest child; that child inherits the chain, every other edge is LIGHT (22.1)};
+  \node[mnode=successgreen] (b) at (0,-1) {pos};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.6cm, align=left] at (1.35,-1) {dfs2 recurses heavy-child-first; a chain becomes one contiguous run of positions, and so does every subtree (22.1)};
+  \node[mnode=difforange]   (c) at (0,-2) {jump};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.6cm, align=left] at (1.35,-2) {path query: while the two heads differ, take the DEEPER head, fold pos[head]..pos[node], hop to parent(head); finish with one same-chain range (22.2)};
+  \node[mnode=warningred]   (d) at (0,-3) {tag};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.6cm, align=left] at (1.35,-3) {path update = the same jump with Ch.20's lazy range-add/assign on each interval; store edge values at the deeper endpoint (22.3)};
+  \node[mnode=softpurple]   (e) at (0,-4) {both};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.6cm, align=left] at (1.35,-4) {subtree query is one pos-interval; a structure answers subtree AND path together because pos keeps BOTH contiguous (22.4)};
+  \node[mnode=deepblue]     (f) at (0,-5) {bound};
+  \node[annot, font=\scriptsize, anchor=west, text width=9.6cm, align=left] at (1.35,-5) {O(log n) light edges per root-path; \(O(\log^2 n)\) per path op; hands off dynamic/ static-kth/ offline to other engines (22.5)};
+\end{tikzpicture}
+\caption{The chapter's six-state taxonomy, read top to bottom as an escalation:
+\(d s1\) sizes the subtrees and picks the heavy child; \(d s2\) lays them on one
+line (\(\mathit{pos}\)); the query walks heads; the update lays a lazy tag on each
+hop; subtree and path share the single order; and the light-edge lemma sets the
+cost and the chapter's boundary.  Every solved problem sits on one row: SPOJ
+QTREE3 on rows~2--3, SPOJ QTREE on rows~3 and~5 (edge reduction), CF~593D on
+rows~3--4, CF~916E on row~5, and the Summit spanning rows~3--4.}
+\label{fig:c16-taxonomy}
+\end{figure}
+
+% ---------------- Who owns what ----------------
+\subsection*{Who Owns What (so nothing is learned twice)}
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.28\linewidth} p{0.36\linewidth}@{}}
+\toprule
+\textbf{Idea} & \textbf{Owner} & \textbf{This chapter's share} \\
+\midrule
+build / point update / range query, arbitrary combine & Ch.~19 (\chref{c13}) & the segment tree is built OVER \(\mathit{pos}\); no re-teach of the tree itself \\
+lazy pending tag, range add/assign & Ch.~20 (\chref{c15}) & 22.3 REUSES the tag on each chain interval and back-cites \secref{c15-strains}; the tag is never re-derived \\
+binary lifting / \(\mathit{lca}()\) & Ch.~11 (\chref{c11}) & the chain jump reaches the LCA for free; 22.2 cites \(\mathit{lca}\) only to name the last segment \\
+Euler tour, plain \(\tin/\tout\), ``subtree\(=\)interval'' & Ch.~5 (\chref{c24}) & 22.4 CONTRASTS the plain order (subtrees only) against the HLD order (paths + subtrees); the tin/pos conflation note lives there \\
+static \(k\)-th / count on a path (four roots) & Ch.~21 (\chref{c19}) & the STATIC sibling; 22.5 forward-cites it -- once updates arrive, HLD replaces it \\
+Fenwick on paths (383C/877E/276E) & Ch.~14 (\chref{c14}) & prose re-treat of the HLD-vs-BIT twins; never re-linked \\
+link-cut / Euler-tour trees & Ch.~25 (\chref{c23}) & forward-cited as the dynamic-topology boundary; no code here \\
+segment-tree beats / Li Chao & Ch.~23 (\chref{c29}) & forward-cited as the non-composable-update boundary; no code here \\
+Mo on trees / centroid path-count & Ch.~27 / Ch.~24 (\chref{c21}/\chref{c18}) & forward-cited offline / counting rivals; name-only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------- Recognition guide ----------------
+\begin{recognitionbox}[Pattern card -- ``tree, aggregate on a path or subtree, with updates'']
+\reckey{a \emph{fixed} tree with a value on each node (or edge); queries of the
+form ``sum/max/count on the path \(u\)--\(v\)'' or ``add \(x\) to every node on
+\(u\)--\(v\) then query a path'', and/or ``query / update a \emph{subtree}'' --
+with the point that \(\mathit{pos}\) handles both.  If you also need edge-weights on the
+path or a lazy rewrite of the path, that is the same three ingredients.}
+\recuse{
+  \item point/range updates \emph{and} path aggregates on a fixed tree -- this chapter (\(\secref{c16-pathq}\), \(\secref{c16-pathupd}\));
+  \item a mix of ``update subtree \(v\)'' and ``read path \(u\)--\(v\)'' in one structure -- \(\secref{c16-subpath}\) (CF~916E);
+  \item edge values queried along a path -- the edge-to-node reduction, \(\secref{c16-pathupd}\) (SPOJ~QTREE, CF~593D).
+}
+\recnotuse{
+  \item no aggregate to fold (just \(\mathit{lca}\), distance, \(k\)-th ancestor) -- Ch.~11, \chref{c11};
+  \item subtree-only queries with point updates, never a path -- Ch.~5's plain Euler flatten + a BIT/segtree, \chref{c24}/\chref{c14};
+  \item \emph{static} \(k\)-th / count on a path, no updates -- the persistent four-root engine, Ch.~21 (\chref{c19});
+  \item the topology itself changes (link/cut/re-root a dynamic forest) -- link-cut trees, Ch.~25 (\chref{c23});
+  \item path queries answered offline, order flexible -- Mo on trees, Ch.~27 (\chref{c21}).
+}
+One-line test: \emph{a fixed tree where you must both \emph{write} and \emph{read}
+an aggregate over a path or subtree -- then cut it into chains and reuse the
+segment tree over \(\mathit{pos}\).}
+\end{recognitionbox}
+
+% ---------------- Constraint -> tool ----------------
+\subsection*{Reading the Constraints (which engine the limits want)}
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.32\linewidth} p{0.40\linewidth} p{0.22\linewidth}@{}}
+\toprule
+\textbf{Constraint signature} & \textbf{What it rules in/out} & \textbf{Tool} \\
+\midrule
+\(N,Q\le10^5\) fixed tree; path max/sum + point/range writes & \(O(\log^2 n)\) per op is \(\sim10^5\!\cdot\!17^2\approx3\cdot10^7\) -- fine & \secref{c16-pathq}/\secref{c16-pathupd} \\
+mix of ``add subtree'' and ``read path'' & one order serves both & \secref{c16-subpath} (CF 916E) \\
+values on edges, path query & reduce edge to deeper endpoint & \secref{c16-pathupd} (SPOJ QTREE) \\
+\(Q\le4\cdot10^5\) with a plain root-path + point toggle & chain walk with a min-segtree & \secref{c16-pathq} (SPOJ QTREE3) \\
+static tree, \(k\)-th on a path, zero updates & \(O(\log n)\) four-root beats \(O(\log^2 n)\) chains & Ch.~21 (\chref{c19}) \\
+link/cut operations appear in the query list & chains are destroyed on re-root & Ch.~25 (\chref{c23}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ---------------- Notation ----------------
+\subsection*{Notation Used Only Here}
+
+The tree is rooted at \(1\); \(\mathit{par}(v)\) is the parent and
+\(\mathit{depth}(v)\) its distance from the root (root depth \(0\)).
+\(\mathit{size}(v)\) is the subtree size and \(\mathit{heavy}(v)\) the child
+of maximum \(\mathit{size}\) (undefined at a leaf).  A \term{chain} is a maximal
+run of heavy edges; \(\mathit{head}(c)\) is the top node of the chain containing
+\(c\).  \(\mathit{pos}(v)\) is \(v\)'s index in the \term{heavy-first preorder} (dfs2
+recursing \(\mathit{heavy}\) first); \(\mathit{node}(\mathit{pos})=v\) is its inverse,
+and \(B[i]=v(\mathit{node}(i))\) is the array the segment tree folds.
+Because heavy-first preorder still lists a whole subtree in one block,
+\(\text{subtree}(v)=\ [\mathit{pos}(v),\,\mathit{pos}(v)+\mathit{size}(v)-1]\) -- the \term{HLD
+subtree interval}.  A \term{light edge} is any non-heavy parent-child edge;
+\(\mathit{parent}(\mathit{head})\) is written \(\mathit{par}(\mathit{head}(c))\),
+the hop that leaves a chain.  \(\mathit{lca}(u,v)\) is Ch.~11's lowest common
+ancestor, used only to name the final same-chain segment.  The lazy tag
+\(\mathit{add},\mathit{set}\) and its \code{push} are Ch.~20's, reused verbatim.
+Every section runs on \(T\) and \(\mathit{pos},B\) above: if a table here and a trace
+there disagree, this opener is authoritative -- fix the section, never the other
+way.

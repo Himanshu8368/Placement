@@ -1,0 +1,483 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  7.3  Mergeable Heaps (leftist / skew, ideas up)  sec:c07-trees
+%  Exports: def:c07-npl  thm:c07-leftist  fig:c07-leftistfig
+%           lst:c07-leftist  lst:c07-mergecost  ex:c07-merge-run
+%           prob:c07-connect  lst:c07-connect-soln
+%           (practice: internal hand-write-a-leftist-merge lab, NO url)
+%  Anti-repetition: treap split/merge and its height bound are Chapter 8's
+%  (\defref{c06-treap}, \thmref{c06-exptheight}) -- cited, never re-derived.
+%  Here "merge" is a DIFFERENT operation: union of two heap-ordered trees.
+% =====================================================================
+\section{Mergeable Heaps: Heaps You Can Union}\label{sec:c07-trees}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \code{push} appends to the \emph{last} array slot and \code{pop} refills the root from that slot.
+        Why is the \emph{shape} of a binary heap completely independent of its values? (the tree is always
+        complete; only the labels move -- \secref{c07-heap})
+  \item To merge two binary heaps of sizes $m$ and $n$ you must copy both into one array and re-heapify.
+        What does that cost, and which step is unavoidable? ($\bigO{m+n}$ with Floyd, \thmref{c07-floyd})
+  \item On a BST you cannot join two arbitrary trees without a full rebuild; what special shape \emph{can}
+        you concatenate in $\bigO{\log n}$? (two trees where every key of one $<$ every key of the other --
+        the treap merge of Chapter~8, \defref{c06-splitmerge})
+  \item If you only ever compare a node to its \emph{children}, must siblings be ordered? (\emph{No} --
+        \defref{c07-heap}; that freedom is what lets a heap tree take \emph{any} shape)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Everything so far stored one heap in one array -- and that is exactly its ceiling: \emph{merging} two array
+heaps means pouring $m+n$ values into a new array and rebuilding, $\bigO{m+n}$, because the shape is
+\emph{rigidly} complete and no position is free. Sometimes rigidity is the enemy. Dijkstra with a decrease
+that spawns candidate queues, Huffman coding merging subtrees, Prim growing from many frontier heaps -- all
+want \texttt{merge(H1, H2)} to be \emph{cheap}. That forces us to relax the shape requirement: keep the heap
+\emph{order} (parent $\le$ children), but let the tree be \emph{ragged}, so there is always a short,
+unoccupied place to graft the other heap on.
+
+The canonical answer is the \term{leftist heap}: a binary tree, heap-ordered, that additionally maintains
+the \term{leftist property} -- every node's \emph{left} subtree has null-path length at least its
+\emph{right}'s --- which confines all the raggedness to a right spine of length $O(\log n)$
+(\thmref{c07-leftist}). Merging then recurses \emph{only down the right spine}: put the smaller root on top,
+merge the loser into the winner's right child, and swap children if the spine got too long. One line of
+recursion, $\bigO{\log n}$, and \code{insert} is just merge-with-a-singleton. We hand-write the merge
+(\coderef{c07-leftist}), price the whole mergeable-heap family in one table (\coderef{c07-mergecost}), and
+spend the pattern on LeetCode 1167, where the \emph{priority queue} you merge is the algorithm itself
+(\probref{c07-connect}). Skew heaps (same code, amortised instead of worst-case, no \code{npl} field) and
+the binomial/Fibonacci ladder are \emph{described}, not implemented --- the section's contract is ideas plus
+\emph{one} hand-written merge.
+\textbf{Prerequisites.} \secref{c07-heap} and \secref{c07-build}. Chapter~8's treap merge
+(\defref{c06-splitmerge}) is contrasted, never re-derived.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item explain why an array heap cannot merge sub-linearly, and what shape freedom fixes it; \hfill\lv{3}--\lv{4}
+  \item write a leftist (or skew) merge cold and justify its $\bigO{\log n}$ from the right-spine bound; \hfill\lv{4}
+  \item choose among binary/leftist/skew/binomial/Fibonacci heaps from a cost table, and recognise a
+        greedy ``merge the two smallest'' problem as a heap union. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- you must \emph{combine} heaps]
+\reckey{the algorithm naturally holds \emph{many} priority queues that get \emph{joined} ( melded ) into one
+-- or repeatedly removes and reinserts the extreme while the \emph{set} is partitioned -- so an
+$\bigO{m+n}$ merge each time would dominate.}
+\recuse{
+  \item Huffman coding / optimal merge pattern / ``connect all sticks'': merge the two cheapest, reinsert
+        the union -- \probref{c07-connect};
+  \item multi-source best-first search, or divide-and-conquer where sub-results are queues you meld;
+  \item any \code{priority\_queue} whose elements you must \emph{split into groups and rejoin} -- an array
+        heap forces a rebuild; a mergeable heap does it in $\bigO{\log n}$.
+}
+\recnotuse{
+  \item there is only \emph{ever} one heap, built once from an array -- a plain binary heap
+        (\secref{c07-build}) is faster and simpler; do not pay for a merge you never use;
+  \item the merge is \emph{keyed-union} where all keys of one tree are $<$ all keys of the other -- that is
+        the treap/BST join (\defref{c06-splitmerge}), a different operation with a different invariant;
+  \item you need \emph{arbitrary} delete / decrease-key on known handles -- you want a Fibonacci heap's
+        $\bigO{1}$ amortised decrease-key or a position-mapped binary heap, not leftist.
+}
+One-line test: \emph{does your loop contain ``take two queues, make them one''? Then you need a mergeable
+heap, and the right spine is where all the cost hides.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Look again at the array heap \figref{c07-heapR}. To graft a second heap onto it you would have to keep the
+tree \emph{complete}: every insertion goes to the next slot on the bottom row, and to make two heaps one
+you must re-lay all $m+n$ values into a new complete layout and sift from $\lfloor(m+n)/2\rfloor$ upward --
+the $\bigO{m+n}$ rebuild of \thmref{c07-floyd}. The completeness that made the \emph{array} so convenient is
+what makes the \emph{merge} so expensive: there is no spare structure to exploit.
+
+The fix is to stop demanding completeness and demand instead a much weaker shape promise that still bounds
+the height --- but only along \emph{one} path, the path merges actually walk. Declare a node's
+\term{null-path length} ($\mathit{npl}$) as the distance from it to the nearest missing child, and insist
+that at every node the \emph{left} child is at least as tall (in $\mathit{npl}$) as the \emph{right} child.
+This ``leftist'' rule forces all the short, empty, graft-able space onto the \emph{right} spine. And here is
+the punchline: a leftist tree whose right spine has length $r$ has at least $2^{r}-1$ nodes (every left
+subtree is at least as full as the right), so $r \le \lg(n+1)$ --- the right spine is \emph{logarithmic}
+even though the tree can be wildly unbalanced on the left. Merge walks only that spine, so merge is
+$\bigO{\log n}$ while the rest of the tree can be whatever shape the values dictate.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, x=13mm, y=9mm, level distance=12mm, sibling distance=20mm]
+  \node[troot] (a) {$1$}
+    child { node[tleaf] {$4$} }
+    child { node[tnode] (b) {$2$}
+      child { node[tleaf] {$9$} }
+      child { node[draw=none, fill=white, inner sep=0] {$\cdot$} } };
+  \draw[tedgehl, line width=1.4pt] (a) -- (b);
+  \node[annot, font=\scriptsize] at (0,0.85)  {$\mathit{npl}=1$};
+  \node[annot, font=\scriptsize] at (-1.6,-1.1) {$\mathit{npl}=0$};
+  \node[annot, font=\scriptsize] at (1.7,-1.1) {$\mathit{npl}=0$};
+  \node[annot, font=\scriptsize] at (0.9,-2.15) {$\mathit{npl}=0$};
+  \node[annot, align=left, font=\scriptsize] at (4.6,-0.6)
+    {\textbf{right spine} $1\to2$\\ has length $\lg(n{+}1)$;\\ left side may be deep};
+  \node[annot, align=left, font=\scriptsize] at (-4.4,-1.8)
+    {every left child\\ $\mathit{npl}\ge$ right child\\ (leftist property)};
+\end{tikzpicture}
+\caption{A leftist min-heap on the values $\{1,2,4,9\}$ (the output of \exref{c07-merge-run}). It is
+\emph{heap-ordered} ($1\le4,2$; $2\le9$) and \emph{leftist}: at each node the left child's null-path length
+is $\ge$ the right child's, so $\mathit{npl}$ is written beside each node. All the emptiness sits on the
+highlighted right spine, which has length $\le\lg(n+1)$ -- that spine is the only path a merge touches, so
+merge costs $\bigO{\log n}$ (\thmref{c07-leftist}) even though the left subtree could be arbitrarily tall.}\label{fig:c07-leftistfig}
+\end{figure}
+
+\subsection{Definitions and the Height Bound}
+
+\begin{definition}{Null-path length and the leftist property}{c07-npl}
+For a node $x$ in a binary tree, the \term{null-path length} $\mathit{npl}(x)$ is the number of edges on the
+shortest path from $x$ to a node with a missing child; by convention $\mathit{npl}(\text{null}) = -1$, so a
+leaf has $\mathit{npl}=0$. A binary tree is \term{leftist} if for every node $x$,
+$\mathit{npl}(\text{left}(x)) \ge \mathit{npl}(\text{right}(x))$. A \term{leftist heap} is a tree that is
+both heap-ordered (\defref{c07-heap}) and leftist.
+\end{definition}
+
+\begin{theorem}{Leftist right spine is $O(\log n)$; merge is $\bigO{\log n}$}{c07-leftist}
+In a leftist tree on $n$ nodes, the right spine (path from the root through successive right children) has
+length at most $\lfloor\lg(n+1)\rfloor$. Consequently the leftist merge of \coderef{c07-leftist}, which
+recurses only along right spines, performs $O(\log n)$ node visits, and \code{insert} (a merge with a
+one-node heap) is $O(\log n)$ as well.
+\end{theorem}
+\begin{proofbox}[Spine length bounds node count]
+We show: a node whose right spine has length $r$ has a subtree of at least $2^{r}-1$ nodes. Induct on $r$.
+At the node, the leftist property gives $\mathit{npl}(\text{left}) \ge \mathit{npl}(\text{right})$, and both
+children's right spines are one shorter than the node's, so the left subtree \emph{also} has a right spine
+of length at least $r-1$; by induction the left and right subtrees each have $\ge 2^{r-1}-1$ nodes, hence the
+subtree has $\ge 2(2^{r-1}-1)+1 = 2^{r}-1$ nodes. Applied at the root with $n$ nodes, the right spine length
+$r$ satisfies $2^{r}-1 \le n$, i.e.\ $r \le \lg(n+1)$. For the merge bound: the recursive call always
+descends a \emph{right} spine, so it makes at most $\lg(n_1{+}1)+\lg(n_2{+}1)$ steps before hitting a null
+child, and each step is $O(1)$ plus the constant-time child-swap test -- total $\bigO{\log n}$. \end{proofbox}
+
+\begin{insightbox}
+The array heap and the leftist heap make opposite trades, and understanding the trade is the whole lesson.
+The array heap spends its \emph{shape} budget on \textbf{density} (complete $\Rightarrow$ pointer-free,
+cache-friendly, $\bigO{1}$ access to slot $i$) and therefore pays for merge. The leftist heap gives up
+density for \textbf{a guaranteed-empty right edge}, which is precisely the slack a recursive union needs.
+Neither is ``the heap'' -- they are two answers to ``what do you promise about shape?'' Pick by which
+operation you perform more: single-heap push/pop under one array favours binary; many melds favour
+leftist/skew; heavy decrease-key favours Fibonacci (\coderef{c07-mergecost}).
+\end{insightbox}
+
+
+\subsection{The Merge, Hand-Written}
+
+\begin{lstlisting}[caption={Leftist-heap merge: recurse down the right spine, then swap to restore leftness}, label={lst:c07-leftist}]
+struct Node { int val, npl; Node *l, *r; };
+int  npl(Node* x) { return x ? x->npl : -1; }      // empty = -1, leaf = 0
+
+Node* merge(Node* a, Node* b) {                     // union of two leftist heaps
+    if (!a) return b;                               // empty operand: take the other
+    if (!b) return a;
+    if (b->val < a->val) swap(a, b);                // a keeps the smaller root (min-heap)
+    a->r = merge(a->r, b);                          // recurse ONLY down the right spine
+    if (npl(a->l) < npl(a->r)) swap(a->l, a->r);    // restore the leftist property
+    a->npl = npl(a->r) + 1;                         // npl == right-spine length
+    return a;
+}
+// insert(x)      = merge(root, new Node{x, 0, nullptr, nullptr});   O(log n)
+// findMin()      = root->val;                                       O(1)
+// deleteMin()    = root = merge(root->l, root->r);                  O(log n)
+\end{lstlisting}
+
+\begin{complexitybox}
+Each \code{merge} frame does constant work plus one recursive call on a \emph{right} child, and by
+\thmref{c07-leftist} right spines are $O(\log n)$, so a merge is $\bigO{\log(n_1+n_2)}$ worst case --
+insert and delete-min are the same by the identities in the listing. Compare the array heap's merge at
+$\bigO{m+n}$ (\thmref{c07-floyd} rebuild). Memory: one node per element plus an $\mathit{npl}$ field; you
+lose the array's cache locality and pointer-free layout, and you pay it \emph{only} when you actually meld.
+The \term{skew heap} deletes the \code{npl} field and the swap-test entirely (always swap unconditionally,
+amortised not worst-case) -- \emph{same code minus two lines}, $\bigO{\log n}$ amortised.
+\end{complexitybox}
+
+\subsection{The Whole Mergeable-Heap Family}
+
+You implement \emph{one} merge (leftist, above); you \emph{know} the rest as a cost table so you can pick
+correctly under interview pressure. Binomial and Fibonacci heaps are named by their structure, not built
+here.
+
+\begin{lstlisting}[caption={Operation costs across the heap family (n = current size; ~ = amortised; * = unless a min-pointer is kept)}, label={lst:c07-mergecost}]
+ operation        binary     leftist    skew     binomial   Fibonacci
+ ---------------------------------------------------------------------
+ find-min          O(1)       O(1)      O(1)     O(log n)*     O(1)
+ insert          O(log n)   O(log n)  O(log n)~  O(log n)     O(1)~
+ delete-min      O(log n)   O(log n)  O(log n)~  O(log n)     O(log n)~
+ meld(merge)     O(m+n)     O(log n)  O(log n)~  O(log n)     O(1)~
+ decrease-key    needs map  needs map needs map   O(log n)     O(1)~
+ ---------------------------------------------------------------------
+ binary    : complete tree in an array -- no meld, best constants
+ leftist   : right spine O(log n) worst-case; merge recurses the spine
+ skew      : leftist without npl fields; same ops, amortised only
+ binomial  : forest of binomial trees B_0..B_k; meld = binary add of ranks
+ Fibonacci : unranked forest + lazy consolidation; wins on decrease-key
+\end{lstlisting}
+
+\begin{notebox}[Why not just always use a Fibonacci heap?]
+Fibonacci heaps win the asymptotic table but carry large constant factors, pointer-heavy structure, and a
+delicate \code{cut}/{\code{cascading-cut}} consolidation -- competitive programmers almost never hand-roll
+one. The pragmatic ladder: reach for \code{priority\_queue} (binary) unless you truly must meld cheaply
+(leftist/skew), and only invoke the Fibonacci name when the problem is textbook decrease-key-heavy (Dijkstra
+with a decrease-key bound). Knowing the table is about \emph{choosing}, not implementing all five.
+\end{notebox}
+
+\subsection{Worked Example}
+
+\begin{example}{Merging $A=\{1;4,9\}$ and $B=\{2\}$ with \coderef{c07-leftist}}{c07-merge-run}
+$A$ is the leftist heap root $1$, left $4$, right $9$; $B$ is the single node $2$.\\
+\emph{merge($1$,$2$):} $a{=}1,b{=}2$; $b\text{.val}=2 \not< 1$, keep $a{=}1$. Recurse
+$\mathit{merge}(a{\to}r{=}9,\ b{=}2)$.\\
+\quad\emph{merge($9$,$2$):} $b\text{.val}=2<9$ so swap $\to a{=}2,b{=}9$. Recurse
+$\mathit{merge}(2{\to}r{=}\text{null},\ 9)$ returns $9$. Now node $2$: left null ($\mathit{npl}{=}-1$),
+right $9$ ($\mathit{npl}{=}0$); since $-1<0$ swap them $\to$ left $9$, right null; $\mathit{npl}(2)=0$.
+Return $2$.\\
+Back at node $1$: $\mathit{right}=2$. Left $4$ ($\mathit{npl}{=}0$), right $2$ ($\mathit{npl}{=}0$);
+$0<0$ false, no swap; $\mathit{npl}(1)=\mathit{npl}(r{=}2)+1=1$. Return $1$.\\
+Result: root $1$, left $4$, right $2$, and $2$'s left $9$ -- exactly \figref{c07-leftistfig}. Heap order
+holds ($1\le4,2$; $2\le9$); every right spine ($1\to2$) is short. Two swaps, three frames -- $\bigO{\log n}$.
+\end{example}
+\begin{tracebox}[Right-spine recursion of \exref{c07-merge-run}]
+merge(1,2) -> right: merge(9,2) -> swap roots (2<9) -> right: merge(null,9)=9 -> node2: swap l/r, npl=0
+-> back to 1: right=2, no swap, npl(1)=1. Frames visited: 3 (= 1 + right-spine of A up to a null).
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Skew heap}: drop the $\mathit{npl}$ field; \emph{always} swap left/right after the recursive
+        merge. No worst-case guarantee, but the \emph{same} $\bigO{\log n}$ \emph{amortised} by a splay-style
+        argument, and shorter code -- often the one you actually type. \hfill\lv{4}
+  \item \textbf{D-ary heap for cache}: not mergeable, but when merges are rare and the array is huge, a
+        $4$- or $8$-ary heap cuts memory traffic on sift-down; the height shrinks by $\log_d$, the per-level
+        child scan grows by $d$. \hfill\lv{4}
+  \item \textbf{Pairing heap}: a single-line meld (make the loser the first child of the winner) with a
+        two-pass delete-min; beats leftist/skew in practice though its decrease-key bound is open in theory.
+        Ideas only. \hfill\lv{5}
+  \item \textbf{ meldable vs.\ joinable}: leftist merge combines \emph{any} two heap-ordered trees (only the
+        root values matter). The treap ``merge'' (\defref{c06-splitmerge}) needs \emph{all} keys of one tree
+        below all keys of the other -- a keyed join, not a heap union. Never conflate them. \hfill\lv{4}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- recursing down the wrong spine]
+Leftist merge recurses on the \emph{right} child because the right spine is the short one
+(\thmref{c07-leftist}). Recursing on the left child is still a \emph{correct} heap union but loses the
+$\bigO{\log n}$ bound (left subtrees may be tall). Symmetrically, if you maintain ``right $\ge$ left''
+by mistake, the guarantee evaporates -- keep the invariant's \emph{direction} straight.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: recurse the (possibly tall) left subtree -- no log bound}, language=C++, basicstyle=\ttfamily\small]
+a->l = merge(a->l, b);            // left side may be deep: O(n) worst case
+// then the swap test can no longer bound the recursion depth
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: recurse the short right spine, then re-leftist}, language=C++, basicstyle=\ttfamily\small]
+a->r = merge(a->r, b);                          // right spine is O(log n)
+if (npl(a->l) < npl(a->r)) swap(a->l, a->r);    // re-earn the bound for next time
+a->npl = npl(a->r) + 1;
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- forgetting to recompute \code{npl} on the way up]
+After the recursive call and possible swap, you \emph{must} set $a\to\mathit{npl}=\mathit{npl}(a{\to}r)+1$.
+Skipping it leaves stale $\mathit{npl}$ values, so later swap-tests read garbage and the tree silently stops
+being leftist -- the ``$\bigO{\log n}$'' merge degrades to $\bigO{n}$ with no error to warn you.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- using a merge you never needed]
+If your program has \emph{one} heap and never melds, leftist/skew is a downgrade: you trade the array heap's
+$\bigO{1}$-memory, cache-friendly layout (\secref{c07-build}) for pointers and an $\mathit{npl}$ field with
+\emph{worse} constants. Reach for mergeable heaps only when the loop literally contains ``union two queues''.
+\probref{c07-connect} is mergeable in \emph{spirit} (repeatedly combine the two smallest) but still uses a
+single \code{priority\_queue} -- recognise that the meld there is ``pop two, push one'', not a data-structure
+union.
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+LeetCode 1167 is the optimal-merge / Huffman greedy: connecting two sticks costs their sum, and you want the
+cheapest total to fuse everything into one. The rule ``always merge the two \emph{cheapest} current sticks''
+is exactly the min-heap extract-reinsert loop -- and it is the same shape as the Summit (\probref{c07-summit}),
+so master it here.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c07-connect}{Minimum Cost to Connect Sticks}{LeetCode 1167}
+  {https://leetcode.com/problems/minimum-cost-to-connect-sticks/}{LC Medium · L3}
+  {min-heap greedy (optimal merge pattern / Huffman), extract-two-push-one, long long}
+
+\begin{problemstatement}[Minimum Cost to Connect Sticks]
+You have some number of sticks with positive integer lengths \texttt{sticks[i]}. Connect all the sticks into
+one stick: the cost of connecting two sticks is the sum of their lengths, and the result is a new stick of
+that length. Return the \textbf{minimum total cost} to connect all sticks. Constraints:
+$1 \le \texttt{sticks.length} \le 10^{4}$, $1 \le \texttt{sticks[i]} \le 1000$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{3}, give yourself 15 minutes]
+Every stick's length is paid once per connection it takes part in; long sticks that keep getting reused
+should be merged \emph{last}. That is the Huffman insight.
+\peek{Which two sticks should you merge \emph{first} to keep their cost from being paid many times?}
+\nudge{Repeatedly merge the two \emph{smallest} current sticks: a min-heap gives both in $\bigO{\log n}$,
+and the new stick goes back. Accumulate each merge cost.}
+\fullhint{Pop the two minima $a,b$, add $a+b$ to the total, push $a+b$ back; repeat while more than one
+stick remains. For \texttt{[2,4,3]}: merge $2{+}3{=}5$ (pay $5$), then $4{+}5{=}9$ (pay $9$), total $14$.
+For \texttt{[1,8,3,5]}: $1{+}3{=}4$, $4{+}5{=}9$, $8{+}9{=}17$, total $4{+}9{+}17=30$.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Connecting forms a full binary tree whose leaves are the sticks; the total cost equals the sum over internal
+nodes of their subtree weight, which is also $\sum_{\text{leaf } \ell} \text{len}(\ell)\cdot\depth(\ell)$. To
+minimise it, the \emph{heaviest} leaves must be \emph{shallowest}, i.e.\ merged \emph{last} -- precisely the
+Huffman greedy: always combine the two currently-smallest weights. We need a structure that hands back the
+two smallest after each (possibly new) insertion: a min-heap.
+
+\solstep{Key Observations}
+\begin{observation}
+A freshly merged stick can itself be among the two smallest later, so the ``two smallest'' must be
+\emph{recomputed} after every merge -- a sorted array or one-pass scan is wrong; the heap is the natural
+home.
+\end{observation}
+\begin{observation}
+Greedy-correctness: swapping a deeper-but-larger leaf with a shallower-but-smaller one never increases the
+cost, so an optimal tree has its two globally smallest weights as sibling leaves at maximum depth -- the exact
+pair the heap merges first. Induct on that merge.
+\end{observation}
+\begin{observation}
+With $m$ sticks there are $m-1$ merges, each two pops and one push, so $\bigO{m\log m}$ total -- and the
+answer can reach $\bigO{10^{4}\cdot 10^{3}\cdot\log}$, so keep it in \code{long long}.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Sort once and always take the first two.}
+{The merge produces a new weight that must be re-inserted \emph{in order}; re-sorting each step is
+$\bigO{m^2\log m}$. This is the tell for a priority queue.}
+\deadend{Greedy by merging the two \emph{largest} first.}
+{Puts heavy leaves deep -- maximises, not minimises, the depth-weighted sum. Wrong on \texttt{[1,8,3,5]}:
+you would pay for $8$ repeatedly.}
+\aha{A min-heap: pop the two smallest, push their sum, add to total. Heavies sink to the bottom of the heap
+and are merged last. $\bigO{m\log m}$ and provably optimal by the Huffman exchange argument.}
+\end{thinkbox}
+
+\solstep{Solution}
+Push all stick lengths into a min-heap (\code{greater<int>}; build it in $\bigO{m}$ via the range
+constructor, not $m$ inserts). While the heap has $\ge 2$ elements: pop the two smallest, form their sum,
+add the sum to the running total, and push it back. Return the total ($0$ if a single stick -- the loop body
+never runs).
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[Huffman greedy yields the minimum total cost]
+Represent any connecting order as a full binary tree with the sticks as leaves; total cost $=$
+$\sum_\ell \text{len}(\ell)\depth(\ell)$. Let $x\le y$ be the two smallest weights. In some optimal tree $T$,
+take two sibling leaves $p,q$ at maximum depth. If $\{p,q\}\ne\{x,y\}$, swap $x$ in for $p$ and $y$ in for
+$q$; since $x,y$ are the smallest and $p,q$ are deepest, the sum does not increase, so there is an optimal
+tree with $x,y$ as sibling leaves at maximum depth. Merging $x,y$ into one leaf $x{+}y$ at depth one less
+reduces the problem to the sticks with $x,y$ replaced by $x{+}y$ -- the \emph{same} heap step. By induction on
+$m$, repeatedly merging the two smallest attains the optimum, and the heap always returns the current two
+smallest, so the algorithm computes exactly that sequence. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Minimum Cost to Connect Sticks -- min-heap extract-two-push-one (LeetCode 1167)}, label={lst:c07-connect-soln}]
+class Solution {
+public:
+    int connectSticks(vector<int>& sticks) {
+        priority_queue<int, vector<int>, greater<int>>
+            pq(sticks.begin(), sticks.end());         // O(m) heap build, min-heap
+        long long total = 0;
+        while (pq.size() > 1) {
+            int s = pq.top(); pq.pop();               // smallest
+            s += pq.top(); pq.pop();                   // + second smallest
+            total += s;                                // this join costs their sum
+            pq.push(s);                                // merged stick rejoins
+        }
+        return (int)total;                             // 0 when a single stick
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official samples: \texttt{[2,4,3]} then \texttt{[1,8,3,5]}]
+\texttt{[2,4,3]}: min-heap $\{2,3,4\}$. Pop $2,3$ -> $5$, total $=5$, push -> $\{4,5\}$. Pop $4,5$ -> $9$,
+total $=14$, push -> $\{9\}$. Size $1$: stop. Answer $14$. \checkmark\\
+\texttt{[1,8,3,5]}: $\{1,3,5,8\}$. $1{+}3{=}4$, total $4$, $\{4,5,8\}$. $4{+}5{=}9$, total $13$, $\{8,9\}$.
+$8{+}9{=}17$, total $30$, $\{17\}$. Answer $30$. \checkmark
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{m\log m}$: $\bigO{m}$ to build the min-heap (Floyd, \thmref{c07-floyd}) plus $m-1$ merges, each
+$O(\log m)$ pops/push. Memory $\bigO{m}$. This is the \emph{optimal merge pattern} -- identical loop to file
+merging and Huffman encoding; the ``mergeable-heap'' flavour of it (melding \emph{heaps of subtrees}) is
+exactly what \coderef{c07-leftist} would accelerate if the input arrived as many small queues rather than one
+array. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to fall: (i) \emph{max}-heap instead of min -- you merge the two \emph{largest}, maximising cost; (ii)
+\code{int} total overflowing on large inputs -- accumulate in \code{long long}; (iii) forgetting the
+single-stick answer is $0$ (loop guarded by \code{size()>1}, so it naturally returns $0$). \emph{Variant:}
+\emph{Minimum Cost to Hire $k$ workers / connect with $r$-way merges} replaces the binary heap step by
+popping $r$ at a time -- then pad with zero-length sticks so the last merge has exactly $r$ inputs (the
+Huffman $r$-ary padding trick).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A binary-heap \emph{cannot} merge sub-linearly because its shape is rigidly complete; \textbf{relax
+        completeness, keep heap order}, and graft the other heap onto a guaranteed-empty right edge
+        (\thmref{c07-leftist}).
+  \item \textbf{Leftist} = ``left $\mathit{npl}\ge$ right $\mathit{npl}$'' $\Rightarrow$ short right spine
+        $\Rightarrow$ $\bigO{\log n}$ merge by recursing \emph{only} that spine and re-swapping on the way up
+        (\coderef{c07-leftist}); \textbf{skew} is the same with the bookkeeping dropped.
+  \item \textbf{``Merge the two smallest''} (\probref{c07-connect}) is the greedy half of every Huffman-style
+        problem; whether the meld is a \code{priority\_queue} pop-push or a real leftist union is an
+        \emph{implementation} choice, not a change of algorithm.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Contrast the merges}: state, in one sentence each, how leftist \coderef{c07-leftist} merge
+        differs from treap merge (\defref{c06-splitmerge}) in what it requires of the two operands.
+  \item \textbf{Table recall}: from \coderef{c07-mergecost}, which structure is the only one with
+        $\bigO{1}$ amortised meld, and what does it sacrifice in constants?
+  \item \textbf{Amortisation}: prove skew heaps keep merge $\bigO{\log n}$ \emph{amortised} without $\mathit{npl}$
+        by noting the swap moves ``light'' subtrees to the left -- sketch the potential argument.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you recurse the \emph{right} spine and recompute $\mathit{npl}$ on the way back up?
+  \item Did you distinguish heap \emph{meld} (any two heaps) from keyed \emph{join} (all keys ordered)?
+  \item For \probref{c07-connect}: did you build the heap in $\bigO{m}$ and keep the total in \code{long long}?
+\end{itemize}
+\end{stuckbox}
+
+\begin{notebox}[In-chapter lab -- hand-write a mergeable heap (no online judge)]
+Implement \coderef{c07-leftist}'s \code{merge} yourself, then wrap it into a full priority queue:
+\code{insert}, \code{findMin}, \code{deleteMin}. Test by (a) inserting $5,3,8,1,4,2,7$ one at a time and
+confirm repeated \code{deleteMin} returns $1,2,3,4,5,7,8$ in order; (b) building two leftist heaps
+$\{1,4,9\}$ and $\{2\}$ and reproducing \exref{c07-merge-run} and \figref{c07-leftistfig} exactly, printing
+each node's $\mathit{npl}$ to check the leftist property holds everywhere. Then replace the swap-test with
+the unconditional skew-heap swap and re-run (a) -- same output, fewer fields. \textbf{Difficulty L4; the goal
+is fluency with right-spine recursion, not a submission.} Once solid, port \probref{c07-connect} to run on
+\emph{your} leftist queue: the merge-the-two-smallest loop reads the same, and you now own the meld.
+\end{notebox}
+
+\begin{recallbox}[10-second refresher -- 7.3 Mergeable Heaps]
+Array heaps are shape-rigid, so merging costs $\bigO{m+n}$; \textbf{leftist heaps} keep only heap order plus
+``left $\mathit{npl}\ge$ right $\mathit{npl}$'' (\defref{c07-npl}), which forces a right spine of length
+$\le\lg(n+1)$ (\thmref{c07-leftist}) -- the single path \coderef{c07-leftist}'s merge walks, hence
+$\bigO{\log n}$ meld. \textbf{Skew} drops the counters (amortised), and \coderef{c07-mergecost} prices the
+family incl.\ binomial/Fibonacci as \emph{ideas}. Treap merge (\defref{c06-splitmerge}) is a keyed \emph{join},
+not a heap union. LeetCode 1167 (\probref{c07-connect}) is the ``merge the two smallest'' Huffman greedy.
+\selftest{
+  \item Why does completeness make array-heap merging expensive, and what shape promise replaces it?
+  \item State the leftist property and the right-spine bound; why does merge recurse the \emph{right} child?
+  \item Give the $\bigO{1}$-meld structure from \coderef{c07-mergecost} and its practical downside.
+  \item How does heap meld differ from treap merge (\defref{c06-splitmerge}) in its precondition?
+  \item In \probref{c07-connect}, why must the merged stick go \emph{back} into the heap rather than a
+        precomputed order being used?
+}
+\end{recallbox}

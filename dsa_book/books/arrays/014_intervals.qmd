@@ -1,0 +1,1379 @@
+# Intervals & Sweep Line {#sec-int}
+
+<!--
+Author-facing provenance (not rendered): Chapter 14 of the arrays volume, per outline.yml
+("Intervals & Sweep Line"). Lessons A1-A5 + patterns P1-P5 as listed in the outline's covers line.
+Registry problems under books/problems/, story boards under books/traces/arr014_traces.py.
+Problems reused from other chapters as cards: LC 435 (foundations, proofs chapter), LC 1235 (DP volume).
+Weighted interval scheduling is only previewed (A5); interval DP and 2-D sweep structures
+(segment intersection, rectangle union) belong to later volumes. This comment is the only place
+a local path may appear, and none does.
+-->
+
+::: {.callout-note title="Sources"}
+**CLRS** (3rd ed.) § 16.1 (activity selection, the greedy choice and its exchange argument) · **Erickson** *Algorithms* ch. 4 (greedy algorithms; scheduling classes and the "greedy stays ahead" proof) · **CPH** (Laaksonen) ch. 6 (greedy scheduling) and ch. 30 (sweep line algorithms) · **Kleinberg–Tardos** § 4.1 (interval scheduling and interval partitioning: the peak overlap equals the number of rooms) · **Wikipedia**: interval scheduling, interval graph, sweep line algorithm · **Problem statements** of the fourteen problems solved here (LeetCode, Codeforces, CSES), which reduce to the five moves this chapter names.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- State an **endpoint convention** (closed, half-open, open) for every interval problem, write the overlap test for it, and choose the event tie-breaker at equal coordinates that matches it.
+- **Merge** a family of intervals in $O(n\log n)$ with one sort by start and a running block end, **insert** into a merged list in $O(n)$, and read off **gaps** and **union length** from the same walk.
+- Turn intervals into **$+1$/$-1$ events** and sweep them to get the peak overlap, the time above a capacity, the union length, and the **number of rooms** needed, which equals the peak.
+- Pick the right greedy among three: **pack** (sort by end, maximum disjoint intervals), **stab** (sort by end, fewest points hitting all), **cover** (sort by start, fewest intervals covering a segment), and prove each with an exchange argument.
+- Intersect two sorted interval lists with **two pointers**, intersect a whole family with $[\max l, \min r]$, and know where greedy stops: intervals on a **circle** need a split, intervals with **weights** need DP.
+:::
+
+```{python}
+#| include: false
+import bisect
+import itertools
+import math
+import random
+import sys
+from heapq import heappop, heappush
+
+import matplotlib.pyplot as plt
+
+sys.path[:0] = ["../shared", "../traces"]
+import arr014_traces as Traces
+import dsa_viz as V
+
+random.seed(0)
+
+SC = 0.6          # drawing units per coordinate unit in the interval figures
+
+
+def ivbars(ax, p, rows, lo, hi, *, y=0.0, row_h=0.5, gap=0.25, sc=SC, names=None, step=1, size=8):
+    """One bar per row, top to bottom, then an axis with ticks. rows: (s, e, label, colour[, dashed]).
+    Returns the y of the axis line."""
+    for k, r in enumerate(rows):
+        s, e, lab, c = r[:4]
+        dashed = len(r) > 4 and r[4]
+        yy = y - k * (row_h + gap)
+        w = max((e - s) * sc, 0.14)
+        x0 = s * sc if e > s else s * sc - 0.07
+        V.box(ax, p, x0, yy, w, row_h, lab, color=c, filled=not dashed, dashed=dashed, size=size)
+        if names and names[k]:
+            V.text(ax, p, lo * sc - 0.35, yy + row_h / 2, names[k], size=size, ha="right", color="muted")
+    ya = y - len(rows) * (row_h + gap) + gap - 0.1
+    axis(ax, p, lo, hi, ya, sc=sc, step=step)
+    return ya
+
+
+def oneline(ax, p, rows, y, *, row_h=0.5, sc=SC, name=None, lo=0, size=8):
+    """Several disjoint bars on one row: rows of (s, e, label, colour[, dashed])."""
+    for r in rows:
+        s, e, lab, c = r[:4]
+        dashed = len(r) > 4 and r[4]
+        w = max((e - s) * sc, 0.14)
+        x0 = s * sc if e > s else s * sc - 0.07
+        V.box(ax, p, x0, y, w, row_h, lab, color=c, filled=not dashed, dashed=dashed, size=size)
+    if name:
+        V.text(ax, p, lo * sc - 0.35, y + row_h / 2, name, size=size, ha="right", color="muted")
+
+
+def axis(ax, p, lo, hi, ya, *, sc=SC, step=1):
+    ax.plot([lo * sc, hi * sc], [ya, ya], color=p["line"], lw=1.1)
+    for t in range(lo, hi + 1, step):
+        ax.plot([t * sc] * 2, [ya - 0.07, ya + 0.07], color=p["line"], lw=0.9)
+        V.text(ax, p, t * sc, ya - 0.32, str(t), size=7, color="muted")
+
+
+def vline(ax, p, x, y_top, y_bot, label="", color="pink", sc=SC):
+    ax.plot([x * sc] * 2, [y_bot, y_top], color=V.col(p, color), lw=1.6, ls="--")
+    V._extend(ax, x * sc, y_bot, x * sc, y_top)
+    if label:
+        V.text(ax, p, x * sc, y_top + 0.3, label, size=8, color=color, weight="bold")
+```
+
+## Why this matters {#sec-int-why}
+
+::: {.callout-note title="In plain words"}
+An interval is **a piece of a line**: $[a, b]$, "everything from $a$ to $b$". A meeting, a reservation, a film, a trip in a car, a balloon on the $x$-axis, a range of days: each is an interval, and the questions are always about how the pieces sit relative to each other. Do they overlap? How many overlap at the worst moment? How many can I keep without clashes? How few points touch them all? Where are the holes? Draw the intervals as horizontal bars on one timeline (@fig-int-idea) and every question becomes a walk from left to right.
+:::
+
+The tools are ones you already own. Sorting buys a monotone order to walk in (@sec-srt); the difference array and its sparse form, the event sweep, count how many ranges cover each point (@sec-pref-diff); binary search counts how many starts or ends lie left of a point (@sec-bst); and two pointers walk two sorted lists at once (@sec-tp-merge). This chapter spends them on one object, a set of intervals, and shows that nearly every interval problem is **one sort plus one linear pass**, once you choose the right coordinate to sort by and the right rule at equal coordinates. The next chapter, @sec-part, leaves intervals behind and rearranges an array in place.
+
+The constraints that point here: $n$ up to $10^5$ or $2 \cdot 10^5$ intervals, coordinates up to $10^9$ (so no array indexed by coordinate), and a question about overlaps, gaps, a schedule or a cover. $O(n^2)$ pairwise checks are then too slow, and $O(n \log n)$ is the target.
+
+::: {#fig-int-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+idea_iv = [(1, 5), (2, 6), (4, 8), (7, 9)]
+idea_cnt = [sum(1 for a, b in idea_iv if a <= t <= b) for t in range(1, 10)]
+assert max(idea_cnt) == 3 and idea_cnt == [1, 2, 2, 3, 3, 2, 2, 2, 1]
+
+
+def draw(ax, p):
+    rows = [(a, b, f"[{a},{b}]", c) for (a, b), c in zip(idea_iv, ["indigo", "cyan", "violet", "green"])]
+    ya = ivbars(ax, p, rows, 1, 9, sc=0.9)
+    peak = max(idea_cnt)
+    V.array(ax, p, idea_cnt, x=0.45, y=ya - 1.75, cell_w=0.9, index=False,
+            colors={i: "amber" for i, c in enumerate(idea_cnt) if c == peak}, label="covering t")
+V.show(draw)
+```
+
+Four closed intervals as bars on one timeline, and under the axis the number of bars covering each integer point $t = 1, \dots, 9$. The amber cells are the peak, $3$, reached on $[4,5]$. Merging, counting, scheduling and covering all read this one picture; the algorithms differ only in what they track while walking it from left to right.
+
+:::
+
+Five lessons build the toolkit, and five patterns spend it:
+
+- **A1. The endpoint contract.** Closed $[a,b]$, half-open $[a,b)$, open $(a,b)$: three overlap tests and three tie-breakers when two intervals meet at a point. Pick the wrong one and an answer is off by one exactly on touching inputs.
+- **A2. Merge after sorting by start.** One pass with a running block end; insertion into an already merged list without sorting; gaps for free.
+- **A3. Events and the sweep.** Split every interval into $(a, +1)$ and $(b, -1)$, sort, keep a running count: peak overlap, union length, time above a capacity, and the number of rooms needed.
+- **A4. Three greedies.** Sort by **end** to *pack* the most disjoint intervals, sort by **end** to *stab* all intervals with the fewest points, sort by **start** to *cover* a segment with the fewest intervals. Each has a two-line exchange proof, and each fails with the other sort.
+- **A5. Where the line breaks.** Intervals on a **circle** (split at the cut) and intervals with **weights** (the greedy fails; dynamic programming takes over).
+
+## Part A — Lessons
+
+## A1. Representing intervals: open, closed and half-open ends {#sec-int-repr}
+
+::: {.callout-note title="In plain words"}
+Every interval problem quietly picks a convention for its two ends. **Closed** $[a, b]$ includes both ends, so $[1,3]$ and $[3,5]$ share the point $3$. **Half-open** $[a, b)$ includes the start and excludes the end, so $[1,3)$ and $[3,5)$ are disjoint: a film that ends at $3$ and a film that starts at $3$ can both be watched. **Open** $(a, b)$ excludes both; it appears in geometry ("strictly inside") more than in scheduling. The convention is rarely named in the statement, and it decides what the code does when two ends sit at the same coordinate.
+:::
+
+The three conventions, the membership test, and when two intervals overlap:
+
+```text
+convention   contains x          [1,3]-type and [3,5]-type      overlap test for (a1,b1), (a2,b2)
+[a, b]       a <= x <= b         share the point 3               a1 <= b2 and a2 <= b1
+[a, b)       a <= x <  b         disjoint                        a1 <  b2 and a2 <  b1
+(a, b)       a <  x <  b         disjoint                        a1 <  b2 and a2 <  b1   (for a < b)
+```
+
+The overlap test reads "neither interval ends before the other starts". It is the only pairwise test the chapter needs, and every algorithm below is a way of *not* running it on all $\binom{n}{2}$ pairs.
+
+**Which statements use which.** LC 56 *Merge Intervals* says $[1,4]$ and $[4,5]$ overlap: closed. LC 1094 *Car Pooling* says passengers are dropped off before new ones are picked up at the same location: half-open. CSES 1629 *Movie Festival* has a sample whose answer needs a film to start at the moment the previous one ends: half-open. CSES 1619 *Restaurant Customers* sidesteps the question by promising that all times are distinct. When a statement says nothing, test a touching pair on the samples, or ask.
+
+**Integers make the choice reversible.** When the coordinates are integers (days, kilometre markers, array indices), a closed interval $[a, b]$ holds exactly the integers of the half-open interval $[a, b+1)$. So you can convert once, at input time, and write the rest of the code for one convention only. LC 986's event form (@sec-int-p5-a) does exactly this.
+
+**The tie-breaker follows from the convention.** Split each interval into an arrival event at $a$ and a departure event at $b$. When an arrival and a departure sit at the same coordinate $t$, the order in which you process them decides whether the two intervals count as overlapping at $t$:
+
+```text
+half-open [a, b)   the departing interval has already released t   ->  process the -1 FIRST
+closed    [a, b]   both intervals contain t                         ->  process the +1 FIRST
+```
+
+That one decision is the difference between "two films fit" and "the room peaks at two". Get it wrong and a sweep reports a peak one too high or one too low, and only on inputs where ends touch, which is exactly where random tests rarely look.
+
+::: {#fig-int-repr}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+repr_closed = sum(1 for a, b in [(1, 3), (3, 5)] if a <= 3 <= b)
+repr_half = sum(1 for a, b in [(1, 3), (3, 5)] if a <= 3 < b)
+assert (repr_closed, repr_half) == (2, 1)
+
+
+def draw(ax, p):
+    rows = [(1, 3, "[1,3]", "green"), (3, 5, "[3,5]", "green"),
+            (1, 3, "[1,3)", "indigo", True), (3, 5, "[3,5)", "indigo", True)]
+    ya = ivbars(ax, p, rows, 0, 6, sc=1.0, names=["closed", "closed", "half-open", "half-open"])
+    vline(ax, p, 3, 0.85, ya, "t = 3", sc=1.0)
+    V.text(ax, p, 6.4, 0.25 - 0.375, f"{repr_closed} intervals contain 3", ha="left", size=8, color="green")
+    V.text(ax, p, 6.4, 0.25 - 2 * 0.75 - 0.375, f"{repr_half} interval contains 3", ha="left", size=8, color="indigo")
+V.show(draw)
+```
+
+The same two pairs of numbers under two conventions. Closed (green), both intervals contain $3$, so they overlap at one point and a sweep must count both there. Half-open (indigo, dashed), the first interval stops just before $3$, so the pair is disjoint. The counts on the right are computed from the membership tests above.
+
+:::
+
+```{python}
+#| label: arr-int-a1-demo
+def overlap_closed(x, y):
+    return x[0] <= y[1] and y[0] <= x[1]
+
+
+def overlap_half(x, y):
+    return x[0] < y[1] and y[0] < x[1]
+
+
+def peak(intervals, tie_depart_first):
+    """Sweep with the tie order as a parameter: True = half-open reading, False = closed."""
+    evs = sorted([(a, +1) for a, _ in intervals] + [(b, -1) for _, b in intervals],
+                 key=lambda e: (e[0], e[1] if tie_depart_first else -e[1]))
+    cur = best = 0
+    for _, d in evs:
+        cur += d
+        best = max(best, cur)
+    return best
+
+
+ivs = [(1, 3), (3, 5)]
+assert overlap_closed(*ivs) and not overlap_half(*ivs)
+assert peak(ivs, tie_depart_first=True) == 1        # half-open [a,b): they do NOT overlap
+assert peak(ivs, tie_depart_first=False) == 2       # closed   [a,b]: they share 3
+
+# On integers, closed [a, b] is half-open [a, b + 1): the two overlap tests agree after conversion.
+for _ in range(500):
+    x = sorted(random.sample(range(12), 2)); y = sorted(random.sample(range(12), 2))
+    by_points = bool(set(range(x[0], x[1] + 1)) & set(range(y[0], y[1] + 1)))
+    assert overlap_closed(x, y) == by_points == overlap_half((x[0], x[1] + 1), (y[0], y[1] + 1))
+print("a1 demo OK")
+```
+
+The two `peak` asserts *are* the lesson: same intervals, same $+1$/$-1$ events, only the tie order changes, and the reported peak moves from $1$ to $2$. The loop checks the integer conversion against the definition (a common integer point), so you may convert closed integer intervals to half-open ones and use one set of comparisons everywhere.
+
+## A2. Merging and inserting intervals after sorting by start {#sec-int-merge}
+
+::: {.callout-note title="In plain words"}
+To **merge** intervals into maximal non-overlapping blocks, do two things: **sort by start**, then walk with the end of the block you are building. Each next interval either starts inside that block, so the block's end becomes the larger of the two ends, or starts after it, so the block is finished and a new one opens. After the sort, an interval can only touch the *last* block, because every earlier block ended before the last one began. To **insert** one interval into a list that is already sorted and merged, skip the sort: copy the intervals strictly to the left, absorb the ones that overlap, copy the rest.
+:::
+
+The merge template:
+
+```text
+sort intervals by start
+out = []
+for iv in intervals:
+    if out and iv.start <= out[-1].end:          # overlap or touch (closed); use < for half-open
+        out[-1].end = max(out[-1].end, iv.end)   # extend, never replace
+    else:
+        out.append(copy(iv))                     # disjoint: open a new block
+```
+
+**Why sorting by start is enough.** After the sort, every unprocessed interval starts at or after the current one. So a block, once a later interval starts beyond its end, can never be touched again: everything still to come starts even later. That is the whole correctness argument, and it is why only `out[-1]` is ever examined.
+
+Two bugs to stamp out on day one. First, comparing `iv.start` with the *previous interval's* end instead of the *block's* end: on $[1,10],[2,3],[4,5]$ the previous interval of $[4,5]$ is $[2,3]$, the test $4 \le 3$ fails, and a second block opens although $[4,5]$ lies inside $[1,10]$ (@fig-int-nested draws it). Second, writing `out[-1].end = iv.end` instead of taking the `max`: the nested $[2,3]$ shrinks the block $[1,10]$ to $[1,3]$, and $[4,5]$ then opens a block of its own.
+
+::: {#fig-int-anim-merge}
+
+```{python}
+#| echo: false
+mg_in = sorted([[1, 3], [8, 10], [2, 6], [15, 18]])
+mg_frames = []                                   # (blocks after this visit, index visited, action)
+mg_out = []
+for mg_k, (mg_a, mg_b) in enumerate(mg_in):
+    if mg_out and mg_a <= mg_out[-1][1]:
+        mg_out[-1][1] = max(mg_out[-1][1], mg_b)
+        mg_act = "starts inside the block: extend"
+    else:
+        mg_out.append([mg_a, mg_b])
+        mg_act = "starts after the block: open a new one"
+    mg_frames.append(([list(x) for x in mg_out], mg_k, mg_act))
+assert mg_frames[-1][0] == [[1, 6], [8, 10], [15, 18]]
+
+
+def mg_frame(ax, p, t):
+    blocks, k, _ = mg_frames[t]
+    rows = [(a, b, f"[{a},{b}]", "amber" if i == k else ("muted" if i < k else "indigo"), i > k)
+            for i, (a, b) in enumerate(mg_in)]
+    ya = ivbars(ax, p, rows, 0, 19, sc=0.42, names=["sorted"] + [""] * 3, size=7)
+    oneline(ax, p, [(a, b, f"[{a},{b}]", "green") for a, b in blocks], ya - 1.2, sc=0.42,
+            name="blocks", size=7)
+
+
+mg_caps = [f"visit [{mg_in[k][0]},{mg_in[k][1]}]: {act}; blocks = "
+           + " ".join(f"[{a},{b}]" for a, b in blocks) for blocks, k, act in mg_frames]
+V.animate(mg_frame, len(mg_frames), captions=mg_caps, interval=1300)
+```
+
+The merge walk on $[1,3],[8,10],[2,6],[15,18]$ after sorting by start. The amber bar is the interval being visited, dashed bars are still to come, and the green row under the axis is the block list. $[2,6]$ starts inside $[1,3]$ and extends it to $[1,6]$; $[8,10]$ and $[15,18]$ each start after the last block and open a new one.
+
+:::
+
+```{python}
+#| label: arr-int-a2-demo
+def merge(intervals):
+    out = []
+    for a, b in sorted(intervals):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def insert(intervals, new):
+    out, i, n = [], 0, len(intervals)
+    while i < n and intervals[i][1] < new[0]:       # strictly left
+        out.append(list(intervals[i])); i += 1
+    cur = list(new)
+    while i < n and intervals[i][0] <= cur[1]:      # absorb overlaps
+        cur = [min(cur[0], intervals[i][0]), max(cur[1], intervals[i][1])]
+        i += 1
+    out.append(cur)
+    while i < n:                                    # strictly right
+        out.append(list(intervals[i])); i += 1
+    return out
+
+
+def gaps(intervals):
+    """The holes between merged blocks, as open stretches (b_k, a_{k+1})."""
+    m = merge(intervals)
+    return [(m[k][1], m[k + 1][0]) for k in range(len(m) - 1)]
+
+
+def merge_brute(intervals):
+    """Union-find over the overlap relation, then one block per component."""
+    n = len(intervals)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            if overlap_closed(intervals[i], intervals[j]):
+                parent[find(i)] = find(j)
+    comp = {}
+    for i, (a, b) in enumerate(intervals):
+        r = find(i)
+        lo, hi = comp.get(r, (a, b))
+        comp[r] = (min(lo, a), max(hi, b))
+    return sorted([list(x) for x in comp.values()])
+
+
+assert merge([[1, 3], [8, 10], [2, 6], [15, 18]]) == [[1, 6], [8, 10], [15, 18]]
+assert merge([[1, 10], [2, 3], [4, 5]]) == [[1, 10]]     # nested: the max() keeps the block
+assert insert([[1, 2], [3, 5], [6, 7], [8, 10], [12, 16]], [4, 8]) == [[1, 2], [3, 10], [12, 16]]
+assert gaps([[1, 3], [8, 10], [2, 6], [15, 18]]) == [(6, 8), (10, 15)]
+for _ in range(300):
+    ivs = [sorted([random.randint(0, 20), random.randint(0, 20)]) for _ in range(random.randint(1, 12))]
+    got = merge(ivs)
+    assert got == merge_brute(ivs)
+    new = sorted([random.randint(0, 20), random.randint(0, 20)])
+    assert insert(got, new) == merge(ivs + [new])     # insert = merge on a merged list
+print("a2 demo OK")
+```
+
+The oracle `merge_brute` never sorts: it joins every overlapping *pair* (connected components of the overlap relation), so it is independent of the walk's reasoning. Agreement on random inputs confirms that "only the last block can be touched" is true. The second assert says that `insert` on a merged list is the same function as `merge` on the whole pile, only cheaper: once the input is sorted *and* merged, you can skip the sort and cut the list at two positions. And `gaps` shows the remark from the plain-words box: the holes of a family are the stretches between consecutive merged blocks, which @sec-int-p5-c counts.
+
+## A3. Events: turning intervals into +1/−1 points and sweeping {#sec-int-events}
+
+::: {.callout-note title="In plain words"}
+The most reusable idea of the chapter. Store an interval not as one bar but as **two events on a shared timeline**: at $a$, "one more interval is active"; at $b$, "one fewer". Sort all $2n$ events by position and walk them with a running count. Picture a vertical line, the **sweep line**, moving from left to right and stopping at every event: at each stop, the running count is exactly the number of intervals the line crosses. Nothing is ever compared with anything else; the order of the events does all the work.
+:::
+
+The template:
+
+```text
+events = [(start, +1) for each interval] + [(end, -1) for each interval]
+sort events by (position, tie_breaker)          # tie_breaker from the convention (A1)
+cur = best = 0
+for pos, delta in events:
+    cur += delta                                 # intervals crossing the sweep line just after pos
+    best = max(best, cur)                        # or: record (pos, cur), compare with a capacity, ...
+```
+
+This is the **sparse difference array** of @sec-pref-diff. With small integer coordinates you can keep a plain array, `diff[a] += 1; diff[b + 1] -= 1` for closed intervals, and a prefix sum gives the count at every position; @sec-int-p2-b does exactly that. With coordinates up to $10^9$ the array is impossible, and sorting the $2n$ events visits only the positions where the count changes. A third option is to compress the coordinates first (@sec-srt-a4) and run the array on ranks, which @sec-int-p2-a shows.
+
+::: {#fig-int-anim-sweep}
+
+```{python}
+#| echo: false
+sw_iv = [(1, 5), (2, 6), (4, 8), (7, 9)]
+sw_ev = sorted([(a, +1, i) for i, (a, _) in enumerate(sw_iv)] + [(b, -1, i) for i, (_, b) in enumerate(sw_iv)],
+               key=lambda e: (e[0], -e[1]))                     # closed: arrivals first on ties
+sw_frames = []
+sw_cur = sw_best = 0
+sw_state = ["future"] * len(sw_iv)
+for sw_t, sw_d, sw_i in sw_ev:
+    sw_cur += sw_d
+    sw_best = max(sw_best, sw_cur)
+    sw_state[sw_i] = "live" if sw_d > 0 else "done"
+    sw_frames.append((sw_t, sw_d, sw_i, sw_cur, sw_best, list(sw_state)))
+assert sw_frames[-1][4] == 3 and sw_frames[-1][3] == 0
+assert [f[3] for f in sw_frames] == [1, 2, 3, 2, 1, 2, 1, 0]
+
+
+def sw_frame(ax, p, k):
+    t, d, i, cur, best, state = sw_frames[k]
+    colour = {"future": "muted", "live": "green", "done": "muted"}
+    rows = [(a, b, f"[{a},{b}]", "amber" if j == i else colour[state[j]], state[j] == "future")
+            for j, (a, b) in enumerate(sw_iv)]
+    ya = ivbars(ax, p, rows, 0, 10, sc=0.8)
+    vline(ax, p, t, 0.9, ya, f"t = {t}", sc=0.8)
+    V.text(ax, p, 10.6 * 0.8, -0.5, f"count = {cur}", ha="left", size=9, weight="bold",
+           color="green" if cur == best else "text")
+    V.text(ax, p, 10.6 * 0.8, -1.2, f"peak = {best}", ha="left", size=9, color="amber")
+
+
+sw_caps = [f"t = {t}: [{sw_iv[i][0]},{sw_iv[i][1]}] {'starts' if d > 0 else 'ends'}, "
+           f"count {'+' if d > 0 else '-'}1 = {cur}, peak {best}"
+           for t, d, i, cur, best, _ in sw_frames]
+V.animate(sw_frame, len(sw_frames), captions=sw_caps, interval=1100)
+```
+
+The sweep line (dashed) stops at each of the eight events of four closed intervals. Green bars are crossed by the line, dashed bars have not started, grey bars are finished, and the amber bar is the one whose start or end the line just met. The count climbs to $3$ at $t = 4$, falls at $5$ and $6$, rises again at $7$ when $[7,9]$ starts while $[4,8]$ is still running, and returns to $0$. No two bars were ever compared.
+
+:::
+
+**What the running count answers.** The same walk, with a different line inside the loop:
+
+- **Peak overlap**: the maximum of `cur`.
+- **Union length**: add `pos - prev` to a total whenever `cur > 0` on the stretch $[\text{prev}, \text{pos})$.
+- **Time above a capacity**, or the first moment the load exceeds it: compare `cur` with the capacity on each stretch.
+- **Points covered exactly $k$ times** (CF 1000C): add the length of each stretch to a bucket indexed by `cur`.
+
+**Rooms: the peak is also the number of rooms needed.** Suppose each interval is a meeting and you must give every meeting a room, with no two overlapping meetings in one room. At the peak moment, `best` meetings run at once, so at least `best` rooms are needed. And `best` rooms always suffice: walk the meetings by start and put each into any room that is already free (a min-heap of room end times finds one). A new room is opened only when every existing room is busy at this meeting's start, and then all those meetings plus this one cover that start point, so the number of rooms never exceeds the peak. This is the interval-partitioning theorem (Kleinberg–Tardos § 4.1), and Movie Festival II's oracle (@sec-int-p3-b) relies on it.
+
+**Point queries without a sweep.** For many questions "how many intervals contain $t$?", sort the starts into $S$ and the ends into $E$. A closed interval contains $t$ when it started at or before $t$ and has not ended before $t$, so the count is $|\{a \le t\}| - |\{b < t\}|$, two binary searches (@sec-bst-p1). For half-open intervals, use $|\{a \le t\}| - |\{b \le t\}|$.
+
+```{python}
+#| label: arr-int-a3-demo
+def max_overlap(intervals, half_open=True):
+    """half_open: departures before arrivals at equal coordinates; closed: arrivals first."""
+    key = (lambda e: (e[0], e[1])) if half_open else (lambda e: (e[0], -e[1]))
+    ev = sorted([(a, +1) for a, _ in intervals] + [(b, -1) for _, b in intervals], key=key)
+    cur = best = 0
+    for _, d in ev:
+        cur += d
+        best = max(best, cur)
+    return best
+
+
+def max_overlap_brute(intervals, half_open=True):
+    inside = (lambda a, b, t: a <= t < b) if half_open else (lambda a, b, t: a <= t <= b)
+    return max((sum(inside(a, b, t) for a, b in intervals) for t, _ in intervals), default=0)
+
+
+def union_length(intervals):
+    """Total length covered at least once, by the sweep."""
+    ev = sorted([(a, +1) for a, _ in intervals] + [(b, -1) for _, b in intervals])
+    total, cur, prev = 0, 0, None
+    for pos, d in ev:
+        if cur > 0:
+            total += pos - prev
+        cur += d
+        prev = pos
+    return total
+
+
+def min_rooms(intervals):
+    """Greedy room assignment for half-open meetings: reuse any room free by the start."""
+    ends = []                                        # min-heap of room end times
+    for a, b in sorted(intervals):
+        if ends and ends[0] <= a:
+            heappop(ends)                            # that room is free again
+        heappush(ends, b)
+    return len(ends)
+
+
+def count_at(S, E, t, closed=True):
+    """S, E: sorted starts and ends. Intervals containing t."""
+    return bisect.bisect_right(S, t) - (bisect.bisect_left(E, t) if closed else bisect.bisect_right(E, t))
+
+
+assert max_overlap([(1, 3), (3, 5)], half_open=True) == 1
+assert max_overlap([(1, 3), (3, 5)], half_open=False) == 2
+assert max_overlap([(1, 5), (2, 6), (4, 8), (7, 9)], half_open=False) == 3
+assert union_length([(1, 3), (2, 6), (8, 10)]) == 7                   # [1,6] and [8,10]
+for _ in range(400):
+    iv = [tuple(sorted(random.sample(range(16), 2))) for _ in range(random.randint(1, 7))]
+    for ho in (True, False):
+        assert max_overlap(iv, ho) == max_overlap_brute(iv, ho)
+    assert union_length(iv) == sum(b - a for a, b in merge(iv))
+    assert min_rooms(iv) == max_overlap(iv, half_open=True)          # rooms needed = peak
+    S, E = sorted(a for a, _ in iv), sorted(b for _, b in iv)
+    for t in range(16):
+        assert count_at(S, E, t, closed=True) == sum(a <= t <= b for a, b in iv)
+        assert count_at(S, E, t, closed=False) == sum(a <= t < b for a, b in iv)
+print("a3 demo OK")
+```
+
+The stress test checks both conventions against an oracle that tests each candidate point directly (the peak is always reached at some start, so the starts are enough candidates). It also checks the union length against the merged blocks of A2, the room count against the peak, and the two-binary-search point count against the definition. Change the closed key `(e[0], -e[1])` into the half-open one and the closed assertion fails on inputs where an end meets a start: the A1 contract paying rent.
+
+## A4. Greedy interval scheduling and covering: sort by end, sort by start {#sec-int-sched}
+
+::: {.callout-note title="In plain words"}
+Three classic questions, three greedy rules. **Pack**: keep as many pairwise disjoint intervals as possible (films in one cinema, tasks on one machine). Sort by **end**, and take every interval that starts after the last one you took: the interval that ends first leaves the most room for the rest. **Stab**: find the fewest points such that every interval contains one (arrows through balloons). Sort by **end**, and place a point at the end of the first interval not yet hit: that point hits as many later intervals as any point could. **Cover**: choose the fewest intervals whose union contains a whole segment $[L, R]$ (clips of a video). Sort by **start**, and among the intervals that start inside the part already covered, take the one that reaches farthest.
+:::
+
+The three templates side by side (closed intervals for stab and cover, half-open for pack, as in the problems that use them):
+
+```text
+pack (activity selection)        stab (fewest points)             cover [L, R] (fewest intervals)
+sort by end                      sort by end                      sort by start
+last = -inf; count = 0           shot = -inf; arrows = 0          reach = L; count = 0; i = 0
+for iv:                          for iv:                          while reach < R:
+    if iv.start >= last:             if iv.start > shot:              best = reach
+        count += 1                       arrows += 1                  while i < n and iv[i].start <= reach:
+        last = iv.end                    shot = iv.end                    best = max(best, iv[i].end); i += 1
+                                                                      if best == reach: return -1   # a hole
+                                                                      reach = best; count += 1
+```
+
+**Why packing by earliest end is optimal ("greedy stays ahead").** Let the greedy take $g_1, g_2, \dots, g_k$ and let an optimal solution take $o_1, o_2, \dots, o_m$, both listed by end. Claim: $\text{end}(g_i) \le \text{end}(o_i)$ for every $i \le k$. For $i = 1$ the greedy took the interval with the smallest end of all. For $i > 1$, $o_i$ starts after $o_{i-1}$ ends, which is at or after $g_{i-1}$'s end by induction, so $o_i$ was still available when the greedy chose $g_i$, and the greedy chose the available interval with the smallest end. Now if $m > k$, the interval $o_{k+1}$ starts after $\text{end}(o_k) \ge \text{end}(g_k)$, so it was available after $g_k$ and the greedy would not have stopped. Hence $k \ge m$. The same argument in exchange form ("swap the optimal solution's first interval for the greedy's") is the one @sec-srt-a5 uses for orderings.
+
+**Why stabbing at the earliest end is optimal.** Some point must hit the interval $I_1$ with the smallest end $b_1$, and such a point lies at or before $b_1$. Slide it right to $b_1$: every interval it hit contains it and ends at or after $b_1$ (no end is smaller), so it still contains $b_1$. So some optimal solution shoots at $b_1$; remove what that shot hits and repeat. A bonus fact: for intervals, **the fewest stabbing points equals the most pairwise disjoint intervals**. No point can hit two disjoint intervals, so you need at least as many points as disjoint intervals; and the intervals that triggered the greedy's shots are pairwise disjoint (each starts after the previous shot), so the greedy achieves that bound. The demo below checks the equality.
+
+**Why covering by farthest reach is optimal.** After $c$ chosen intervals the greedy has covered $[L, \text{reach}]$, the longest prefix that any $c$ intervals can cover. The next interval of any solution must start inside the prefix covered so far, which is not longer than the greedy's, so it is among the candidates the greedy considered, and the greedy took the one reaching farthest. @sec-int-p4-c solves the problem.
+
+**The wrong greedies.** Each rule fails with the other sort, and the other "natural" rules fail too. Packing by earliest **start** takes one long interval and blocks many short ones (@fig-int-sched). Packing by **shortest** first fails on $[1,5],[4,7],[6,10]$: the short $[4,7]$ blocks both others, while $[1,5],[6,10]$ fit. Stabbing at the end of the earliest-**starting** interval fails on $[1,10],[2,3]$: the shot at $10$ misses $[2,3]$, while one shot at $3$ hits both. If you cannot state the exchange argument, suspect the greedy.
+
+::: {#fig-int-sched}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+sch_iv = [(1, 9), (2, 3), (4, 5), (6, 7)]
+
+
+def greedy_pack(ivs, key):
+    taken, last = [], -math.inf
+    for a, b in sorted(ivs, key=key):
+        if a >= last:
+            taken.append((a, b)); last = b
+    return taken
+
+
+sch_start = greedy_pack(sch_iv, key=lambda x: x[0])
+sch_end = greedy_pack(sch_iv, key=lambda x: x[1])
+assert len(sch_start) == 1 and len(sch_end) == 3
+
+
+def draw(ax, p):
+    by_start = sorted(sch_iv, key=lambda x: x[0])
+    rows = [(a, b, f"[{a},{b})", "green" if (a, b) in sch_start else "red", (a, b) not in sch_start)
+            for a, b in by_start]
+    ya = ivbars(ax, p, rows, 0, 10, sc=0.7, names=["by start"] + [""] * 3)
+    V.text(ax, p, 10.5 * 0.7, -1.2, f"{len(sch_start)} taken", ha="left", size=9, color="red", weight="bold")
+    by_end = sorted(sch_iv, key=lambda x: x[1])
+    rows = [(a, b, f"[{a},{b})", "green" if (a, b) in sch_end else "red", (a, b) not in sch_end)
+            for a, b in by_end]
+    ivbars(ax, p, rows, 0, 10, y=ya - 1.3, sc=0.7, names=["by end"] + [""] * 3)
+    V.text(ax, p, 10.5 * 0.7, ya - 1.3 - 1.2, f"{len(sch_end)} taken", ha="left", size=9, color="green",
+           weight="bold")
+V.show(draw)
+```
+
+The packing greedy on the same four intervals in two orders. Green bars are taken, dashed red bars are rejected because they start before the last taken interval ends. Sorted by start (top), the long $[1,9)$ comes first and blocks the other three. Sorted by end (bottom), the three short intervals come first and fit; $[1,9)$ is rejected last. The sort key *is* the algorithm.
+
+:::
+
+::: {#fig-int-cover}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+cov_clips = sorted([(0, 2), (4, 6), (8, 10), (1, 9), (1, 5), (5, 9)])
+cov_T = 10
+cov_chosen, cov_reaches = [], []
+cov_reach, cov_i = 0, 0
+while cov_reach < cov_T:
+    cov_best, cov_arg = cov_reach, None
+    while cov_i < len(cov_clips) and cov_clips[cov_i][0] <= cov_reach:
+        if cov_clips[cov_i][1] > cov_best:
+            cov_best, cov_arg = cov_clips[cov_i][1], cov_clips[cov_i]
+        cov_i += 1
+    assert cov_arg is not None
+    cov_chosen.append(cov_arg)
+    cov_reach = cov_best
+    cov_reaches.append(cov_reach)
+assert cov_chosen == [(0, 2), (1, 9), (8, 10)] and cov_reaches == [2, 9, 10]
+
+
+def draw(ax, p):
+    rows = [(a, b, f"[{a},{b}]", "green" if (a, b) in cov_chosen else "muted") for a, b in cov_clips]
+    ya = ivbars(ax, p, rows, 0, 10, sc=0.75)
+    for k, (r, c) in enumerate(zip(cov_reaches, ["indigo", "violet", "pink"])):
+        vline(ax, p, r, 0.75 + 0.45 * k, ya, f"reach {r}", color=c, sc=0.75)
+V.show(draw)
+```
+
+Covering $[0, 10]$ with the clips of LC 1024, sorted by start. Each round looks at the clips that start inside the covered prefix and keeps the one that reaches farthest (green): $[0,2]$ gives reach $2$; among the clips starting by $2$, $[1,9]$ reaches farthest; among those starting by $9$, $[8,10]$ finishes the cover. Three clips, and the dashed lines are the reach after each round.
+
+:::
+
+```{python}
+#| label: arr-int-a4-demo
+def pack(intervals):
+    """Activity selection on half-open [start, end): a start equal to the last end fits."""
+    count, last_end = 0, -math.inf
+    for a, b in sorted(intervals, key=lambda x: x[1]):
+        if a >= last_end:
+            count += 1
+            last_end = b
+    return count
+
+
+def pack_closed(intervals):
+    """Closed intervals: touching ones clash, so the test is strict."""
+    count, last_end = 0, -math.inf
+    for a, b in sorted(intervals, key=lambda x: x[1]):
+        if a > last_end:
+            count += 1
+            last_end = b
+    return count
+
+
+def stab(intervals):
+    """Fewest points hitting every closed interval."""
+    shots, shot = 0, -math.inf
+    for a, b in sorted(intervals, key=lambda x: x[1]):
+        if a > shot:
+            shots += 1
+            shot = b
+    return shots
+
+
+def pack_brute(intervals, clash):
+    best = 0
+    for r in range(len(intervals) + 1):
+        for combo in itertools.combinations(intervals, r):
+            if not any(clash(x, y) for x, y in itertools.combinations(combo, 2)):
+                best = r
+    return best
+
+
+assert pack([(1, 9), (2, 3), (4, 5), (6, 7)]) == 3
+assert len(greedy_pack([(1, 5), (4, 7), (6, 10)], key=lambda x: x[1] - x[0])) == 1   # shortest-first
+assert pack([(1, 5), (4, 7), (6, 10)]) == 2                                           # earliest end
+for _ in range(200):
+    iv = []
+    for _ in range(random.randint(1, 7)):
+        a = random.randint(0, 12)
+        iv.append((a, a + random.randint(1, 5)))
+    assert pack(iv) == pack_brute(iv, overlap_half)
+    assert pack_closed(iv) == pack_brute(iv, overlap_closed)
+    assert stab(iv) == pack_closed(iv)        # fewest points = most disjoint intervals
+print("a4 demo OK")
+```
+
+The two conventions differ by one comparison, `>=` (half-open: a film may start when the previous one ends) against `>` (closed: touching intervals clash). The last assertion is the duality: on every random input, the fewest stabbing points equals the most pairwise disjoint closed intervals.
+
+## A5. Intervals on a circle and intervals with weights (a preview) {#sec-int-circle}
+
+::: {.callout-note title="In plain words"}
+Two situations break the plain line. On a **circle** (hours of a day, positions around a round table) an interval may wrap past the cut, like a night shift $[22, 2)$; neither end is "earlier". On a **weighted** line every interval carries a value and you want the most valuable disjoint set, not the largest one. The first is repaired by cutting the circle and splitting the wrapping intervals in two; the second is not a greedy problem at all.
+:::
+
+**Splitting at the cut.** Put the cut at $0$ on a circle of length $C$. A non-wrapping interval $[a, b)$ with $a < b$ stays as it is; a wrapping one ($a > b$, read clockwise from $a$ to $b$) becomes the two pieces $[a, C)$ and $[0, b)$. Every point of the circle lies in exactly one copy of the line $[0, C)$, and a point is covered by a wrapping interval exactly when it is covered by one of its two pieces. So any question about **coverage at points** (peak overlap, union length, free stretches) is answered exactly by running the linear sweep of @sec-int-events on the pieces.
+
+Questions about **choosing intervals** (pack, stab, cover) need more care, because a wrapping interval cut in two must not count as two intervals. The standard repair is to *unroll*: copy every interval shifted by $C$, so the line $[0, 2C)$ holds two laps, and run the linear greedy on a window of length $C$ starting at a chosen interval; trying each start costs $O(n)$ per start, and faster versions use binary lifting, which belongs to a later volume.
+
+::: {#fig-int-circle}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+CIRC_C = 12
+circ_iv = [(2, 5), (9, 3), (4, 10)]
+
+
+def split_circle(intervals, C):
+    out = []
+    for a, b in intervals:
+        out += [(a, b)] if a < b else [(a, C), (0, b)]
+    return out
+
+
+circ_pieces = split_circle(circ_iv, CIRC_C)
+assert circ_pieces == [(2, 5), (9, 12), (0, 3), (4, 10)]
+circ_cnt = [sum(a <= t < b for a, b in circ_pieces) for t in range(CIRC_C)]
+assert max(circ_cnt) == 2
+
+
+def draw(ax, p):
+    oneline(ax, p, [(2, 5, "[2,5)", "indigo")], 0.0, sc=0.65, name="[2,5)")
+    oneline(ax, p, [(9, 12, "[9,12)", "amber"), (0, 3, "[0,3)", "amber")], -0.75, sc=0.65, name="[9,3) wraps")
+    oneline(ax, p, [(4, 10, "[4,10)", "cyan")], -1.5, sc=0.65, name="[4,10)")
+    axis(ax, p, 0, CIRC_C, -1.85, sc=0.65)
+    V.array(ax, p, circ_cnt, x=0, y=-3.3, cell_w=0.65, index=False, label="covering [t,t+1)",
+            colors={i: "amber" for i, c in enumerate(circ_cnt) if c == max(circ_cnt)}, size=9)
+V.show(draw)
+```
+
+Three half-open intervals on a circle of length $12$, cut open at $0$. The wrapping interval $[9, 3)$ becomes the two amber pieces $[9,12)$ and $[0,3)$ on the same row. The cells count the intervals covering each unit stretch $[t, t+1)$; the peak $2$ is reached on $[2,3)$, where $[2,5)$ meets the second piece of the wrap, and on $[4,5)$ and $[9,10)$.
+
+:::
+
+**Weights change the question.** If interval $i$ pays $w_i$ and you want the most valuable set of pairwise disjoint intervals, earliest end fails at once: $[0,2)$ worth $1$ ends first and blocks $[1,10)$ worth $100$. Sorting by weight fails too (one heavy interval can block two that together weigh more). The right tool is dynamic programming over the intervals sorted by end: either the last interval is skipped, or it is taken together with the best answer among the intervals that end by its start, and that index is found with `bisect`. The DP volume solves it in full:
+
+{{< include ../problems/lc-1235-maximum-profit-in-job-scheduling/card.qmd >}}
+
+```{python}
+#| label: arr-int-a5-demo
+def circle_peak(intervals, C):
+    return max_overlap(split_circle(intervals, C), half_open=True)
+
+
+def circle_peak_brute(intervals, C):
+    def inside(a, b, t):
+        return a <= t < b if a < b else (t >= a or t < b)
+    return max(sum(inside(a, b, t) for a, b in intervals) for t in range(C))
+
+
+def weighted_pack(jobs):
+    """jobs: (start, end, weight), half-open. DP over jobs sorted by end + bisect."""
+    jobs = sorted(jobs, key=lambda j: j[1])
+    ends = [e for _, e, _ in jobs]
+    best = [0] * (len(jobs) + 1)                   # best[i]: first i jobs
+    for i, (s, e, w) in enumerate(jobs):
+        j = bisect.bisect_right(ends, s, 0, i)     # jobs 0..j-1 end by s
+        best[i + 1] = max(best[i], best[j] + w)
+    return best[-1]
+
+
+def weighted_brute(jobs):
+    best = 0
+    for r in range(len(jobs) + 1):
+        for combo in itertools.combinations(jobs, r):
+            if not any(overlap_half(x[:2], y[:2]) for x, y in itertools.combinations(combo, 2)):
+                best = max(best, sum(w for _, _, w in combo))
+    return best
+
+
+assert circle_peak(circ_iv, CIRC_C) == 2
+assert weighted_pack([(0, 2, 1), (1, 10, 100)]) == 100      # earliest end would take only 1
+for _ in range(300):
+    C = random.randint(2, 12)
+    iv = []
+    for _ in range(random.randint(1, 5)):
+        a, b = random.sample(range(C), 2)
+        iv.append((a, b))
+    assert circle_peak(iv, C) == circle_peak_brute(iv, C)
+    jobs = []
+    for _ in range(random.randint(1, 6)):
+        s = random.randint(0, 10)
+        jobs.append((s, s + random.randint(1, 5), random.randint(1, 9)))
+    assert weighted_pack(jobs) == weighted_brute(jobs)
+print("a5 demo OK")
+```
+
+The circle oracle tests every unit stretch with a membership rule that understands wrapping, and it never splits anything; agreement shows that splitting at the cut is exact for coverage. The weighted DP is checked against all subsets. Keep the boundary in mind: **counting and coverage questions on a circle reduce to the line by a split; unweighted choosing questions reduce by unrolling; weighted choosing questions are DP.**
+
+## Part B — Patterns
+
+Each pattern below opens with the signals that say "use me", a boxed template with its invariant, and its complexity, followed by its solved problems. Every problem climbs a ladder of solution forms: a brute force that follows the statement, sometimes a tempting wrong idea, and the form the pattern names, with a stress test that checks the fast forms against the slow one.
+
+## Pattern 1: Merging intervals {#sec-int-p1}
+
+**Where we are.** The five patterns of Part B form one climb, each adding one idea to the walk "sort, then sweep left to right". **Merging** keeps one piece of state, the end of the current block. **Event sweeps** replace the block by a *count* of active intervals. **Scheduling** keeps a count of chosen intervals and the moment the resource frees up, and decides *which* intervals to keep. **Covering** turns the decision around: choose the fewest intervals or points that reach everything. **Intersections and gaps** walk two lists at once, or read the complement of the union. Throughout, the sort key and the endpoint convention are the two decisions that make or break the code.
+
+**Recognise it.** "Merge", "combine overlapping ranges", "insert into a sorted list of ranges", or an output that must be a *maximal non-overlapping family* covering the same points. Constraints around $n \le 10^4$ to $10^5$ and coordinates up to $10^9$: sort-based, never per coordinate.
+
+::: {.callout-important title="Template"}
+Sort by start ascending, walk with the running end of the last block.
+
+```text
+sort intervals by start
+out = []
+for iv:
+    if out and iv.start <= out[-1].end:          # < for half-open, where touching blocks stay apart
+        out[-1].end = max(out[-1].end, iv.end)   # extend, never replace
+    else:
+        out.append(copy(iv))
+```
+
+**Invariant.** After the first $k$ intervals (in start order), `out` is the merged form of exactly those $k$ intervals, sorted by start. Every later interval starts at or after the current one, so it can touch only the last block; the earlier blocks are final.
+:::
+
+**Complexity.** $O(n\log n)$ for the sort and $O(n)$ for the walk, $O(n)$ for the output. Inserting into a list that is already merged needs no sort: $O(n)$ for the three-phase walk, or $O(\log n)$ to *find* the absorbed range with two binary searches.
+
+::: {#fig-int-nested}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+nest_in = [[1, 10], [2, 3], [4, 5]]
+
+
+def merge_prev_bug(intervals):
+    """WRONG: compares with the previous interval's end instead of the block's end."""
+    out, prev = [], None
+    for a, b in sorted(intervals):
+        if out and a <= prev[1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+        prev = (a, b)
+    return out
+
+
+nest_bug = merge_prev_bug(nest_in)
+nest_ok = merge(nest_in)
+assert nest_bug == [[1, 10], [4, 5]] and nest_ok == [[1, 10]]
+
+
+def draw(ax, p):
+    rows = [(a, b, f"[{a},{b}]", "indigo") for a, b in nest_in]
+    ya = ivbars(ax, p, rows, 0, 11, sc=0.7, names=["input"] + [""] * 2)
+    for k, (a, b) in enumerate(nest_bug):           # the two wrong blocks overlap: one row each
+        oneline(ax, p, [(a, b, f"[{a},{b}]", "red")], ya - 1.1 - 0.7 * k, sc=0.7,
+                name="vs previous end" if k == 0 else None)
+    yb = ya - 1.1 - 0.7 * len(nest_bug) - 0.3
+    oneline(ax, p, [(a, b, f"[{a},{b}]", "green") for a, b in nest_ok], yb, sc=0.7, name="vs block end")
+    V.text(ax, p, 11.6 * 0.7, ya - 0.85, f"{len(nest_bug)} blocks: wrong", ha="left", size=8, color="red")
+    V.text(ax, p, 11.6 * 0.7, yb + 0.25, f"{len(nest_ok)} block: right", ha="left", size=8, color="green")
+V.show(draw)
+```
+
+The classic merge bug, computed. With the input sorted by start, $[4,5]$ is compared with the *previous interval* $[2,3]$, and $4 > 3$ opens a second block (red rows; the two "blocks" even overlap), although $[4,5]$ lies inside $[1,10]$. Comparing with the *block's* end, $10$, keeps one block (green). The block end is the state; the previous interval is not.
+
+:::
+
+{{< include ../problems/lc-0056-merge-intervals/problem.qmd >}}
+
+[**From merging a pile to inserting into a merged list.** Merge Intervals starts from an unsorted pile. Insert Interval starts from a list that is already sorted and merged and adds one interval, so the sort is wasted work: three phases (left, overlap, right) in one linear walk, or two binary searches to find the overlap.]{.flow-bridge}
+
+{{< include ../problems/lc-0057-insert-interval/problem.qmd >}}
+
+## Pattern 2: Event sweep and overlap counts {#sec-int-p2}
+
+**From blocks to counts.** Merging answers "which points are covered?", but it forgets *how many times* each point is covered: two overlapping meetings and ten overlapping meetings both become one block. When the question is about multiplicity (the busiest moment, a capacity, the number of rooms), replace the block end by a running count of active intervals, as in @sec-int-events.
+
+**Recognise it.** "Maximum number at the same time", "peak occupancy", "how many are active at time $t$", "is the capacity ever exceeded", "minimum number of rooms". Each object has a start and an end, and the question cares only about how many objects are active, not which ones.
+
+::: {.callout-important title="Template"}
+Break every interval into two events, sort, walk with a running sum.
+
+```text
+events = [(start, +w), (end, -w) for each interval]       # w = 1, or a weight such as passengers
+sort events by (position, tie_breaker)                     # tie_breaker encodes the convention
+cur = 0
+for pos, d in events:
+    cur += d
+    use cur: track the maximum, compare with a capacity, add the stretch length to a bucket, ...
+```
+
+With small integer coordinates the same thing is a difference array: `diff[start] += w; diff[end] -= w` (half-open), then a prefix sum.
+
+**Invariant.** After all events at positions $\le$ `pos` are processed (in tie-breaker order), `cur` is the total weight of the intervals that contain the points just after `pos`; for closed intervals with arrivals first, it is also the weight at `pos` itself.
+:::
+
+**Complexity.** $O(n\log n)$ for the sort, $O(n)$ for the walk, $O(n)$ space. Difference array on integer coordinates in $[0, W]$: $O(n + W)$ time and $O(W)$ space, the better choice when $W$ is small (Car Pooling has $W = 1000$).
+
+::: {#fig-int-profile}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+prof_trips, prof_cap = [[2, 1, 5], [3, 3, 7]], 4
+prof_diff = [0] * 9
+for prof_p, prof_f, prof_t in prof_trips:
+    prof_diff[prof_f] += prof_p
+    prof_diff[prof_t] -= prof_p
+prof_load = list(itertools.accumulate(prof_diff))[:8]
+assert prof_load == [0, 2, 2, 5, 5, 3, 3, 0] and max(prof_load) > prof_cap
+
+
+def draw(ax, p):
+    H = 3.0
+    V.bars(ax, p, prof_load, height=H, colors={i: ("red" if v > prof_cap else "indigo") for i, v in enumerate(prof_load)})
+    yc = H * prof_cap / max(prof_load)
+    ax.plot([0, len(prof_load)], [yc, yc], color=V.col(p, "amber"), lw=1.5, ls="--")
+    V.text(ax, p, len(prof_load) + 0.2, yc, f"capacity {prof_cap}", ha="left", size=9, color="amber")
+    V.text(ax, p, len(prof_load) / 2, -1.0, "kilometre (load on [k, k+1))", size=8, color="muted")
+V.show(draw)
+```
+
+The load profile of Car Pooling's first sample, trips $[2,1,5]$ and $[3,3,7]$, computed with a difference array: each bar is the number of passengers on the stretch $[k, k+1)$. The car is over capacity (red) on $[3, 5)$, where both trips ride; at kilometre $5$ the first trip leaves *before* anything else happens, so the load drops to $3$.
+
+:::
+
+{{< include ../problems/cses-1619-restaurant-customers/problem.qmd >}}
+
+[**From a peak to a capacity check.** Restaurant Customers reports the largest value of the running count. Car Pooling keeps the sweep, gives each event a weight (the number of passengers) and compares the running sum with a capacity, under the half-open convention, so the tie-breaker flips; its small coordinates also make a plain difference array the natural form.]{.flow-bridge}
+
+{{< include ../problems/lc-1094-car-pooling/problem.qmd >}}
+
+## Pattern 3: Scheduling by end time {#sec-int-p3}
+
+**From counting to choosing.** The sweep tells you how crowded the timeline is but never *which* intervals to keep. When a resource can serve one interval at a time (a cinema seat, a machine) and the goal is to serve as many as possible, every interval becomes a yes/no decision, and the greedy of @sec-int-sched makes the decisions in order of end time.
+
+**Recognise it.** "Maximum number of non-overlapping intervals / films / tasks", "fewest removals so the rest do not overlap", and with a twist "$k$ machines / rooms / people; how many intervals can be served?" An unweighted count objective and a limit on concurrency. (A weight per interval means DP, @sec-int-circle.)
+
+::: {.callout-important title="Template"}
+Sort by end ascending; decide each interval as it comes.
+
+```text
+one resource (half-open):              k resources (half-open):
+sort by end                             sort by end
+last_end = -inf; count = 0              free = multiset of k zeros; count = 0
+for iv:                                 for iv:
+    if iv.start >= last_end:                f = largest value in free that is <= iv.start
+        count += 1                          if f exists:
+        last_end = iv.end                       replace f by iv.end in free; count += 1
+```
+
+**Invariant (one resource).** After $i$ picks, `last_end` is the smallest end any set of $i$ disjoint intervals can have among the intervals seen so far ("greedy stays ahead"), so no other choice leaves more room.
+
+**Invariant ($k$ resources).** Some optimal schedule agrees with every decision made so far; giving the film to the member who is free *latest but in time* keeps the members who are free early available for films that start early.
+:::
+
+**Complexity.** $O(n\log n)$ for the sort; $O(n)$ walk for one resource, $O(n\log k)$ multiset operations for $k$.
+
+::: {#fig-int-rooms}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+rm_movies, rm_k = [(1, 5), (8, 10), (3, 6), (2, 5), (6, 9)], 2
+rm_free = [(0, 0), (0, 1)]                 # sorted (free time, member)
+rm_assign = {0: [], 1: []}
+rm_skipped = []
+for rm_a, rm_b in sorted(rm_movies, key=lambda m: m[1]):
+    rm_idx = bisect.bisect_right(rm_free, (rm_a, rm_k)) - 1
+    if rm_idx >= 0:
+        _, rm_mem = rm_free.pop(rm_idx)
+        rm_assign[rm_mem].append((rm_a, rm_b))
+        bisect.insort(rm_free, (rm_b, rm_mem))
+    else:
+        rm_skipped.append((rm_a, rm_b))
+assert sum(len(v) for v in rm_assign.values()) == 4 and rm_skipped == [(3, 6)]
+
+
+def draw(ax, p):
+    oneline(ax, p, [(a, b, f"[{a},{b})", "indigo") for a, b in rm_assign[0]], 0.0, sc=0.75, name="member 1")
+    oneline(ax, p, [(a, b, f"[{a},{b})", "cyan") for a, b in rm_assign[1]], -0.75, sc=0.75, name="member 2")
+    oneline(ax, p, [(a, b, f"[{a},{b})", "red", True) for a, b in rm_skipped], -1.5, sc=0.75, name="skipped")
+    axis(ax, p, 0, 11, -1.85, sc=0.75)
+V.show(draw)
+```
+
+The best-fit greedy on Movie Festival II's sample with $k = 2$, computed. Films are processed by end: $[2,5)$ and $[1,5)$ go to the two members, $[3,6)$ finds nobody free by $3$ and is skipped (dashed red), $[6,9)$ goes to a member free since $5$, and $[8,10)$ to the other one. Four films, the sample's answer.
+
+:::
+
+{{< include ../problems/cses-1629-movie-festival/problem.qmd >}}
+
+The same greedy read backwards solves a problem from the proofs chapter: removing the fewest intervals so that the rest do not overlap is keeping the most, so the answer is $n$ minus Movie Festival's count.
+
+{{< include ../problems/lc-0435-non-overlapping-intervals/card.qmd >}}
+
+[**From one resource to $k$.** Movie Festival keeps one number, the moment the single viewer is free again. Movie Festival II has $k$ viewers, so the state becomes a multiset of $k$ free times, and the new decision is *who* takes a film: the viewer free latest but still in time. The tempting shortcut, running the one-viewer greedy $k$ times, is shown to fail.]{.flow-bridge}
+
+{{< include ../problems/cses-1632-movie-festival-ii/problem.qmd >}}
+
+## Pattern 4: Covering with intervals {#sec-int-p4}
+
+**From keeping to reaching.** Scheduling keeps as many intervals as possible subject to "no clash". Covering asks the opposite kind of question: the fewest *points* that touch every interval, the fewest *intervals* that touch every point of a segment, or which intervals are made redundant by others. The greedy still decides one item at a time, but its state is now a reach: the last arrow, the largest end so far, or the end of the covered prefix.
+
+**Recognise it.** "Fewest arrows / guards / points so that every interval contains one" (stab); "remove the intervals contained in another" (containment); "fewest intervals / clips / taps / heaters to cover $[0, T]$" (cover). The objective lives on points of the line or on the containment relation.
+
+::: {.callout-important title="Template"}
+Stab: sort by end, shoot at ends. Containment: sort by (start ascending, end descending), keep a running maximum end. Cover: sort by start, extend to the farthest end.
+
+```text
+stab (LC 452):                 containment (LC 1288):            cover [0, T] (LC 1024):
+sort by end                    sort by (start asc, end desc)     sort by start
+shot = -inf; arrows = 0        max_end = -inf; keep = 0          reach = 0; count = 0; i = 0
+for iv:                        for iv:                           while reach < T:
+    if iv.start > shot:            if iv.end > max_end:              best = max end of iv[i..] with start <= reach
+        arrows += 1                    keep += 1                     if best == reach: return -1
+        shot = iv.end                  max_end = iv.end              reach = best; count += 1
+```
+
+**Invariant (stab).** Every interval seen so far contains some shot, and `shot` is as far right as possible: any interval starting after it needs a new shot.
+
+**Invariant (containment).** `max_end` is the largest end among the intervals seen so far, all of which start at or before the current one, so the current interval is covered exactly when its end does not exceed `max_end`.
+
+**Invariant (cover).** After $c$ rounds, $[0, \text{reach}]$ is the longest prefix that any $c$ intervals can cover.
+:::
+
+**Complexity.** All three: $O(n\log n)$ for the sort, $O(n)$ for the walk (the cover's inner pointer never moves back), $O(1)$ extra state.
+
+::: {#fig-int-anim-arrows}
+
+```{python}
+#| echo: false
+ar_iv = sorted([(10, 16), (2, 8), (1, 6), (7, 12)], key=lambda x: x[1])
+ar_frames = []
+ar_shots = []
+for ar_k, (ar_a, ar_b) in enumerate(ar_iv):
+    if not ar_shots or ar_a > ar_shots[-1]:
+        ar_shots.append(ar_b)
+        ar_act = f"starts after the last arrow: shoot at its end {ar_b}"
+    else:
+        ar_act = f"contains the arrow at {ar_shots[-1]}: already burst"
+    ar_frames.append((ar_k, list(ar_shots), ar_act))
+assert ar_frames[-1][1] == [6, 12]
+
+
+def ar_frame(ax, p, t):
+    k, shots, _ = ar_frames[t]
+    rows = []
+    for i, (a, b) in enumerate(ar_iv):
+        if i == k:
+            c = "amber"
+        elif i < k:
+            c = "green"
+        else:
+            c = "muted"
+        rows.append((a, b, f"[{a},{b}]", c, i > k))
+    ya = ivbars(ax, p, rows, 0, 17, sc=0.45, names=["by end"] + [""] * 3, size=7)
+    for s in shots:
+        vline(ax, p, s, 0.85, ya, f"x={s}", sc=0.45)
+
+
+ar_caps = [f"[{ar_iv[k][0]},{ar_iv[k][1]}] {act}; arrows so far {len(shots)}" for k, shots, act in ar_frames]
+V.animate(ar_frame, len(ar_frames), captions=ar_caps, interval=1300)
+```
+
+Minimum arrows on $[10,16],[2,8],[1,6],[7,12]$, sorted by end. The amber balloon is being examined, green ones are burst, dashed ones are still to come, and each dashed vertical line is an arrow. $[1,6]$ forces an arrow at $6$, which also bursts $[2,8]$; $[7,12]$ starts after $6$ and forces an arrow at $12$, which also bursts $[10,16]$. Two arrows.
+
+:::
+
+{{< include ../problems/lc-0452-minimum-number-of-arrows-to-burst-balloons/problem.qmd >}}
+
+[**From points to containment.** Minimum Arrows chooses points that hit every interval. Remove Covered Intervals asks which intervals are already inside another one: the decision moves from "place a point" to "is this interval redundant", the sort changes to start ascending with ends descending, and the state is the largest end seen so far.]{.flow-bridge}
+
+{{< include ../problems/lc-1288-remove-covered-intervals/problem.qmd >}}
+
+[**From redundant intervals to a fewest cover.** Remove Covered Intervals keeps every interval that is not inside another. Video Stitching asks for the fewest intervals whose union covers a whole segment, so it keeps only one interval per round, the one that pushes the covered prefix farthest, and it must notice a hole.]{.flow-bridge}
+
+{{< include ../problems/lc-1024-video-stitching/problem.qmd >}}
+
+## Pattern 5: Intersections and gaps {#sec-int-p5}
+
+**From one family to two, and to the complement.** Every pattern so far walked a single list. Intersections take two sorted, merged lists and walk them with two pointers, the merge of two sorted arrays from @sec-tp-merge with an overlap test in place of a comparison. Then the idea shrinks to a single formula (the intersection of a whole family is $[\max l, \min r]$) and finally turns inside out: the gaps are what the union of all intervals misses.
+
+**Recognise it.** "Two lists of intervals; return their intersection / common free time"; "the segment shared by all, possibly after removing one"; "days / points not covered by any interval". The input is sorted interval lists or a family whose common part or complement is wanted.
+
+::: {.callout-important title="Template"}
+Two sorted, merged lists: two pointers; advance the one that ends first.
+
+```text
+i = j = 0
+while i < len(A) and j < len(B):
+    lo = max(A[i].start, B[j].start)
+    hi = min(A[i].end,   B[j].end)
+    if lo <= hi: emit [lo, hi]                  # closed; lo < hi for half-open
+    if A[i].end < B[j].end: i += 1              # A[i] cannot meet any later B
+    else:                   j += 1              # B[j] cannot meet any later A
+```
+
+A whole family: the intersection is $[\max_i l_i, \min_i r_i]$, empty when $\max l > \min r$. Gaps: sort by start, keep the covered `reach`, and every start beyond `reach` opens a gap.
+
+**Invariant.** Every pair $(A[i'], B[j'])$ with $i' < i$ or $j' < j$ has been examined or proved disjoint. The interval with the smaller end is finished: every later interval of the other list starts after the current one ends, hence after this one ends too. This is the monotone-cursor argument of @sec-tp-merge.
+:::
+
+**Complexity.** Two lists: $O(|A| + |B|)$ time, output of at most $|A| + |B|$ pieces. A family: $O(n)$, no sort. Gaps: $O(n\log n)$ for the sort, $O(n)$ walk. If the two lists are not sorted and merged yet, merge them first (@sec-int-p1).
+
+::: {#fig-int-anim-inter}
+
+```{python}
+#| echo: false
+it_A = [(0, 3), (5, 9), (13, 20)]
+it_B = [(1, 6), (8, 13), (15, 25)]
+it_frames = []
+it_out = []
+it_i = it_j = 0
+while it_i < len(it_A) and it_j < len(it_B):
+    it_lo, it_hi = max(it_A[it_i][0], it_B[it_j][0]), min(it_A[it_i][1], it_B[it_j][1])
+    if it_lo <= it_hi:
+        it_out.append((it_lo, it_hi))
+    it_adv = "i" if it_A[it_i][1] < it_B[it_j][1] else "j"
+    it_frames.append((it_i, it_j, (it_lo, it_hi) if it_lo <= it_hi else None, it_adv, list(it_out)))
+    if it_adv == "i":
+        it_i += 1
+    else:
+        it_j += 1
+assert it_out == [(1, 3), (5, 6), (8, 9), (13, 13), (15, 20)]
+
+
+def it_frame(ax, p, t):
+    i, j, got, adv, out = it_frames[t]
+    sc = 0.3
+    oneline(ax, p, [(a, b, f"[{a},{b}]", "amber" if k == i else ("muted" if k < i else "indigo"), k < i)
+                    for k, (a, b) in enumerate(it_A)], 0.0, sc=sc, name="A", size=7)
+    oneline(ax, p, [(a, b, f"[{a},{b}]", "amber" if k == j else ("muted" if k < j else "cyan"), k < j)
+                    for k, (a, b) in enumerate(it_B)], -0.75, sc=sc, name="B", size=7)
+    axis(ax, p, 0, 25, -1.1, sc=sc, step=5)
+    oneline(ax, p, [(a, b, "", "green") for a, b in out], -2.1, sc=sc, name="A and B", size=7)
+
+
+it_caps = [(f"A[{i}] and B[{j}] meet in [{g[0]},{g[1]}]" if g else f"A[{i}] and B[{j}] are disjoint")
+           + f"; the one that ends first is finished: {adv} += 1" for i, j, g, adv, _ in it_frames]
+V.animate(it_frame, len(it_frames), captions=it_caps, interval=1300)
+```
+
+Two sorted lists $A = [0,3],[5,9],[13,20]$ and $B = [1,6],[8,13],[15,25]$. The amber pair is under the two cursors; its common part, if any, joins the green row; then the interval that ends first is greyed out and its cursor moves. Five steps, five pieces, including the single point $[13,13]$, which counts for closed intervals.
+
+:::
+
+{{< include ../problems/lc-0986-interval-list-intersections/problem.qmd >}}
+
+[**From two lists to a whole family.** Interval List Intersections meets intervals pairwise across two lists. Maximal Intersection asks for the part common to *all* $n$ segments, after removing one of them: the common part is just $[\max l, \min r]$, and "all but one" needs only prefix and suffix extremes, or, better, only two candidate removals.]{.flow-bridge}
+
+{{< include ../problems/cf-1029c-maximal-intersection/problem.qmd >}}
+
+[**From what all intervals share to what none of them touches.** Maximal Intersection keeps the common part of a family. Count Days Without Meetings wants the complement of the union inside $[1, \text{days}]$: the merge walk of @sec-int-merge, counting the holes between blocks instead of the blocks.]{.flow-bridge}
+
+{{< include ../problems/lc-3169-count-days-without-meetings/problem.qmd >}}
+
+**Looking back.** Every pattern was the same move: *sort the endpoints, then walk once from left to right*, with one small piece of state that the sort makes sufficient. Merging keeps the end of the last block. The sweep keeps a count of active intervals. Scheduling keeps when the resource is free, or $k$ such moments. Covering keeps a reach: the last arrow, the largest end, the covered prefix. Intersections keep two cursors, and gaps keep the covered reach again. Two decisions are made before any of that, and they are the ones to say out loud: **which endpoint to sort by** (start for merging, covering a segment, gaps and room assignment; end for packing and stabbing) and **which convention holds at equal coordinates**. When both are right, the code is a dozen lines; when either is wrong, it still runs and is wrong on exactly the inputs that touch.
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Ranges to "merge / combine overlapping", output maximal blocks | Sort by start, running block end | @sec-int-p1-a, @sec-int-merge |
+| A sorted merged list plus one new range | Three phases (left / overlap / right), or two binary searches | @sec-int-p1-b |
+| "Maximum number at the same time", "peak occupancy" | Event sweep, running count, convention-aware ties | @sec-int-p2-a, @sec-int-events |
+| "Capacity $C$; is it ever exceeded?", weighted loads, small coordinates | Same sweep with weights, or a difference array | @sec-int-p2-b, @sec-pref-diff |
+| "Minimum number of rooms / groups / platforms" | Rooms = peak overlap (sweep, or min-heap of end times) | @sec-int-events |
+| "How many intervals contain $t$?" for many $t$ | Sorted starts and ends, two binary searches | @sec-int-events, @sec-bst-p1 |
+| "Most non-overlapping intervals", "fewest removals" | Sort by end, take what fits | @sec-int-p3-a, @sec-int-sched |
+| "$k$ people / machines; serve the most intervals" | Sort by end, best-fit multiset of free times | @sec-int-p3-b |
+| "Fewest points / arrows hitting every interval" | Sort by end, shoot at ends | @sec-int-p4-a |
+| "Intervals contained in another" | Sort by (start asc, end desc), running max end | @sec-int-p4-b |
+| "Fewest intervals covering $[0, T]$", or report impossible | Sort by start, extend to the farthest end, detect holes | @sec-int-p4-c |
+| Two sorted merged lists; their common part | Two pointers, advance the smaller end | @sec-int-p5-a |
+| The part shared by all segments, perhaps minus one | $[\max l, \min r]$, prefix/suffix extremes or two candidates | @sec-int-p5-b |
+| Points / days not covered by any interval | Sort by start, running reach, count the gaps | @sec-int-p5-c |
+| Wraps past midnight, positions on a circle | Split at the cut for coverage; unroll for choosing | @sec-int-circle |
+| Each interval has a value; maximise the total | Not greedy: DP over intervals sorted by end, plus `bisect` | @sec-int-circle |
+
+## Pitfalls
+
+::: {.callout-warning title="Common mistakes"}
+- **Comparing with the previous interval instead of the block.** On $[1,10],[2,3],[4,5]$ the test against the previous interval $[2,3]$ opens a second block for $[4,5]$, which lies inside $[1,10]$. Compare with `out[-1].end` (@fig-int-nested, @sec-int-merge).
+- **Replacing the block end instead of extending it.** `out[-1].end = iv.end` turns $[1,10]$ into $[1,3]$ when the nested $[2,3]$ arrives. Always `max(out[-1].end, iv.end)` (@sec-int-p1-a).
+- **The wrong tie-breaker at equal coordinates.** Half-open: process $-1$ before $+1$ at the same position. Closed: $+1$ first. Backwards, the peak is off by one exactly where ends touch, and random tests on large ranges rarely produce touching ends; include them on purpose (@sec-int-repr, @sec-int-p2-b).
+- **The right greedy with the wrong sort.** Packing sorts by end, not by start and not by length; stabbing shoots at the earliest *end*; covering a segment sorts by *start*. The counterexamples are three intervals long (@sec-int-sched, @fig-int-sched).
+- **Strict against non-strict in the greedy test.** `start >= last_end` packs touching half-open films; `start > shot` lets an arrow at a balloon's end burst a balloon that starts there (closed). Test every greedy on a touching pair such as $[1,3],[3,5]$ (@sec-int-p3-a, @sec-int-p4-a).
+- **A tie-break that breaks containment.** In Remove Covered Intervals, equal starts must be sorted by end *descending*; ascending makes $[1,3]$ look uncovered next to $[1,4]$ (@sec-int-p4-b).
+- **Advancing both pointers.** In the intersection walk only the interval that ends first is finished; the other may still meet later partners (@sec-int-p5-a).
+- **Running the one-resource greedy $k$ times.** It is wrong for $k$ resources; assign each interval to the member free latest but in time (@sec-int-p3-b).
+- **Overflow and sentinels.** Coordinates near $\pm 2^{31}$ (LC 452) break `int` sentinels and subtracting comparators; use `long long` and compare, never subtract (@sec-int-p4-a).
+- **Inclusive integer ranges.** A closed day range $[s, e]$ has $e - s + 1$ days; forgetting the $+1$ is the commonest bug in gap counting (@sec-int-p5-c).
+- **Feeding a wrapping interval to a linear sweep.** An interval with $a > b$ on a circle must be split at the cut first (@sec-int-circle).
+- **Assuming the greedy survives weights.** The earliest-end greedy is wrong once intervals carry values; that is DP (@sec-int-circle).
+:::
+
+## Exercises
+
+**1. [E] Run the merge template by hand on $[1,3],[6,8],[2,4],[5,7],[9,10]$ (closed) and list the blocks after each visit.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sorted by start: $[1,3],[2,4],[5,7],[6,8],[9,10]$. Visit $[1,3]$: open, blocks $[1,3]$. Visit $[2,4]$: $2 \le 3$, extend to $[1, \max(3,4)] = [1,4]$. Visit $[5,7]$: $5 > 4$, open, blocks $[1,4],[5,7]$. Visit $[6,8]$: $6 \le 7$, extend to $[5,8]$. Visit $[9,10]$: $9 > 8$, open. Answer $[1,4],[5,8],[9,10]$ (@sec-int-merge). Note that $[1,4]$ and $[5,8]$ stay apart: they do not share a point, even though no integer lies strictly between them.
+:::
+
+**2. [E] Under the half-open convention, do $[1,3)$ and $[3,5)$ overlap? What peak does the event sweep report with the correct tie-breaker, and with the wrong one?**
+
+::: {.callout-note collapse="true" title="Solution"}
+They are disjoint. The events are $(1,+1),(3,-1),(3,+1),(5,-1)$ with the half-open rule (departure first at $3$), so the count goes $1, 0, 1, 0$ and the peak is $1$. With arrivals first at $3$ the count goes $1, 2, 1, 0$ and the peak is $2$, the closed answer (@sec-int-repr).
+:::
+
+**3. [E] Days are integers. Rewrite the closed day ranges $[2,4]$ and $[5,7]$ as half-open ranges. Do they overlap? Should a "count the free days" algorithm merge them?**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[2,4]$ is $[2,5)$ and $[5,7]$ is $[5,8)$. They do not overlap ($5 < 5$ is false), but they touch: together they cover days $2..7$ with no free day between them. For counting free days it does not matter whether you merge them; the gap formula gives $5 - 4 - 1 = 0$ free days either way. For *reporting* maximal busy stretches you would want them merged, so with half-open ranges the merge test must be `start <= end` there, not `start < end` (@sec-int-repr, @sec-int-p5-c).
+:::
+
+**4. [M] Movie Festival on $[1,100),[2,3),[4,5),[6,7)$: trace the greedy sorted by start and the greedy sorted by end, and give the argument that makes the second one optimal.**
+
+::: {.callout-note collapse="true" title="Solution"}
+By start: $[1,100)$ is taken first and every other film starts before $100$: count $1$. By end: $[2,3),[4,5),[6,7)$ are taken and $[1,100)$ is rejected: count $3$. Optimality ("greedy stays ahead"): if the greedy's films are $g_1, g_2, \dots$ and an optimal set's films are $o_1, o_2, \dots$, both by end, then $\text{end}(g_i) \le \text{end}(o_i)$ by induction, because $o_i$ was still available when the greedy picked the available film with the smallest end. So the optimal set cannot have a film after the greedy's last one (@sec-int-sched).
+:::
+
+**5. [M] For LC 452 on $[2,3],[1,2],[3,4]$, compute the answer with the sort-by-end greedy and with the chain-intersection form.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort by end: $[1,2],[2,3],[3,4]$. Shot at $2$ bursts $[1,2]$ and $[2,3]$ (closed, $2 \le 2$); $[3,4]$ starts after $2$, shot at $4$. Two arrows. Chain form, sorted by start $[1,2],[2,3],[3,4]$: window $[1,2]$, then $[2,2]$ after $[2,3]$, then $[3,4]$ starts after $2$, so a new arrow and window $[3,4]$. Two arrows. Both forms keep "the set of positions one arrow can still use"; the chain form keeps it as a window, the greedy only its right end (@sec-int-p4-a).
+:::
+
+**6. [M] Give an input where packing by *shortest interval first* is not optimal, and explain the failure in one sentence.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[1,5),[4,7),[6,10)$: the shortest, $[4,7)$, is taken first and overlaps both others, so the count is $1$, while $[1,5),[6,10)$ gives $2$. A short interval can still sit across two longer ones; what matters is how early the resource is *released*, which is the end, not the length (@sec-int-sched).
+:::
+
+**7. [M] Why must the stabbing greedy shoot at the end of the interval with the smallest end, not at the end of the interval with the smallest start? Give a counterexample.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$[1,10],[2,3]$: the earliest start is $[1,10]$; a shot at $10$ misses $[2,3]$, so two arrows are spent, while one arrow at $3$ hits both. The interval with the smallest end must be hit by a point at or before its end, and its end is the rightmost such point, so it is the safe place to shoot; nothing like that holds for the interval with the smallest start (@sec-int-sched).
+:::
+
+**8. [M] Compute the union length of $[1,3],[2,6],[8,10]$ with the event sweep, showing the stretches where the count is positive.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Events: $(1,+1),(2,+1),(3,-1),(6,-1),(8,+1),(10,-1)$. Counts on the stretches: $[1,2)$ count $1$, $[2,3)$ count $2$, $[3,6)$ count $1$, $[6,8)$ count $0$, $[8,10)$ count $1$. Positive stretches add $1 + 1 + 3 + 2 = 7$, matching the merged blocks $[1,6]$ and $[8,10]$ (@sec-int-events).
+:::
+
+**9. [M] Meetings $[0,30),[5,10),[15,20)$. How many rooms are needed? Prove in two sentences that the peak overlap is always enough rooms.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The peak is $2$ (for example at time $5$), so at least two rooms; and two suffice: $[0,30)$ in room 1, $[5,10)$ and then $[15,20)$ in room 2. In general, assign meetings in order of start to any room that is free; a new room is opened only when every existing room is busy at this meeting's start, so at that moment all those meetings and this one overlap, and the number of rooms never exceeds the peak (@sec-int-events).
+:::
+
+**10. [M] CF 1000C asks, for every $k = 1..n$, how many integer points are covered by exactly $k$ of $n$ closed segments with ends up to $10^{18}$. Describe an $O(n\log n)$ algorithm.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Convert each closed integer segment $[l, r]$ to half-open $[l, r+1)$ and make events $(l, +1)$ and $(r+1, -1)$. Sort, and walk them: between consecutive distinct positions $x < y$ the count `cur` is constant, so add $y - x$ integer points to `ans[cur]`. Apply all events at one position before reading the next stretch. $O(n\log n)$ for the sort, $64$-bit counts. This is the "points covered exactly $k$ times" use of the sweep (@sec-int-events).
+:::
+
+**11. [M] Insert $[4,8]$ into $[1,2],[3,5],[6,7],[8,10],[12,16]$ with the two-bisect method: give `lo`, `hi` and the merged block.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Ends $= [2,5,7,10,16]$, starts $= [1,3,6,8,12]$. `lo = bisect_left(ends, 4) = 1` (the first interval ending at or after $4$ is $[3,5]$); `hi = bisect_right(starts, 8) = 4` (the first interval starting after $8$ is $[12,16]$). Absorbed: indices $1..3$. Merged block $[\min(4,3), \max(8,10)] = [3,10]$. Result $[1,2],[3,10],[12,16]$ (@sec-int-p1-b).
+:::
+
+**12. [H] Intervals on a circle of length $C$, half-open, possibly wrapping. Give an $O(n\log n)$ algorithm for the peak overlap and prove that it is exact.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Cut the circle at $0$. Keep each non-wrapping $[a,b)$; replace each wrapping one ($a > b$) by $[a, C)$ and $[0, b)$. Run the half-open peak sweep on the at most $2n$ pieces. Exactness: each point $t \in [0, C)$ of the circle appears once on the line, and an interval contains $t$ exactly when one of its pieces does; the two pieces of a wrapping interval are disjoint, so no interval is counted twice at the same point. Hence the count at every point equals the circle's count, and so does the peak (@sec-int-circle).
+:::
+
+**13. [H] Prove that for LC 1288, sorting by (start ascending, end descending) and keeping a running maximum end counts the uncovered intervals correctly, and show what goes wrong with ends ascending.**
+
+::: {.callout-note collapse="true" title="Solution"}
+When interval $k$ is processed, every earlier interval has start $\le a_k$. If $b_k \le$ `max_end`, the earlier interval holding `max_end` contains interval $k$; if $b_k >$ `max_end`, no earlier interval contains it, and no later one can either, since a later interval either starts after $a_k$ or has the same start and, by the tie-break, an end $\le b_k$ (it can contain $k$ only by being equal, which the problem excludes). With ends ascending, $[1,3]$ comes before $[1,4]$: $[1,3]$ is kept, then $[1,4]$ is kept too, and the answer counts $[1,3]$ although it is covered (@sec-int-p4-b).
+:::
+
+**14. [H] Weighted interval scheduling: write the recurrence, give its complexity, and give an input where the earliest-end greedy loses.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Sort jobs by end; let $p(i)$ be the number of jobs that end at or before job $i$'s start (one `bisect_right` on the ends). Then $\text{best}(i+1) = \max(\text{best}(i), \text{best}(p(i)) + w_i)$, with $\text{best}(0) = 0$. $O(n\log n)$. Counterexample: $[0,2)$ worth $1$ and $[1,10)$ worth $100$: the greedy takes the first and loses $99$ (@sec-int-circle; solved in full in @sec-od-p2-sched).
+:::
+
+**15. [H] You are given $m$ lists of intervals, each sorted and merged, $N$ intervals in total. Find the points covered by *all* $m$ lists. Give two algorithms.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) Fold the two-pointer intersection of @sec-int-p5-a: intersect list 1 with list 2, the result with list 3, and so on. Each step is linear in its inputs, and the running result is never longer than the lists it came from, so the total is $O(mN)$ in the worst case; folding in a balanced tree of pairs brings it to $O(N\log m)$. (b) Sweep: emit $+1$/$-1$ events for every interval of every list, sort ($O(N\log N)$), and report the stretches where the count equals $m$. Within one list the intervals are disjoint, so a count of $m$ means one interval from each list (@sec-int-p5, @sec-int-events).
+:::
+
+**16. [H] For Movie Festival II, show that giving each film to the member who has been free *longest* (smallest free time $\le a$) is wrong.**
+
+::: {.callout-note collapse="true" title="Solution"}
+$k = 2$, films $[0,4),[4,5),[2,6)$, processed by end: $[0,4)$, $[4,5)$, $[2,6)$. $[0,4)$ goes to member 1 (free times $4, 0$). For $[4,5)$ both qualify; "free longest" picks member 2 (free time $0$), giving free times $4, 5$. Now $[2,6)$ finds nobody free by $2$: total $2$. Best fit gives $[4,5)$ to member 1 (free time $4$), keeps member 2 free since $0$, and $[2,6)$ fits: total $3$. The member who is free early is the scarce resource; spend him last (@sec-int-p3-b).
+:::
+
+## Interview questions
+
+**1. Given $n$ intervals on $[0, 10^9]$, how do you answer $q$ queries "how many intervals contain point $t$?" in $O((n + q)\log n)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort the starts into $S$ and the ends into $E$. For closed intervals, the count is the number of starts $\le t$ minus the number of ends $< t$: `bisect_right(S, t) - bisect_left(E, t)`. For half-open $[a, b)$, subtract the ends $\le t$: `bisect_right(S, t) - bisect_right(E, t)`. Preprocessing $O(n\log n)$, each query $O(\log n)$. If the queries are known in advance, sorting them and sweeping once also works (@sec-int-events, @sec-bst-p1).
+:::
+
+**2. How do you merge $k$ lists of intervals, each already sorted and merged, into one merged list?**
+
+::: {.callout-note collapse="true" title="Answer"}
+With $N$ intervals in total, either concatenate, sort by start and run the merge walk ($O(N\log N)$), or do a $k$-way merge with a min-heap keyed by the next start of each list, feeding intervals into the same running-block walk in start order ($O(N\log k)$). Overlaps inside one list are already resolved, but overlaps across lists are not, so the walk is still needed (@sec-int-merge).
+:::
+
+**3. Given half-open intervals, how do you check in $O(n\log n)$ whether they cover $[L, R)$ completely?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Sort by start and keep `reach = L`. For each interval, if its start is greater than `reach` there is a gap at $[\text{reach}, \text{start})$ and the answer is no (as long as `reach < R`); otherwise set `reach = max(reach, end)`. Answer yes once `reach >= R`. The invariant: $[L, \text{reach})$ is covered by the intervals processed so far (@sec-int-merge, @sec-int-p5-c).
+:::
+
+**4. Why is "sort by end, take what fits" optimal for the number of non-overlapping intervals, and why does it fail when intervals have weights?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Unweighted: by induction, the greedy's $i$-th interval ends no later than the $i$-th interval of any valid set, so the greedy is never behind and cannot stop early. Weighted: $[0,2)$ worth $1$ ends first and blocks $[1,10)$ worth $100$. The weighted problem is DP over intervals sorted by end, with `bisect` to find the last compatible interval (@sec-int-sched, @sec-int-circle).
+:::
+
+**5. Two merged lists $A$ and $B$. How do you compute their union in $O(|A| + |B|)$?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Merge the two lists by start with two pointers, as in merging sorted arrays, and feed each interval into the running-block walk of @sec-int-merge. Each list is sorted, so the combined stream is in start order without a sort. The intersection walk of @sec-int-p5-a is the same two pointers with a different action.
+:::
+
+**6. In Car Pooling, why must a drop-off be processed before a pick-up at the same kilometre?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The statement says so: passengers are dropped off before new passengers are picked up at the same location, which is the half-open reading $[\text{from}, \text{to})$. If pick-ups came first, the load would briefly include passengers who have already left, and touching trips such as $[3,1,5],[4,5,9]$ with capacity $4$ would be wrongly rejected. Sorting `(position, delta)` pairs does it automatically, since negative deltas sort first (@sec-int-p2-b).
+:::
+
+**7. Design a structure that supports `add_interval(a, b)` and `max_overlap()`, each in $O(\log n)$.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Store the $+1$ and $-1$ events in a balanced search tree keyed by coordinate (or a segment tree over compressed coordinates if they are known in advance). Each node keeps the sum of its subtree's deltas and the maximum prefix sum inside the subtree; a parent combines its children as `sum = L.sum + R.sum` and `maxpre = max(L.maxpre, L.sum + R.maxpre)`. An insertion adds two events and updates two root paths; `max_overlap` is the root's `maxpre`. With range-add updates instead of point events, a segment tree with lazy propagation does the same (later volumes); @sec-int-p2 is the offline version.
+:::
+
+**8. Merging sorts by start, packing sorts by end. Why the difference?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Merging must *see* every interval that touches the current block before the block is closed, and sorting by start guarantees that everything still to come starts later, so a block that is passed is final. Packing must *decide* which intervals to keep, and the right decision depends on when the resource is released, which is the end. Packing by start lets a long early interval block many short ones; merging by end would close a block before a long interval that starts earlier arrives (@sec-int-merge, @sec-int-sched).
+:::
+
+**9. How do you compute the minimum number of meeting rooms, and why are the two standard methods equivalent?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Method 1: the peak overlap from the event sweep. Method 2: sort by start and keep a min-heap of room end times; reuse the room at the top if it is free by the next start, otherwise open a room; the answer is the heap size. They agree because rooms needed $\ge$ peak (the meetings at the peak moment need different rooms) and the heap never opens a room unless all rooms are busy at that start, which is a moment with as many overlapping meetings as rooms (@sec-int-events).
+:::
+
+**10. Your merge works for closed intervals. What changes for half-open intervals, and how do you test it?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Decide first whether touching half-open intervals ($[1,3)$ and $[3,5)$) should merge. As *sets* they are disjoint, so a strict merge uses `start < out[-1].end`; but if the goal is maximal *contiguous* stretches (busy periods), they should merge, and the test stays `<=`. State the choice, and put a touching pair in the tests together with a nested interval and a duplicate (@sec-int-repr).
+:::
+
+**11. Intervals arrive one by one as a stream (for example, LC 352 adds single numbers). How do you keep the merged list up to date?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Keep the disjoint blocks in a sorted map keyed by start. For a new interval, find the block just before its start (floor lookup) and the blocks that start inside it; absorb them all into one block, delete the absorbed keys and insert the merged one. Each insertion is $O(\log n)$ plus $O(\log n)$ per absorbed block, and each block is absorbed at most once, so the total is $O(n\log n)$ amortised. Python's standard library has no sorted map; `bisect` on a list gives the same lookups with $O(n)$ shifts (@sec-int-p1-b).
+:::
+
+**12. You sort intervals in C++ with the comparator `return a[0] <= b[0];`. What can go wrong?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`std::sort` requires a strict weak ordering, and `<=` is not irreflexive (an element compares less than itself), so the behaviour is undefined: in practice wrong orders, or reads past the end of the array on some inputs. Use `<`, or for several keys compare the first key and fall back to the second, as in `a[0] != b[0] ? a[0] < b[0] : a[1] > b[1]` (@sec-srt-a2).
+:::
+
+**13. Can the maximum overlap of $n$ intervals be computed faster than $O(n\log n)$ in the comparison model?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Not in general. Deciding whether some two numbers among $x_1, \dots, x_n$ are equal (element distinctness) needs $\Omega(n\log n)$ comparisons in the algebraic decision-tree model, and it reduces to the overlap question: the closed point-intervals $[x_i, x_i]$ have peak overlap $\ge 2$ exactly when two numbers are equal. With small integer coordinates the difference array beats the bound, because it uses the values as addresses, not comparisons (@sec-pref-diff).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Convention first:** closed $[a,b]$ overlap test `a1 <= b2 and a2 <= b1`; half-open `a1 < b2 and a2 < b1`; on integers $[a,b] = [a, b+1)$. Sweep ties: half-open processes $-1$ first, closed $+1$ first (@sec-int-repr).
+- **Merge:** sort by start; extend the last block with `max(out[-1].end, iv.end)` or open a new one (@sec-int-merge, @sec-int-p1-a).
+- **Insert into a merged list:** copy strictly-left, absorb overlaps, copy the rest; no sort (@sec-int-p1-b).
+- **Event sweep:** $(a, +w)$ and $(b, -w)$, sort with the convention's tie-break, running sum: peak, capacity check, union length, rooms $=$ peak (@sec-int-events, @sec-int-p2).
+- **Pack:** sort by end; take each interval that starts at or after the last end; $k$ resources: best-fit multiset of free times (@sec-int-p3).
+- **Stab:** sort by end; shoot at the end of each interval not yet hit; fewest points $=$ most disjoint intervals (@sec-int-p4-a).
+- **Containment:** sort by (start asc, end desc); covered iff `end <= max_end` (@sec-int-p4-b).
+- **Cover $[0,T]$:** sort by start; each round take the farthest end among intervals starting inside the covered prefix; no progress means a hole (@sec-int-p4-c).
+- **Intersect:** two lists, two pointers, advance the smaller end; a family, $[\max l, \min r]$ (@sec-int-p5-a, @sec-int-p5-b).
+- **Gaps:** sort by start, running reach; a start beyond `reach + 1` (integer days) opens a gap (@sec-int-p5-c).
+:::
+
+- Nearly every interval problem is one sort plus one walk; the walk keeps one small piece of state (a block end, a count, a free time, a reach, two cursors) that the sort makes sufficient (@sec-int-p1 to @sec-int-p5).
+- The endpoint convention is part of the problem, not a detail: it fixes the overlap test, the sweep's tie order and the strictness of every greedy comparison, and it only shows on touching inputs, so test those on purpose (@sec-int-repr).
+- The event sweep is the difference array without the array; it answers every question about *how many* intervals cover a point, and the peak it finds is also the number of rooms needed (@sec-int-events).
+- Sort by **start** to build or scan the union (merge, cover, gaps, room assignment); sort by **end** to choose intervals (pack, stab, $k$-resource scheduling). Each greedy has a short exchange or "stays ahead" proof, and each fails under the other sort (@sec-int-sched).
+- The fewest points stabbing all intervals equals the most pairwise disjoint intervals: one greedy computes both (@sec-int-sched).
+- Several resources are not several runs of the one-resource greedy: assign each interval to the resource that became free latest but in time (@sec-int-p3-b).
+- Two sorted interval lists intersect in linear time with two pointers; a whole family intersects in one pass with $[\max l, \min r]$ (@sec-int-p5).
+- Circles reduce to lines by a split (coverage) or by unrolling (choice); weights end the greedy and start the DP (@sec-int-circle).
+
+## Practice ladder
+
+Ordered by concept, following the patterns. Codeforces first where a good one exists; every problem here is a step beyond one solved in this chapter.
+
+::: {.practice}
+- [CF 1102E · Monotonic Renumeration](https://codeforces.com/problemset/problem/1102/E){rating="1700"} — after @sec-int-p1-a: each value's first and last positions form an interval; merge them and count blocks.
+- [LC 1272 · Remove Interval](https://leetcode.com/problems/remove-interval/){difficulty="Medium"} — after @sec-int-p1-b: the inverse of insertion; each interval splits into at most two pieces.
+- [LC 715 · Range Module](https://leetcode.com/problems/range-module/){difficulty="Hard"} — after @sec-int-p1-b: insertion and removal on a merged list kept in a sorted structure.
+- [CF 1000C · Covered Points Count](https://codeforces.com/problemset/problem/1000/C){rating="1700"} — after @sec-int-p2-a: the sweep, adding each constant stretch to the bucket of its count.
+- [CF 612D · The Union of k-Segments](https://codeforces.com/problemset/problem/612/D){rating="1800"} — after @sec-int-p2-b: report where the running count is at least $k$.
+- [CF 1420D · Rescue Nibel!](https://codeforces.com/problemset/problem/1420/D){rating="1800"} — after @sec-int-p2-a: count $k$-subsets of lamps that are all on at some moment by charging each subset to its latest start during the sweep.
+- [LC 2406 · Divide Intervals Into Minimum Number of Groups](https://leetcode.com/problems/divide-intervals-into-minimum-number-of-groups/){difficulty="Medium"} — after @sec-int-events: groups needed $=$ peak overlap.
+- [LC 253 · Meeting Rooms II](https://leetcode.com/problems/meeting-rooms-ii/){difficulty="Medium"} — after @sec-int-events: the same fact, the classic interview form.
+- [CF 1249D1 · Too Many Segments (easy version)](https://codeforces.com/problemset/problem/1249/D1){rating="1800"} — after @sec-int-p3-a: sweep, and at an overload drop the active segment reaching farthest right.
+- [LC 1353 · Maximum Number of Events That Can Be Attended](https://leetcode.com/problems/maximum-number-of-events-that-can-be-attended/){difficulty="Medium"} — after @sec-int-p3-b: one event per day; sweep days and attend the open event that closes first.
+- [CF 22D · Segments](https://codeforces.com/problemset/problem/22/D){rating="1900"} — after @sec-int-p4-a: the stabbing greedy, printing the nails.
+- [CF 976C · Nested Segments](https://codeforces.com/problemset/problem/976/C){rating="1500"} — after @sec-int-p4-b: find one contained pair with the (start asc, end desc) sort.
+- [CF 1066B · Heaters](https://codeforces.com/problemset/problem/1066/B){rating="1500"} — after @sec-int-p4-c: the farthest-reach cover with heaters as intervals.
+- [LC 1326 · Minimum Number of Taps to Open to Water a Garden](https://leetcode.com/problems/minimum-number-of-taps-to-open-to-water-a-garden/){difficulty="Hard"} — after @sec-int-p4-c: turn taps into intervals and cover $[0, n]$.
+- [LC 1229 · Meeting Scheduler](https://leetcode.com/problems/meeting-scheduler/){difficulty="Medium"} — after @sec-int-p5-a: the first common slot of length at least $d$ in two sorted lists.
+- [CF 1462F · The Treasure of The Segments](https://codeforces.com/problemset/problem/1462/F){rating="1800"} — after @sec-int-p5-b: for each segment, count those that miss it with two binary searches.
+- [CF 1015A · Points in Segments](https://codeforces.com/problemset/problem/1015/A){rating="800"} — after @sec-int-p5-c: list the uncovered points.
+- [LC 759 · Employee Free Time](https://leetcode.com/problems/employee-free-time/){difficulty="Hard"} — after @sec-int-p5-c: merge everyone's busy time, then report the gaps.
+:::
+
+## Further reading
+
+- [Wikipedia — Interval scheduling](https://en.wikipedia.org/wiki/Interval_scheduling) — the unweighted and weighted problems, the earliest-finish greedy and the $k$-machine variants (@sec-int-sched, @sec-int-p3).
+- [Wikipedia — Activity selection problem](https://en.wikipedia.org/wiki/Activity_selection_problem) — the CLRS formulation with the greedy-choice proof and the weighted DP (@sec-int-sched, @sec-int-circle).
+- [Wikipedia — Interval graph](https://en.wikipedia.org/wiki/Interval_graph) — why the peak overlap equals the number of rooms (interval graphs are perfect) and why packing and stabbing are dual (@sec-int-events).
+- [Wikipedia — Sweep line algorithm](https://en.wikipedia.org/wiki/Sweep_line_algorithm) — the sweep as a general technique, leading to the geometric versions in later volumes (@sec-int-events).
+- [Jeff Erickson — Algorithms, ch. 4: Greedy Algorithms](https://jeffe.cs.illinois.edu/teaching/algorithms/book/04-greedy.pdf) — class scheduling and the exchange-argument template, written for proofs (@sec-int-sched).
+- [Antti Laaksonen — Competitive Programmer's Handbook](https://cses.fi/book/book.pdf) — greedy scheduling with the counterexamples to the wrong rules, and the sweep-line chapter (@sec-int-p2, @sec-int-p3).
+- [CP-Algorithms — Search for a pair of intersecting segments](https://cp-algorithms.com/geometry/intersecting_segments.html) — the sweep line taken to two dimensions, with events and an ordered set of active segments (@sec-int-events).

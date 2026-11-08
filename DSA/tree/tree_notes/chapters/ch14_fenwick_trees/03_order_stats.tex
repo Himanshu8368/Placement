@@ -1,0 +1,633 @@
+% =====================================================================
+%  18.3  Order Statistics and Sweeps with a Frequency BIT   sec:c14-order
+%  Exports: def:c14-freq  thm:c14-lift  prop:c14-inversion
+%           lst:c14-freq  lst:c14-kth  lst:c14-inv  lst:c14-61-soln
+%           fig:c14-lift  prob:c14-triplets
+%  Shared numbers (agree with 00_opener, six-angles rows 5 and 6):
+%    frequency (weight) array w=(3,2,4,1,5,5,2,6), total 28,
+%      prefix=(3,5,9,10,15,20,22,28), BIT  tf=(3,5,4,10,1,6,5,28);
+%      kth(6)=3, kth(11)=5  (opener says "first prefix >=6 -> slot 3; >=11 -> slot 5").
+%    inversion sweep on a=(10,8,3,1): ranks (4,3,2,1),
+%      smaller-after=(3,2,1,0), inversions=6, decreasing triplets=4.
+%    CF 61E (Enemy is weak, 1900) samples, live-verified:
+%      3 / 3 2 1 -> 1 ;  3 / 2 3 1 -> 0 ;  4 / 10 8 3 1 -> 4 ;  4 / 1 5 4 3 -> 1.
+%    leftGreater/rightLess on (10,8,3,1): leftG=(0,1,2,3), rightL=(3,2,1,0),
+%      sum of products = 0*3+1*2+2*1+3*0 = 4.
+% =====================================================================
+\section{Order Statistics and Sweeps with a Frequency BIT}\label{sec:c14-order}
+
+\begin{previouslybox}[Ch.~1 counted these offline; Ch.~6 owns the tree versions]
+Chapter~1 (\chref{c01}) counted inversions by splitting the array and
+merging -- divide and conquer, all the data on the table at once.  The
+answer is the same number; here we get it \emph{online}, one element at a
+time, by reading the BIT not as ``a sum over positions'' but as ``a count
+over values''.  Order-statistic \emph{trees} (PBDS, the multiset of Ch.~6,
+\chref{c06}) answer the same questions with pointers and rotations; the
+frequency BIT is their flat-array twin -- it needs the values to be ranks,
+which \secref{c14-range}'s compression already taught us to produce.
+\end{previouslybox}
+
+\begin{topicintro}
+Reinterpret slot \(i\) of a BIT: instead of ``the block of positions
+\([i{-}\text{lowbit}(i){+}1,\,i]\)'', read \(i\) as a \emph{value} (a rank)
+and \(t[i]\) as ``how many stored elements fall in the value-range of that
+block''.  Then \(\code{query}(k)\) counts elements \(\le k\) and
+\(\code{add}(\mathit{rank},+1)\) inserts one element -- a full multiset with
+\(\bigO{\log}\) insert, delete, and rank-count.  The single new trick is the
+\emph{reverse} query: given a count \(k\), recover the value that is the
+\(k\)-th smallest, by walking the tree top-down a bit at a time.
+
+\textbf{Prerequisites.} \secref{c14-core} (the two walks) and
+\secref{c14-range} (coordinate compression: values \(\to\) ranks).  The
+running frequency array \((3,2,4,1,5,5,2,6)\) and the sweep array
+\((10,8,3,1)\) from \figref{c14-array}'s six-angle table.
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item drive a BIT as a multiset: insert, erase, ``how many \(\le k\)''; \hfill\lv{3}
+  \item find the \(k\)-th smallest in \(\bigO{\log n}\) by binary lifting; \hfill\lv{4}
+  \item count inversions and \emph{decreasing triplets} with one or two
+        directional sweeps (CF~61E); \hfill\lv{4}--\lv{5}
+  \item state, precisely, why this beats Ch.~1's merge count when updates
+        interleave and matches it when they do not. \hfill\lv{4}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card --``counts across a sorted value axis'']
+\reckey{``how many elements are \(\le k\) / \(< k\)'' with insertions and
+deletions; ``the \(k\)-th smallest'' of a changing multiset; ``for each
+element, count the ones after/before it that are smaller/greater''
+(inversions, LC~315's shape); ``count triples \(i<j<k\) with
+\(a_i>a_j>a_k\)'' (CF~61E); ``smallest value whose running count reaches
+\(k\)''; any problem whose brute force is a scan that \emph{compares to one
+element} and \emph{counts over a prefix}.}
+\recuse{
+  \item rank/count over a value range, online -- frequency BIT (this
+        section): \(\code{add}\) at a rank, \(\code{query}\) counts \(\le k\);
+  \item \(k\)-th smallest / select -- binary lifting (\(\thmref{c14-lift}\));
+  \item pairwise or triple counts with an index constraint -- sweep one
+        direction, keep a frequency BIT of what you've seen
+        (\(\propref{c14-inversion}\), CF~61E).
+}
+\recnotuse{
+  \item the values arrive in one pass and you only ever need the
+        \emph{median} of a \emph{stream} -- the two heaps of Ch.~8
+        (\chref{c07}) are \(O(\log)\) with less setup; here select is
+        offline/static or by rank;
+  \item you must also read arbitrary \emph{sums of values} (not counts) of a
+        multiset under order statistics -- store a value-carrying tree (the
+        paired trick of \(\secref{c14-range}\));
+  \item the range aggregate is over \emph{positions} with an arbitrary
+        combine (max/min/gcd) -- segment tree, Ch.~19 (\chref{c13}); a
+        frequency BIT counts \emph{by value}, not by position.
+}
+One-line test: \emph{is the question a \emph{rank} among \emph{values} (how
+many below / which is the \(k\)-th)?  Compress the values, and let the index
+of the BIT \emph{be} the value.}
+\end{recognitionbox}
+
+% ---------------------------------------------------------------
+\subsection{The Frequency BIT: an Index that Means a Value}
+% ---------------------------------------------------------------
+
+\begin{definition}{Frequency BIT}{c14-freq}
+A \term{frequency BIT} (a.k.a.\ \term{binary indexed multiset}) is a BIT
+\(\mathit{tf}[1..m]\) whose index \(r\) stands for the \(r\)-th
+\emph{rank} in a sorted set of values.  \(\code{add}(r,d)\) changes the
+multiplicity of rank \(r\) by \(d\); \(\code{count\_le}(r)=\sum_{p\le r}
+\mathit{tf}[p]\) is the number of stored elements \(\le\) the \(r\)-th
+value.  The accumulator is a \emph{count}, so it is invertible and the plain
+prefix-difference of \(\secref{c14-core}\) applies: elements strictly below
+rank \(r\) are \(\code{count\_le}(r-1)\).
+\end{definition}
+
+\begin{lstlisting}[caption={the frequency BIT: add a copy of a rank, count how many sit at or below a rank}, label={lst:c14-freq}]
+int lowbit(int i){ return i & -i; }
+void add(int r, int d){                 // one more item of rank r
+    for (; r <= m; r += lowbit(r)) tf[r] += d;
+}
+int count_le(int r){                    // items with rank <= r
+    int s = 0;
+    for (; r > 0; r -= lowbit(r)) s += tf[r];
+    return s;
+}
+// strictly below r:  count_le(r-1)      items in (l..r]: count_le(r)-count_le(l-1)
+\end{lstlisting}
+
+The weight array \(w=(3,2,4,1,5,5,2,6)\) of \figref{c14-array} is read here
+as ``rank~1 appears three times, rank~2 twice, \ldots'' -- \(\sum w=28\)
+items total -- and its frequency BIT is
+\(\mathit{tf}=(3,5,4,10,1,6,5,28)\).
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.82, transform shape]
+  \foreach \i/\vv in {1/3,2/5,3/4,4/10,5/1,6/6,7/5,8/28} {
+    \draw[primaryblue, line width=0.6pt, fill=primaryblue!6] (\i*0.9,0) rectangle (\i*0.9+0.9,0.9);
+    \node[font=\scriptsize\ttfamily] at (\i*0.9+0.45,0.45) {\vv};
+    \node[font=\tiny\ttfamily, text=darkgray] at (\i*0.9+0.45,1.12) {tf[\i]};}
+  \node[font=\scriptsize, text=primaryblue!60!black, anchor=east] at (0,0.45)
+    {\(\mathit{tf}:\)};
+  \foreach \i/\pv in {1/3,2/5,3/9,4/10,5/15,6/20,7/22,8/28} {
+    \node[font=\tiny\ttfamily, text=green!45!black] at (\i*0.9+0.45,-0.55) {\pv};}
+  \node[font=\tiny, text=green!45!black, anchor=east] at (0,-0.55) {prefix:};
+  \draw[warningred, line width=1.0pt, -latex] (0.15,-1.05) -- node[below,font=\scriptsize,text=warningred] {step 4: swallow tf[4]=10 < 11} (4*0.9+0.75,-1.05);
+  \draw[warningred, line width=1.0pt, -latex] (4*0.9+0.85,-1.05) -- node[below,font=\scriptsize,text=warningred] {then 5} (5*0.9+0.75,-1.05);
+\end{tikzpicture}
+\caption{The frequency BIT \(\mathit{tf}\) over \(w=(3,2,4,1,5,5,2,6)\), its
+cumulative counts on the middle row, and one \emph{lifting} descent for
+\(k{=}11\): the search swallows the length-4 block (\(\mathit{tf}[4]{=}10<11\)),
+then cannot take the next two, and stops with answer \(\mathit{idx}{+}1=5\).
+The red walk is \(\thmref{c14-lift}\); the numeric trace is the box below.}
+\label{fig:c14-lift}
+\end{figure}
+
+% ---------------------------------------------------------------
+\subsection{Binary Lifting: the k-th Smallest in \texorpdfstring{\(\bigO{\log n}\)}{O(log n)}}
+% ---------------------------------------------------------------
+
+\(\code{count\_le}\) turns a value into a count; we want the inverse -- turn
+a count into a value.  Because a BIT is the forest of \figref{c14-hiddentree},
+we can decide the answer one bit at a time: walk a candidate index
+\(\mathit{idx}\) from the most significant bit down, and \emph{keep} a
+candidate step whenever the block we would swallow is still strictly short of
+the target.  This is the same ``drop one bit per step'' budget as
+\thmref{c14-query}, run in reverse -- we build the largest prefix whose sum
+stays \(<k\), and the answer is the next index.
+
+\begin{theorem}{Lifting to the first prefix reaching \(k\)}{c14-lift}
+Let \(\mathit{tf}\) be a frequency BIT over \(m\) ranks and let \(k\ge1\) be
+at most the total count.  The following returns the smallest rank
+\(r\) with \(\code{count\_le}(r)\ge k\): start \(\mathit{idx}=0\), take
+\(\mathit{step}=2^{\lfloor\log_2 m\rfloor}\), and while \(\mathit{step}>0\)
+set \(\mathit{idx}\mathrel{+}=\mathit{step},\;k\mathrel{-}=\mathit{tf}[\mathit{idx}]\)
+whenever \(\mathit{idx}{+}\mathit{step}\le m\) and \(\mathit{tf}[\mathit{idx}{+}\mathit{step}]<k\);
+else just halve \(\mathit{step}\).  Return \(\mathit{idx}+1\).  Runs in
+\(\bigO{\log m}\).
+\end{theorem}
+\begin{proofbox}
+The invariant is ``\(\mathit{idx}\) is the largest index with
+\(\sum_{p\le \mathit{idx}} w_p \le k_{\text{orig}} - k_{\text{now}}\) that is
+a prefix of the already-fixed high bits, and \(k_{\text{now}}\) is the count
+still unaccounted for beyond \(\mathit{idx}\)''.  At step size
+\(\mathit{step}=2^{b}\), the block \(\mathit{tf}[\mathit{idx}{+}\mathit{step}]\)
+covers exactly the \(\mathit{step}\) ranks immediately after \(\mathit{idx}\)
+(because \(\mathit{idx}\)'s fixed high bits make
+\(\operatorname{lowbit}(\mathit{idx}{+}\mathit{step})=\mathit{step}\)).  If
+that block sum is \(<k\) we may safely consume all of it and set the bit to
+\(1\); otherwise the target rank lies inside the block, we leave the bit
+\(0\), and descend.  Every bit is decided once, so \(\le\lceil\log_2
+m\rceil\) steps, and by construction \(\mathit{idx}\) ends as the largest
+rank whose cumulative count is \(<k_{\text{orig}}\), making \(\mathit{idx}+1\)
+the smallest rank whose cumulative count is \(\ge k_{\text{orig}}\).
+\end{proofbox}
+
+\noindent\textbf{In plain words.}  Reading a frequency BIT as a cumulative
+distribution, lifting is the binary search that a segment-tree descent also
+performs -- but it never touches a child pointer, only the flat
+\(\mathit{tf}[]\).  With \(\mathit{tf}\) storing \emph{ranks of equal items},
+\(\text{kth}(k)\) is literally the \(k\)-th smallest; with \(\mathit{tf}\)
+storing \emph{weights}, it is ``the first slot whose running total reaches
+\(k\)'', the shape CSES~1143's booking query would need if it were a
+\emph{sum} threshold.
+
+\begin{lstlisting}[caption={binary lifting on the BIT: smallest index whose prefix sum reaches k}, label={lst:c14-kth}]
+// smallest r with count_le(r) >= k ; needs 1 <= k <= total, m >= 1
+int kth(int k){
+    int idx = 0;
+    int step = 1;
+    while (step <= m) step <<= 1;          // power of two strictly above m
+    for (step >>= 1; step > 0; step >>= 1){
+        int next = idx + step;             // candidate block just past idx
+        if (next <= m && tf[next] < k){    // whole block still short of k
+            idx  = next;                   //   -> swallow it
+            k   -= tf[next];               //   -> owe k fewer items
+        }
+    }
+    return idx + 1;                        // first prefix reaching the target
+}
+\end{lstlisting}
+
+\begin{tracebox}[Lifting on w=(3,2,4,1,5,5,2,6): kth(6) and kth(11)]
+The tree is \(\mathit{tf}=(3,5,4,10,1,6,5,28)\), \(m=8\), so
+\(\mathit{step}\) starts at \(8\).
+
+\emph{\(k=6\):} step~8: \(\mathit{tf}[8]=28\not<6\), skip. step~4:
+\(\mathit{tf}[4]=10\not<6\), skip. step~2: next\(=2\),
+\(\mathit{tf}[2]=5<6\) \(\Rightarrow\) \(\mathit{idx}=2,\;k=6-5=1\). step~1:
+next\(=3\), \(\mathit{tf}[3]=4\not<1\), skip. Return \(\mathit{idx}+1=3\)
+\checkmark\ (\(\text{prefix}=(3,5,\mathbf{9})\) first reaches \(\ge6\) at
+slot~3).
+
+\emph{\(k=11\):} step~8: \(28\not<11\). step~4: \(\mathit{tf}[4]=10<11\)
+\(\Rightarrow\) \(\mathit{idx}=4,\;k=1\). step~2: next\(=6\),
+\(\mathit{tf}[6]=6\not<1\). step~1: next\(=5\), \(\mathit{tf}[5]=1\not<1\)
+(strict). Return \(4+1=5\) \checkmark\ (\(\text{prefix}=(\ldots,10,\mathbf{15})\):
+slot~4 gives \(10<11\), slot~5 gives \(15\ge11\)).  Both match
+\figref{c14-lift} and the opener's lifting row exactly.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Inversions as a One-Sided Sweep}
+% ---------------------------------------------------------------
+
+\begin{proposition}{Inversions by a right-to-left frequency sweep}{c14-inversion}
+Sweep the array from the right, inserting each element's rank into a fresh
+frequency BIT.  When the pointer is at position \(i\), the BIT already holds
+exactly the elements \(a_{i+1},\dots,a_n\), so
+\(\code{count\_le}(\mathit{rank}_i-1)\) is the number of them \emph{strictly
+smaller} than \(a_i\) -- the ``smaller-after self'' count of position \(i\).
+Summing these over \(i\) is the number of inversions (pairs \(i<j\),
+\(a_i>a_j\)).  Total cost \(\bigO{n\log n}\) after compression; each query is
+a single walk.
+\end{proposition}
+
+\begin{lstlisting}[caption={inversion / smaller-after count: one right-to-left sweep}, label={lst:c14-inv}]
+// ranks r[1..n] in 1..m from coderef:c14-compress; tf[] starts all zero
+long long inv = 0;
+for (int i = n; i >= 1; i--){
+    inv += count_le(r[i] - 1);          // items to the RIGHT that are smaller
+    add(r[i], 1);                       // this one joins the seen multiset
+}
+// inv == sum of the smaller-after counts; the per-i value IS LC 315's answer
+\end{lstlisting}
+
+\begin{comparisonbox}[Same count, two mechanics (Ch.~1 vs this section)]
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Ch.~1 merge sort (\chref{c01})}: divide, conquer, and charge
+        inversions at merge time.  \(\bigO{n\log n}\), \emph{offline} -- the
+        whole array must exist, and it cannot answer an \emph{interleaved}
+        update without re-sorting.
+  \item \textbf{Frequency BIT (here)}: one walk per element, \(\bigO{n\log
+        n}\), \emph{online} -- and it generalises to ``smaller after'',
+        ``greater before'', and triplet products for free, because the seen
+        multiset is a data structure, not a merge step.
+\end{itemize}
+If the task is \emph{only} the inversion count of a fixed array, Ch.~1 is the
+shorter program; the moment the question varies per element (LC~315's output
+list) or the array mutates, the sweep wins.  This is the stated division of
+labour, not a re-derivation of merge sort.
+\end{comparisonbox}
+
+\begin{tracebox}[Smaller-after and inversions on a=(10,8,3,1)]
+Compress ascending: \(1{\to}1,\,3{\to}2,\,8{\to}3,\,10{\to}4\), so
+\(r=(4,3,2,1)\).  Right-to-left sweep (the BIT holds ranks seen so far):
+\[
+\renewcommand{\arraystretch}{1.15}
+\begin{array}{c|c|c|c|c}
+i & a_i & r_i & \text{count\_le}(r_i-1)\ \text{(smaller after)} & \text{seen set}\\ \hline
+4 & 1  & 1 & 0 & \{1\}\\
+3 & 3  & 2 & 1 & \{1,2\}\\
+2 & 8  & 3 & 2 & \{1,2,3\}\\
+1 & 10 & 4 & 3 & \{1,2,3,4\}
+\end{array}
+\]
+Smaller-after \(=(3,2,1,0)\) (reading positions \(1..4\)), sum \(=6\) -- the
+inversion count of a strictly decreasing length-4 array, \(\binom{4}{2}=6\)
+\checkmark.  These same partial counts are the input to the triplet sweep
+below, and match the opener's sweep row exactly.
+\end{tracebox}
+
+% ---------------------------------------------------------------
+\subsection{Problem Lab: CF 61E Enemy is weak}
+% ---------------------------------------------------------------
+
+\solvedproblem{c14-triplets}{Enemy is weak}{CF 61E}
+  {https://codeforces.com/problemset/problem/61/E}{CF 1900 L5}
+  {frequency BIT over compressed ranks, two directional sweeps, per-middle product}
+
+\begin{problemstatement}[CF 61E Enemy is weak]
+An army is a line of \(n\) men with pairwise distinct powers
+\(a_1,\dots,a_n\).  Its \emph{weakness} is the number of triplets
+\((i,j,k)\) with \(i<j<k\) and \(a_i>a_j>a_k\).  Count them.
+
+\textbf{Input.} \(3\le n\le 10^6\); \(n\) distinct integers
+\(1\le a_i\le 10^9\).
+
+\textbf{Output.} A single integer -- the weakness (it may exceed \(2^{31}\)).
+
+\textbf{Example.}
+\begin{verbatim}
+Input:
+4
+10 8 3 1
+
+Output:
+4
+\end{verbatim}
+Other official samples: \texttt{3 / 3 2 1 -> 1},
+\texttt{3 / 2 3 1 -> 0}, \texttt{4 / 1 5 4 3 -> 1}.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 30 minutes]
+Three nested loops are \(\bigO{n^3}\) -- at \(n=10^6\), hopeless.  A triplet
+\((i,j,k)\) is really a \emph{middle} \(j\) glued to an independent choice
+on its left and on its right: for a fixed \(j\), the count is
+\((\#\,i<j,\;a_i>a_j)\cdot(\#\,k>j,\;a_k<a_j)\).  Can you make each factor a
+prefix of a frequency BIT?
+\peek{separate the two conditions around the middle index \(j\).}
+\nudge{two independent sweeps: left-to-right fills ``greater to the left of
+\(j\)'', right-to-left fills ``smaller to the right of \(j\)''; then sum the
+products.  Each sweep is exactly \(\coderef{c14-inv}\).}
+\fullhint{Compress to ranks.  Forward: \(\mathit{lg}[j]=(j-1)-
+\code{count\_le}(r_j)\) then \(\code{add}(r_j,1)\).  Clear \(\mathit{tf}\),
+backward: \(\mathit{rl}[j]=\code{count\_le}(r_j-1)\) then
+\(\code{add}(r_j,1)\).  Answer \(\sum_j \mathit{lg}[j]\cdot\mathit{rl}[j]\)
+in \code{long long}.  Two \(\bigO{n\log n}\) passes, memory \(\bigO{n}\).}
+\end{attemptgate}
+
+\solstep{Understanding}
+The index order \(i<j<k\) and the value order \(a_i>a_j>a_k\) are two
+different axes: position and magnitude.  Pin the middle \(j\) and the problem
+\emph{factors}: everything to the left only has to beat \(a_j\), everything
+to the right only has to lose to \(a_j\).  Each side is a running ``how many
+values exceed / fall below a threshold'' question -- precisely what a
+frequency BIT over ranks answers in one walk.  This is
+\propref{c14-inversion} run twice, in both directions, then multiplied.
+
+\solstep{Key Observations}
+\begin{observation}
+The distinctness of the \(a_i\) means every rank is unique; the ``strictly
+greater / strictly smaller'' conditions become clean rank comparisons with no
+tie handling: greater-left \(=(j-1)-\text{count\_le}(r_j)\), smaller-right
+\(=\text{count\_le}(r_j-1)\).
+\end{observation}
+\begin{observation}
+A triplet is fully determined by its middle plus one left and one right
+choice, so the total is \(\sum_j \mathit{lg}[j]\cdot\mathit{rl}[j]\) -- no
+over- or under-counting, because each valid \((i,j,k)\) has exactly one
+middle \(j\).
+\end{observation}
+\begin{observation}
+\(\binom{10^6}{3}\approx1.7\cdot10^{17}\) fits \code{long long} (\(<9.2\cdot
+10^{18}\)) but not \code{int}; and \(n=10^6\) rules out any
+\(\bigO{n\sqrt n}\) or cache-hostile tree -- this is a flat-array sweep, and
+fast I/O is not optional.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Fix \(j\) and scan both sides naively}
+{That is \(\bigO{n^2}\) per choice of \(j\)... really \(\bigO{n^2}\) total
+with the right prefix idea, but \(\bigO{n^3}\) if done plainly; at
+\(n=10^6\) even \(\bigO{n^2}\) is \(10^{12}\).  Only a per-side
+\(\bigO{\log}\) query survives.}
+\deadend{Count triplets in a single left-to-right pass}
+{One pass cannot see the future: \(\mathit{rl}[j]\) needs the elements
+\(\ge j\).  Trying to fold the right count into the left sweep makes the
+product depend on data not yet read -- this is exactly why the sweep runs
+twice, in opposite directions.}
+\aha{The middle index splits a triplet into two independent rank-counts; a
+frequency BIT gives each count in \(\bigO{\log n}\), so the weakness is a sum
+of products of two one-dimensional sweeps.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict}\\
+\midrule
+1 & \lv{2}\ three loops & test every \((i,j,k)\) & \(\bigO{n^3}\) & \tle \\
+2 & \lv{3}\ fix middle, scan & for each \(j\), count sides linearly & \(\bigO{n^2}\) & \tle \\
+3 & \lv{5}\ \textbf{two BIT sweeps} & lg, rl by rank-counts; sum products (\(\coderef{c14-inv}\)) & \(\bigO{n\log n}\) & \ac \\
+4 & \lv{4}\ merge-sort variant & possible but awkward for a per-middle product & \(\bigO{n\log n}\) & clunkier \\
+\bottomrule
+\end{tabular}\end{center}
+Rung~3 is the point: the middle-index factorisation is what makes a
+\emph{triplet} problem reduce to \emph{pair}-counting, which the frequency
+BIT already solves.
+
+\solstep{Solution}
+Compress the distinct powers to ranks \(1..n\).  Left-to-right sweep to fill
+\(\mathit{lg}[j]\) (greater to the left); reset the frequency BIT; right-to-
+left sweep to fill \(\mathit{rl}[j]\) (smaller to the right).  Print
+\(\sum_j \mathit{lg}[j]\cdot\mathit{rl}[j]\) as \code{long long}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+\emph{Compression:} \propref{c14-compress} lets us replace the powers by
+their ranks with no change to any comparison (distinct \(\Rightarrow\) rank
+order equals value order).  \emph{Left count:} before \(\code{add}(r_j,1)\),
+the forward BIT holds exactly ranks of \(a_1..a_{j-1}\); \(\code{count\_le}(r_j)\)
+counts those \(\le a_j\), so \((j-1)-\code{count\_le}(r_j)\) counts those
+\(\;>\;a_j\)=\(\mathit{lg}[j]\).  \emph{Right count:} symmetrically the
+backward BIT holds \(a_{j+1}..a_n\) and \(\code{count\_le}(r_j-1)\) counts
+those \(<a_j\)=\(\mathit{rl}[j]\).  \emph{Product:} a triplet with middle
+\(j\) picks one greater-left and one smaller-right independently, so it is
+counted once among \(\mathit{lg}[j]\cdot\mathit{rl}[j]\); summing over all
+\(j\) counts every valid \((i,j,k)\) exactly once (each has a unique middle).
+\emph{Bounds:} \(\bigO{n\log n}\); magnitude \(\le\binom{n}{3}<1.7\cdot10^{17}\)
+fits \code{long long}.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={CF 61E full solution: two frequency-BIT sweeps around the middle index}, label={lst:c14-61-soln}]
+#include <bits/stdc++.h>
+using namespace std;
+const int MX = 1000005;
+int n, a[MX], rnk[MX], tf[MX], m;
+int lg[MX], rl[MX];
+
+int lowbit(int i){ return i & -i; }
+void add(int r, int d){ for (; r <= m; r += lowbit(r)) tf[r] += d; }
+int count_le(int r){
+    int s = 0;
+    for (; r > 0; r -= lowbit(r)) s += tf[r];
+    return s;
+}
+int main(){
+    scanf("%d", &n);
+    vector<int> v(n);
+    for (int i = 1; i <= n; i++){ scanf("%d", &a[i]); v[i-1] = a[i]; }
+    sort(v.begin(), v.end());
+    v.erase(unique(v.begin(), v.end()), v.end());
+    m = (int)v.size();
+    for (int i = 1; i <= n; i++)
+        rnk[i] = (int)(lower_bound(v.begin(), v.end(), a[i]) - v.begin()) + 1;
+
+    for (int i = 1; i <= n; i++){                 // greater to the LEFT
+        lg[i] = (i - 1) - count_le(rnk[i]);
+        add(rnk[i], 1);
+    }
+    for (int i = 1; i <= m; i++) tf[i] = 0;       // fresh tree
+    for (int i = n; i >= 1; i--){                 // smaller to the RIGHT
+        rl[i] = count_le(rnk[i] - 1);
+        add(rnk[i], 1);
+    }
+    long long ans = 0;
+    for (int i = 1; i <= n; i++) ans += (long long)lg[i] * rl[i];
+    printf("%lld\n", ans);
+}
+\end{lstlisting}
+
+\solstep{Trace on the Official Sample}
+\begin{tracebox}[CF 61E: a=(10,8,3,1), ranks (4,3,2,1)]
+Forward (greater-left): \(j{=}1\): \(0-\text{count\_le}(4)=0\).
+\(j{=}2\): seen \(\{4\}\), \(1-0=1\).  \(j{=}3\): seen \(\{3,4\}\),
+\(2-0=2\).  \(j{=}4\): seen \(\{2,3,4\}\), \(3-0=3\).  So
+\(\mathit{lg}=(0,1,2,3)\).\\
+Backward (smaller-right): \(j{=}4\): \(0\).  \(j{=}3\): seen \(\{1\}\),
+\(\text{count\_le}(1)=1\).  \(j{=}2\): seen \(\{1,2\}\), \(\text{count\_le}(2)=2\).
+\(j{=}1\): seen \(\{1,2,3\}\), \(\text{count\_le}(3)=3\).  So
+\(\mathit{rl}=(3,2,1,0)\).\\
+Products: \(0{\cdot}3+1{\cdot}2+2{\cdot}1+3{\cdot}0=0+2+2+0=4\).  Printed
+\texttt{4} -- the official output.  Sanity on \texttt{3 2 1}
+(ranks \(3,2,1\)): \(\mathit{lg}=(0,1,2)\), \(\mathit{rl}=(2,1,0)\),
+products \(0+1+0=1\) \checkmark; \texttt{2 3 1}: \(\mathit{lg}=(0,0,2)\),
+\(\mathit{rl}=(1,1,0)\), \(0+0+0=0\) \checkmark.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Two sweeps of \(n\) \(\bigO{\log n}\) queries/updates plus an
+\(\bigO{n\log n}\) sort for compression: total \(\bigO{n\log n}\), at
+\(n=10^6\) about \(2\cdot10^7\) tree touches -- fine under the 5\,s limit.
+Memory: three \code{int} arrays and one frequency tree of size \(n\), plus the
+compression copy, \(\approx 6\) arrays \(\sim 24\) MB of \(4\) bytes -- inside
+256 MB.  \textbf{AC}.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.20\linewidth} p{0.30\linewidth} p{0.38\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{Why tricky} & \textbf{Code behaviour}\\
+\midrule
+strictly increasing & no triplet is decreasing & \(\mathit{lg}\equiv0\) for every \(j\) except the far right; products all \(0\) \\
+strictly decreasing & every \(\binom{n}{3}\) counts & \(\mathit{lg}=(0,1,2,\dots)\), \(\mathit{rl}=(\dots,2,1,0)\), sum \(=\binom{n}{3}\) \\
+\(n=3\) minimum & single candidate middle & works: only \(j=2\) can have both sides \\
+answer size & \(\binom{10^6}{3}\) overflows \code{int} & \code{long long} accumulator and cast \\
+\(r_j=1\) & \(\code{count\_le}(0)\) must be \(0\) & walk loop body never runs \\
+\bottomrule
+\end{tabular}\end{center}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item \textbf{Fast I/O:} \(10^6\) integers -- \code{scanf}/\code{printf} as
+        above (or \code{cin} with \code{sync\_with\_stdio(false)} and
+        \code{tie(nullptr)}); \code{cout} per line would TLE on I/O alone.
+  \item \textbf{Reset the tree between sweeps:} forgetting to zero
+        \(\mathit{tf}\) after the forward pass corrupts \(\mathit{rl}\); this
+        is the problem's signature WA.  One \(\bigO{m}\) clear is enough.
+  \item \textbf{Distinctness is a licence, not a luck:} the strict
+        \(\code{count\_le}(r-1)\) for ``smaller'' is correct \emph{because}
+        no two powers tie.  If a variant allows equal values, fix ties by a
+        stable secondary key before ranking.
+  \item \textbf{\code{int} vs \code{long long}:} \(\mathit{lg},\mathit{rl}\)
+        fit \code{int} (\(\le n\)); only their product summed over \(n\) needs
+        \code{long long} -- cast at multiply time, \code{(long long)lg[i]*rl[i]}.
+\end{itemize}
+\end{hardeningbox}
+
+% ---------------------------------------------------------------
+\subsection{Common Pitfalls}
+% ---------------------------------------------------------------
+
+\begin{warningbox}[Trap 1: forgetting that lifting needs a power-of-two cap]
+\(\coderef{c14-kth}\) must start \(\mathit{step}\) at the highest power of
+two \(\le m\), not at \(m\).  Starting mid-block means the very first
+candidate \(\mathit{tf}[\mathit{idx}+\mathit{step}]\) no longer covers a
+contiguous prefix and the search returns a wrong rank that still ``looks
+plausible''.  Compute \(\mathit{step}\) with the \code{while (step <= m) step
+<<= 1;} then \code{step >>= 1;} idiom.
+\end{warningbox}
+
+\begin{warningbox}[Trap 2: counting \emph{positions} when you mean \emph{ranks}]
+A frequency BIT's index is a value's rank, not its location.  For a ``how
+many elements \(\le k\)'' query the answer is \(\code{count\_le}(\mathit{rank}(k))\),
+and \(\mathit{rank}(k)\) must come from the same sorted set you compressed
+against -- and \(k\) must have been \emph{collected} first
+(\propref{c14-compress}).  Querying a rank that was never inserted is the
+compression-off-by-one we warned about in \(\secref{c14-range}\).
+\end{warningbox}
+
+\begin{warningbox}[Trap 3: reusing the forward tree for the backward sweep]
+CF~61E's two counts come from \emph{opposite} directions.  Leaving the
+forward BIT populated makes \(\mathit{rl}[j]\) ``smaller to the right''
+silently include left-side elements -- answers too big.  Clear \(\mathit{tf}\)
+(or use a second tree).  The same trap hides in ``pairs with property''
+problems that need greater-before \emph{and} less-before
+(CF~1579E2): they share the tree only if you reset it.
+\end{warningbox}
+
+\begin{warningbox}[Trap 4: \code{int} product on a triplet count]
+The weakness reaches \(\binom{n}{3}\).  Even one \(\mathit{lg}[j]\cdot
+\mathit{rl}[j]\) product can overflow \code{int} (up to \(\sim n^2/4\));
+summed, it is astronomically past \(2^{31}\).  Multiply into \code{long long}
+and accumulate in \code{long long} -- CF~61E's own note that \code{\%lld}
+is fine (unlike most modern judges) is a hint that this is a 64-bit answer.
+\end{warningbox}
+
+% ---------------------------------------------------------------
+\subsection{Practice Problems}
+% ---------------------------------------------------------------
+
+\begin{stuckbox}
+\begin{itemize}[nosep,leftmargin=1.4em]
+  \item Did you compress \emph{all} values (and every query bound) before the
+        sort, so no rank is ever missing?
+  \item Is the lifting \(\mathit{step}\) a power of two \(\le m\)?
+  \item For a two-sided count, did you reset the tree between directions?
+  \item Is the accumulation \code{long long} at the multiply, not just the sum?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Array Optimization by Stack}{CF 1579E2}
+    {https://codeforces.com/problemset/problem/1579/E2}
+    {CF 1800 L4}
+    {Cost of a build step is the number of earlier elements \emph{greater
+     than} plus those \emph{less than} the pushed value.  For each position
+     \(j\) that is \((j{-}1)-\code{count\_le}(r_j)\) (greater before) plus
+     \(\code{count\_le}(r_j-1)\) (less before) -- the very two prefix counts
+     of \(\coderef{c14-61-soln}\), now \emph{summed} not multiplied.  One
+     left-to-right frequency sweep; distinct ranks need the tie-handling note
+     of the hardening box.}
+  \practice{Invariant}{CF 540E}
+    {https://codeforces.com/problemset/problem/540/E}
+    {CF 1900 L5}
+    {Two descriptions of the same permutation: count the pairs whose
+     relative order the two disagree on.  Map one sequence's values to the
+     other's positions, reducing it to an \emph{inversion count} of a single
+     permutation -- exactly \(\coderef{c14-inv}\)'s right-to-left sweep, then
+     subtract from \(\binom{n}{2}\).  The lesson: a ``difference of two
+     orders'' is a frequency-BIT inversion count after a relabelling.}
+\end{practiceset}
+
+\paragraph{Back-cites and forwards.}
+\secref{c14-range} (\(\coderef{c14-compress}\)) supplies the ranks this
+section indexes by; \propref{c14-compress}'s ``order survives, magnitudes do
+not'' is why a count-based tree is the right companion.  Chapter~1
+(\chref{c01}) owns the offline merge count; Ch.~6 (\chref{c06}) owns PBDS and
+the LC~315/LC~493 URLs (the same sweep, a balanced tree); Ch.~8 (\chref{c07})
+owns the online stream median -- lifting here is the \emph{static/offline}
+select.  Forward: the same ``sort one axis, count the other'' shape returns,
+fully offline, in \secref{c14-offline}, and the lifting search is the exact
+predicate the Summit CF~1181D runs per binary-search step.
+
+% ---------------------------------------------------------------
+\begin{recallbox}[Section 18.3 in 10 seconds]
+Read the index as a \emph{value}: frequency BIT \(\;\code{add}(r,\pm1)\)
+inserts, \(\code{count\_le}(r)\) counts \(\le\) rank \(r\), and
+\(\code{count\_le}(r-1)\) is strictly-below (\(\defref{c14-freq}\)).
+Select backwards with \emph{lifting} -- build the largest prefix still \(<k\)
+bit by bit, answer \(\mathit{idx}+1\) (\(\thmref{c14-lift}\),
+\(\coderef{c14-kth}\)).  Inversions \(=\) one right-to-left sweep
+(\(\coderef{c14-inv}\)); decreasing triplets \(=\) two sweeps whose counts
+multiply per middle (CF~61E, \(\probref{c14-triplets}\),
+\(\coderef{c14-61-soln}\)).  Distinct ranks, reset between directions, 64-bit
+answer.
+\selftest{
+  \item State the BIT's two interpretations (position-sum vs value-count) and
+        one problem each.
+  \item Why must the lifting \(\mathit{step}\) be a power of two, and what
+        breaks otherwise?
+  \item Express CF~61E's \(\mathit{lg}[j]\) and \(\mathit{rl}[j]\) using only
+        \(\code{count\_le}\).
+  \item Give the one reason the merge count of Ch.~1 cannot answer an
+        interleaved ``how many now \(\le k\)'' query.
+  \item Why is \(\code{count\_le}(r-1)\) ``strictly smaller'' only when the
+        values are distinct?
+}
+\end{recallbox}

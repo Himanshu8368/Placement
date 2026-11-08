@@ -1,0 +1,918 @@
+% !TEX root = ../../../tree_notes.tex
+% =====================================================================
+%  Chapter 11 review -- the 15-section revision contract (chapter_end.txt).
+%  Revision-only: tables, one-liners, pointers back via \thmref/\probref/
+%  \secref/\coderef/\defref/\exref/\figref/\lemref.  No derivations.
+%  Summit: CF 706D Vasiliy's Multiset -- a DYNAMIC binary trie over a live
+%  multiset of integers (0 always present).  Each node stores cnt = how many
+%  values pass through; +x increments along x's MSB-first bit path, -x
+%  decrements (erase), ?x descends preferring the opposite bit whenever that
+%  child exists AND cnt > 0, else the same bit, reading off max(x XOR y).
+%  Sample verified live: q=10, +8 +9 +11 +6 +1 ?3 -8 ?3 ?8 ?11 -> 11 10 14 13.
+%  (The plan table's "Hard Problem / Selling Number" names were stale; CF
+%  706D is Vasiliy's Multiset and CF 282E is Sausage Maximization -- corrected
+%  against live sources before writing.)
+% =====================================================================
+
+\chaptersection{Chapter 11 Summary}
+
+One sentence: \emph{build the tree so its \textbf{edges} carry the information -- one character (or bit)
+per level -- and a lookup costs $\bigO{L}$, the length of the key, with no dependence on how many keys you
+hold}. A binary search tree compares whole keys and so pays $\bigO{\log N}$ levels; a hash map pays
+$\bigO{L}$ to hash but knows nothing about prefixes. A \term{trie} spends its \emph{depth} on the key's own
+spelling, so \code{insert}, \code{search} and \code{startsWith} all run in time proportional to the query,
+not the collection (\thmref{c08-searchcost}). Reading the same structure over a \emph{bit} alphabet
+$\{0,1\}$ turns it into the tool for XOR extrema: greedy from the most-significant bit toward its
+complement is provably optimal (\lemref{c08-greedybit}). Compression collapses one-child chains
+(\defref{c08-radix}); persistence keeps a root per version so a frozen set stays queryable
+(\defref{c08-persistent}); and a per-node count turns a mutable trie into a live multiset you can add to and
+erase from -- which is exactly the Summit. Every entry below is a pointer, not a re-derivation.
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.25\linewidth} p{0.47\linewidth} p{0.20\linewidth}@{}}
+\toprule
+\textbf{Result} & \textbf{Statement (with conditions)} & \textbf{Where} \\
+\midrule
+Trie & A node stores one child slot per alphabet symbol and a terminal flag; a key is the root-to-node
+  path of its symbols. One node per distinct \emph{prefix}. & \defref{c08-trie} \\
+Search cost & \code{insert}/\code{search}/\code{startsWith} are $\bigO{L}$ -- one level per character,
+  \emph{independent of} $N$. Compare BST $\bigO{L\log N}$; hash has no prefix order. & \thmref{c08-searchcost} \\
+Node layout & Fixed \code{child[26]} array ($\bigO{1}$ hit, $\bigO{|\Sigma|}$ per node), \code{map}
+  (sparse), or sorted edge list -- a time/memory trade, never a change to $\bigO{L}$. & \defref{c08-nodelayout} \\
+Wildcard & A \code{.} (or \code{'?'}) matches \emph{any} edge, so the search is a DFS over all children at
+  that level. & \defref{c08-wildcard} \\
+Prefix aggregation & Store a per-node word count; the number of keys under a prefix is that node's subtree
+  total (a DFS), and autocomplete is a subtree walk. & \defref{c08-prefixcount} \\
+Binary (XOR) trie & Read keys MSB-first over $\{0,1\}$; at bit $b$ take the child holding the
+  \emph{complement} of $x_b$ when it exists -- highest bit dominates, so greedy-from-top is optimal. &
+  \lemref{c08-greedybit}, \defref{c08-bittrie} \\
+Radix / compressed & Collapse every maximal single-child chain into one substring edge; nodes survive only
+  at branches. Fewer nodes on a large or sparse alphabet. & \defref{c08-radix} \\
+Persistent & Path-copy on insert: clone the depth-many nodes, share the rest, keep one root per version;
+  the frozen per-version $\mathit{cnt}$ answers about the set \emph{as it was}. & \defref{c08-persistent} \\
+Live multiset & A per-node $\mathit{cnt}$ gates the complement branch on ``is this child non-empty now?'',
+  supporting erase and query over a changing set. & \probref{c08-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+{\small\textbf{Algorithms from this chapter -- spend one level per symbol, then walk the path you need.}}
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}p{0.19\linewidth} l l p{0.29\linewidth} p{0.155\linewidth}@{}}
+\toprule
+\textbf{Algorithm} & \textbf{Time} & \textbf{Memory} & \textbf{When to use (deciding phrase)} & \textbf{Code} \\
+\midrule
+Trie insert / search / prefix
+  & $\bigO{L}$ & $\bigO{\sum|s|}$
+  & ``membership or prefix over a set of strings''
+  & \coderef{c08-trie-ops} \\
+Top-$k$ autocomplete
+  & $\bigO{L + \text{subtree}}$ & $\bigO{k}$ extra
+  & ``$k$ best suggestions sharing a prefix''
+  & \coderef{c08-autocomplete} \\
+Word Search II (grid + trie)
+  & $\bigO{RC\cdot 4^{L}}$ worst & $\bigO{\sum|w|}$
+  & ``many pattern searches over a board''
+  & \coderef{c08-wordsearch-soln} \\
+Max-XOR pair (binary trie)
+  & $\bigO{nB}$ & $\bigO{nB}$ nodes
+  & ``largest $a_i \oplus a_j$ in a set''
+  & \coderef{c08-maxxor-soln} \\
+Persistent range max-XOR
+  & $\bigO{(n+q)\log C}$ & $\bigO{nB}$
+  & ``max XOR with $y \le m$ / a past version''
+  & \coderef{c08-persistxor-soln} \\
+Dynamic multiset max-XOR (Summit)
+  & $\bigO{qB}$ & $\bigO{qB}$
+  & ``add / erase / query the live set''
+  & \coderef{c08-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Master Decision Flowchart}
+
+Post-study ladder: walk top to bottom, stop at the first branch that matches. It decides \emph{whether a
+trie is even the right tool} -- you pay a node per prefix, so you reach for one when the question is about
+\emph{prefixes, completions, or bit-by-bit XOR}, not merely membership (a hash set is cheaper) and not for
+ordered range counting (a Fenwick/segment tree wins).
+
+\begin{lstlisting}[language={}, basicstyle=\ttfamily\small, numbers=none, frame=single]
+  You have a set of keys (strings or integers) and need something about them. What?
+  |
+  |-- membership / "does any key START WITH this prefix?" / autocomplete?
+  |     +-- string trie : O(L) insert/search/startsWith, independent of N   [8.1, LC 208]
+  |
+  |-- "how many keys have this prefix?" / "all keys under a prefix"?
+  |     +-- trie + per-node subtree count -> DFS the subtree                [8.2, LC 677]
+  |
+  |-- dictionary lookup with '.' / '?' wildcards that match any letter?
+  |     +-- trie DFS, branching over all children at the wildcard level     [8.2, LC 211]
+  |
+  |-- match MANY words against a grid / text at once?
+  |     +-- put the words in a trie, descend it as you walk the board/text  [8.2, LC 212]
+  |
+  |-- need k best (longest / most-frequent) completions of a prefix?
+  |     +-- subtree collect + a size-k heap -- the heap is Chapter 10 (c07)  [8.2, LC 1268]
+  |
+  |-- maximise a_i XOR a_j, or x XOR (some stored y)?
+  |     +-- BINARY trie over {0,1}, bits MSB-first, opposite-bit greedy     [8.3, LC 421]
+  |
+  |-- "max XOR with y <= m", or "over the first k insertions" (a version)?
+  |     +-- PERSISTENT binary trie, root per version, gate by cnt           [8.4, LC 1707]
+  |
+  |-- add / erase / query a LIVE multiset of numbers, max XOR each query?
+  |     +-- dynamic binary trie with per-node cnt -- the Summit, CF 706D     [Summit]
+  |
+  |-- huge alphabet or long shared prefixes; a plain trie blows memory?
+  |     +-- RADIX (compressed) trie: collapse single-child chains           [8.4]
+  |
+  +-- plain exact membership only, no prefix / no XOR?
+        +-- NOT a trie : an unordered_set is O(L) with no node-per-prefix cost  [all]
+\end{lstlisting}
+
+\chaptersection{Common Mistakes Checklist}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Confusing \code{search} with \code{startsWith}.} A path existing means only that some key
+        \emph{has this prefix}; a word is present only if the end node also carries the terminal flag
+        (\defref{c08-trie}, \coderef{c08-trie-ops}). Returning \code{true} whenever the walk lands is the
+        classic \textbf{WA} on \probref{c08-implement}.
+  \item \textbf{Letting \code{search} invent nodes.} Only \code{insert} may allocate a missing child; a
+        read walk that hits a null edge must return ``not found'' immediately
+        (\coderef{c08-trie-ops}). A \code{search} that creates nodes quietly rebuilds the whole trie as it
+        queries.
+  \item \textbf{Forgetting the terminal flag survives only at the exact depth.} \texttt{car} ends at depth
+        $3$; \texttt{care}/\texttt{cares} continue. Marking a word done needs the \code{end}/\code{word}
+        field on that precise node, not ``somewhere below'' (\exref{c08-trie-run}).
+  \item \textbf{Blowing memory on \code{child[26]} without counting nodes.} Each node is $26$ pointers;
+        the node budget is $\bigO{\sum|s|}$, so a $2\cdot10^{5}$-word dictionary over long keys can exceed
+        the limit. Weigh the \code{map}/edge-list layouts (\defref{c08-nodelayout}) before assuming
+        $26\cdot N$ fits.
+  \item \textbf{Reading the binary trie LSB-first.} The opposite-bit greedy is optimal only from the
+        \emph{most} significant bit, because a high bit outweighs all lower ones combined
+        (\lemref{c08-greedybit}). Insert/query at $b$ from $\mathit{MAXB}$ down to $0$ -- reversing the
+        loop gives wrong XOR answers (\probref{c08-maxxor}).
+  \item \textbf{Ignoring \code{cnt} when the set changes.} A plain trie cannot erase; a
+        \code{child[want] != null} test still sees deleted values. Maintain a per-node count and gate the
+        branch on \code{cnt > 0} (\probref{c08-summit}); persistence is the same count frozen per version
+        (\defref{c08-persistent}).
+  \item \textbf{Rebuilding the trie per query in the range/persistent problem.} ``max XOR with $y \le m$''
+        re-solved from scratch each time is $\bigO{q\cdot n}$. Sort the keys, build version roots once,
+        and answer with one \code{upper\_bound} plus one $\bigO{B}$ walk (\probref{c08-persistxor}).
+  \item \textbf{Treating a trie as ordered by value.} Siblings carry no value order -- only the shared
+        prefix does. K-th-smallest, predecessor/successor and range counts are the balanced-tree/Fenwick
+        world (\chref{c05}, \chref{c14}), not here (\secref{c08-triebasics}).
+\end{itemize}
+
+\chaptersection{WA Clinic}
+
+Verdicts are symptoms; the causes are the short list this chapter drilled. Diagnose top-down -- every leaf
+names the training problem.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram,
+    v/.style={boxnode, fill=primaryblue!12, draw=primaryblue, text width=22mm, align=center},
+    b/.style={boxnode, fill=difforange!12, draw=difforange, text width=12mm},
+    l/.style={boxnode, fill=successgreen!10, draw=successgreen, text width=58mm,
+              font=\scriptsize, align=left}]
+  \node[v] (verdict) {\textbf{Verdict on the judge}};
+  \node[b, below left=8mm and 6mm of verdict] (wa) {\textbf{WA}};
+  \node[b, below right=1mm of verdict] (tle) {\textbf{TLE}};
+  \node[b, below left=8mm and 1mm of verdict, xshift=30mm] (re) {\textbf{RE}};
+  \node[b, below right=8mm and 6mm of verdict] (mle) {\textbf{MLE}};
+  \node[l, below right=1mm and 2mm of wa.south] (wa1)
+    {returning true on a path with no terminal flag (\coderef{c08-trie-ops}); reading the binary trie
+     LSB-first so the greedy grabs the wrong bit (\lemref{c08-greedybit}); taking a complement child whose
+     \code{cnt} is $0$ on the Summit (\probref{c08-summit})};
+  \node[l, below right=1mm and 2mm of tle.south] (tle1)
+    {rebuilding the trie per query instead of one persistent root + binary search (\probref{c08-persistxor});
+     a grid/text DFS not pruned by the trie, exploding to $4^{L}$ (\probref{c08-wordsearch})};
+  \node[l, below right=1mm and 2mm of re.south] (re1)
+    {indexing \code{child[c - 'a']} before checking $c$ is a lowercase letter / not the sentinel
+     (\probref{c08-wordsearch}); dereferencing a null walk result in \code{search} (\probref{c08-implement})};
+  \node[l, below right=1mm and 2mm of mle.south] (mle1)
+    {\code{child[26]} arrays at every node with no node budget -- use \code{map} or a radix trie
+     (\defref{c08-nodelayout}, \defref{c08-radix}); path-copying without sharing, storing whole tries per
+     version (\defref{c08-persistent})};
+  \draw[flow] (verdict) -- (wa); \draw[flow] (verdict) -- (tle);
+  \draw[flow] (verdict) -- (re); \draw[flow] (verdict) -- (mle);
+  \draw[flow] (wa) -- (wa1); \draw[flow] (tle) -- (tle1);
+  \draw[flow] (re) -- (re1); \draw[flow] (mle) -- (mle1);
+\end{tikzpicture}
+\caption*{Chapter~11 verdict tree -- only the failures this chapter's problems can produce.}
+\end{figure}
+
+\medskip
+\noindent Backup table (same content, terse):
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llp{0.39\linewidth}l@{}}
+\toprule
+\textbf{Verdict} & \textbf{Usual cause} & \textbf{One-line fix} & \textbf{Trained in} \\
+\midrule
+WA  & path without terminal flag  & require \code{n->end} for \code{search}       & \probref{c08-implement} \\
+WA  & XOR built LSB-first         & loop $b$ from \code{MAXB} down to $0$          & \lemref{c08-greedybit} \\
+WA  & complement branch is empty  & gate on \code{child \&\& cnt>0}                & \probref{c08-summit} \\
+TLE & fresh trie each query       & one persistent root + \code{upper\_bound}      & \probref{c08-persistxor} \\
+MLE & $26$ pointers $\times$ nodes & switch to \code{map} or a radix trie          & \defref{c08-nodelayout} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Quick Reference Card}
+
+\begin{quickref}[Chapter 11 at a glance]
+\textbf{Depth is the key, not the count.} A trie spends one level per symbol of the key, so
+\code{insert}/\code{search}/\code{startsWith} cost $\bigO{L}$ and \emph{never} mention $N$
+(\thmref{c08-searchcost}, \coderef{c08-trie-ops}); that is the whole reason it beats a BST
+$\bigO{L\log N}$ on prefix work and beats a hash map wherever order-by-prefix matters.
+
+\medskip
+\textbf{Prefix questions live in the subtree.} ``How many keys start with $p$'' and ``list the completions
+of $p$'' are the node reached by $p$ plus a DFS with a per-node count (\defref{c08-prefixcount}); the top-$k$
+variant just holds a size-$k$ heap over that subtree -- a Chapter~10 tool, cited not re-taught
+(\coderef{c08-autocomplete}, \chref{c07}).
+
+\medskip
+\textbf{Bits are letters for a different alphabet.} Re-read the trie over $\{0,1\}$, most-significant bit
+first, and the objective $\max x\oplus y$ becomes a single greedy: take the complement branch whenever it
+holds a value (\lemref{c08-greedybit}). Every XOR extremum in this chapter -- \probref{c08-maxxor},
+\probref{c08-persistxor}, the Summit -- is that walk with a stricter ``is the child available?'' test
+(count, version, range).
+
+\medskip
+\textbf{Two running examples.} $\mathcal{W}=\{\texttt{car},\texttt{cares},\texttt{care},\texttt{cat},
+\texttt{dog}\}$ drives every string-trie trace (\exref{c08-trie-run}); $A=[3,10,5,25,2,8]$ with answer $28$
+drives the binary trie (\exref{c08-xor-run}).
+
+\medskip
+\textbf{Know your boundaries.} Exact membership with no prefix need is a hash set, cheaper; ordered splits,
+joins, and rank/select are the balanced tree (\chref{c06}); range counting and k-th by \emph{value} are the
+Fenwick/segment trees (\chref{c14}, \chref{c13}); general persistence-with-edit is Chapter~21
+(\chref{c19}). The trie owns \emph{prefix} and \emph{bit-by-bit XOR}.
+\end{quickref}
+
+\begin{lstlisting}[caption={Chapter 11 code kit: the string-trie walk, the autocomplete subtree collect, the binary-trie insert/greedy query, the persistent path-copy, and the Summit's live-multiset add/query}, label={lst:c08-kit}]
+#include <bits/stdc++.h>
+using namespace std;
+
+// (1) String trie: one walk helper drives insert / search / startsWith.   [8.1]
+struct TrieNode { TrieNode* child[26]{}; bool end = false; };
+TrieNode* walk(TrieNode* root, const string& s, bool make) {
+    TrieNode* cur = root;
+    for (char ch : s) { int i = ch - 'a';
+        if (!cur->child[i]) { if (!make) return nullptr; cur->child[i] = new TrieNode(); }
+        cur = cur->child[i]; }
+    return cur;
+}   // search = walk(s,false) && node->end ; startsWith = walk(p,false)!=null
+
+// (2) Top-k autocomplete: reach the prefix node, DFS its subtree, keep a   [8.2]
+//     size-k heap of (rank, word). The heap itself is Chapter 10 (c07).
+void collect(TrieNode* u, string& buf, vector<string>& out) {   // full subtree words
+    if (u->end) out.push_back(buf);
+    for (int i = 0; i < 26; ++i) if (u->child[i]) { buf.push_back('a'+i);
+        collect(u->child[i], buf, out); buf.pop_back(); }
+}
+// (3) Binary trie for max XOR: insert MSB-first, query preferring the       [8.3]
+//     complement bit. cnt gates a branch on "non-empty right now".
+struct BNode { BNode* ch[2]{}; int cnt = 0; };
+static const int MAXB = 30;
+void binsert(BNode* root, int x, int delta) {            // delta +1 add / -1 erase
+    BNode* u = root;
+    for (int b = MAXB; b >= 0; --b) { int k = (x >> b) & 1;
+        if (!u->ch[k]) u->ch[k] = new BNode(); u = u->ch[k]; u->cnt += delta; }
+}
+int bquery(BNode* root, int x) {                          // max x XOR y over the live set
+    BNode* u = root; int best = 0;
+    for (int b = MAXB; b >= 0 && u; --b) { int k = (x >> b) & 1, w = k ^ 1;
+        if (u->ch[w] && u->ch[w]->cnt > 0) { best |= (1 << b); u = u->ch[w]; }
+        else u = u->ch[k]; }
+    return best;
+}
+// (4) Persistent insert: clone the path, share the rest, return the new root. [8.4]
+//     (full version in Code lst:c08-persist ; query takes a version root.)
+// (5) Summit CF 706D: add/erase via binsert(+1/-1), query via bquery,        [Summit]
+//     with the number 0 always present. Full code in Code lst:c08-summit.
+\end{lstlisting}
+
+\chaptersection{Write-From-Memory Drills}
+
+Five signature skeletons, each lifted from a listing already in the chapter. Cover the marked line,
+reproduce it from memory, then check the answer one line below.
+
+\begin{lstlisting}[caption={Drill 1 -- the trie walk, read vs write (from \coderef{c08-trie-ops})}]
+TrieNode* walk(TrieNode* root, const string& s, bool make) {
+    TrieNode* cur = root;
+    for (char ch : s) {
+        int i = ch - 'a';
+        if (!cur->child[i]) {
+            if (!make) return nullptr;    // a read may not invent a node
+            /* FILL: cur->child[i] = new TrieNode(); */
+        }
+        cur = cur->child[i];
+    }
+    return cur;
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: the same walk serves insert (\code{make=true}) and search/startsWith
+(\code{make=false}); the caller decides the meaning -- \code{search} also needs \code{->end}, \code{startsWith}
+does not (\thmref{c08-searchcost}, \probref{c08-implement}).}
+
+\begin{lstlisting}[caption={Drill 2 -- insert bits MSB-first with a count (from \coderef{c08-maxxor})}]
+for (int b = MAXB; b >= 0; --b) {
+    int bit = (x >> b) & 1;                       // this level's symbol is the BIT
+    if (!u->ch[bit]) u->ch[bit] = new Node();
+    u = u->ch[bit];
+    /* FILL: u->cnt++; */                        // insurance for erase / non-empty tests
+}
+\end{lstlisting}
+\noindent{\scriptsize Key: iterate $b$ from $\mathit{MAXB}$ \emph{down}; bumping $\mathit{cnt}$ at every node
+on the path is what lets a later query ask ``is this branch still populated?'' (\defref{c08-bittrie},
+\probref{c08-summit}).}
+
+\begin{lstlisting}[caption={Drill 3 -- the complement greedy query (from \coderef{c08-maxxor})}]
+int bit = (x >> b) & 1, want = bit ^ 1;           // prefer the OPPOSITE bit
+if (u->ch[want] && u->ch[want]->cnt > 0) { best |= (1 << b); /* FILL: u = u->ch[want]; */ }
+else u = u->ch[bit];                              // forced onto the same-bit child
+\end{lstlisting}
+\noindent{\scriptsize Key: setting answer bit $b$ to $1$ (weight $2^b$) always beats every lower bit
+combined, so greedily steer to the complement whenever it is non-empty -- this is
+\lemref{c08-greedybit} turned into three lines (\exref{c08-xor-run}).}
+
+\begin{lstlisting}[caption={Drill 4 -- persistent path-copy insert (from \coderef{c08-persist})}]
+PNode* cur = clone(prev); cur->cnt++;             // copy this node, bump its count
+if (b >= 0) {
+    int k = (x >> b) & 1;
+    PNode* pc = prev ? prev->ch[k] : nullptr;
+    cur->ch[k] = insert(pc, x, b - 1);            // recurse ONE branch; the other stays shared
+}
+/* FILL: return cur; */                           // the root of the new version
+\end{lstlisting}
+\noindent{\scriptsize Key: only the depth-many nodes on the walked path are cloned; every untouched child
+pointer is reused straight from the previous version, so version $i{+}1$ costs $\bigO{B}$ new nodes
+(\defref{c08-persistent}, \probref{c08-persistxor}).}
+
+\begin{lstlisting}[caption={Drill 5 -- Word Search II mark / restore around the grid DFS (from \coderef{c08-wordsearch-soln})}]
+char c = b[i][j];
+if (c == '.' || !u->ch[c - 'a']) return;          // visited, or no trie edge: prune
+u = u->ch[c - 'a'];
+if (!u->word.empty()) { res.push_back(u->word); u->word.clear(); }
+b[i][j] = '.';                                    // mark on THIS path only
+/* FILL: recurse on the 4 in-bounds neighbours; */
+b[i][j] = c;                                      // restore on backtrack
+\end{lstlisting}
+\noindent{\scriptsize Key: the mark is \emph{path-scoped}, so restore the letter on the way out; a global
+visited array would wrongly block other words (\probref{c08-wordsearch}, \defref{c08-wildcard}).}
+
+\chaptersection{Complete Problem Checklist}
+
+Every problem this chapter offers -- 4 fully solved in-section, 7 practice, one internal lab, one Summit,
+ten mixed. Tick \emph{only} after an unaided solve; a hinted attempt counts as half. Cite by name and
+number -- URLs appear once, in the solved and practice entries.
+
+\begin{center}
+\footnotesize
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}c p{0.19\linewidth} l p{0.20\linewidth} p{0.235\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Problem} & \textbf{Source} & \textbf{Key technique} & \textbf{What to look for} & \textbf{Done?} \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 8.1 -- the trie of strings; $\bigO{L}$ independent of $N$}} \\
+W11.1.1 & Implement Trie (Prefix Tree) & LC 208 & \lv{2} one walk helper & insert \emph{creates} nodes; search needs the \code{end} flag; startsWith does not & $\square$ \\
+P11.1.2 & Map Sum Pairs & LC 677 & \lv{3} per-node value sum & store the sum of weights in the subtree; a prefix query is one walk & $\square$ \\
+P11.1.3 & Replace Words & LC 648 & \lv{3} shortest root match & walk each word; cut at the first node carrying \code{end} & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 8.2 -- dictionary applications; wildcards and the subtree}} \\
+W11.2.1 & Word Search II & LC 212 & \lv{4} grid DFS pruned by a trie & descend the trie as you walk the board; mark/restore per path & $\square$ \\
+P11.2.2 & Design Add and Search Words & LC 211 & \lv{4} wildcard DFS & \code{.} matches every child -- branch over all $26$ at that level & $\square$ \\
+P11.2.3 & Search Suggestions System & LC 1268 & \lv{3} prefix subtree + top-$k$ & collect the prefix node's subtree, keep $3$ lexicographic best & $\square$ \\
+P11.2.4 & Longest Word in Dictionary & LC 720 & \lv{3} all-prefixes-built test & a word survives only if every prefix is a terminal & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 8.3 -- the binary (XOR) trie; opposite-bit greedy}} \\
+W11.3.1 & Maximum XOR of Two Numbers & LC 421 & \lv{4} MSB-first trie, greedy & insert all, query each preferring the complement bit; answer $28$ & $\square$ \\
+P11.3.2 & Dr.\ Evil Underscores & CF 1285D & \lv{4} divide-and-conquer on bits & minimise $\max(a_i \oplus X)$: recurse on the $0/1$ split & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Section 8.4 -- compressed and persistent tries}} \\
+W11.4.1 & Max XOR With an Element From Array & LC 1707 & \lv{5} persistent roots + binary search & sort keys, one root per version, \code{upper\_bound} picks the version & $\square$ \\
+P11.4.2 & Count Pairs With XOR in a Range & LC 1803 & \lv{5} trie, count by bounds & count pairs with $L \le a_i \oplus a_j \le \mathit{high}$ via a trie walk & $\square$ \\
+P11.4.3 & Radix collapse + subtree count & internal lab & \lv{4} single-child chain merge & count nodes before/after compress; the shared $c$-$a$-$r$-$e$ spine & $\square$ \\
+\midrule
+\multicolumn{6}{l}{\textbf{Summit (chapter end)}} \\
+S11 & Vasiliy's Multiset & CF 706D & \lv{5} dynamic binary trie & add/erase via $\mathit{cnt}$, query the complement branch gated on $\mathit{cnt}>0$; $0$ always present & $\square$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Recommended Study Order}
+
+Five focused days. Day 1 builds the string trie by hand and internalises $\bigO{L}$; day 2 spends the
+subtree on wildcards, autocomplete and the board; day 3 flips letters to bits and drills the greedy; day 4
+adds history (persistence) and compression; day 5 is the Summit. Solve in this order even where it differs
+from section order -- each day's tool is in hand the day before.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}llp{0.55\linewidth}@{}}
+\toprule
+\textbf{Day} & \textbf{Focus} & \textbf{Tasks} \\
+\midrule
+1 & Read + do 8.1 & trace $\mathcal{W}$ through insert/search/startsWith (\exref{c08-trie-run}); write the
+    walk cold; LC 208, then 677, 648 \\
+2 & Read + do 8.2 & wildcard DFS on \texttt{ad}/\texttt{bad}; one autocomplete subtree collect; the
+    Word Search II board (\probref{c08-wordsearch}); then LC 211, 1268, 720 \\
+3 & Read + do 8.3 & build the bit trie of $A=[3,10,5,25,2,8]$ and read $28$ off the $5$-query
+    (\exref{c08-xor-run}); LC 421, then CF 1285D \\
+4 & Read + do 8.4 & the radix-collapse count lab (\exref{c08-radixlab}); path-copy one insert by hand; trace
+    LC 1707's three queries; then LC 1803 \\
+5 & Summit + revise & CF 706D with the $\mathit{cnt}$-gated dynamic trie (\probref{c08-summit}); walk the
+    decision flowchart on five questions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Difficulty Progression}
+
+Tiers are competency gates -- each row names the \emph{skill} the tier unlocks, not just a rating bucket.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{0.36\linewidth}p{0.34\linewidth}@{}}
+\toprule
+\textbf{Tier} & \textbf{Problems} & \textbf{What passing this tier proves} \\
+\midrule
+$\lv{2}$ \ $\bigstar\bigstar$
+  & LC 208
+  & you separate ``a path exists'' from ``a word ends here'' and never let a read allocate nodes \\
+$\lv{3}$ \ $\bigstar\bigstar\bigstar$
+  & LC 677, 648, 1268, 720
+  & you store per-node aggregates and read answers off a prefix walk \\
+$\lv{4}$ \ $\bigstar\bigstar\bigstar\bigstar$
+  & LC 211, 212, 421, CF 1285D, the radix lab
+  & you compose a trie with a second idea (a board DFS, a wildcard branch, the bit greedy, a compression) \\
+$\lv{5}$ \ $\bigstar\bigstar\bigstar\bigstar\bigstar$
+  & LC 1707, 1803, CF 706D (Summit)
+  & you gate the walk on counts/versions and see the live-multiset trie hiding in the query stream \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Reduction Gallery}
+
+The trie is one walk; each line collapses a family onto \emph{descend the symbol path, then read what the
+node (or its subtree) stores}. No new theory -- just where the descent is already hiding.
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item ``does this exact word exist / does any word start with $p$'' (LC 208) $\longrightarrow$ one walk;
+        \code{search} checks the terminal flag, \code{startsWith} does not (\probref{c08-implement}).
+  \item ``sum of values over all keys with prefix $p$'' (LC 677) $\longrightarrow$ store a per-node subtree
+        sum; the answer is one walk to $p$ (\defref{c08-prefixcount}).
+  \item ``replace each word by its shortest root'' (LC 648) $\longrightarrow$ walk the root trie and cut at
+        the first terminal (\secref{c08-triebasics}).
+  \item ``word with wildcards, \code{.} matches anything'' (LC 211) $\longrightarrow$ DFS branching over all
+        children at the wildcard level (\defref{c08-wildcard}).
+  \item ``find many words hiding in a grid'' (LC 212) $\longrightarrow$ put the dictionary in a trie and let
+        it prune the board DFS (\probref{c08-wordsearch}).
+  \item ``largest $a_i \oplus a_j$'' (LC 421) $\longrightarrow$ a binary trie, insert MSB-first, query the
+        complement (\lemref{c08-greedybit}, \probref{c08-maxxor}).
+  \item ``$\max x \oplus y$ over $y \le m$ / the first $k$ keys'' (LC 1707) $\longrightarrow$ the same walk on
+        a persistent root picked by binary search (\probref{c08-persistxor}).
+  \item ``add / erase / query max-XOR on a live multiset'' (CF 706D) $\longrightarrow$ a binary trie with
+        $\mathit{cnt}$ gating the complement branch (\probref{c08-summit}).
+\end{itemize}
+
+\chaptersection{Mixed Problem Set}
+
+These refuse to say ``trie''; decide \emph{what the levels are (letters, bits, or file-path components) and
+what each node should store} before opening the code. A hint tells you the shape of the answer, never the
+tool.
+
+\begin{mixedset}
+  \practice{Sum of Prefix Scores of Strings}{LeetCode 2416}
+    {https://leetcode.com/problems/sum-of-prefix-scores-of-strings/}{LC Hard · L4}
+    {The score of a word is the number of its prefixes that occur as a prefix of some word; return the sum
+    per index. Build a trie and store at each node the count of words passing through it -- a word's score
+    is the sum of $\mathit{cnt}$ along its path, exactly the prefix aggregation of \defref{c08-prefixcount}.}
+  \practice{Prefix and Suffix Search}{LeetCode 745}
+    {https://leetcode.com/problems/prefix-and-suffix-search/}{LC Hard · L4}
+    {Query by (prefix, suffix) returns the largest index whose word has both. Encode each word as every
+    \emph{suffix + sentinel + prefix} string and insert them into one trie keyed on that concatenation --
+    then the two-part query collapses to a single \code{startsWith} walk as in \secref{c08-triebasics}.}
+  \practice{Palindrome Pairs}{LeetCode 336}
+    {https://leetcode.com/problems/palindrome-pairs/}{LC Hard · L5}
+    {Find index pairs where words[i] + words[j] is a palindrome. Insert the words (or their reverses) into a
+    trie and, for each word, walk it matching a complementary prefix/suffix, checking the leftover is itself
+    a palindrome -- the same descend-and-test motion behind \probref{c08-wordsearch}.}
+  \practice{Camelcase Matching}{LeetCode 1023}
+    {https://leetcode.com/problems/camelcase-matching/}{LC Medium · L4}
+    {A query matches a word if the query is a subsequence that touches every capital letter of the word.
+    Build a trie of the queries and DFS the \emph{word} over it, jumping lowercase runs -- a subtree walk in
+    the spirit of \defref{c08-wildcard} rather than a fresh $\bigO{n\cdot L}$ scan per query.}
+  \practice{Word Squares}{LeetCode 425}
+    {https://leetcode.com/problems/word-squares/}{LC Hard · L4}
+    {Backtrack rows so the grid reads the same across rows and columns: at step $k$ the required prefix is
+    determined by earlier words, so query the trie for that \code{startsWith} node and DFS only its subtree
+    of candidates -- the autocomplete walk \coderef{c08-autocomplete} with a constraint.}
+  \practice{Short Encoding of Words}{LeetCode 820}
+    {https://leetcode.com/problems/short-encoding-of-words/}{LC Medium · L3}
+    {Minimum reference string; a word needs no own slot when it is a \emph{suffix} of another. Insert the
+    \emph{reversed} words into a trie and sum lengths only over words that end at a leaf (not a suffix of
+    another) -- one reversal turns a suffix test into the ordinary prefix descent of \secref{c08-triebasics}.}
+  \practice{Remove Sub-Folders from the Filepath}{LeetCode 1233}
+    {https://leetcode.com/problems/remove-sub-folders-from-the-filesystem/}{LC Medium · L3}
+    {Drop any path that sits under another. Split on \code{/} and build a trie of the components; a folder is
+    redundant when its path is a strict prefix of an already-stored one -- the terminal-vs-path distinction of
+    \probref{c08-implement} over a slash alphabet.}
+  \practice{Word Break II}{LeetCode 140}
+    {https://leetcode.com/problems/word-break-ii/}{LC Hard · L4}
+    {Enumerate every space-separated segmentation of a sentence against a dictionary. Put the dictionary in a
+    trie and, while DFS-ing the sentence, descend it one character at a time -- you test a whole batch of
+    candidate words at once instead of hashing each cut, exactly as the trie pruned the grid in
+    \probref{c08-wordsearch}.}
+  \practice{Good Substrings}{Codeforces 271D}
+    {https://codeforces.com/problemset/problem/271/D}{CF 2100 · L5}
+    {Count \emph{distinct} substrings containing at most $k$ bad letters. Fix a start, extend the end, and
+    walk a trie inserting each substring -- a brand-new node means a genuinely new distinct string, and you
+    stop the walk once the bad-count exceeds $k$; the trie is doing distinct-substring dedup, not membership
+    (\defref{c08-prefixcount}).}
+  \practice{Sausage Maximization}{Codeforces 282E}
+    {https://codeforces.com/problemset/problem/282/E}{CF 2200 · L5}
+    {Choose a non-overlapping prefix and suffix (either may be empty) maximising the XOR of their two XOR
+    values. Collect prefix-XORs and suffix-XORs and run the \secref{c08-binary} binary-trie greedy
+    (\lemref{c08-greedybit}) for the max XOR of two members -- LC 421 with the operands read as running
+    XORs.}
+\end{mixedset}
+
+\chaptersection{The Summit -- CF 706D Vasiliy's Multiset}
+
+\begin{notebox}[Why this is the chapter top rope]
+Every XOR problem in Section 8.3 was \emph{static}: build the trie once, query it, done. \emph{Vasiliy's
+Multiset} removes that luxury. You maintain a live multiset (which always contains $0$) under three
+operations -- add $x$, erase one copy of $x$, and ``max $x \oplus y$ over the current set'' -- one after
+another, up to $2\cdot10^{5}$ times. A pointer trie with a membership flag cannot erase in
+$\bigO{1}$; the fix is the exact field you saw guarding persistence in \secref{c08-variants}: a per-node
+$\mathit{cnt}$ of how many live values pass through. Now the complement greedy of \lemref{c08-greedybit} is
+unchanged except that ``may I take the opposite branch?'' becomes ``does that child exist \emph{and} have
+$\mathit{cnt}>0$?'' Every idea of the chapter -- the MSB-first walk, the greedy, the count gate, the shared
+skeleton between mutable and persistent tries -- lands in these fifteen lines, which is why it is the top
+rope and not a new technique.
+\end{notebox}
+
+\solvedproblem{c08-summit}{Vasiliy's Multiset}{Codeforces 706D}
+  {https://codeforces.com/problemset/problem/706/D}{CF 1800 · L5}
+  {dynamic binary trie over a live multiset, per-node count for add/erase, opposite-bit greedy query gated on cnt>0, the always-present 0 seeding the root}
+
+\begin{problemstatement}[Vasiliy's Multiset]
+Maintain a multiset $A$ of integers, \textbf{initially containing only $0$}, under $q$ queries:
+\code{+ x} add $x$ to $A$; \code{- x} erase one occurrence of $x$ (guaranteed present); \code{? x} print
+$\max_{y \in A} (x \oplus y)$, the largest bitwise XOR of $x$ with any element currently in $A$.\\
+$1 \le q \le 2\cdot10^{5}$, $1 \le x \le 10^{9}$; $0$ is always in $A$. Sample $q=10$ with operations
+\texttt{+8 +9 +11 +6 +1 ?3 -8 ?3 ?8 ?11} outputs \texttt{11 10 14 13}.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 35 minutes]
+A fair first attempt is a plain insert/query binary trie from \secref{c08-binary}. It handles \code{+} and
+\code{?}, but the moment \code{- x} appears you discover the trie cannot \emph{un-see} $x$: the path you
+inserted long ago is shared with other numbers and you cannot simply cut it.
+\peek{What single piece of per-node information tells you whether a subtree is still occupied by \emph{at
+least one} live value, even after some values are erased?}
+\nudge{Give every node a counter of how many values pass through it. \code{+ x} walks $x$'s bit path
+incrementing; \code{- x} walks the same path decrementing. A query may step onto a child only if that
+child's counter is positive.}
+\fullhint{Seed the root by inserting $0$ once at the start. Then loop over queries: \code{+} calls
+\code{add(x, +1)}, \code{-} calls \code{add(x, -1)}, both descending bits $30$ down to $0$ and adjusting
+$\mathit{cnt}$ on each node (creating the child if needed on add). \code{? x} runs the greedy: at bit $b$
+prefer the child holding $\lnot x_b$ \emph{if it exists and has $\mathit{cnt}>0$} (set answer bit $b$),
+otherwise take the same-bit child. Because $0$ is always present, the walk never runs off an empty node.
+Full build below.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+Three operations on one live set, and the hard one is \code{? x}: the maximum $x \oplus y$ among values
+\emph{currently} in $A$. That is precisely the complement-greedy of \secref{c08-binary}, so the trie shape
+is decided. The twist is \code{- x}: erasure. A trie path is shared by every value with the same prefix, so
+you cannot delete nodes freely -- you must track \emph{how many} live values justify each node. That single
+need converts a static structure into a counted, dynamic one, and it is the same $\mathit{cnt}$ field that
+\secref{c08-variants} uses to freeze versions.
+
+\solstep{Key Observations}
+\begin{observation}
+A node's $\mathit{cnt}$ (values passing through it) is exactly the predicate ``is this subtree non-empty
+right now?''. Decrementing along $x$'s path on \code{- x} makes every node on that path report one fewer
+tenant; a query that checks \code{child \&\& child->cnt > 0} therefore ignores erased values without ever
+deleting a node (\defref{c08-bittrie}).
+\end{observation}
+\begin{observation}
+Erasing never removes the \emph{last} $0$: the problem guarantees $0$ stays in $A$, and since every value's
+path shares the top of the trie, seeding a single insert of $0$ guarantees each queried descent lands on a
+live value -- the greedy can never walk into a dead end (\lemref{c08-greedybit}).
+\end{observation}
+\begin{observation}
+The greedy itself is untouched from LC 421: take the opposite bit whenever legal. Only the legality test
+grows from ``child exists'' to ``child exists \textbf{and} is populated'' -- the mutable-count view of the
+version-count that persistence keeps frozen (\probref{c08-maxxor}, \secref{c08-variants}).
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Delete the nodes on $x$'s path when \code{- x} arrives.}
+{Those nodes are shared by every value whose prefix agrees with $x$; cutting them would silently erase other
+members of the multiset. Erasure must be a count change, never a structural cut.}
+\deadend{Keep a \code{multiset} and scan it for the best $y$ on each \code{?}.}
+{$\bigO{q\cdot|A|}$ worst case -- at $q=2\cdot10^{5}$ that is $4\cdot10^{10}$, \tle. The live set has to
+answer in $\bigO{B}$, which is a trie descent, not a scan.}
+\aha{One binary trie, MSB-first, a $\mathit{cnt}$ on every node. \code{add(x, delta)} walks the bits and
+bumps counts by $\delta$ ($+1$ add, $-1$ erase); \code{query(x)} runs the complement greedy, entering the
+opposite-bit child only when it exists \emph{and} its $\mathit{cnt}>0$. Seed $0$ once and every query is
+$\bigO{31}$.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.30\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} static trie, ignore erases & LC 421 walk, never remove values & $O(qB)$ & \textbf{WA} \\
+2 & \lv{4} scan the live multiset & linear search for the best $y$ per query & $O(q^2)$ & \tle \\
+3 & \lv{5} counted dynamic trie & $\mathit{cnt}$ per node gates add/erase/query & $O(qB)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+Rung 1 gets \code{+} and \code{?} right but leaves erased values visible -- a \textbf{WA} exactly on the
+\code{- } operations. Rung 2 is the honest ``I trust the greedy but not the deletion'' attempt: right
+answer, wrong cost. Rung 3 is \emph{this} chapter's answer -- the count makes each branch's liveness a
+$\bigO{1}$ read, so the descent stays $\bigO{B}$.
+
+\solstep{Solution}
+Build one binary trie whose nodes carry $\mathit{ch}[2]$ and $\mathit{cnt}$. Insert $0$ once so the always
+present seed is in the tree. For each query, branch on the operator: \code{+ x} calls
+\code{add(x, +1)}; \code{- x} calls \code{add(x, -1)}; \code{? x} calls \code{query(x)}. Both add and
+\code{query} descend bits $30$ down to $0$. \code{add} creates a missing child only when adding, then
+updates $\mathit{cnt}$ by the delta -- so a value's whole path stays as long as some live value still
+traverses it. \code{query} prefers the child with the opposite bit of $x$, but takes it only when that
+child is present and $\mathit{cnt}>0$; when it sets that answer bit it accumulates $2^b$. Because the seed
+$0$ keeps the top of every shared path at count $\ge 1$, the descent never fails. Print the accumulated
+value per \code{?}.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The counted trie answers each query as if it scanned the live multiset]
+\emph{Counts track liveness.} By induction on operations, a node's $\mathit{cnt}$ equals the number of live
+values $y \in A$ whose bit path passes through it: adding $y$ increments exactly that path, erasing $y$
+decrements it, and no other operation touches it. Hence ``child exists with $\mathit{cnt}>0$'' holds if and
+only if at least one live value continues into that child. \emph{The greedy is valid over live values.} At
+bit $b$, weight $2^b$ exceeds every lower bit combined, so any maximum must first fix bit $b$ to $1$ when
+some \emph{live} $y$ differs from $x$ there -- i.e.\ when the opposite-bit child has $\mathit{cnt}>0$, which
+is the code's exact test; otherwise no live $y$ differs and the same-bit child is forced. This is
+\lemref{c08-greedybit} restricted to the populated branches, and the count equivalence shows ``populated''
+means ``there is a live value here.'' \emph{Termination.} The seed $0$ guarantees a live value exists at
+every level along the descent, so the walk reaches depth $0$ and returns a real $x \oplus y$ with $y \in A$,
+attaining the maximum.
+\end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Vasiliy's Multiset -- a counted dynamic binary trie: add/erase bump cnt, query runs the complement greedy gated on cnt>0 (Codeforces 706D; O(q log C))}, label={lst:c08-summit}]
+#include <bits/stdc++.h>
+using namespace std;
+struct Node { Node* ch[2]{}; int cnt = 0; };
+static const int MAXB = 30;                 // values up to 1e9 -> bits 30..0
+Node* root;
+void add(int x, int delta) {                // delta = +1 (insert) or -1 (erase)
+    Node* u = root;
+    for (int b = MAXB; b >= 0; --b) {
+        int k = (x >> b) & 1;
+        if (!u->ch[k]) u->ch[k] = new Node();     // only created while adding
+        u = u->ch[k];
+        u->cnt += delta;                          // liveness of this branch
+    }
+}
+int query(int x) {                          // max x XOR y over the live multiset
+    Node* u = root; int best = 0;
+    for (int b = MAXB; b >= 0 && u; --b) {
+        int k = (x >> b) & 1, want = k ^ 1;       // prefer the OPPOSITE bit
+        if (u->ch[want] && u->ch[want]->cnt > 0) { best |= (1 << b); u = u->ch[want]; }
+        else u = u->ch[k];                         // same-bit branch (non-empty: the seed 0 is here)
+    }
+    return best;
+}
+int main() {
+    int q;
+    if (scanf("%d", &q) != 1) return 0;
+    root = new Node();
+    add(0, 1);                              // the multiset always contains 0
+    while (q--) {
+        char op; int x;
+        scanf(" %c %d", &op, &x);
+        if (op == '+')      add(x, 1);
+        else if (op == '-') add(x, -1);
+        else                printf("%d\n", query(x));
+    }
+    return 0;
+}
+\end{lstlisting}
+\begin{notebox}[The one field that makes erase work]
+Nothing here deletes a node. \textbf{Liveness is a number, not a pointer}: $\mathit{cnt}$ answers ``is this
+branch still occupied?'' in $\bigO{1}$, so the query walk of LC 421 carries over \emph{verbatim} with a
+stronger availability test. That is the same realisation that lets a \emph{persistent} trie share nodes
+across versions (\defref{c08-persistent}) -- mutable counts for one changing version, frozen counts for many.
+\end{notebox}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample -- seed 0; after +8 +9 +11 +6 +1 the set is 0,8,9,11,6,1]
+\textbf{?3} ($3=00011$), bits shown $4$ down to $0$:
+\begin{itemize}[nosep,leftmargin=1.3em]
+  \item bit$4$ of $3$ is $0$; want a $1$-child -- none of $\{0,8,9,11,6,1\}$ reaches bit$4$ (all $<16$), so
+        same-bit, answer bit$4=0$.
+  \item bit$3$ of $3$ is $0$; want $1$: $\{8,9,11\}$ have it, $\mathit{cnt}>0$, so take it, answer
+        $+8$. Candidates now $\{8,9,11\}$.
+  \item bit$2$ of $3$ is $0$; want $1$: none of $\{8,9,11\}$ sets bit$2$ -- forced same-bit, answer bit$2=0$.
+  \item bit$1$ of $3$ is $1$; want $0$: $8,9$ have bit$1=0$ ($\mathit{cnt}>0$), so take $0$, answer $+2$.
+        Candidates $\{8,9\}$.
+  \item bit$0$ of $3$ is $1$; want $0$: $8$ has bit$0=0$, take it, answer $+1$. Lands on $y=8$.
+\end{itemize}
+Result $8+2+1 = 11 = 3 \oplus 8$ \checkmark\ (largest of $3\oplus\{0,8,9,11,6,1\}=\{3,11,10,8,5,2\}$).
+\smallskip\\
+Then \textbf{- 8} decrements $8$'s path (its nodes keep $\mathit{cnt}\ge0$; $8$ is now invisible). \textbf{?3}
+over $\{0,9,11,6,1\}$: the top shared path is untouched, but the $8$ branch now reads $\mathit{cnt}=0$ so
+the greedy takes $9$ instead -- $3\oplus 9 = 10$ \checkmark. \textbf{?8} gives $8\oplus 6 = 14$ \checkmark;
+\textbf{?11} gives $11\oplus 6 = 13$ \checkmark. Output \texttt{11 10 14 13} matches the official answer.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time: every operation is one $\bigO{B}$ descent with $B=31$, so $\bigO{(q{+}1)B} = \bigO{q\cdot 31}$ total
+-- $\bigO{L}$ per key with $L=B$ once more (\thmref{c08-searchcost}). Memory: at most one node per distinct
+bit-prefix over all inserted values, $\bigO{(\text{adds})\cdot B}$ worst case; with $q\le 2\cdot10^{5}$ that
+is a few million small $2$-pointer nodes -- well inside limits, and the reason a binary trie is
+$\bigO{2}$ children per node rather than the $\bigO{26}$ that loomed over \defref{c08-nodelayout}.
+\end{complexitybox}
+
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Erase the only copy of $x$ & path stays intact, every node's $\mathit{cnt}$ drops; a later query skips the
+  $0$-count branch automatically \\
+$x$ added twice, erased once & counts are multiplicity-aware, so the value is still live ($\mathit{cnt}\ge1$) \\
+Empty complement branch & the \code{cnt>0} test fails, so the greedy falls to the same-bit child -- never a
+  null deref thanks to the seed $0$ \\
+Query before any \code{+} & only $0$ is present; $\max x \oplus 0 = x$, and the walk returns exactly that \\
+Values up to $10^{9}$ & bit$30$ is the top used ($10^{9} < 2^{30}$ margin under $2^{31}$); \code{int} keeps
+  the XOR value since it is still $<2^{30}$ \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Ways to break it: (i) \emph{deleting nodes} on \code{-} -- you erase shared prefixes and corrupt other
+values; erase is a $\mathit{cnt}$ decrement, nothing more. (ii) testing only ``\code{child != null}''
+without ``\code{\&\& cnt>0}'' in the query -- a fully erased branch still has a pointer and gets chosen,
+wrongly inflating the answer. (iii) forgetting the initial \code{add(0,1)} seed, so a query on a set that
+had only $0$ walks into a null. (iv) reading bits LSB-first -- the greedy needs the most-significant bit
+(\lemref{c08-greedybit}). \emph{Variants:} replace the count with a persistent root per time index and you
+have answered ``max XOR over the first $t$ insertions'' (\probref{c08-persistxor}); bound the set by a value
+threshold instead of time and it is the same version-rooted walk with a binary search.
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{Erasure in a trie is arithmetic, not surgery.} A $\mathit{cnt}$ per node turns add/erase into
+        $\pm 1$ along a bit path and keeps the query greedy identical -- the branch is available exactly when
+        its count is positive (\probref{c08-summit}).
+  \item \emph{One greedy, three settings.} LC 421 (static), LC 1707 (versions), CF 706D (live counts) are the
+        same complement walk differing only in ``is this child available?'' -- \probref{c08-maxxor},
+        \probref{c08-persistxor}, \probref{c08-summit}.
+  \item \emph{The mutable trie and the persistent trie share their soul.} Counts gate the present; frozen
+        per-version counts gate the past (\defref{c08-persistent}). Knowing one means you have written the
+        other.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Generalises}: any ``maintain a set under insert/delete and answer a bit-prefix extremum''
+        (k-th smallest XOR, nearest value by Hamming-style objective) is this counted trie with a different
+        leaf payload (\secref{c08-binary}).
+  \item \textbf{The count was the whole difficulty}: a static trie already gave the greedy; promoting it to a
+        dynamic one needs only the $\mathit{cnt}$ gate, which is why this is $\lv{5}$ for the composition, not
+        the parts (\probref{c08-summit}).
+  \item \textbf{Alternatives}: an ordered \code{set}/\code{multiset} of values cannot maximise an XOR in
+        $\bigO{\log n}$ (the optimal partner is not a predecessor/successor -- the same failure \chref{c05}
+        has here); an array-indexed trie (children as integer indices) is a cache-friendlier rewrite of the
+        pointer version, identical complexity (\coderef{c08-maxxor}).
+\end{itemize}
+\end{hardeningbox}
+
+\chaptersection{Tool Kit Inventory}
+
+The machine assembled so far -- cumulative through Chapter~11. Chapters~1--10's rows are carried forward;
+Chapter~11's rows are appended. Pointers only, never prose.
+
+\begin{center}
+\small
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{}p{0.24\linewidth} l c p{0.27\linewidth} p{0.16\linewidth}@{}}
+\toprule
+\textbf{Tool} & \textbf{Since} & \textbf{Level} & \textbf{Trigger phrase} & \textbf{Where} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapters 1--10 -- carried forward} \\
+Three-slot DFS (pre/in/post) & 3.1 & \lv1 & a node sequence in a named order & \coderef{c03-dfs} \\
+Array-as-tree / pointer layouts & 4.1 & \lv2 & ``how the tree lives in memory'' & \chref{c04} \\
+BST search / insert / delete descent & 7.1 & \lv2 & ``a BST is given -- does/where does $x$ go?'' & \coderef{c05-search} \\
+Balanced-tree split/merge engine & 8.3 & \lv4 & ``a dynamic ordered set that stays short'' & \coderef{c06-split} \\
+Heap in an array; sift up / down & 10.1 & \lv2 & ``the extreme of a set you edit'' & \defref{c07-heap} \\
+Size-$k$ top-$k$ heap & 10.2 & \lv3 & ``$k$ largest / most frequent of $n$'' & \coderef{c07-topk-soln} \\
+Cartesian stack build (read-only heap order) & 9.1 & \lv3 & ``the extreme of a \emph{static} array'' & \coderef{c26-stackbuild} \\
+\midrule
+\multicolumn{5}{l}{\itshape Chapter 11 -- new this chapter} \\
+String trie; $\bigO{L}$ membership/prefix & 8.1 & \lv2 & ``does any key start with this prefix?'' & \coderef{c08-trie-ops} \\
+Node layout: array / map / edge list & 8.1 & \lv3 & ``memory blew up on a plain trie?'' & \defref{c08-nodelayout} \\
+Wildcard as an all-children DFS & 8.2 & \lv4 & ``\code{.} / \code{?} matches any letter'' & \defref{c08-wildcard} \\
+Prefix aggregation (subtree count) & 8.2 & \lv3 & ``how many keys under a prefix?'' & \defref{c08-prefixcount} \\
+Top-$k$ autocomplete (trie + size-$k$ heap) & 8.2 & \lv4 & ``$k$ best completions of a prefix'' & \coderef{c08-autocomplete} \\
+Grid/text pruned by a dictionary trie & 8.2 & \lv4 & ``many words hidden in one board'' & \coderef{c08-wordsearch-soln} \\
+Binary trie, MSB-first bit path & 8.3 & \lv4 & ``the alphabet is bits'' & \defref{c08-bittrie} \\
+Opposite-bit greedy (max XOR) & 8.3 & \lv4 & ``maximise $x \oplus y$'' & \lemref{c08-greedybit}, \coderef{c08-maxxor} \\
+Radix / compressed trie & 8.4 & \lv4 & ``collapse single-child chains'' & \defref{c08-radix} \\
+Persistent trie, path-copy, version roots & 8.4 & \lv5 & ``max XOR over a version / a value bound'' & \defref{c08-persistent}, \coderef{c08-persist} \\
+Counted dynamic multiset (Summit) & Summit & \lv5 & ``add / erase / query max-XOR, live'' & \coderef{c08-summit} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\chaptersection{Related Topics}
+
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \chref{c05} -- backward: a trie is the \emph{anti-BST}. A BST orders siblings by key and answers
+        rank/predecessor; a trie orders nothing between siblings -- it only shares prefixes -- so it wins on
+        $\bigO{L}$ prefix work and loses on ordered queries you hand back to \chref{c05} (\thmref{c08-searchcost}).
+  \item \chref{c03}, \chref{c04} -- backward: the subtree DFS behind wildcard, prefix counting and
+        autocomplete (\defref{c08-wildcard}, \defref{c08-prefixcount}) is exactly the traversal machinery of
+        Chapters~3--4, and the pointer/array node layouts of Chapter~4 are the \code{child[26]} vs \code{map}
+        choice of \defref{c08-nodelayout}.
+  \item \chref{c07} -- backward: top-$k$ autocomplete and any ``$k$ best completions'' hold a size-$k$ heap
+        over a trie subtree (\coderef{c08-autocomplete}); the heap is Chapter~10's tool, cited not re-taught.
+  \item \chref{c26} -- backward: Chapter~9 read a heap order \emph{off} a static array; here the binary trie
+        reads a bit order off a key. Both are ``structure over a fixed representation,'' neither keeps a live
+        extreme -- that contrast is why the XOR greedy needs a trie and the window-max needed a deque.
+  \item \chref{c13}, \chref{c14} -- forward: the segment tree and Fenwick engines answer range-count and
+        k-th-by-value questions under edits on a compressed value domain; the decision flowchart hands any
+        \emph{ordered}/range problem to them, since a trie counts prefixes, not values.
+  \item \chref{c19} -- forward: the persistent binary trie of \secref{c08-variants} is one instance; the
+        general merge-sort / persistent-structure machinery (full persistence with edits) lives in
+        Chapter~21 (\defref{c08-persistent} is the read-only special case).
+\end{itemize}
+
+\begin{lastword}[Last Word -- Chapter 11]
+\emph{``Chapter 10 kept an extreme alive while a set changed by value; this chapter keeps a \emph{prefix}
+alive by reading the key itself, one symbol per level.''}
+
+\medskip
+A trie makes the boldest trade in the tree zoo: it gives up every ordering \emph{between} siblings and puts
+all the information on the \emph{edges}. From that choice the chapter is a corollary -- lookups cost
+$\bigO{L}$ and never mention $N$ (\thmref{c08-searchcost}); prefix questions become subtree walks with a
+per-node count (\defref{c08-prefixcount}); wildcards branch over children (\defref{c08-wildcard}); a whole
+dictionary prunes a grid DFS (\probref{c08-wordsearch}). Swap letters for bits and the same walk, greedied
+from the top toward the complement, settles every XOR extremum (\lemref{c08-greedybit}); collapse chains to
+compress it (\defref{c08-radix}); clone paths to persist it (\defref{c08-persistent}); and put a count on
+every node to make it a live multiset (\probref{c08-summit}).
+
+\medskip
+Carry three reflexes forward:
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item \emph{If the objective is a prefix or an XOR, the length of the key -- not the number of keys -- is
+        the working dimension.} $\bigO{L}$ search, $\bigO{B}$ bit greedy; reach for a trie when you see
+        ``autocomplete'', ``how many with prefix'', ``maximise $\oplus$'' (\secref{c08-triebasics},
+        \secref{c08-binary}).
+  \item \emph{Liveness and history are the same count in two moods.} Erase is $\mathit{cnt}\mathrel{-}=1$,
+        persistence is $\mathit{cnt}$ frozen per version; once you see that, LC 421, LC 1707 and CF 706D are
+        one program (\probref{c08-maxxor}, \probref{c08-persistxor}, \probref{c08-summit}).
+  \item \emph{Pay in nodes, and say what buys them.} A trie costs $\bigO{\sum|s|}$ nodes; justify them with
+        prefix order the hash map lacks, or shrink them with a \code{map}/radix layout
+        (\defref{c08-nodelayout}, \defref{c08-radix}).
+\end{enumerate}
+
+\medskip
+And three habits, drilled until boring: write the read/write walk once and let the caller decide the meaning;
+build a binary trie MSB-first and prefer the complement whenever the branch is populated; and when a set
+must forget or remember values, reach for a per-node \emph{count} before reaching for surgery on the nodes
+themselves (\coderef{c08-kit}).
+
+\medskip
+\textbf{Next:} \chref{c09} turns the camera back onto \emph{the tree as a shape} rather than a key index.
+Chapters~10 and 11 both spent structure on \emph{ordering} -- a heap on value, a trie on symbol. Height,
+diameter and centroid ask instead what the tree's \emph{geometry} owes you: how deep it reaches, how far
+apart two nodes are, and which node splits it into balanced halves. The walk down a trie becomes a walk
+\emph{over} a tree, and the subtree aggregation you just learned (\defref{c08-prefixcount}) reappears as the
+workhorse of every centroid and diameter computation.
+\end{lastword}

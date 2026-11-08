@@ -1,397 +1,655 @@
 % !TEX root = ../../tree_notes.tex
 % =====================================================================
-%  3.4  Rebuilding and Serialising Trees            sec:c03-rebuild
-%  Exports: thm:c03-prein-unique  def:c03-serialize  def:c03-euler
-%           prop:c03-euler-interval
-%           fig:c03-ambig  lst:c03-build-tmpl  lst:c03-105  lst:c03-106
-%           lst:c03-ser  lst:c03-deser
-%           prob:c03-build-prein  prob:c03-build-inpost  prob:c03-serialize
+%  3.4  Rebuilding and Serialising                       sec:c03-rebuild
+%  Exports: def:c03-reconstruct  def:c03-serialize  thm:c03-pair-uniqueness
+%           cor:c03-serialize-bijection  lst:c03-build  ex:c03-build-run
+%           prob:c03-build-in-post  prob:c03-dup-subtrees
 % =====================================================================
-\section{Rebuilding and Serialising Trees}\label{sec:c03-rebuild}
+\section{Rebuilding and Serialising}\label{sec:c03-rebuild}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Which order starts with the root, and which puts the root at a fixed split
+        position? (\thmref{c03-root-position})
+  \item On $R$, state the preorder and the inorder. (\secref{c03-dfs}, \figref{c03-running})
+  \item Why does inorder of a \emph{general} binary tree not come out sorted, and where
+        do we exploit that caveat here? (Trap 3, \secref{c03-dfs})
+\end{enumerate}
+\end{previouslybox}
 
 \begin{topicintro}
-Now we run traversal backwards: given the \emph{lists} this chapter produces, can you
-recover the \emph{tree}? This is the question behind LeetCode 105/106/889 and behind every
-``store a tree in a file / send it over a network'' problem (serialise/deserialise, LC 297).
-The whole theory rests on one observation you already proved -- \propref{c03-root-position}
--- used with a bit of care about which pairs of orders carry enough information.
-
-\textbf{Prerequisites.} \secref{c03-dfs}, especially \propref{c03-root-position} and the
-lists of \exref{c03-three-orders}.
+Everything so far mapped \emph{tree $\to$ sequence}. This section runs the arrow
+backwards, and its close cousin, \emph{tree $\leftrightarrow$ string}. Given two traversal
+orders we rebuild the unique tree (\term{reconstruction}); given a tree we flatten it to a
+token string and parse it back (\term{serialisation}). Both hinge on one asymmetry from
+\thmref{c03-root-position}: the root is free-standing in preorder/postorder but is a
+\emph{splitter} in inorder -- and it is exactly inorder that removes ambiguity. These are
+the deepest tools of the chapter, and they power the hardest interview tree questions
+(construction, persistence, subtree hashing, and this chapter's Summit, LC 297).
+\textbf{Prerequisites.} \secref{c03-dfs} (all three orders and \thmref{c03-root-position});
+maps for index lookup.
 
 \textbf{After this section you can}
 \begin{itemize}[nosep]
-  \item rebuild a tree from preorder $+$ inorder with a full hand trace;
-  \item prove why one inorder-free pair (pre $+$ post) is \emph{not} enough;
-  \item serialise and deserialise a tree with null markers, by hand and in code;
-  \item number a DFS walk's entry/exit times ($\tin/\tout$) and read subtree facts off them.
+  \item reconstruct the unique binary tree from inorder $+$ (pre- or post-order);       \hfill\lv{4}
+  \item explain precisely why preorder $+$ postorder is ambiguous;                      \hfill\lv{4}
+  \item serialise a tree to a string and parse it back, and use a canonical serialisation
+        to detect duplicate subtrees;                                                   \hfill\lv{5}
 \end{itemize}
 \end{topicintro}
 
-\subsection{What Each Order Does and Does Not Tell You}
+\begin{recognitionbox}[Pattern card -- rebuild from orders / serialise]
+\reckey{``construct the tree given its X and Y traversals'', ``serialise / deserialise a
+binary tree'', ``encode and decode'', ``find all duplicate subtrees'' -- the tree must be
+\emph{recovered} from, or \emph{round-tripped} through, a linear form.}
+\recuse{
+  \item two order-sequences are handed to you and the \emph{structure} must be rebuilt;
+  \item the tree must be stored / transmitted as a string and later parsed (\chref{c06}
+        reuses this as flat storage);
+  \item subtree \emph{identity} is decided by comparing a canonical string (hashing).
+}
+\recnotuse{
+  \item you only need to \emph{emit} an order -- \secref{c03-dfs}, no reconstruction;
+  \item the answer is per-row -- \secref{c03-bfs};
+  \item the tree is a BST and values must stay ordered -- construction there leans on the
+        BST invariant, \chref{c05} (LC 449 is the BST specialisation).
+}
+One-line test: \emph{is the tree itself the output (or must a string describe it exactly)?
+If yes, reconstruction/serialisation.}
+\end{recognitionbox}
 
-Recall \propref{c03-root-position}: preorder starts at the root, postorder ends at it, and
-\emph{inorder splits} the remaining nodes into ``all of the left'' and ``all of the
-right''. That split property is the missing coordinate:
+\subsection{Intuition}
 
-\begin{itemize}[nosep]
-  \item \textbf{pre} alone: root first, then two unknown-length blocks glued together --
-        you cannot see where the left block ends;
-  \item \textbf{post} alone: same problem in mirror image;
-  \item \textbf{in} alone: left block, root, right block -- but you don't know which node
-        is the root;
-  \item \textbf{pre $+$ in}: \emph{pre hands you the root; in splits around it.} Every
-        reconstruction step is just these two facts. (Same for post $+$ in.)
-\end{itemize}
-
-\begin{theorem}{Preorder $+$ inorder determines the tree}{c03-prein-unique}
-Let all node values be distinct. No two different binary trees have the same preorder list
-\emph{and} the same inorder list. Moreover the tree is reconstructible from the two lists
-by the recursive rule: \emph{the first preorder value is the root; the position of that
-value inside the inorder list splits inorder into left-subtree nodes and right-subtree
-nodes; the same-sized preorder chunks carry the subproblems.}
-\end{theorem}
-\begin{proofbox}
-Constructibility is induction on $n$: the rule identifies the root $v$, the size
-$s=\card{L}$ of the left subtree (from the inorder split), the preorder prefix
-$\text{pre}[1..s]$ of the left subtree and the rest for the right. Both chunks are smaller
-trees with distinct values, so by induction each is uniquely rebuildable -- and $v$ with
-its two rebuilt subtrees is one tree. Uniqueness: \emph{any} tree with these lists must
-have root $\text{pre}[0]$ (first visited in preorder) and its inorder forces every node
-before $v$ into the left subtree; restricting the lists to each side repeats the argument.
-Two distinct trees would need distinct left or right subtrees, contradicting induction.
-\end{proofbox}
-
-\begin{warningbox}[Two orders \emph{without} inorder cannot split]
-Preorder keeps every subtree contiguous but never tells you \emph{where the boundary}
-is; without the inorder split the shape is ambiguous whenever a node has exactly one
-child. The minimal example:
-\end{warningbox}
+Take $R$'s two orders. Preorder \emph{begins} at the root ($1$); inorder \emph{places} the
+root between its two subtrees. Combine them and the whole tree falls out in one stroke:
+read the root from preorder, locate it in inorder, and inorder's left part \emph{is} the
+left subtree while its right part \emph{is} the right subtree -- recurse.
 
 \begin{figure}[H]
 \centering
-\begin{forest} bintree [1 [2] ] \end{forest}
-\qquad\qquad
-\begin{forest} bintree [1 [,phantom] [2] ] \end{forest}
-\caption{Two \emph{different} trees -- root $1$ with a left child $2$ versus with a right
-child $2$ -- whose preorder is $1,2$ and whose postorder is $2,1$ in both cases. Pre $+$
-post agree but the trees differ: exactly one-child nodes are where the ambiguity lives.
-This is why LeetCode 889 (construct from pre $+$ post) asks for \emph{any} valid tree.}\label{fig:c03-ambig}
+\begin{tikzpicture}[diagram, font=\small]
+  \node[annot, anchor=west] at (-6.6,0.6) {$\mathit{pre}=1,2,4,5,3,6$};
+  \node[annot, anchor=west] at (-6.6,-0.1) {$\mathit{in}=4,2,5,\mathbf{1},3,6$};
+  \node[annot, text=accentorange, anchor=west] at (-6.6,-0.9)
+    {root $=1$ splits inorder into};
+  \node[annot, text=primaryblue, anchor=east] at (-2.6,-1.6) {\{4,2,5\} left};
+  \node[annot, text=deepblue, anchor=west] at (-1.9,-1.6) {right \{3,6\}};
+  \draw[<->, primaryblue] (-6.3,-0.35) -- (-4.9,-1.35);
+  \draw[<->, deepblue]  (-0.6,-0.35) -- (-1.3,-1.35);
+\end{tikzpicture}
+\caption{Reconstruction pivot: preorder names the root ($1$); inorder then splits into the
+left subtree's inorder ($4,2,5$, size $3$) and right subtree's inorder ($3,6$). The left
+size tells us the next $3$ preorder tokens ($2,4,5$) belong to the left subtree and the
+rest to the right -- recurse on both.}\label{fig:c03-rebuild}
 \end{figure}
 
-\subsection{Rebuilding by Hand}
+Why is \emph{inorder} indispensable? Without a splitter, a lone child is unattributable.
+Preorder and postorder \emph{both} agree on $1,2$ / $2,1$ whether $2$ is the left or the
+right child of $1$ -- so (pre, post) cannot tell a one-child node's side:
 
-\begin{tracebox}[Rebuild the running tree from pre $=$ [1,2,4,5,3,6], in $=$ [4,2,5,1,3,6]]
-Write each region as ``pre$=$\{..\} $\mid$ in$=$\{..\}''. Every line applies exactly the two
-facts of \thmref{c03-prein-unique}: take pre's first value, find it in in, split.
-\begin{center}\ttfamily\footnotesize
-\begin{tabular}{@{}c l l@{}}
-1 & root $=$ pre[0] $= 1$; in: $1$ at index 3 & left $=\{4,2,5\}$, right $=\{3,6\}$\\
-2 & left child: pre next $=[2,4,5]$, in $=[4,2,5]$ & root $2$; in split $\{4\}\mid\{5\}$\\
-3 & $2$'s left: pre $=[4]$, in $=[4]$ & leaf $4$\\
-4 & $2$'s right: pre $=[5]$, in $=[5]$ & leaf $5$\\
-5 & right child: pre $=[3,6]$, in $=[3,6]$ & root $3$; in split $\varnothing\mid\{6\}$\\
-6 & $3$'s left $=\varnothing$; right: pre $=[6]$ & leaf $6$ as \textbf{right} child\\
-\end{tabular}
-\end{center}
-Line~6 rebuilds precisely the odd shape of \figref{c03-runner} -- $3$ with \emph{no} left
-child -- because the inorder region $[3,6]$ puts nothing before $3$. An empty region means
-an empty (\nil) child; that base case is half the algorithm.
-\end{tracebox}
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, scale=0.75, transform shape]
+  \node[troot] (a) at (0,0) {$1$};
+  \node[tleaf] (b) at (-1,-1.3) {$2$};
+  \draw[tedge] (a) -- (b);
+  \node[annot, anchor=north] at (0,0.55) {left child};
+  \node[troot] (c) at (4,0) {$1$};
+  \node[tleaf] (d) at (5,-1.3) {$2$};
+  \draw[tedge] (c) -- (d);
+  \node[annot, anchor=north] at (4,0.55) {right child};
+  \node[annot] at (2,-0.65) {both give\\$\mathit{pre}=1,2$\\$\mathit{post}=2,1$};
+\end{tikzpicture}
+\caption{The (preorder, postorder) ambiguity: two genuinely different trees share both
+orders. Only a node with \emph{exactly one} child is ambiguous; if every node has $0$ or
+$2$ children the pair does determine the tree. Inorder resolves the general case.}\label{fig:c03-ambig}
+\end{figure}
 
-The only expensive step per node is ``find the root inside in''. Preprocess positions once
-into a hash map (\code{value $\to$ index in in}) and every node costs $\bigO{1}$ -- without
-the map you get $\bigO{n^2}$ on skewed trees, the standard TLE of first attempts.
+\subsection{Definitions and Notation}
 
-\begin{lstlisting}[caption={Rebuild skeleton: index-by-hash, split, recurse on four ranges}, label={lst:c03-build-tmpl}]
-unordered_map<int,int> pos;   // pos[value] = index inside inorder
+\begin{definition}{Reconstruction from a traversal pair}{c03-reconstruct}
+Given the inorder and one of \{preorder, postorder\} of a tree with \emph{distinct}
+values, \term{reconstruction} recovers the unique binary tree: the second order supplies
+the root, the inorder supplies the left/right split (and split sizes), and each half is
+reconstructed recursively.
+\end{definition}
 
-TreeNode* build(vector<int>& pre, int pl, int pr,      // preorder range
-                vector<int>& in,  int il, int ir) {    // inorder range
-    if (pl > pr) return nullptr;                  // empty region = nil child
-    TreeNode* r = new TreeNode(pre[pl]);          // pre[pl] is the root here
-    int k = pos[r->val];                          // root inside inorder
-    int leftSize = k - il;                        // everything before k is left
-    r->left  = build(pre, pl+1,          pl+leftSize, in, il,    k-1);
-    r->right = build(pre, pl+leftSize+1, pr,          in, k+1,   ir);
-    return r;
+\begin{definition}{Serialisation (with null markers)}{c03-serialize}
+A \term{serialisation} is the string obtained by a preorder walk that emits each real node's
+value \emph{and} emits a distinguished marker (say \code{\#}) for every \nil{} child, with
+an explicit separator. \term{Deserialisation} parses that string by the same preorder,
+consuming tokens left-to-right and rebuilding children recursively.
+\end{definition}
+
+\begin{vsbox}{Two orders vs a marked string}{reconstruct (pre+in)}{serialise (pre+\#)}
+{ Uniqueness needs a \emph{splitter} (inorder) plus distinct values; you are given two
+arrays and must interleave them. }
+{ Uniqueness is bought instead by writing \emph{null markers} so the missing-child
+ambiguity of \figref{c03-ambig} is made explicit -- one walk, self-delimiting. }
+\end{vsbox}
+
+\subsection{Properties}
+
+\begin{theorem}{Pair Uniqueness}{c03-pair-uniqueness}
+For binary trees with distinct node values: (preorder, inorder) determines the tree
+uniquely, as does (postorder, inorder). (Preorder, postorder) does \emph{not} in general.
+\end{theorem}
+\begin{proofbox}
+\emph{(pre, in):} by \thmref{c03-root-position} the first preorder token is the root $r$;
+in inorder $r$ occurs at index $k$, so $\mathit{in}[0..k{-}1]$ is exactly
+$\mathit{in}(L)$ and $\mathit{in}[k{+}1..]$ is $\mathit{in}(R)$, with $\size(L)=k$. Since
+values are distinct, $r$'s inorder position is unique, so the split is forced; the first
+$k$ preorder tokens (after $r$) are $\mathit{pre}(L)$ and the remainder $\mathit{pre}(R)$.
+Recurse; the base case (empty inorder range) yields $\nil$. Every choice is forced, giving
+uniqueness; the same argument reads the root from the \emph{last} postorder token for
+(post, in). \emph{(pre, post) fails:} \figref{c03-ambig} exhibits two distinct trees with
+identical preorder and postorder -- the side of a single child is unrecoverable because
+neither order separates $L$ from $R$ without inorder.
+\end{proofbox}
+
+\begin{corollary}{Serialisation is a Bijection}{c03-serialize-bijection}
+For distinct (or arbitrary) values, the null-marked preorder of \defref{c03-serialize} is
+$\mathit{tree} \leftrightarrow \mathit{string}$ one-to-one: distinct trees yield distinct
+strings, and every well-formed string parses to exactly one tree.
+\end{corollary}
+\begin{proofbox}
+The marked preorder is precisely the tree read in preorder with \code{\#} recording each
+missing child, so it reconstructs by the deterministic recursive parse (read a token: if
+\code{\#} return $\nil$, else make a node and parse its left then right). Because the walk
+visits the structure in fixed order, two different trees differ at the first node whose
+child-presence or value differs, hence differ in the string -- injective; the parse inverts
+it, giving the bijection. (Note the contrast with \thmref{c03-pair-uniqueness}: markers
+resolve the one-child ambiguity that (pre,post) cannot.)
+\end{proofbox}
+
+\subsection{Reconstruction Algorithm}
+
+\begin{lstlisting}[caption={Rebuild from inorder + postorder (indices, with a value$\to$inorder-index map)}, label={lst:c03-build}]
+TreeNode* build(const vector<int>& in, const vector<int>& post,
+                int il, int ir, int pl, int pr, unordered_map<int,int>& inIdx) {
+    if (pl > pr) return nullptr;                   // empty range -> empty subtree
+    int rootVal = post[pr];                        // postorder's last is the root
+    TreeNode* root = new TreeNode(rootVal);
+    int k = inIdx[rootVal];                        // root's inorder position
+    int leftSize = k - il;                         // # nodes in the left subtree
+    root->left  = build(in, post, il, k - 1, pl, pl + leftSize - 1, inIdx);
+    root->right = build(in, post, k + 1, ir, pl + leftSize, pr - 1, inIdx);
+    return root;
 }
+// caller: fill inIdx[x]=index, then build(in, post, 0, n-1, 0, n-1, inIdx)
 \end{lstlisting}
-
-\subsection{Solved Problems}
-
-\solvedproblem{c03-build-prein}{Construct Binary Tree from Preorder and Inorder Traversal}{LeetCode 105}
-  {https://leetcode.com/problems/construct-binary-tree-from-preorder-and-inorder-traversal/}{LC Medium}
-  {divide and conquer, hash index, range arithmetic}
-
-\begin{problemstatement}[Build from Pre $+$ In]
-Given two integer arrays \code{preorder} and \code{inorder} (distinct values, produced by
-one binary tree), rebuild and return that tree.
-\end{problemstatement}
-
-\solstep{Understanding the Problem}
-\thmref{c03-prein-unique} says the answer exists and is unique;
-\coderef{c03-build-tmpl} is the constructive proof. Running example: the trace above
-rebuilds \figref{c03-runner} itself.
-
-\solstep{Key Observations}
-\begin{observation}
-You never need to \emph{slice} the arrays -- carry four indices; the preorder boundary of
-the left chunk is derived as \code{pl + leftSize}, never read from inorder directly.
-\end{observation}
-\begin{observation}
-Distinct values are essential: the hash map \code{value $\to$ index} is meaningless with
-duplicates, which is why the problem guarantees them.
-\end{observation}
-
-\solstep{Implementation}
-\begin{lstlisting}[caption={Construct tree from preorder + inorder (LeetCode 105)}, label={lst:c03-105}]
-class Solution {
-    unordered_map<int,int> pos;
-    TreeNode* build(vector<int>& pre, int pl, int pr, vector<int>& in, int il, int ir) {
-        if (pl > pr) return nullptr;
-        TreeNode* r = new TreeNode(pre[pl]);
-        int k = pos[r->val], ls = k - il;
-        r->left  = build(pre, pl+1, pl+ls, in, il, k-1);
-        r->right = build(pre, pl+ls+1, pr, in, k+1, ir);
-        return r;
-    }
-public:
-    TreeNode* buildTree(vector<int>& pre, vector<int>& in) {
-        for (int i = 0; i < (int)in.size(); i++) pos[in[i]] = i;
-        return build(pre, 0, (int)pre.size()-1, in, 0, (int)in.size()-1);
-    }
-};
-\end{lstlisting}
-
-\solstep{Complexity}
 \begin{complexitybox}
-Time $\bigO{n}$: one hash lookup and $\bigO{1}$ work per node. Memory $\bigO{n}$ for the
-map plus $\bigO{h}$ recursion. Drop the map and re-scan inorder each call: $\bigO{n^2}$
-worst case (a chain), which LeetCode's larger tests punish.
+With the inorder index map, the root's split position is $\bigO{1}$, so the recurrence is
+$T(n) = 2T(n/2) + \bigO{1}$ for a balanced split $=\bigO{n}$; building the map is
+$\bigO{n}$. Without it (linear \code{find} each level) you get $\bigO{n^2}$ on a skewed
+tree -- the map is not a micro-optimisation, it is what keeps construction linear.
 \end{complexitybox}
 
-\solvedproblem{c03-build-inpost}{Construct Binary Tree from Inorder and Postorder Traversal}{LeetCode 106}
-  {https://leetcode.com/problems/construct-binary-tree-from-inorder-and-postorder-traversal/}{LC Medium}
-  {divide and conquer, mirror of LC 105}
+\subsection{Worked Example}
 
-\begin{problemstatement}[Build from In $+$ Post]
-Rebuild the tree from \code{inorder} and \code{postorder} arrays (distinct values).
+\begin{example}{Reconstructing $R$ from inorder $+$ postorder}{c03-build-run}
+With $\mathit{in}=4,2,5,1,3,6$ and $\mathit{post}=4,5,2,6,3,1$: root $=1$ (last of post),
+inorder index $3$ $\Rightarrow$ left size $3$. Left half reads $\mathit{in}[0..2]=4,2,5$,
+$\mathit{post}[0..2]=4,5,2$ giving root $2$ with left $4$, right $5$; right half
+$\mathit{in}[4..5]=3,6$, $\mathit{post}[3..4]=6,3$ giving root $3$ with \emph{left size
+$0$} and right child $6$ -- the skewed node $3$ from \figref{c03-running} is rebuilt
+correctly because inorder told us $6$ lies to $3$\textquotesingle s \emph{right}.
+\end{example}
+\begin{tracebox}[Index windows per recursive call]
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item build $[0..5]\mid[0..5]$: root $1$, $k{=}3$, leftSize$3$
+  \item left $[0..2]\mid[0..2]$: root $2$, $k{=}1$, leftSize$1$
+    \begin{itemize}[nosep,leftmargin=1.6em]
+      \item $[0..0]\mid[0..0]$ root $4$; $[2..2]\mid[2..2]$ root $5$
+    \end{itemize}
+  \item right $[4..5]\mid[3..4]$: root $3$, $k{=}4$, leftSize$0$ $\Rightarrow$ left
+        \nil, right $[5..5]\mid[3..3]$ root $6$
+\end{itemize}
+\end{tracebox}
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{pre + in} instead of post + in: identical, but take the root from
+        \emph{front} of preorder. (LC 105 -- the mirror of \probref{c03-build-in-post}.) \hfill\lv{4}
+  \item \textbf{pre + post}: only yields \emph{a} valid tree, not the unique one; build
+        left greedily. (LC 889, \secref{c03-rebuild} practice.)        \hfill\lv{3}
+  \item \textbf{Serialise the whole tree}: null-marked preorder \emph{is} a
+        deserialisable code -- the Summit, LC 297 (chapter end).        \hfill\lv{5}
+  \item \textbf{Subtree fingerprint}: a canonical serialisation identifies a subtree; count
+        them to find duplicates (\probref{c03-dup-subtrees}).          \hfill\lv{5}
+\end{itemize}
+
+\subsection{Common Pitfalls}\label{sec:c03-rebuild-pitfalls}
+
+\begin{warningbox}[Trap 1 -- linear search for the root split]
+Calling \code{find(in.begin(), in.end(), rootVal)} at every recursion re-scans the inorder
+array, giving $\bigO{n^2}$ and TLE on skewed inputs. Precompute an
+\code{unordered\_map<int,int>} value $\to$ index once (\coderef{c03-build}).
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: $\bigO{n}$ split-search per node}, language=C++, basicstyle=\ttfamily\small]
+int k = find(in.begin()+il, in.begin()+ir+1, rootVal) - in.begin();  // O(n) each
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: one-time index map, $\bigO{1}$ split}, language=C++, basicstyle=\ttfamily\small]
+// precompute: for (i) inIdx[in[i]] = i;
+int k = inIdx[rootVal];                                              // O(1)
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- serialising without null markers]
+\code{"1,2"} as preorder is ambiguous (is $2$ left or right of $1$? -- \figref{c03-ambig}).
+Emit a marker for every \nil{} child so the string is self-delimiting and deserialises to
+exactly one tree.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: bare preorder -- cannot decode one-child nodes}, language=C++, basicstyle=\ttfamily\small]
+void ser(TreeNode* t, string& s){ if(!t) return; s+=to_string(t->val)+",";
+    ser(t->left,s); ser(t->right,s); }         // nulls invisible
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: mark the nulls}, language=C++, basicstyle=\ttfamily\small]
+void ser(TreeNode* t, string& s){ if(!t){ s+="#,"; return; }   // emit marker
+    s+=to_string(t->val)+","; ser(t->left,s); ser(t->right,s); }
+\end{lstlisting}
+
+\begin{warningbox}[Trap 3 -- no separator between values]
+For values $\ge 10$, \code{"123"} could be $12,3$ or $1,23$; even for single digits a
+negative sign needs care. Always join tokens with a delimiter (\code{,}) and split on it
+when parsing.
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: delimited tokens survive multi-digit and negative values}, language=C++, basicstyle=\ttfamily\small]
+// "-3,#,#," parses unambiguously to a single left node holding -3
+\end{lstlisting}
+
+
+\subsection{Problem Lab}
+
+Both are \lv4--\lv5 constructions: the first rebuilds a tree from a traversal pair (the
+\coderef{c03-build} template, fully deployed), the second turns \emph{subtrees} into
+strings to detect repeats -- a serialisation used as an identity test, and a warm-up for
+this chapter's Summit (LC 297).
+
+\solvedproblem{c03-build-in-post}{Construct Binary Tree from Inorder and Postorder Traversal}{LeetCode 106}
+  {https://leetcode.com/problems/construct-binary-tree-from-inorder-and-postorder-traversal/}{LC Medium L4}
+  {divide-and-conquer reconstruction, index map}
+
+\begin{problemstatement}[Inorder + Postorder $\to$ Tree]
+Given two integer arrays \code{inorder} and \code{postorder} (distinct values) that are
+the inorder and postorder traversals of the same binary tree, rebuild and return that
+tree. $n \le 3000$.
 \end{problemstatement}
 
+\begin{attemptgate}[Attempt it yourself first -- \lv{4}, 25 minutes]
+A fair attempt: the postorder's last value is the root; use it to cut the inorder array.
+\peek{which array tells you the \emph{size} of the left subtree?}
+\nudge{root's inorder index $k$ gives left size $k-il$; that size carves the postorder
+range for the left subtree. Recurse on both windows.}
+\fullhint{\coderef{c03-build}: read root from \code{post[pr]}, split via an
+\code{inIdx} map, recurse. Full build below.}
+\end{attemptgate}
+
 \solstep{Understanding the Problem}
-Mirror image: the \emph{last} postorder value is the root (\propref{c03-root-position}),
-the inorder position still splits, and now the right chunk of postorder is found counting
-\emph{back}. Same skeleton, three index expressions change.
+We must emit \emph{pointers}, not a number, so the algorithm constructs nodes and wires
+them. The information is exactly \thmref{c03-pair-uniqueness}: postorder's tail names the
+root; inorder's index of that root fixes the left/right boundary and the left subtree's
+\emph{size}, which in turn carves the postorder ranges.
 
 \solstep{Key Observations}
 \begin{observation}
-Root $=$ \code{post[pr]}; left size $=$ \code{k - il}; the postorder ranges are
-$[\text{pl},\ \text{pl}+\text{ls}-1]$ for the left subtree and
-$[\text{pl}+\text{ls},\ \text{pr}-1]$ for the right -- the final $-1$ removes the root
-that sits at the end.
+Root $= \mathit{postorder}$'s \emph{last} element of the current window (\defref{c03-three-orders}).
 \end{observation}
 \begin{observation}
-Off-by-one here is guaranteed unless you trace one small case fully -- do the trace of the
-subsection above with $1$ moved from the front of pre to the back of post.
+If the root sits at inorder index $k$, the left subtree has $k-il$ nodes; those occupy the
+next $k-il$ slots of postorder, and the right subtree's postorder window ends one before
+the root.
+\end{observation}
+\begin{observation}
+Distinct values make the value $\to$ inorder-index map a function (one index per value),
+which is what turns the split into an $\bigO{1}$ lookup.
 \end{observation}
 
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Recurse using \code{find()} to locate the root in inorder.}{Correct output, but
+$\bigO{n}$ per node $\Rightarrow$ $\bigO{n^2}$ overall; at $n=3000$ on a skewed tree this
+is $\sim 9\cdot10^{6}$ with heavy constants and TLE risk.}
+\deadend{Rebuild from postorder alone, guessing splits.}{Postorder without a splitter does
+not say where the left subtree ends -- \thmref{c03-pair-uniqueness} says inorder is needed.}
+\aha{Precompute \code{inIdx}; then each call is $\bigO{1}$ work plus two recursive calls
+on disjoint windows -- total $\bigO{n}$.}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.235\linewidth} p{0.28\linewidth} l c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} recursion + \code{find} & linear split search & $O(n^2)$ & \tle \\
+2 & \lv{4} recursion + index map & $\bigO{1}$ split & $O(n)$ & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Solution}
+\coderef{c03-build} verbatim: build \code{inIdx}, then \code{build(in,post,0,n-1,0,n-1)}.
+Each call takes root from the postorder window's tail, reads its inorder index, and
+recurses on the two child windows computed from the left size.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By \thmref{c03-pair-uniqueness} there is exactly one tree with the given (inorder,
+postorder). We show \coderef{c03-build} returns it, by induction on the window length.
+Base (empty window, $\mathit{pl}>\mathit{pr}$): return $\nil$, correct for the empty
+subtree. Step: the last postorder token is the subtree root (def of postorder); its inorder
+index $k$ splits inorder into the left/right subtree traversals (def of inorder,
+\thmref{c03-root-position}); $\mathit{leftSize}=k-il$ equals the left subtree's node count,
+so the postorder window $[\mathit{pl},\mathit{pl}+\mathit{leftSize}-1]$ is exactly the left
+subtree's postorder and $[\mathit{pl}+\mathit{leftSize},\mathit{pr}-1]$ the right's. By the
+hypothesis both recursive calls rebuild those subtrees correctly; wiring them under the new
+root yields the unique tree.
+\end{proofbox}
+
 \solstep{Implementation}
-\begin{lstlisting}[caption={Construct tree from inorder + postorder (LeetCode 106) -- compare ranges with \coderef{c03-105}}, label={lst:c03-106}]
+\begin{lstlisting}[caption={Construct from Inorder + Postorder (LeetCode 106)}, label={lst:c03-build-in-post}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
 class Solution {
-    unordered_map<int,int> pos;
-    TreeNode* build(vector<int>& post, int pl, int pr, vector<int>& in, int il, int ir) {
+    unordered_map<int,int> inIdx;
+    TreeNode* build(const vector<int>& in, const vector<int>& post,
+                    int il, int ir, int pl, int pr) {
         if (pl > pr) return nullptr;
-        TreeNode* r = new TreeNode(post[pr]);        // LAST post value = root
-        int k = pos[r->val], ls = k - il;
-        r->left  = build(post, pl,       pl+ls-1, in, il, k-1);
-        r->right = build(post, pl+ls,    pr-1,    in, k+1, ir);
-        return r;
+        int rootVal = post[pr];
+        TreeNode* root = new TreeNode(rootVal);
+        int k = inIdx[rootVal];
+        int leftSize = k - il;
+        root->left  = build(in, post, il, k - 1, pl, pl + leftSize - 1);
+        root->right = build(in, post, k + 1, ir, pl + leftSize, pr - 1);
+        return root;
     }
 public:
     TreeNode* buildTree(vector<int>& in, vector<int>& post) {
-        for (int i = 0; i < (int)in.size(); i++) pos[in[i]] = i;
-        return build(post, 0, (int)post.size()-1, in, 0, (int)in.size()-1);
+        for (int i = 0; i < (int)in.size(); ++i) inIdx[in[i]] = i;
+        return build(in, post, 0, (int)in.size() - 1, 0, (int)post.size() - 1);
     }
 };
 \end{lstlisting}
 
-\solstep{Complexity}
-\begin{complexitybox}
-$\bigO{n}$ time and memory exactly as in \probref{c03-build-prein}. Pre $+$ in and post
-$+$ in both work; \emph{any pair without in} fails by the ambiguity of \figref{c03-ambig}.
-\end{complexitybox}
-
-\subsection{Serialising and Deserialising}
-
-\begin{definition}{Serialise / deserialise}{c03-serialize}
-A \term{serialisation} of a tree is a flat encoding (string or array) from which a
-\term{deserialisation} routine can rebuild \emph{exactly} the original tree -- shape and
-values. Formally: $\text{deserialize}(\text{serialize}(T)) = T$ for every $T$.
-\end{definition}
-
-\begin{insightbox}[Why one order plus markers is enough]
-Two orders were needed for reconstruction only because a \emph{bare} preorder hides where
-subtrees end. Put an explicit marker (\code{\#}) into the preorder every time the walk
-hits a \nil, and the boundary information is in the string itself: reading it left to
-right, ``value $\to$ make a node; \code{\#} $\to$ stop this branch'' is unambiguous. This
-is the one place the $n+1$ nulls of \thmref{c02-null-links} become \emph{data}.
-\end{insightbox}
-
-\begin{tracebox}[Encode the running tree (preorder with \code{\#})]
-Walk preorder; write the value on arrival, write \code{\#} at every null child:
-\begin{center}\ttfamily
-1\ \ 2\ \ 4\ \ \#\ \ \#\ \ 5\ \ \#\ \ \#\ \ 3\ \ \#\ \ 6\ \ \#\ \ \#
-\end{center}
-Reading back the same string: $1$; its left $2$; $2$'s left $4$ closed by two \code{\#};
-$2$'s right $5$ closed by two \code{\#}; $1$'s right $3$; \code{\#} says $3$ has no left
-child; $6$ then two \code{\#}. Rebuilds \figref{c03-runner} uniquely -- 6 values $+ 7$
-markers $= 13$ tokens $= 2n+1$, the same count as \propref{c03-once-each} (nice surprise:
-serialising and traversing are the same walk seen differently).
+\solstep{Trace}
+\begin{tracebox}[On the running example $R$]
+Given $\mathit{in}=[4,2,5,1,3,6]$, $\mathit{post}=[4,5,2,6,3,1]$.
+Root $1$ ($k{=}3$, leftSize $3$). Left window $\to$ root $2$ (leftSize $1$) with children
+$4,5$; right window $\to$ root $3$ (leftSize $0$, so left $\nil$) with right child $6$.
+Rebuilt tree $=R$ (\figref{c03-running}). \ac.
 \end{tracebox}
 
-\begin{lstlisting}[caption={Serialise: preorder with null markers, appended to one stream}, label={lst:c03-ser}]
-void ser(TreeNode* r, ostringstream& out) {
-    if (!r) { out << "# "; return; }        // the n+1 nulls, made explicit
-    out << r->val << " ";
-    ser(r->left, out);
-    ser(r->right, out);
-}
-string serialize(TreeNode* root) {
-    ostringstream out; ser(root, out); return out.str();
-}
-\end{lstlisting}
+\solstep{Complexity}
+\begin{complexitybox}
+Time $\bigO{n}$ (each node built with $\bigO{1}$ split work); space $\bigO{n}$ for the map
+plus $\bigO{h}$ recursion stack ($\bigO{n}$ skewed). Building the map is $\bigO{n}$.
+\end{complexitybox}
 
-\begin{lstlisting}[caption={Deserialise: read tokens left to right; the recursion shape IS the string shape}, label={lst:c03-deser}]
-TreeNode* des(istringstream& in) {
-    string tok; in >> tok;
-    if (tok == "#") return nullptr;               // consumed null: branch ends
-    TreeNode* r = new TreeNode(stoi(tok));
-    r->left  = des(in);                            // same preorder order = same tokens
-    r->right = des(in);
-    return r;
-}
-TreeNode* deserialize(string data) { istringstream in(data); return des(in); }
-\end{lstlisting}
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Single node & one call, both windows size $1$, leaf returned \\
+Skewed (all-left) tree & leftSize $=$ full range each time; still $\bigO{n}$ with the map,
+  but $\bigO{n^2}$ without it (Trap 1) \\
+Empty tree & initial \code{pl>pr} guard returns $\nil$ \\
+\bottomrule
+\end{tabular}\end{center}
 
-\solvedproblem{c03-serialize}{Serialize and Deserialize Binary Tree}{LeetCode 297}
-  {https://leetcode.com/problems/serialize-and-deserialize-binary-tree/}{LC Hard}
-  {preorder with null markers, stream I/O}
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Off-by-one on the postorder right window (\code{pr-1}, excluding the root) is the most
+common construction bug -- draw the four indices on paper for a 3-node tree before coding.
+Variant LC 105 (preorder+inorder) is the mirror: root from the \emph{front} of preorder,
+windows shifted accordingly. LC 889 (preorder+postorder) must \emph{choose} a side because
+the answer is non-unique (\figref{c03-ambig}).
+\end{warningbox}
 
-\begin{problemstatement}[Serialize and Deserialize]
-Design an encoding of a binary tree into a string and a decoding back. The only contract:
-\code{decode(encode(T))} must equal $T$ for every tree -- any format you like.
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item Reconstruction is divide-and-conquer where the \emph{pivot} is the root's inorder
+        position -- the splitter is the whole algorithm.
+  \item Turning a per-node search into a one-time index map is the difference between
+        $\bigO{n^2}$ and $\bigO{n}$; amortise the lookup, not the recursion.
+  \item ``Return a \code{TreeNode*} and wire children'' is the constructive form of
+        structural recursion from \secref{c02-transform}.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Deep recursion}: $n=3000$ skewed is $\bigO{n}$ stack depth -- fine for LC,
+        but a contest may push $n$ higher; an iterative build with an explicit stack of
+        windows mirrors \secref{c03-iterative}'s discipline.
+  \item \textbf{Duplicate values}: \thmref{c03-pair-uniqueness} needs distinct values; if
+        values repeat the map is no longer a function and the tree is not unique -- the
+        problem promises distinctness, and you should say so when asked.
+  \item \textbf{Memory}: every \code{new TreeNode} leaks if the harness reuses the
+        \code{Solution}; real systems free or pool -- know the ownership model.
+\end{itemize}
+\end{hardeningbox}
+
+\solvedproblem{c03-dup-subtrees}{Find Duplicate Subtrees}{LeetCode 652}
+  {https://leetcode.com/problems/find-duplicate-subtrees/}{LC Medium L5}
+  {canonical serialisation, hash-map counting, postorder}
+
+\begin{problemstatement}[Find Duplicate Subtrees]
+Return the roots of all duplicate subtrees (two subtrees are duplicate if they have the
+same structure \emph{and} same node values). For each repeated shape you may return any
+one of its roots. Values in $[-10^{5}, 10^{5}]$, $n \le 5000$.
 \end{problemstatement}
 
+\begin{attemptgate}[Attempt it yourself first -- \lv{5}, give yourself 30 minutes]
+A fair attempt: find a way to say ``these two subtrees are the same'' cheaply.
+\peek{what single string could \emph{fingerprint} a subtree's shape and values?}
+\nudge{a null-marked serialisation of each subtree is a canonical name; count names in a
+map; emit the root the second time a name repeats.}
+\fullhint{Postorder: build \code{key = val + "," + leftKey + "," + rightKey} (with \code{"\#"}
+for null), \code{++freq[key]}, and push the root when the count hits exactly $2$. Full build
+below.}
+\end{attemptgate}
+
 \solstep{Understanding the Problem}
-``Any format'' is the trap: BFS with holes, or pre $+$ in pairs, also work, but preorder
-with markers is shortest ($2n+1$ tokens), needs one pass each way, and matches code you
-have \emph{already written above} -- \coderef{c03-ser} and \coderef{c03-deser} are the
-complete solution.
+Subtree equality is \emph{structure} $+$ \emph{values}, which is exactly what a null-marked
+serialisation encodes (\defref{c03-serialize}, \corref{c03-serialize-bijection}): two
+subtrees are identical iff their marked serialisations are identical strings. So the task
+becomes ``count equal strings and report the ones seen twice or more.''
 
 \solstep{Key Observations}
 \begin{observation}
-Deserialisation must read \emph{in exactly the order serialisation wrote}. Preorder writes
-node-left-right, so the decoder takes one token for the node, then recursively one region
-for the left, one for the right -- the \code{istringstream} cursor advances itself.
+A postorder assembly -- children's keys first, then the node's -- lets each node's key be
+built once from its children in $\bigO{1}$ concatenations.
 \end{observation}
 \begin{observation}
-Without the \code{\#} markers the round trip \emph{cannot} work: two different trees share
-a bare preorder (that exact fact is \figref{c03-ambig}). Markers are the missing second
-order, smuggled into the first one.
+Null markers are mandatory: without them, a left-only and a right-only single-child node
+share a key (\figref{c03-ambig} again), merging distinct shapes.
+\end{observation}
+\begin{observation}
+Pushing the root only when \code{++freq[key] == 2} reports each repeated shape exactly once.
 \end{observation}
 
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Compare every pair of subtrees structurally.}{There are $\bigO{n}$ subtrees and
+pairwise comparison is $\bigO{n^2}$ pairs, each $\bigO{n}$ to check -- hopeless.}
+\deadend{Fingerprint by the multiset of node values only.}{Two different \emph{shapes} can
+share a value multiset (e.g.\ a chain vs a fork on $\{1,2,3\}$); values without structure
+over-merge. The key must encode \emph{shape}, which null-marked serialisation does.}
+\aha{Use the null-marked preorder key computed bottom-up, hash it, and group by the hash:
+equality of keys $\Leftrightarrow$ equality of subtrees (\corref{c03-serialize-bijection}).}
+\end{thinkbox}
+
+\solstep{The Approach Ladder}
+\begin{center}\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}c p{0.225\linewidth} p{0.255\linewidth} p{0.235\linewidth} c@{}}
+\toprule
+\textbf{\#} & \textbf{Approach} & \textbf{Idea} & \textbf{Time} & \textbf{Verdict} \\
+\midrule
+1 & \lv{3} pairwise check & compare all subtree pairs & $O(n^3)$ & \tle \\
+2 & \lv{4} value-multiset key & hash values only & $O(n^2)$ & \textbf{WA} \\
+3 & \lv{5} marked-serial key & shape+value string & $O(n^2)$, $O(n)$ intern'd & \ac \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Solution}
+Postorder DFS returning the subtree's serialisation string. Maintain
+\code{unordered\_map<string,int> freq}. At each node form \code{key}; if
+\code{++freq[key]==2} add the node to the answer.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}
+By \corref{c03-serialize-bijection} the marked-preorder string is a bijection between
+subtrees and well-formed strings, so two nodes' subtrees are duplicates iff their keys are
+equal. The postorder computes each node's key from its children's keys, which equal their
+subtrees by the same fact; hence \code{freq[key]} counts subtrees isomorphic (in value and
+structure) to $\subtree(v)$. Emitting $v$ exactly when the count reaches $2$ yields one
+representative per equivalence class of size $\ge 2$ and none of size $1$ -- precisely the
+required output.
+\end{proofbox}
+
 \solstep{Implementation}
-\begin{lstlisting}[caption={LC 297 in full -- the two helpers glued into the class}, label={lst:c03-297}]
-class Codec {
+\begin{lstlisting}[caption={Find Duplicate Subtrees (LeetCode 652)}, label={lst:c03-dup-subtrees}]
+#include <bits/stdc++.h>
+using namespace std;
+
+struct TreeNode {
+    int val;
+    TreeNode *left, *right;
+    TreeNode(int x = 0) : val(x), left(nullptr), right(nullptr) {}
+};
+
+class Solution {
+    unordered_map<string,int> freq;
+    vector<TreeNode*> res;
+    string key(TreeNode* t) {
+        if (!t) return "#";                              // null marker -> shape-sensitive
+        string s = to_string(t->val) + "," + key(t->left) + "," + key(t->right);
+        if (++freq[s] == 2) res.push_back(t);            // emit each dup once
+        return s;
+    }
 public:
-    string serialize(TreeNode* root) {
-        ostringstream out; ser(root, out); return out.str();
-    }
-    TreeNode* deserialize(string data) {
-        istringstream in(data); return des(in);
-    }
-private:
-    void ser(TreeNode* r, ostringstream& out) {
-        if (!r) { out << "# "; return; }
-        out << r->val << " "; ser(r->left, out); ser(r->right, out);
-    }
-    TreeNode* des(istringstream& in) {
-        string tok; in >> tok;
-        if (tok == "#") return nullptr;
-        TreeNode* r = new TreeNode(stoi(tok));
-        r->left = des(in); r->right = des(in);
-        return r;
+    vector<TreeNode*> findDuplicateSubtrees(TreeNode* root) {
+        key(root);
+        return res;
     }
 };
 \end{lstlisting}
 
-\solstep{Complexity}
-\begin{complexitybox}
-Time $\bigO{n}$ each way; memory $\bigO{n}$ for the string, $\bigO{h}$ stack each pass.
-Values may contain any integer -- tokenise with spaces (or commas) and never split on a
-character that can occur inside a value.
-\end{complexitybox}
-
-\solstep{Pitfalls and Variants}
-\begin{warningbox}[Serialising with inorder, or without markers]
-A bare inorder of a BST is just sorted values (no shape at all); a bare preorder of a BST
-\emph{does} encode the shape (see LeetCode 449 in the practice list) -- but only for BSTs,
-because the split point can be recovered from value ranges instead of a second array.
-General trees need markers or two orders; there is no way around \figref{c03-ambig}.
-\end{warningbox}
-
-\subsection{The Euler Tour: $\tin$ and $\tout$ (Teaser)}
-
-\begin{definition}{Entry and exit times}{c03-euler}
-Number the moments of a single depth-first walk: $\tin(v)$ is the count when the walk first
-\emph{enters} $v$, and $\tout(v)$ is the count when it \emph{exits} $v$ after finishing the
-whole subtree of $v$. Every node produces exactly two events -- one entry, one exit -- so
-the walk numbers the $n$ nodes' events $1$ through $2n$.
-\end{definition}
-
-\begin{tracebox}[One DFS walk, twelve events, on the running tree]
-\footnotesize
-\begin{tabular}{@{}c l @{\qquad} c l@{}}
-\textbf{time} & \textbf{event} & \textbf{time} & \textbf{event}\\ \midrule
-1 & $\tin(1)$ & 7 & $\tout(2)$\\
-2 & $\tin(2)$ & 8 & $\tin(3)$\\
-3 & $\tin(4)$ & 9 & $\tin(6)$\\
-4 & $\tout(4)$ & 10 & $\tout(6)$\\
-5 & $\tin(5)$ & 11 & $\tout(3)$\\
-6 & $\tout(5)$ & 12 & $\tout(1)$\\
-\end{tabular}
+\solstep{Trace}
+\begin{tracebox}[On $R$ (leaves shared, internal not)]
+Leaves: \code{key(4)="4,\#,\#"}, \code{"5,\#,\#"}, \code{"6,\#,\#"} -- all first-time. Node
+$2$: \code{"2,4,\#,\#,5,\#,\#"} first time; node $3$: \code{"3,\#,6,\#,\#"} first time;
+root $1$: unique. No key reaches count $2$ on $R$ (its three leaf keys are \emph{distinct}
+because values differ), so result is empty -- correct, $R$ has no repeated subtree. If two
+leaves shared a value, say two \code{7}s, their \code{"7,\#,\#"} key would hit $2$ once and
+be reported.
 \end{tracebox}
 
-\begin{proposition}{Subtrees are intervals}{c03-euler-interval}
-For any nodes $u,v$: $v$ is in the subtree of $u$ if and only if
-$\tin(u) \le \tin(v) \le \tout(v) \le \tout(u)$. And
-$\size(v) = (\tout(v) - \tin(v) + 1)/2$.
-\end{proposition}
-\begin{proofbox}
-From the moment the walk enters $u$ until the moment it exits $u$, it is inside $u$ and
-never outside: it descends through each child edge, finishes that whole subtree, and only
-then moves on -- so exactly the nodes of $\subtree(u)$ are entered (and exited) inside the
-span $[\tin(u), \tout(u)]$, giving the iff. For the count: a subtree of size $s$ produces
-$2s$ events, so its span is $2s-1$ time units plus the endpoint:
-$\tout(v)-\tin(v)+1 = 2\size(v)$.
-\end{proofbox}
+\solstep{Complexity}
+\begin{complexitybox}
+Naive string keys: node at depth $d$ builds an $\bigO{\text{subtree size}}$ string, total
+$\bigO{n^2}$ time and $\bigO{n^2}$ hash storage worst case (a comb tree). Interning each
+unique key to a small integer id (see hardening) makes the \emph{distinct} subtree count
+the work bound, typically $\bigO{n}$ average. Postorder DFS stack $\bigO{h}$.
+\end{complexitybox}
 
-Check on node $2$: $[2,7]$, size $(7-2+1)/2 = 3$ -- nodes $\{2,4,5\}$ \checkmark. Node $1$:
-$[1,12]$, size $6$ \checkmark. This one trick turns trees into intervals:
-\usedin{Chapters 11 and 16}{ancestor tests in $\bigO{1}$ and subtree queries -- the interval picture above is what makes them fast}
+\solstep{Verification and Edge Cases}
+\begin{center}\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}p{0.30\linewidth} p{0.62\linewidth}@{}}
+\toprule
+\textbf{Case} & \textbf{What the code does} \\
+\midrule
+Identical single-node subtrees & \code{"7,\#,\#"} repeats; reported once \\
+Whole tree repeated (root counted twice) & only the first node to reach \code{freq==2}
+  is added, never the ancestor of an already-duplicate -- LC forbids nested duplicates in
+  the answer, which the \code{==2} rule matches \\
+All-distinct values, unique shapes & empty result (as on $R$) \\
+\bottomrule
+\end{tabular}\end{center}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Dropping the null markers (\code{"\#"}) or the separators merges distinct shapes (Traps 2
+and 3 of \secref{c03-rebuild-pitfalls} in one). Emit on \code{==2} exactly, not
+\code{>=2} (which would list the same shape once per extra copy).
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways -- three things to remember]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A \emph{canonical serialisation} is a fingerprint: reduce ``are these subtrees
+        equal?'' to ``are these strings equal?'' and let a hash map do the grouping.
+  \item Shape-sensitivity requires explicit nulls -- the same lesson the (pre,post)
+        ambiguity taught us.
+  \item ``Report on the transition to count $2$'' is the generic one-representative-per-class
+        idiom; it recurs in de-duplication problems across the book.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Quadratic strings}: interning --- map each distinct key string to an
+        \code{int} id and represent a subtree by the triple \code{(val, leftId, rightId)}
+        in a \code{map<tuple,int>} --- makes each node $\bigO{1}$ expected work, total
+        $\bigO{n}$; this is the honest answer to the ``can you do better?'' follow-up.
+  \item \textbf{Adversarial depth}: a chain of $5000$ nodes is $\bigO{n}$ recursion; if the
+        judge stack is tight, convert the postorder to an explicit stack (\secref{c03-iterative}).
+  \item \textbf{Collisions}: if you hash to a fixed-width integer instead of the full
+        string, a collision silently merges classes -- prefer exact strings, or the interned
+        id, not a lossy hash, when correctness is graded.
+\end{itemize}
+\end{hardeningbox}
 
 \subsection{Practice Problems}
 
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item In reconstruction: did you exclude the root token from both child postorder
+        windows? (Off-by-one, \probref{c03-build-in-post}.)
+  \item Do you have a value $\to$ inorder-index map, or are you searching each level?
+        (Trap 1.)
+  \item Does your serialisation write a marker for \emph{every} null and a separator between
+        values? (Traps 2--3.)
+  \item For subtree hashing: would removing a null marker merge two shapes that differ only
+        in a child's side?
+\end{itemize}
+\end{stuckbox}
+
 \begin{practiceset}
-  \practice{Maximum Width of Binary Tree}{LeetCode 662}
-    {https://leetcode.com/problems/maximum-width-of-binary-tree/}{LC Medium}
-    {level order with \emph{virtual indices}: number slots heap-style (children of $i$ are $2i,2i+1$), width $=$ last index $-$ first index $+1$ per round; use \code{long long} or strip leading zeros.}
+  \practice{Construct Binary Tree from Preorder and Postorder Traversal}{LeetCode 889}
+    {https://leetcode.com/problems/construct-binary-tree-from-preorder-and-postorder-traversal/}{LC Medium L3}
+    {The pair is \emph{not} unique (\figref{c03-ambig}); LC asks for \emph{any} valid tree,
+    so when a node has one child, assign it consistently to the left and advance. Root from
+    preorder's front, split by the next preorder token's postorder index.}
   \practice{Serialize and Deserialize BST}{LeetCode 449}
-    {https://leetcode.com/problems/serialize-and-deserialize-bst/}{LC Medium}
-    {plain preorder works with NO markers on BSTs: decode by recursing with a (min,max) value window -- a preview of \chref{c05}.}
-  \practicehh{Construct Binary Tree from Preorder and Postorder Traversal}{LeetCode 889}
-    {https://leetcode.com/problems/construct-binary-tree-from-preorder-and-postorder-traversal/}{LC Medium}
-    {ambiguous in general -- but you only need \emph{some} valid tree: the next preorder value is the root of \emph{a} child subtree; find it in post to get that child's size.}
-    {attach it as left if you like; left size $=$ (index in post $-$ post start $+1$); recurse the remainder as right child.}
+    {https://leetcode.com/problems/serialize-and-deserialize-bst/}{LC Medium L4}
+    {A BST's preorder alone deserialises uniquely (no null markers needed) -- bound each
+    parse by the current $[\mathit{lo},\mathit{hi}]$ value window. Contrast with the general
+    tree needing markers; the Summit LC 297 is exactly this without the BST promise.}
 \end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 3.4 Rebuilding and serialising]
+Reconstruction needs a \emph{splitter}: (pre,in) or (post,in) give a unique tree because
+inorder's root index carves left/right; (pre,post) is ambiguous at one-child nodes. To
+round-trip a tree to a string, mark every null and separate every token -- a marked
+preorder is a bijection with the tree, and doubles as a subtree fingerprint for hashing.
+\selftest{
+  \item State \thmref{c03-pair-uniqueness}: which pairs are unique and which is not, and
+        give the one-child counterexample.
+  \item Write the reconstruction recurrence (\coderef{c03-build}) from memory and mark the
+        two window-arithmetic lines.
+  \item Why is the value $\to$ inorder-index map needed for $\bigO{n}$ time?
+  \item Give the two conditions a serialisation string must satisfy to deserialise to
+        exactly one tree.
+  \item On LC 652, why does emitting on \code{freq==2} (not \code{>=2}) give one node per
+        duplicate class?
+}
+\end{recallbox}

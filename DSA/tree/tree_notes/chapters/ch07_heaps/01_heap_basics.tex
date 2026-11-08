@@ -1,0 +1,482 @@
+% !TEX root = ../../tree_notes.tex
+% =====================================================================
+%  7.1  The Binary Heap                          sec:c07-heap
+%  Exports: def:c07-heap  lem:c07-height  def:c07-sift
+%           lst:c07-heapops  ex:c07-sift-run  (fig:c07-layout, fig:c07-heapR
+%           are defined in 00_opener.tex and reused here)
+%           prob:c07-stone  lst:c07-stone-soln   (practice: LC 703)
+% =====================================================================
+\section{The Binary Heap}\label{sec:c07-heap}
+
+\begin{previouslybox}
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A complete binary tree with $n$ nodes fills every level except possibly the last, and the last
+        from the left. Why can such a tree be stored with \emph{no pointers} at all? (its shape is fixed,
+        so position determines parent/child -- Chapter~4, \chref{c04})
+  \item On a BST the \emph{inorder} walk lists keys sorted. What single promise does a heap make instead,
+        and what does it deliberately \emph{not} promise between siblings? (parent beats children; siblings
+        unordered -- \chref{c05})
+  \item A \emph{min}-heap puts its smallest element where, relative to a \emph{max}-heap's largest? (both
+        at the root; the rule is just flipped -- the read-only cousin is Chapter~9, \chref{c26})
+  \item How many elements can sit on the bottom level of a tree of height $h$, and how tall is a tree of
+        $n$ nodes if it is as short as shape allows? (up to $2^{h}$; height $\approx\lg n$)
+\end{enumerate}
+\end{previouslybox}
+
+\begin{topicintro}
+Chapter~9 (\chref{c26}) \emph{read} a heap order straight out of a frozen array. This section starts the
+moving version: a heap you \emph{edit}. The whole data structure rests on one deliberately weak promise
+-- \textbf{the root is the extreme, and that is all}. A \term{binary heap} is a complete binary tree kept
+in a plain array and held to the \term{heap order} ``every parent $\le$ its children'' (min-heap) or the
+reverse (max-heap). Crucially there is \emph{no} left-to-right order between siblings: the array position
+$t_3$ may hold a smaller value than $t_2$ with no rule broken. That weak promise is exactly what a greedy
+or a top-$k$ question ever asks for -- ``give me the current extreme now'' -- and it is shockingly cheap
+to maintain, because the tree's shape is fixed by the array index and never needs a rotation.
+
+Two moves do everything. \term{Sift-up} plants a new leaf at the end and bubbles it toward the root while
+it beats its parent; \term{sift-down} drops the last element onto the vacated root and pushes it down
+toward the leaves while it is beaten by a child. Both walk a single root--leaf path, and the heap is
+\emph{short by shape}: its height is $\lfloor\lg n\rfloor$ (\lemref{c07-height}). So \code{push} and
+\code{pop} are each $\bigO{\log n}$, and \code{top} -- read the extreme -- is one array cell. We fix the
+layout, define the two sifts, hand-write the three operations, and spend them on LeetCode 1046, the
+purest ``extract-the-extreme-then-reinsert'' warm-up in the book.
+\textbf{Prerequisites.} Array index arithmetic; the complete-binary-tree shape previewed in Chapter~4
+(\chref{c04}). No search-tree ordering is assumed; indeed we open by contrasting the heap's ``no sibling
+order'' against the BST inorder of Chapter~7 (\chref{c05}).
+
+\textbf{After this section you can}
+\begin{itemize}[nosep]
+  \item store a heap in an array, compute parent/children from an index, and state exactly what the heap
+        order promises and what it leaves unordered; \hfill\lv{2}--\lv{3}
+  \item write sift-up and sift-down push/pop cold, and explain why each is $\bigO{\log n}$ from the height
+        bound; \hfill\lv{3}
+  \item recognise a ``repeatedly grab the extreme'' problem and reach for \code{priority\_queue} rather
+        than a sort; \hfill\lv{3}
+\end{itemize}
+\end{topicintro}
+
+\begin{recognitionbox}[Pattern card -- the extreme of a \emph{changing} set]
+\reckey{you must repeatedly read (and remove) the \emph{current} smallest or largest element of a
+multiset that you also insert into, and you never ask for the second-smallest, a predecessor, or an
+arbitrary rank -- only the one element at the top.}
+\recuse{
+  \item ``always smash the two heaviest'' / ``combine the two smallest'' -- pop the extreme, push a
+        result back, \probref{c07-stone} and \probref{c07-connect};
+  \item ``the $k$-th largest so far'' / ``keep the top $k$'' -- a size-$k$ heap, \secref{c07-build};
+  \item ``schedule by priority'', ``which task runs next'' -- pop the highest-priority item, the graph
+        chapters' Dijkstra/Prim engine (previewed, not built here).
+}
+\recnotuse{
+  \item you need \emph{any} rank, predecessor, or successor -- that is a total order, go to the BST/treap
+        of Chapters~7--8 (\chref{c05}, \chref{c06}); a heap cannot answer ``what is just below $x$?'';
+  \item the set is \emph{static} and you only want its minimum -- one scan, no structure, or the read-only
+        Cartesian tree of Chapter~9 (\chref{c26});
+  \item you need the extreme of \emph{every subarray} $[l,r]$ -- that is range-min, a sparse table or
+        segment tree (\chref{c13}, \chref{c26}).
+}
+One-line test: \emph{does the question keep asking ``who is the biggest/smallest \emph{right now}'' after
+each edit? Then a heap is the tool, and the two sifts below are all the machinery you need.}
+\end{recognitionbox}
+
+\subsection{Intuition}
+
+Lay the running array $R=(5,3,8,1,4,2,7)$ into the slots of a complete tree, numbering the slots from $1$
+(\figref{c07-layout}). Nothing about the values has been changed -- it is the same seven numbers -- but now
+each slot has a fixed address, and the address encodes the tree: slot $i$'s parent is $\lfloor i/2\rfloor$,
+its children are $2i$ and $2i+1$. No pointer is stored anywhere; the tree is \emph{implicit in the index}.
+That is the entire reason a heap is a handful of integers and one loop: the shape (complete, filled from
+the left) is forced, so the only thing you ever recompute is \emph{where a value sits}, never the
+structure itself.
+
+Now impose the heap order. Read $R$ as a min-heap and you must have each parent $\le$ its children; that
+is \emph{not} true of $R$ as written ($5$ sits above $3$ and $8$). But once we heapify it -- by the sifts
+below, and $\bigO{n}$ at build time in \secref{c07-build} -- we get the array $(1,3,2,5,4,8,7)$ shown as
+\figref{c07-heapR}. Look hard at its root: $1$, the minimum, sits at index~$1$. Look at the two children
+of the root: $3$ on the left, $2$ on the right. The \emph{left} child is \emph{bigger} than the right
+child. A BST would consider that a corruption; a heap does not care, because it makes \emph{no} promise
+across siblings. And in fact the whole right half $\{2,8,7\}$ is smaller than much of the left half, yet
+the structure is perfectly valid. ``The top is the extreme; everything below is only loosely organised''
+is the deal, and it is precisely loose enough to be an array and tight enough to answer the one question
+greedy problems ask.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[diagram, x=13mm, y=9mm, level distance=13mm, sibling distance=22mm]
+  \node[troot] (r) {$1$}
+    child { node[tnode] {$3$}
+      child { node[tleaf] {$5$} }
+      child { node[tleaf] {$4$} } }
+    child { node[tnode] (c2) {$2$}
+      child { node[tleaf] {$8$} }
+      child { node[tleaf] {$7$} } };
+  \draw[tedgehl] (r) -- (c2);
+  \node[annot, align=left, font=\scriptsize] at (-4.3,0.5)
+    {\textbf{root $=1$} is the\\ minimum of $R$\\ (\emph{the} promise)};
+  \node[annot, align=left, font=\scriptsize] at (4.2,-1.2)
+    {left child $3 >$ right child $2$\\ -- \emph{allowed}: no\\ sibling order in a heap};
+\end{tikzpicture}
+\caption*{The min-heap $(1,3,2,5,4,8,7)$, i.e.\ \figref{c07-heapR}, annotated. The highlighted root--right
+edge exists only to draw your eye to the fact that the value grows \emph{down} both subtrees ($1\le3\le5$,
+$1\le2\le8$) while the left and right branches are mutually unordered. That asymmetry is why a heap cannot
+find the \emph{second} smallest without a second pop, and why it costs so little to keep.}
+\end{figure}
+
+\subsection{Definitions and Notation}
+
+\begin{definition}{Binary heap (array representation)}{c07-heap}
+A \term{(min-)binary heap} is a complete binary tree stored in an array $h[1..n]$ satisfying the
+\term{heap-order} property: for every node $i>1$, $h[\lfloor i/2\rfloor] \le h[i]$. Equivalently, every
+parent is $\le$ each of its children. A \term{max-heap} reverses the inequality. No other ordering is
+implied: for two nodes that are not in an ancestor--descendant relation there is \emph{no} guarantee, so
+in particular \text{left}(i) and \text{right}(i) may hold values in either order.
+\end{definition}
+
+\noindent\textbf{In plain words.} It is a complete tree, so it lives in an array with parent
+$\lfloor i/2\rfloor$ and children $2i,2i+1$. It is a \emph{heap}, so each node is $\le$ (or $\ge$) its
+children -- the extreme floats to index~$1$, and \emph{nothing else} is sorted.
+
+\begin{lemma}{Height of a heap is $\lfloor\lg n\rfloor$}{c07-height}
+A heap on $n\ge 1$ elements has height $\lfloor\lg n\rfloor$ (counting edges from root to the deepest
+leaf). Hence any root-to-leaf path -- and every sift -- has length $O(\log n)$.
+\end{lemma}
+\begin{proofbox}
+A complete tree of height $h$ has its levels $0,1,\dots,h-1$ full (that is $1+2+\cdots+2^{h-1}=2^{h}-1$
+nodes) and its last level non-empty, so $2^{h}-1 < n \le 2^{h+1}-1$, i.e.\ $2^{h}\le n < 2^{h+1}$. Taking
+$\lg$ gives $h \le \lg n < h+1$, so $h=\lfloor\lg n\rfloor$. The filling-from-the-left rule is what forces
+every level but the last to be full; because a heap \emph{never rotates} -- it only adds or removes the
+last slot -- the shape is guaranteed after every edit, and so is the bound. Every sift walks at most one
+such path, hence $\bigO{\log n}$.
+\end{proofbox}
+
+\begin{definition}{Sift-up and sift-down}{c07-sift}
+\term{Sift-up}($i$) repeatedly compares $h[i]$ with its parent $\lfloor i/2\rfloor$ and swaps them while
+$i>1$ and $h[i] < h[\lfloor i/2\rfloor]$ (min-heap), restoring the heap order up the single path from a
+freshly added leaf. \term{Sift-down}($i$) repeatedly swaps $h[i]$ with its \emph{smallest} child while
+that child is $<h[i]$ (min-heap), restoring the heap order down the single path from the root. A sift is
+correct precisely because only one path's heap-order edge can be violated after a \code{push} or \code{pop}
+-- every untouched subtree stays a heap -- so fixing that one path repairs the whole structure.
+\end{definition}
+
+\begin{insightbox}
+The reason a heap is $\bigO{\log n}$ and a \emph{sorted array} is $\bigO{n}$ per insertion is the same
+reason it is not a BST: the heap refuses to sort. A sorted array must move every element to open a gap at
+the right rank; a heap only needs the extreme to be reachable at index~$1$, so it can let a value land
+anywhere in $\bigO{\log n}$ swaps along a root-to-leaf path and call it done. You are paying the minimum
+possible price for the \emph{one} guarantee the problem actually needs. When you later need richer order,
+you graduate to the ordered trees of Chapters~7--8 (\chref{c05}, \chref{c06}).
+\end{insightbox}
+
+\subsection{The Algorithm: Two Sifts, Three Operations}
+
+Everything below is a $\bigO{\log n}$ walk down or up \emph{one} path of the implicit array tree. We keep
+$h$ $1$-based with $h[0]$ an unused dummy so the parent/child formulas are exactly $\lfloor i/2\rfloor$ and
+$2i,2i+1$ -- matching \defref{c07-heap} and every trace in this chapter.
+
+\begin{lstlisting}[caption={A hand-written min-heap: \code{push}, \code{pop}, \code{top} on an implicit array}, label={lst:c07-heapops}]
+vector<int> h(1, 0);                 // 1-based min-heap; h[0] is an unused dummy
+int parent(int i){ return i >> 1; }          // floor(i/2)
+int left    (int i){ return i << 1; }        // 2i
+int right   (int i){ return (i << 1) | 1; }  // 2i+1
+
+void push(int x) {                   // plant a new leaf, then sift UP
+    h.push_back(x);
+    int i = (int)h.size() - 1;
+    while (i > 1 && h[i] < h[parent(i)]) {
+        swap(h[i], h[parent(i)]);
+        i = parent(i);
+    }
+}
+int pop() {                          // remove min: refill root, sift DOWN
+    int res = h[1];
+    h[1] = h.back();                 // last element takes the root's place
+    h.pop_back();
+    int i = 1, n = (int)h.size() - 1;
+    while (true) {
+        int s = i;                   // candidate to swap with = smallest child
+        if (left(i)  <= n && h[left(i)]  < h[s]) s = left(i);
+        if (right(i) <= n && h[right(i)] < h[s]) s = right(i);
+        if (s == i) break;           // already <= both children: heap restored
+        swap(h[i], h[s]);
+        i = s;
+    }
+    return res;
+}
+int top() { return h[1]; }           // the extreme is a single array cell away
+\end{lstlisting}
+
+\begin{complexitybox}
+Time: \code{push} sifts up at most one root--leaf path, \code{pop} sifts down one path -- by
+\lemref{c07-height} each is $O(\height)=\bigO{\log n}$ swaps; \code{top} and a ``is it empty'' test are
+$\bigO{1}$; building by pushing $n$ values one at a time is $\bigO{n\log n}$ (\secref{c07-build} beats
+that to $\bigO{n}$). Memory $\bigO{n}$ for the array -- and \emph{nothing else}: no pointers, no recursion
+stack. Verdict: this is the smallest non-trivial priority queue you can write; keep it in memory so that,
+when a contest forbids the library, you type it in seconds.
+\end{complexitybox}
+
+\subsection{Worked Example}
+
+\begin{example}{Sift-up build and one sift-down pop, on $R=(5,3,8,1,4,2,7)$}{c07-sift-run}
+\emph{Sift-up (build by inserting in array order).}\\
+$5$: $[5]$. \ $3$: append, parent $5>3$ swap $\to[3,5]$. \ $8$: parent $3\le8$, stop $\to[3,5,8]$.\\
+$1$: append at index $4$; parent $h[2]{=}5>1$ swap, then parent $h[1]{=}3>1$ swap $\to[1,3,8,5]$.\\
+$4$: index $5$, parent $h[2]{=}3\le4$, stop $\to[1,3,8,5,4]$.\\
+$2$: index $6$, parent $h[3]{=}8>2$ swap $\to[1,3,2,5,4,8]$; now parent $h[1]{=}1\le2$, stop.\\
+$7$: index $7$, parent $h[3]{=}2\le7$, stop $\to[1,3,2,5,4,8,7]$.\\
+Result $(1,3,2,5,4,8,7)$ -- exactly \figref{c07-heapR}. Note index $2{=}3$ and index $3{=}2$ are
+\emph{out of order} and the heap is still valid.\\[2pt]
+\emph{Sift-down (one \code{pop}, removing the min $1$).}\\
+Move last element $7$ to root, shrink: $[7,3,2,5,4,8]$. Sift $7$ down: children $h[2]{=}3$, $h[3]{=}2$,
+smallest child $2$ at index $3$; $7>2$ swap $\to[2,3,7,5,4,8]$. Now at index $3$, its only in-range child
+is $h[6]{=}8$; $7\le8$, stop. Heap $[2,3,7,5,4,8]$, and the popped value was $1$. \checkmark\ The new root
+$2$ is the second-smallest of $R$: the heap hands you the extremes \emph{in order}, one \code{pop} at a
+time.
+\end{example}
+\begin{tracebox}[Array view of \exref{c07-sift-run}, indices 1-based]
+after build: i=1..7 hold 1 3 2 5 4 8 7 (root 1; children of 1 are 3,2; of 3 are 5,4; of 2 are 8,7).\\
+pop(): root$\leftarrow$7 (last), size 6. path: 7@1 vs min-child 2@3 -> swap; 7@3 vs child 8@6 -> stop.\\
+final: 2 3 7 5 4 8. Every parent $\le$ children: 2<=3,2; 3<=5,4; 7<=8. Sibling 3>2 -- allowed.
+\end{tracebox}
+
+
+\subsection{Variations and Twists}
+
+\begin{itemize}[nosep]
+  \item \textbf{Min vs.\ max}: flip every comparison in \coderef{c07-heapops}; a max-heap is the same code
+        with $>$ where the min-heap has $<$. Which one you want is decided by which extreme the problem
+        greedily removes. \hfill\lv{2}
+  \item \textbf{Arbitrary delete-min of a non-root}: only the \emph{root} is guaranteed extreme. To remove
+        a specific interior element you must either sift it out after swapping in the last leaf (breaking
+        the ``complete'' shape -- then repair) or mark it dead and lazily pop stale tops; the lazy trick
+        powers the Summit (\probref{c07-summit}). \hfill\lv{4}
+  \item \textbf{Decrease-key / increase-key}: a plain binary heap has \emph{no} fast handle for ``element
+        at unknown index changed'' -- you need a position map (index $\leftrightarrow$ handle), the thing
+        Dijkstra's heap variant carries. Not free here; noted for the graph chapters. \hfill\lv{4}
+  \item \textbf{k-th smallest}: popping $k$ times from a min-heap is $\bigO{k\log n}$; for $k\ll n$ a
+        size-$k$ \emph{max}-heap is better (\secref{c07-build}). The heap gives extremes \emph{in order},
+        not ranked access. \hfill\lv{3}
+\end{itemize}
+
+\subsection{Common Pitfalls}
+
+\begin{warningbox}[Trap 1 -- assuming the array is sorted]
+Reading a heap's array left-to-right gives $1,3,2,5,4,8,7$: it is \emph{not} sorted, and no slice of it is.
+The only invariant is ``parent beats children'' (\defref{c07-heap}); siblings are free. Trying to binary
+search a heap, or expecting $h[i]\le h[i+1]$, is the classic wrong-structure error. If you need sorted
+order, either pop everything ($\bigO{n\log n}$, the basis of heapsort) or use the ordered trees of
+Chapters~7--8 (\chref{c05}, \chref{c06}).
+\end{warningbox}
+\begin{lstlisting}[caption={\textcolor{warningred}{WRONG}: treating a heap array as sorted}, language=C++, basicstyle=\ttfamily\small]
+// h is a min-heap array; this is NOT a valid way to find the 2nd smallest:
+int secondSmallest = h[1];   // h[1] is the min; h[2] is a child of root, not "2nd smallest"
+\end{lstlisting}
+\begin{lstlisting}[caption={\textcolor{successgreen}{RIGHT}: the 2nd extreme comes from a second pop}, language=C++, basicstyle=\ttfamily\small]
+int mn = pop();              // remove the min; heap re-sifts, O(log n)
+int second = top();          // now the root is the 2nd smallest
+push(mn);                    // (restore if you must keep the element)
+\end{lstlisting}
+
+\begin{warningbox}[Trap 2 -- off-by-one in the index formulas]
+The layout only works when the tree is \emph{complete and filled from the left}. Use $1$-based indexing
+(parent $i/2$, children $2i,2i{+}1$) or $0$-based (parent $(i-1)/2$, children $2i{+}1,2i{+}2$) -- but do
+\emph{not} mix them. Every bug in \coderef{c07-heapops} that ``sometimes leaves a parent bigger than a
+child'' is a mixed-base index. We standardise on $1$-based throughout this chapter.
+\end{warningbox}
+
+\begin{warningbox}[Trap 3 -- sifting the wrong way after \code{pop}]
+After \code{pop} you replace the root with the \emph{last leaf} and sift \emph{down}; after \code{push} you
+append at the end and sift \emph{up}. Sifting the new root \emph{up} (it has no parent) is a no-op that
+silently leaves the heap broken at the bottom. The direction is forced by which single edge you broke:
+\code{push} breaks the edge to a new leaf (fix upward); \code{pop} breaks the root's edges (fix downward).
+\end{warningbox}
+
+\subsection{Problem Lab}
+
+The section's anchor is LeetCode 1046, \probref{c07-stone}: a pile of stones, repeatedly smash the two
+heaviest. It is the most literal possible ``extract the extreme, then maybe reinsert a residue'' loop --
+exactly the \code{pop}$\to$\code{pop}$\to$\code{push} rhythm \coderef{c07-heapops} provides -- so it is the
+first problem every reader should be able to write cold with a \code{priority\_queue}.
+
+% ---------------------------------------------------------------------------
+\solvedproblem{c07-stone}{Last Stone Weight}{LeetCode 1046}
+  {https://leetcode.com/problems/last-stone-weight/}{LC Easy · L2}
+  {max-heap greedy extraction, pop-pops-push loop, priority\_queue}
+
+\begin{problemstatement}[Last Stone Weight]
+You are given an array \texttt{stones} where \texttt{stones[i]} is the weight of the $i$-th stone. On each
+turn you choose the two \textbf{heaviest} stones with weights $x \le y$ and smash them: if $x = y$ both are
+destroyed; otherwise the stone of weight $x$ is destroyed and the stone of weight $y$ becomes weight
+$y - x$. Return the \textbf{smallest possible weight} of the last remaining stone, or $0$ if none remain.
+Constraints: $1 \le \texttt{stones.length} \le 30$ and $1 \le \texttt{stones[i]} \le 1000$.
+\end{problemstatement}
+
+\begin{attemptgate}[Attempt it yourself first -- \lv{2}, give yourself 10 minutes]
+``Always take the two heaviest'' is not a sorting problem; it is a ``pop the extreme twice'' problem. Model
+one turn directly as two \code{pop}s and at most one \code{push}.
+\peek{What container lets you get the current maximum in $\bigO{\log n}$ and then remove it?}
+\nudge{Use a \emph{max}-heap. Each turn: pop the top twice (the two heaviest $y$ and $x$), and if
+$y \ne x$ push $y-x$ back. Repeat while the heap has at least two stones.}
+\fullhint{When the loop ends either the heap is empty (answer $0$) or one stone remains (answer that
+stone, the top). For the sample $[2,7,4,1,8,1]$ the sequence of heaps is: smash $8,7\to1$; $4,2\to2$;
+$2,1\to1$; $1,1\to$ both gone; leaving a single $1$. Answer $=1$.}
+\end{attemptgate}
+
+\solstep{Understanding the Problem}
+We repeatedly act on the \emph{two largest} elements, replacing them by their (signed, non-negative)
+difference, until fewer than two stones remain. The result depends only on \emph{which} two are largest at
+each step -- a pure greedy on the current extremes. Because each smash can create a new value ($y-x$) that
+is again among the largest, the extreme must be recomputed every turn; sorting once is wrong. That is the
+signature of a priority queue: extract, mutate, reinsert, extract again.
+
+\solstep{Key Observations}
+\begin{observation}
+A turn touches only the two heaviest stones, so a \emph{max}-heap gives them in $\bigO{\log n}$ each;
+everything below the top is irrelevant to the decision, which is exactly the weak promise a heap makes
+(\defref{c07-heap}).
+\end{observation}
+\begin{observation}
+After popping $y\ge x$: push $y-x$ iff $y>x$ (if equal, both are destroyed and nothing is pushed). The
+multiset size drops by $1$ or $2$ per turn, so at most $n-1$ turns occur.
+\end{observation}
+\begin{observation}
+The process is deterministic given the multiset (the two heaviest are well-defined), so the greedy ``answer
+is whatever the loop leaves'' is automatically optimal -- there is no choice to make.
+\end{observation}
+
+\solstep{Think It Through With Me}
+\begin{thinkbox}
+\deadend{Sort the array once and always look at the last two entries.}
+{The smash produces $y-x$ which may belong anywhere in the order; you would re-sort every turn --
+$\bigO{n^2\log n}$ and easy to get wrong. Re-sorting is the tell you wanted a heap.}
+\deadend{Scan for the two maxima each turn.}
+{$\bigO{n}$ per turn, $\bigO{n^2}$ total; fine for $n\le 30$ but misses the \emph{point}: the operation is
+``extreme of a changing set,'' which is a priority queue, not a scan.}
+\aha{Pop the top twice, push their difference back when non-zero. A max-heap keeps the two heaviest on tap
+in $\bigO{\log n}$, and the loop is literally the \code{pop}$\to$\code{pop}$\to$\code{push} rhythm of
+\coderef{c07-heapops}.}
+\end{thinkbox}
+
+\solstep{Solution}
+Load all stones into a max-heap. While its size is at least $2$: pop $y$ (largest), pop $x$ (next largest);
+if $y \ne x$ push $y-x$. When the loop ends, return $0$ if the heap is empty, else return the single
+remaining top. Correctness is immediate from the greedy; the only implementation care is that the standard
+\code{priority\_queue} is a \emph{max}-heap by default, which is exactly what we want here.
+
+\solstep{Proof of Correctness}
+\begin{proofbox}[The loop returns the smallest possible last weight]
+Each turn is fully determined by the current multiset: the two heaviest stones $x\le y$ are unique (as
+\emph{values}), and the mandated outcome -- remove both, reinsert $y-x$ if $y>x$ -- matches the problem's
+smash rule exactly, so the loop reproduces the prescribed process step for step. The loop invariant ``the
+heap holds precisely the multiset of stones still standing'' holds initially and is preserved by each turn.
+The loop stops iff fewer than two stones remain, i.e.\ the terminal states the problem enumerates: empty
+(return $0$) or a single stone (return it). Since the problem's own process is deterministic, the weight
+the loop returns \emph{is} the (uniquely determined, hence smallest-possible) answer. \end{proofbox}
+
+\solstep{Implementation}
+\begin{lstlisting}[caption={Last Stone Weight -- two pops and a conditional push on a max-heap (LeetCode 1046)}, label={lst:c07-stone-soln}]
+class Solution {
+public:
+    int lastStoneWeight(vector<int>& stones) {
+        priority_queue<int> pq(stones.begin(), stones.end()); // max-heap
+        while (pq.size() > 1) {
+            int y = pq.top(); pq.pop();   // heaviest
+            int x = pq.top(); pq.pop();   // second heaviest
+            if (x != y) pq.push(y - x);   // one shattered remnant
+        }
+        return pq.empty() ? 0 : pq.top(); // last standing stone
+    }
+};
+\end{lstlisting}
+
+\solstep{Trace}
+\begin{tracebox}[Official sample: \texttt{stones = [2,7,4,1,8,1]} (the pile $S$)]
+max-heap $\{8,7,4,2,1,1\}$. Turn 1: pop $8,7$, push $1$ $\to\{4,2,1,1,1\}$. Turn 2: pop $4,2$, push $2$
+$\to\{2,1,1,1\}$. Turn 3: pop $2,1$, push $1$ $\to\{1,1,1\}$. Turn 4: pop $1,1$, equal so push nothing
+$\to\{1\}$. Size $<2$: stop. One stone remains, top $=1$. \checkmark\ matches the official output $1$.
+\end{tracebox}
+
+\solstep{Complexity}
+\begin{complexitybox}
+Time: at most $n-1$ turns; each does two \code{pop}s and at most one \code{push}, each $\bigO{\log n}$, so
+$\bigO{n\log n}$ overall (building the heap from the array is $\bigO{n}$, \secref{c07-build}). Memory
+$\bigO{n}$. With $n\le 30$ anything passes, but the $\bigO{n\log n}$ heap is the \emph{transferable}
+answer: it is the same loop that solves the Summit (\probref{c07-summit}) and every ``combine the two
+extremes'' greedy. Verdict: \ac.
+\end{complexitybox}
+
+\solstep{Pitfalls and Variants}
+\begin{warningbox}
+Three ways to fall: (i) using a \emph{min}-heap -- the problem wants the two \emph{heaviest}, so you need a
+max-heap (the default \code{priority\_queue}) or to negate every weight; (ii) forgetting the ``both
+destroyed'' case and pushing $y-x=0$, which pollutes the heap with zero-weight phantom stones (harmless to
+the answer but a size/logic trap when you port to $k$-way variants); (iii) writing the loop condition as
+\code{size >= 1} instead of $>1$, then popping the top a second time from a one-element heap -- \re.
+\emph{Variant:} \emph{Last Stone Weight II} (LC 1049) asks for the \emph{minimum} final weight over
+\emph{any} pairing and is a subset-sum DP, \emph{not} a greedy -- a sharp reminder that ``smallest possible
+over all orderings'' is a different question from ``the greedy's result.''
+\end{warningbox}
+
+\begin{insightbox}[Key takeaways]
+\begin{enumerate}[nosep, leftmargin=1.6em]
+  \item A heap is a \emph{complete tree in an array} promising only ``parent $\le$ children''
+        (\defref{c07-heap}); the root is the extreme, siblings are unordered -- this is what makes it cheap
+        and what makes it \emph{not} a sorted array or a BST.
+  \item \code{push} sifts \emph{up} a new leaf, \code{pop} refills the root with the last leaf and sifts
+        \emph{down}; both walk one path of length $\lfloor\lg n\rfloor$ (\lemref{c07-height},
+        \defref{c07-sift}), so every operation is $\bigO{\log n}$.
+  \item ``Repeatedly grab the extreme, mutate, reinsert'' -- \probref{c07-stone} -- is the shape of the
+        whole chapter; the Summit (\probref{c07-summit}) is the same loop with a subtler greedy rule.
+\end{enumerate}
+\end{insightbox}
+
+\begin{hardeningbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item \textbf{Write \coderef{c07-heapops} from memory}, then run \exref{c07-sift-run}'s insert sequence
+        $5,3,8,1,4,2,7$ through your own code and check you land on $(1,3,2,5,4,8,7)$.
+  \item \textbf{Negation trick}: make a min-heap out of a max-heap by pushing $-w$ for every weight; verify
+        \probref{c07-stone} still returns $1$.
+  \item \textbf{Read ahead}: the $\bigO{n}$ \emph{build} you skipped here (you pushed one at a time) is
+        \secref{c07-build}'s Floyd heapify -- and the size-$k$ heap for ``top $k$'' is right after it.
+\end{itemize}
+\end{hardeningbox}
+
+\subsection{Practice Problems}
+
+\begin{stuckbox}
+\begin{itemize}[nosep, leftmargin=1.4em]
+  \item Did you pick the heap flavour (max vs.\ min) to match \emph{which} extreme the greedy removes?
+  \item Did you make the loop stop when fewer than the needed number of elements remain, not when it is
+        merely empty?
+  \item When a smash/merge produces a new value, did you \emph{reinsert} it so it can be re-chosen?
+\end{itemize}
+\end{stuckbox}
+
+\begin{practiceset}
+  \practice{Kth Largest Element in a Stream}{LeetCode 703}
+    {https://leetcode.com/problems/kth-largest-element-in-a-stream/}{LC Easy · L2}
+    {Design a class that, given an initial array and a value $k$, supports \texttt{add(val)} returning the
+    current $k$-th largest element after each insertion. A \emph{min}-heap capped at size $k$ is the whole
+    idea: push each new value, and the moment the heap exceeds $k$ elements pop its root. The surviving
+    $k$ elements are exactly the $k$ largest seen so far, and the \emph{root} (their minimum) is the
+    $k$-th largest -- report \code{pq.top()} in $\bigO{1}$. Each \texttt{add} is $\bigO{\log k}$. Do
+    \emph{not} keep all elements or a max-heap of everything: you only ever need the frontier of the top
+    $k$. Build the initial heap in $\bigO{n}$ first (\secref{c07-build}) if the seed array is large. This
+    is the running ``top-$k$ frontier'' pattern used again in \probref{c07-topk}.}
+\end{practiceset}
+
+\begin{recallbox}[10-second refresher -- 7.1 The Binary Heap]
+A binary heap is a \emph{complete} tree stored in an array (parent $\lfloor i/2\rfloor$, children
+$2i,2i{+}1$) held to ``parent $\le$ children'' (\defref{c07-heap}); the root is the extreme and
+\emph{siblings are unordered} -- that weak promise is why it is only an array plus one loop. Its height is
+$\lfloor\lg n\rfloor$ (\lemref{c07-height}), so \code{push} (sift-up a new leaf) and \code{pop} (refill the
+root, sift-down) are each $\bigO{\log n}$ (\defref{c07-sift}, \coderef{c07-heapops}); the array is
+\emph{not} sorted. LeetCode 1046 (\probref{c07-stone}) is the pure extract-extreme loop, and LC 703 the
+size-$k$ frontier.
+\selftest{
+  \item What does a heap promise between a node and its children, and what does it promise between
+        siblings?
+  \item Why is a heap's array \emph{not} sorted, and how do you correctly get the second-smallest?
+  \item State \lemref{c07-height} and explain why it makes every sift $\bigO{\log n}$.
+  \item After \code{pop}, why do you sift \emph{down} and not \emph{up}?
+  \item For ``two heaviest stones'' do you want a min- or a max-heap, and why?
+}
+\end{recallbox}

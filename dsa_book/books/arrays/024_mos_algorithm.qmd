@@ -1,0 +1,2072 @@
+# Mo's Algorithm {#sec-mo}
+
+<!--
+Author-facing provenance (not rendered): Chapter 24 of the arrays volume, the sixth chapter of Part IV,
+per outline.yml ("Mo's Algorithm"). Lesson labels follow the outline "covers" order exactly:
+sec-mo-a1 (the Mo core: offline reordering, block size n/sqrt(q)), a2 (rollback Mo: append +
+snapshot/restore, no deletes), a3 (Mo with updates: a third, time pointer at block size n^{2/3}), a4
+(Hilbert order: a space-filling-curve key that shortens the walk), a5 (Mo plus a value structure:
+freq-of-freq / exact-k tables), a6 (the boundary: Mo vs segment tree vs sqrt blocks vs persistent).
+Patterns sec-mo-p1..p5 with two solved problems each: p1 CF 86D + CF 617E, p2 CF 703D + (self-authored, rollback distinct),
+p3 CF 940F + (self-authored, updates), p4 CF 1000F + (self-authored, Hilbert), p5 (self-authored, range mode) +
+(self-authored, every-value-exactly-thrice).
+Roster note (recorded shortfall): the outline is flat-array Mo only, so tree-path Mo (CF 246E, CF 375D) is
+deferred to the trees volume and cited, never solved here. Only FIVE of the ten solved slots are genuine,
+cache-verified Codeforces Mo problems (86D, 617E, 703D, 940F, 1000F); the other five are fully-stressed
+self-authored problems rather than judge links. Beyond CF 940F the offline cache holds no clean, collision-free
+flat-array Mo-with-updates problem, and Hilbert order is an ordering optimisation applicable to any Mo task, so
+those slots carry an authored problem validated by brute + stress instead of a fabricated link (the Ch. 23
+precedent authorises swapping a slot that does not fit its named technique). The two P5 judge candidates turned
+out NOT to be Mo problems once fetched: CF 1418G counts good subarrays via a two-pointer / random-hash sweep, and
+CF 985F isomorphism is a positional bijection a frequency table cannot express ("aba" vs "aab" share a multiset but
+are not isomorphic) — both are cited as cautionary practice links, never solved as Mo here. Rollback's canonical
+judge problem CF 868F likewise appears only as a cited practice link, since CF 703D exercises the pattern here.
+Storyboards use inline V.grid/V.array/V.trace/V.flow/V.bars/V.animate draws; every sample output quoted is produced
+by a cell in this file or its registry problems and asserted against a brute force; where a CF statement is
+paraphrased the constraints come from the judge page.
+-->
+
+::: {.callout-note title="Sources"}
+**CP-Algorithms**: Mo's algorithm (the block reordering, the $O(n\sqrt q)$ bound, the $B = n/\sqrt q$ block size), Mo's algorithm with updates, and "Mo's algorithm on trees" (cited here as the deferred variant) · **E-maxx / Hilbert-curve Mo ordering** (the space-filling-curve key) · **CLRS** ch. 17 (amortised bookkeeping for rollback) · **CPH** ch. 10 (the block idea shared with sqrt decomposition) · Sibling chapters: @sec-sqrt (blocks over positions and values — the *online* cousin) and @sec-seg (the fully general dynamic structure). Coverage: reordering range queries offline so a single window slides from one query to the next; the $n/\sqrt q$ block size and the $O(n\sqrt q)$ pointer-movement proof; rollback (append + snapshot/restore, no deletes); a third, time pointer for point updates at block size $n^{2/3}$; the Hilbert-order shortcut; and bolting a value structure (freq-of-freq, exact-$k$) onto the window.
+:::
+
+::: {.callout-tip title="What you will be able to do"}
+- Recognise when a batch of *offline* range queries can be answered by sliding one window instead of building a structure — the tell is "no (or few) updates, and the answer changes in $O(1)$ when you add or drop one endpoint" (@sec-mo-a1).
+- Sort queries into blocks of size $B = n/\sqrt q$ and prove the total two-pointer movement is $O(n\sqrt q)$ — and see *why* $n/\sqrt q$, not $\sqrt n$ (@sec-mo-a1, @sec-mo-p1-powerful).
+- Answer "how many distinct / equal-pairs / exact-$k$" style queries by maintaining an $O(1)$ `add`/`remove` pair over the window (@sec-mo-a1, @sec-mo-p1-xorfav).
+- Handle a structure with **append but no cheap delete** by rollback Mo: keep the right pointer monotone within each left-block, snapshot, add the $\le B$ left fringe, answer, restore (@sec-mo-a2, @sec-mo-p2-interesting).
+- Fold in point *updates* with a third (time) pointer at block size $n^{2/3}$, stashing the old value before overwriting it (@sec-mo-a3, @sec-mo-p3-ml).
+- Replace block-sorting with the **Hilbert order** and measure the shorter walk it buys (@sec-mo-a4).
+- Attach a value structure (a freq-of-freq table, an exact-$k$ counter) to the window so the answer is more than a single scalar (@sec-mo-a5, @sec-mo-p5-threeocc).
+- Triage Mo against segment tree, sqrt blocks, and persistent/Fenwick from the shape of the statement (@sec-mo-a6).
+:::
+
+```{python}
+#| include: false
+import bisect
+import heapq
+import math
+import random
+import sys
+from collections import Counter, defaultdict, deque
+from itertools import combinations
+
+sys.path[:0] = ["../shared", "../traces"]
+import dsa_viz as V
+
+random.seed(0)
+```
+
+## Why this matters {#sec-mo-why}
+
+::: {.callout-note title="In plain words"}
+Suppose someone hands you $q$ range queries, $[l_1, r_1], \dots, [l_q, r_q]$, all up front, with **no updates in between**. A segment tree or a prefix table answers each on its own. Mo's algorithm does something stranger and often faster: it **reorders the queries** so that consecutive ones overlap heavily, then keeps a single window $[\ell, r]$ and *slides* it from one query to the next — expanding or shrinking one endpoint at a time. The trick works whenever you can maintain the answer cheaply as the window grows or shrinks by one cell: an `add(i)` that lets cell $i$ into the window and a `remove(i)` that kicks it out, each $O(1)$. Sort the $q$ queries by which block of size $B$ their $\ell$ lives in, and by $r$ inside the block, and the pointers travel only $O(n\sqrt q)$ steps in total. Because you shuffled the queries to make the walk short, you must remember each query's original index and print the answers back in that order — Mo is **offline**.
+:::
+
+Chapter @sec-sqrt put $\sqrt{n}$ blocks on *positions* and *values* to serve queries and updates **online**. This chapter is its offline sibling: instead of a structure you update, you keep one moving window and move it in the cheapest order through a whole batch of questions asked ahead of time. The payoff shows up when the batch is large, there are no (or very few) updates, and — crucially — the thing you are counting can be fixed or broken in $O(1)$ when a single cell enters or leaves the range. "Distinct values", "how many equal pairs", "is there a value appearing exactly once", "the XOR of every value seen an even number of times" — all of these slide.
+
+Four statement shapes put you in Mo's territory:
+
+| Statement hint | Why Mo fits / what rules others out | Which section uses it |
+|---|---|---|
+| "$q$ range queries, **all given up front**, no updates, $n, q \le 2\cdot10^{5}$" | Offline lets you reorder; $O(1)$ add/remove gives $O(n\sqrt q)$ | @sec-mo-a1, @sec-mo-p1 |
+| answer **appends** cheaply but **deleting** is hard / costs a rebuild | Rollback Mo: right pointer never moves left, snapshot + restore the fringe | @sec-mo-a2, @sec-mo-p2 |
+| queries are interleaved with **a handful of point updates** | Add a third, *time* pointer; block size $n^{2/3}$ | @sec-mo-a3, @sec-mo-p3 |
+| the raw window gives a scalar, but you need the **mode / exact-$k$ / a witness** | Bolt a freq-of-freq or bitmask table onto the window | @sec-mo-a5, @sec-mo-p5 |
+
+::: {#fig-mo-idea}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "qs": (-4.8, 0.0, "$q$ queries\n(all known)", "muted"),
+        "sort": (-1.7, 0.0, "sort by block$(\\ell)$, then $r$", "green"),
+        "walk": (1.7, 0.0, "one window\nslides $\\ell,r$", "indigo"),
+        "ans": (4.8, 0.0, "write $\\to$ ans[id]", "pink"),
+    }, [("qs", "sort", "reorder"), ("sort", "walk", "$O(1)$ add/remove"),
+        ("walk", "ans", "restore order")], w=2.9, h=1.1)
+V.show(draw)
+```
+
+The whole chapter in one pipe: you are *given* every query, so you sort them to make the window's journey short, slide a single $[\ell,r]$ with $O(1)$ updates to the answer, and stash each result under the query's original id so the output is still in input order.
+
+:::
+
+The lessons build the toolkit in six steps:
+
+- **A1 — The Mo core.** Offline reordering, block size $B = n/\sqrt q$, and the $O(n\sqrt q)$ pointer-movement proof (@sec-mo-a1).
+- **A2 — Rollback Mo.** Append + snapshot/restore for structures with no cheap delete; monotone right pointer per left-block (@sec-mo-a2).
+- **A3 — Mo with updates.** A third (time) pointer, block size $n^{2/3}$, and stashing the old value (@sec-mo-a3).
+- **A4 — Hilbert order.** A space-filling-curve key that shortens the walk; measured against block-sort (@sec-mo-a4).
+- **A5 — Mo plus a value structure.** freq-of-freq / exact-$k$ tables living inside the window (@sec-mo-a5).
+- **A6 — Mo versus the rest.** Reading the statement to pick Mo, sqrt blocks, segment tree, or a persistent/Fenwick offline trick (@sec-mo-a6).
+
+Part B turns the toolkit into five patterns, one per outline topic: classic Mo (@sec-mo-p1), rollback Mo (@sec-mo-p2), Mo with updates (@sec-mo-p3), Hilbert order (@sec-mo-p4), and Mo plus a value structure (@sec-mo-p5).
+
+## Part A — Lessons
+
+## A1. The Mo core: sliding one window {#sec-mo-a1}
+
+::: {.callout-note title="In plain words"}
+You have $q$ queries and an array of length $n$. Write a tiny state with two operations: `add(i)` (let cell $i$ into the current window) and `remove(i)` (kick it out), each $O(1)$, plus a running answer you update inside them. Hold the current window $[\ell, r]$ (inclusive) and, for each query, walk $\ell$ and $r$ from where they were for the previous query to the new one — each step is one `add` or `remove`. If you processed queries in *input* order the pointers could thrash $O(n)$ per query ($O(nq)$ total). Sorting by $\bigl(\lfloor \ell/B \rfloor,\ r\bigr)$ fixes that: inside one $\ell$-block, $r$ only ever moves forward (at most $n$ steps across the whole block) and $\ell$ moves at most $B$ steps per query. With $n/B$ blocks that is $O(n \cdot n/B)$ for $r$ and $O(q \cdot B)$ for $\ell$; total movement $O(n^2/B + qB)$, minimised when the two terms are equal, i.e. $B = n/\sqrt q$, giving $O(n\sqrt q)$.
+:::
+
+Here is the whole engine on the friendliest question — "how many **distinct** values are in $[l, r]$?" — with coordinate compression so the frequency table is small. Read the four `while` loops as the invariant "the window currently equals the last query's range":
+
+```{python}
+def mo_distinct(a, qs, B=None):
+    """Answer 'count of distinct values in [l, r]' (0-indexed, inclusive) for every query by
+    sliding one window in block order. Returns answers in the ORIGINAL query order."""
+    n = len(a)
+    if B is None:
+        B = max(1, int(n / max(1, len(qs)) ** 0.5))    # the right default is n/sqrt(q), not sqrt(n)
+    # coordinate-compress so freq[] is small even for huge values
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    freq = [0] * len(comp)
+    distinct = 0
+    cl, cr = 0, -1                     # current window is empty: [cl, cr] with cl > cr
+
+    def add(i):
+        nonlocal distinct
+        freq[b[i]] += 1
+        if freq[b[i]] == 1:            # this value just appeared for the first time in the window
+            distinct += 1
+
+    def remove(i):
+        nonlocal distinct
+        freq[b[i]] -= 1
+        if freq[b[i]] == 0:            # this value just vanished from the window
+            distinct -= 1
+
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    ans = [0] * len(qs)
+    for i in order:
+        l, r = qs[i]
+        while cr < r:
+            cr += 1; add(cr)
+        while cl > l:
+            cl -= 1; add(cl)
+        while cl < l:
+            remove(cl); cl += 1
+        while cr > r:
+            remove(cr); cr -= 1
+        ans[i] = distinct              # stash under the query's original index
+    return ans
+
+
+a = [1, 3, 1, 2, 4, 2, 1, 3]
+qs = [(0, 3), (1, 4), (2, 7), (0, 7)]
+assert mo_distinct(a, qs) == [3, 4, 4, 4]     # {1,3,2}; {3,1,2,4}; {1,2,4,3}; {1,2,3,4}
+```
+
+The four moves look asymmetric, but they are the *only* order that keeps the window consistent — you always widen before you narrow so indices never go out from under you. Stress it against the one-line truth (`len(set(...))`) over random arrays, block sizes, and query sets:
+
+```{python}
+def distinct_brute(a, l, r):
+    return len(set(a[l:r + 1]))
+
+
+for _ in range(400):
+    n = random.randint(1, 60)
+    a = [random.randint(0, 5) for _ in range(n)]
+    q = random.randint(1, 25)
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(q)]
+    B = random.choice([1, max(1, int(n / q ** 0.5)), max(1, int(round(n ** 0.5))), n])
+    got = mo_distinct(a, qs, B)
+    exp = [distinct_brute(a, l, r) for l, r in qs]
+    assert got == exp, (a, qs, B, got, exp)
+```
+
+::: {#fig-mo-window}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+w_a = [1, 3, 1, 2, 4, 2, 1, 3]
+w_B = 3
+w_win = (1, 4)                         # the window [1, 4] of the second query
+
+def draw(ax, p):
+    V.array(ax, p, w_a, x=0.0, y=0.0,
+            regions=[(w_B, 2 * w_B, "muted", "$\\ell$-block 1")],
+            colors={i: ("green" if w_win[0] <= i <= w_win[1] else None) for i in range(len(w_a))},
+            pointers=[(w_win[0], "$\\ell$", "indigo"), (w_win[1], "$r$", "pink", "top")],
+            label="a")
+V.show(draw)
+```
+
+One query's window $[\ell, r] = [1, 4]$ shaded green over a block size $B = 3$. Cell $0$ and cells $5..7$ sit outside and are *not* counted. The $\ell$-block boundary (a faint box around cells $3, 4, 5$) is what the sort groups by; $r$ sweeps left-to-right within it.
+
+:::
+
+Now the part beginners get wrong: **the block size is $n/\sqrt q$, not $\sqrt n$**. $\sqrt n$ is only optimal in the special case $q \approx n$. Price the actual pointer movement both ways on random query sets where $q \ll n$ and watch $n/\sqrt q$ win:
+
+```{python}
+def mo_move(qs, B):
+    """Total |d_l| + |d_r| over the block-ordered walk — the real work Mo does."""
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    move, prev = 0, (0, -1)
+    for i in order:
+        l, r = qs[i]
+        move += abs(l - prev[0]) + abs(r - prev[1])
+        prev = (l, r)
+    return move
+
+
+rm = random.Random(7)
+tot_good = tot_sqrt = 0
+for _ in range(40):
+    n = rm.choice([1000, 2000, 4000])
+    q = rm.choice([100, 200, 400])                    # q much smaller than n
+    qs = [tuple(sorted((rm.randrange(n), rm.randrange(n)))) for _ in range(q)]
+    tot_good += mo_move(qs, max(1, int(n / q ** 0.5)))   # B = n/sqrt(q)
+    tot_sqrt += mo_move(qs, max(1, int(round(n ** 0.5))))  # B = sqrt(n)
+assert tot_good < tot_sqrt                            # measured: the right block size is cheaper
+```
+
+::: {.callout-important title="The Mo core, in five lines"}
+- Offline: sort queries by $\bigl(\lfloor \ell/B \rfloor, r\bigr)$ with $B = n/\sqrt q$.
+- Maintain one window $[\ell, r]$ and an answer updated by `add`/`remove` in $O(1)$.
+- For each query, walk the four pointers with the widen-then-narrow order shown above.
+- Store the result in `ans[original_index]`; print in input order.
+- Total movement $O(n^2/B + qB) = O(n\sqrt q)$. If you cannot write a $O(1)$ `remove`, you are in @sec-mo-a2 (rollback).
+:::
+
+## A2. Rollback Mo: append, snapshot, restore {#sec-mo-a2}
+
+::: {.callout-note title="In plain words"}
+Some aggregates are easy to *build up* but painful to *undo*. Adding a cell to "number of equal pairs" is $O(1)$ (just add the current frequency), but there is no clean $O(1)$ `remove` that also retracts whatever `add` did to some other structure. Rollback Mo avoids deletes entirely: within a left-block, sort the queries by $r$ and move the right pointer **only forward** (never left, never a remove). Keep the "clean" part of the window as $[\text{blockEnd}+1, R]$. For each query, snapshot, temporarily `add` the short *left fringe* $\ell \dots \text{blockEnd}$ (at most $B$ cells), read the answer, then **restore** the snapshot. Because the fringe is tiny and gets rolled back every query, and $R$ never retreats, total work is still $O(n\sqrt n)$ — with not a single delete.
+:::
+
+The canonical add-only aggregate is **the number of equal pairs in $[\ell, r]$** (this exact cost is what CF 868F minimises). `add(i)` bumps the pair count by the frequency the value already had; a stack of `(value, old_freq)` lets `rollback` pop the fringe away in $O(B)$ and reset the pair count to the snapshot.
+
+```{python}
+def rollback_pairs(a, qs, B=None):
+    """Number of unordered equal pairs in [l, r] (inclusive), answered by rollback Mo (no deletes)."""
+    n = len(a)
+    if B is None:
+        B = max(1, int(round(n ** 0.5)))
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    freq = [0] * len(comp)
+    pairs = 0
+    hist = []                          # (value, freq_before) for every add, so we can undo
+
+    def add(i):
+        nonlocal pairs
+        v = b[i]
+        hist.append((v, freq[v]))
+        pairs += freq[v]               # this new cell pairs with each earlier copy already inside
+        freq[v] += 1
+
+    def snapshot():
+        return len(hist), pairs
+
+    def rollback(snap):
+        nonlocal pairs
+        hh, pp = snap
+        while len(hist) > hh:
+            v, old = hist.pop()
+            freq[v] = old
+        pairs = pp
+
+    def pairs_in(l, r):                # brute for a query that lives wholly inside one block
+        c = Counter(a[l:r + 1])
+        return sum(x * (x - 1) // 2 for x in c.values())
+
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    ans = [0] * len(qs)
+    last_block, R = -1, -1
+    for i in order:
+        l, r = qs[i]
+        bl = l // B
+        block_end = min(n - 1, (bl + 1) * B - 1)
+        if bl != last_block:           # start a fresh left-block: drop the whole window
+            rollback((0, 0))
+            R = block_end
+            last_block = bl
+        while R < r:                   # right pointer only ever advances — never a remove
+            R += 1
+            add(R)
+        if r <= block_end:             # short query, entirely inside the block: brute it
+            ans[i] = pairs_in(l, r)
+            continue
+        snap = snapshot()
+        for j in range(block_end, l - 1, -1):    # temporarily add the left fringe, at most B cells
+            add(j)
+        ans[i] = pairs
+        rollback(snap)                          # undo the fringe; the clean [blockEnd+1, R] survives
+    return ans
+
+
+a = [1, 2, 1, 1, 3, 2, 1]
+qs = [(0, 6), (1, 3), (0, 2), (4, 6)]
+# [0,6]: 1x4 ->6 pairs, 2x2 ->1, total 7 ; [1,3]=[2,1,1] ->1 ; [0,2]=[1,2,1] ->1 ; [4,6]=[3,2,1] ->0
+assert rollback_pairs(a, qs) == [7, 1, 1, 0]
+```
+
+The `snapshot` is just a stack height and the pair total — $O(1)$ — and `rollback` only pops the at-most-$B$ fringe cells, so the amortisation is honest. Verify against a brute pair-counter:
+
+```{python}
+for _ in range(400):
+    n = random.randint(1, 60)
+    a = [random.randint(0, 4) for _ in range(n)]
+    q = random.randint(1, 25)
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(q)]
+    B = max(1, int(round(n ** 0.5)))
+    got = rollback_pairs(a, qs, B)
+    exp = [sum(x * (x - 1) // 2 for x in Counter(a[l:r + 1]).values()) for l, r in qs]
+    assert got == exp, (a, qs, got, exp)
+```
+
+::: {#fig-mo-rollback}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+rb_a = [1, 2, 1, 1, 3, 2, 1]
+rb_B = 3
+
+def draw(ax, p):
+    V.array(ax, p, rb_a, x=0.0, y=1.6,
+            regions=[(0, rb_B, "green", "left fringe $\\leq B$ (added, then rolled back)"),
+                     (rb_B, 7, "indigo", "clean tail: $R$ only grows")],
+            pointers=[(6, "$R$", "pink", "top")], label="a")
+V.show(draw)
+```
+
+Within one left-block, the window splits into a **fringe** (the $\le B$ cells from $\ell$ to the block end, added fresh and rolled back every query) and a **clean tail** $[\text{blockEnd}+1, R]$ that $R$ only ever extends rightward. No cell is ever removed from the tail — that is the whole point of rollback.
+
+:::
+
+::: {.callout-important title="When to reach for rollback instead of classic Mo"}
+Use rollback when `remove` is expensive or impossible but `add` is cheap: e.g. maintaining a sorted/DSU structure, a stack of "last occurrence" links, or a value that only combines. The cost is the same $O(n\sqrt n)$, but you must be able to **snapshot and restore both the scalar answer and the auxiliary table** (here `pairs` *and* `freq` via `hist`) — restoring only the number and leaving the table dirty is the classic rollback bug (@sec-mo-pit).
+:::
+
+
+## A3. Mo with updates: a third, time pointer {#sec-mo-a3}
+
+::: {.callout-note title="In plain words"}
+Now updates *do* appear, but few — say the input is "interleave $q$ range queries and $m$ point updates". Give the window a third pointer: besides $[\ell, r]$ you track `t`, *how many* of the updates have been applied. Moving `t` forward applies the next update and moving it back reverts the last one — for that you must have **saved the cell's old value before overwriting it**, or you cannot undo. Now a query has a triple $(\ell, r, t)$ and you sort by $\bigl(\lfloor \ell/B \rfloor, \lfloor r/B \rfloor, t\bigr)$. The right block size is no longer $n/\sqrt q$ but $B = n^{2/3}$: with three pointers the movement splits into three terms — $\ell$-jitter $O(qB)$, $r$-sweeps $O(n^2/B)$, and $t$-sweeps $O(m\,n^2/B^2)$ — and for $m \sim n$ the $\ell$ and $t$ terms balance at $B = n^{2/3}$, giving $O(n^{5/3})$.
+:::
+
+Keep "count distinct" and add updates `(pos, x)` that set `a[pos] = x`. Applying an update when `pos` is inside the window must first `remove` the old value's contribution and then `add` the new one; when `pos` is outside, you just change the stored value so it reads correctly if the window later slides over it.
+
+```{python}
+def mo_with_updates(a0, queries, updates):
+    """queries: (l, r, t) with t = number of the FIRST updates already applied (inclusive window).
+    updates: list of (pos, newval). Returns count-of-distinct in [l, r] after the first t updates."""
+    a = list(a0)
+    n = len(a)
+    comp = {}
+
+    def id_of(v):
+        comp.setdefault(v, len(comp))
+        return comp[v]
+
+    b = [id_of(v) for v in a]
+    for pos, x in updates:
+        id_of(x)                       # make sure every update value has an id too
+    freq = [0] * (len(comp) + 1)
+    distinct = 0
+    cl, cr, ct = 0, -1, 0              # window [cl, cr] with ct updates applied
+
+    def add(i):
+        nonlocal distinct
+        freq[b[i]] += 1
+        if freq[b[i]] == 1:
+            distinct += 1
+
+    def remove(i):
+        nonlocal distinct
+        freq[b[i]] -= 1
+        if freq[b[i]] == 0:
+            distinct -= 1
+
+    ups = [[pos, x, None] for pos, x in updates]   # third slot: the stashed OLD value
+
+    def apply_time():                  # move ct forward by one
+        nonlocal ct, distinct
+        pos, x = ups[ct][0], ups[ct][1]
+        ups[ct][2] = a[pos]            # STASH the old value before overwriting — else no undo
+        nid = id_of(x)
+        if cl <= pos <= cr:            # only disturb the window if the changed cell is inside it
+            freq[b[pos]] -= 1
+            if freq[b[pos]] == 0:
+                distinct -= 1
+            freq[nid] += 1
+            if freq[nid] == 1:
+                distinct += 1
+        a[pos] = x
+        b[pos] = nid
+        ct += 1
+
+    def revert_time():                 # move ct back by one, using the stash
+        nonlocal ct, distinct
+        ct -= 1
+        pos, x, old = ups[ct]
+        nid = b[pos]
+        oid = id_of(old)
+        if cl <= pos <= cr:
+            freq[nid] -= 1
+            if freq[nid] == 0:
+                distinct -= 1
+            freq[oid] += 1
+            if freq[oid] == 1:
+                distinct += 1
+        a[pos] = old
+        b[pos] = oid
+
+    B = max(1, int(round(n ** (2 / 3))))
+    order = sorted(range(len(queries)),
+                   key=lambda i: (queries[i][0] // B, queries[i][1] // B, queries[i][2]))
+    ans = [0] * len(queries)
+    for i in order:
+        l, r, t = queries[i]
+        while cr < r:
+            cr += 1; add(cr)
+        while cl > l:
+            cl -= 1; add(cl)
+        while cl < l:
+            remove(cl); cl += 1
+        while cr > r:
+            remove(cr); cr -= 1
+        while ct < t:
+            apply_time()
+        while ct > t:
+            revert_time()
+        ans[i] = distinct
+    return ans
+
+
+a0 = [1, 2, 3, 1, 1, 2, 2, 2]
+ups = [(1, 1), (3, 4)]                 # 1-indexed in the raw idea; here 0-indexed for the demo
+# queries as (l, r, t): after t updates applied
+qs = [(0, 5, 0), (0, 5, 1), (0, 7, 2)]
+# t=0: [1,2,3,1,1,2] distinct {1,2,3}=3 ; t=1 (a[1]=1): [1,1,3,1,1,2] {1,3,2}=3 ;
+# t=2 (a[3]=4): [1,1,3,4,1,2,2,2] whole [0,7] {1,3,4,2}=4
+assert mo_with_updates(a0, qs, ups) == [3, 3, 4]
+```
+
+The stash is the whole difficulty. Stress against naive replay — for each query, copy the array, apply the first `t` updates, and count distinct by hand:
+
+```{python}
+def distinct_replay(a0, updates, l, r, t):
+    arr = list(a0)
+    for k in range(t):
+        pos, x = updates[k]
+        arr[pos] = x
+    return len(set(arr[l:r + 1]))
+
+
+for _ in range(200):
+    n = random.randint(1, 40)
+    a = [random.randint(0, 5) for _ in range(n)]
+    u = random.randint(0, 15)
+    updates = [(random.randrange(n), random.randint(0, 5)) for _ in range(u)]
+    q = random.randint(1, 15)
+    queries = [(*sorted((random.randrange(n), random.randrange(n))), random.randint(0, u))
+               for _ in range(q)]
+    got = mo_with_updates(a, queries, updates)
+    exp = [distinct_replay(a, updates, l, r, t) for l, r, t in queries]
+    assert got == exp, (a, updates, queries, got, exp)
+```
+
+::: {#fig-mo-updates}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "l": (-3.2, 1.3, "move $\\ell$  $O(1)$", "green"),
+        "r": (3.2, 1.3, "move $r$  $O(1)$", "green"),
+        "t": (0.0, -0.4, "move $t$: apply/revert\none update (needs stash)", "pink"),
+        "sort": (0.0, -2.3, "sort by\n$(\\lfloor \\ell/B \\rfloor, \\lfloor r/B \\rfloor, t)$", "indigo"),
+    }, [("l", "t", ""), ("r", "t", ""), ("t", "sort", "$B = n^{2/3}$")], w=3.1, h=0.9)
+V.show(draw)
+```
+
+Three pointers, one sort key. The time axis $t$ is what distinguishes Mo-with-updates: each $t$-step is an `apply_time`/`revert_time`, and the old value *must* be stashed on the way in so the way out is possible.
+
+:::
+
+::: {.callout-important title="The $n^{2/3}$ is not a magic tweak"}
+With only $\ell, r$ the per-query $\ell$-jitter was $O(B)$ while $r$ swept $O(n)$ per block. Add $t$: the sort keys on $(\lfloor\ell/B\rfloor,\ \lfloor r/B\rfloor,\ t)$, so within each of the $(n/B)^2$ $(\ell,r)$-cells the $t$-pointer advances monotonically $O(m)$ times — a $t$-movement of $O(m\,n^2/B^2)$. The full cost is therefore three terms, $O(qB) + O(n^2/B) + O(m\,n^2/B^2)$ ($\ell$-jitter, $r$-sweeps, $t$-sweeps). With $m \sim n$ the $\ell$ and $t$ terms are equalised when $B^3 = n^2$, i.e. $B = n^{2/3}$, and both come out $O(n^{5/3})$ while the $r$ term $O(n^{4/3})$ is dominated. Using $B = \sqrt n$ instead leaves the $t$ term at $O(mn)$ — $O(n^2)$ once $m \sim n$, measurably worse — and the top CF solutions all size $B$ by $n^{2/3}$ (@sec-mo-p3-ml).
+:::
+
+## A4. Hilbert order: a shorter walk, same engine {#sec-mo-a4}
+
+::: {.callout-note title="In plain words"}
+Block-sorting is a crude way to make consecutive queries *near* each other in $(\ell, r)$ space. A **Hilbert curve** is a single line that folds the 2D grid of $(\ell, r)$ points so that points close along the curve are also close in the plane. Compute each query's position on that curve — an integer key `hilbertOrder(l, r)` — and sort by it. You lose the tidy $O(n\sqrt q)$ proof (Hilbert gives the same asymptotic bound with a better constant), but in practice the pointers travel measurably fewer steps, and the code is just a different sort key over the same `add`/`remove` window.
+:::
+
+The recursive key below is the standard one (per cp-algorithms / kactl). Feed it to any Mo engine in place of the block key:
+
+```{python}
+def hilbert_order(x, y, pow=21, rot=0):
+    """Position of (x, y) on the Hilbert curve of side 2^pow. Returns an integer sort key."""
+    if pow == 0:
+        return 0
+    hpow = 1 << (pow - 1)
+    if x < hpow:
+        seg = 0 if y < hpow else 3
+    else:
+        seg = 1 if y < hpow else 2
+    seg = (seg + rot) % 4
+    rotate_delta = [3, 0, 0, 1]
+    nx, ny = x % hpow, y % hpow
+    nrot = (rot + rotate_delta[seg]) % 4
+    sub = 1 << (2 * pow - 2)
+    ans = seg * sub
+    add = hilbert_order(nx, ny, pow - 1, nrot)
+    ans += add if seg == 1 or seg == 3 else (sub - add - 1)
+    return ans
+```
+
+The engine is A1's classic window with one line changed — the sort key. Keep the movement counter from A1 so the two orderings can be compared on the *same* random queries:
+
+```{python}
+def mo_distinct_ordered(a, qs, keyfn, count_move=False):
+    n = len(a)
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    freq = [0] * len(comp)
+    distinct = 0
+    move = 0
+    cl, cr = 0, -1
+    prev = (0, -1)
+
+    def add(i):
+        nonlocal distinct
+        freq[b[i]] += 1
+        if freq[b[i]] == 1:
+            distinct += 1
+
+    def remove(i):
+        nonlocal distinct
+        freq[b[i]] -= 1
+        if freq[b[i]] == 0:
+            distinct -= 1
+
+    order = sorted(range(len(qs)), key=lambda i: keyfn(qs[i]))
+    ans = [0] * len(qs)
+    for i in order:
+        l, r = qs[i]
+        if count_move:
+            move += abs(l - prev[0]) + abs(r - prev[1])
+        prev = (l, r)
+        while cr < r:
+            cr += 1; add(cr)
+        while cl > l:
+            cl -= 1; add(cl)
+        while cl < l:
+            remove(cl); cl += 1
+        while cr > r:
+            remove(cr); cr -= 1
+        ans[i] = distinct
+    return (ans, move) if count_move else ans
+```
+
+Correctness first — Hilbert changes the *order*, never the answer:
+
+```{python}
+def hilb_key(q):
+    return hilbert_order(q[0], q[1])
+
+
+def blk_key(q, B):
+    return (q[0] // B, q[1])
+
+
+for _ in range(200):
+    n = random.randint(1, 60)
+    a = [random.randint(0, 5) for _ in range(n)]
+    q = random.randint(1, 25)
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(q)]
+    exp = [distinct_brute(a, l, r) for l, r in qs]
+    assert mo_distinct_ordered(a, qs, hilb_key) == exp
+print("Hilbert-ordered Mo is correct")
+```
+
+Now the measured payoff. On the *same* random query sets, count the total pointer steps for block-sort versus Hilbert and confirm Hilbert is the shorter walk:
+
+```{python}
+tot_h = tot_b = 0
+rm = random.Random(12345)
+for _ in range(40):
+    n = rm.choice([800, 2000, 4000])
+    qs = [tuple(sorted((rm.randrange(n), rm.randrange(n)))) for _ in range(n)]
+    B = max(1, int(n / n ** 0.5))
+    tot_b += mo_distinct_ordered([0] * n, qs, lambda q: blk_key(q, B), count_move=True)[1]
+    tot_h += mo_distinct_ordered([0] * n, qs, hilb_key, count_move=True)[1]
+assert tot_h < tot_b                   # Hilbert moves the window strictly less here
+```
+
+::: {#fig-mo-hilbert}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+hb_block, hb_hilbert = tot_b, tot_h
+hb_best = min(hb_block, hb_hilbert)
+hb_scaled = [round(hb_block / hb_best * 100), round(hb_hilbert / hb_best * 100)]
+
+def draw(ax, p):
+    V.bars(ax, p, hb_scaled, x=0.0, y=0.0,
+           colors={0: "muted", 1: "green"}, labels=True)
+V.show(draw)
+```
+
+Total pointer movement, normalised to the smaller (Hilbert) = 100: block-sort (grey) versus Hilbert order (green) summed over the measured trials. Hilbert trades a slightly uglier key for a genuinely shorter walk — which is why top-ranked Mo solutions reach for it when $n, q$ are large.
+
+:::
+
+::: {.callout-important title="Getting the key right"}
+`pow` must satisfy $2^{\text{pow}} > \max(n)$ (the side length covers the grid); `pow=21` clears $2\cdot10^6$. Use a 64-bit integer in C++ ($4^{\text{pow}}$ overflows `int`), and rotate consistently — a wrong `rotate_delta` still produces a permutation, just a *longer* path, so tests pass while the constant silently worsens (@sec-mo-pit).
+:::
+
+
+## A5. Mo plus a value structure: when the answer is more than a number {#sec-mo-a5}
+
+::: {.callout-note title="In plain words"}
+A lot of Mo problems are not "how many distinct" but something about the *shape* of the frequencies inside the range: the **mode** (largest frequency), "how many values appear **exactly** $k$ times", "is there a value appearing exactly once" (CF 1000F), "does every value appear at least / at most $t$ times" (CF 1418G). The window already keeps `freq[v]`. Add a **second table** that is also updated in $O(1)$ on every `add`/`remove`: `ftf[f]` = how many values currently have frequency exactly `f`. Then the mode is "the largest `f` with `ftf[f] > 0`" and "count of values appearing exactly $k$ times" is just `ftf[k]`. Keeping two tables consistent — and updating *both* in lockstep — is the entire extra difficulty.
+:::
+
+```{python}
+def mo_exact_k(a, qs, k, B=None):
+    """Count values that appear EXACTLY k times in [l, r] (inclusive), for each query."""
+    n = len(a)
+    if B is None:
+        B = max(1, int(n / max(1, len(qs)) ** 0.5))
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    freq = [0] * len(comp)
+    ftf = [0] * (n + 5)                 # ftf[f] = number of values whose current frequency is f
+    cl, cr = 0, -1
+
+    def add(i):
+        v = b[i]
+        old = freq[v]
+        if old > 0:
+            ftf[old] -= 1               # v is leaving frequency 'old'
+        freq[v] = old + 1
+        ftf[old + 1] += 1               # and entering frequency 'old+1'
+
+    def remove(i):
+        v = b[i]
+        old = freq[v]
+        ftf[old] -= 1
+        freq[v] = old - 1
+        if old - 1 > 0:
+            ftf[old - 1] += 1
+
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    ans = [0] * len(qs)
+    for i in order:
+        l, r = qs[i]
+        while cr < r:
+            cr += 1; add(cr)
+        while cl > l:
+            cl -= 1; add(cl)
+        while cl < l:
+            remove(cl); cl += 1
+        while cr > r:
+            remove(cr); cr -= 1
+        ans[i] = ftf[k]
+    return ans
+
+
+a = [1, 2, 2, 3, 3, 3, 4]
+qs = [(0, 6), (3, 5), (0, 2)]
+# [0,6]: freqs 1->1,2->2,3->3,4->1 ; exactly-once values {1,4}=2
+# [3,5]=[3,3,3] -> exactly-once 0 ; [0,2]=[1,2,2] -> exactly-once {1}=1
+assert mo_exact_k(a, qs, k=1) == [2, 0, 1]
+```
+
+The two tables must move together — a `add`/`remove` that edits `freq` but forgets `ftf` is the most common bug in this family. Stress against a `Counter` oracle, and also drive the **mode** (largest frequency) from the same table to show the reuse:
+
+```{python}
+def exact_k_brute(a, l, r, k):
+    return sum(1 for x in Counter(a[l:r + 1]).values() if x == k)
+
+
+for _ in range(200):
+    n = random.randint(1, 60)
+    a = [random.randint(0, 4) for _ in range(n)]
+    q = random.randint(1, 25)
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(q)]
+    B = max(1, int(n / q ** 0.5))
+    for k in (1, 2, 3):
+        got = mo_exact_k(a, qs, k, B)
+        exp = [exact_k_brute(a, l, r, k) for l, r in qs]
+        assert got == exp, (k, a, qs, got, exp)
+print("exact-k value-structure stress OK")
+```
+
+::: {#fig-mo-ftf}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+ftf_win = [1, 2, 2, 3, 3, 3]          # a window with freqs v=1->1, v=2->2, v=3->3
+
+def draw(ax, p):
+    V.array(ax, p, ftf_win, x=0.0, y=2.2,
+            colors={i: "green" for i in range(len(ftf_win))},
+            regions=[(0, 6, "muted", "the window")], label="a[window]")
+    V.grid(ax, p, [["value", "v=1", "v=2", "v=3"],
+                   ["freq[v]", "1", "2", "3"],
+                   ["ftf[f]#", "1", "1", "1"]],
+           x=0.0, y=0.2, colors={(1, 1): "indigo", (1, 2): "indigo", (1, 3): "indigo"}, cell_w=1.2)
+V.show(draw)
+```
+
+The window $[1,2,2,3,3,3]$ keeps `freq[v]` per value **and** `ftf[f]` = how many values sit at frequency $f$ (here one value each at $1, 2, 3$). "Exactly one value with frequency $2$" reads straight off `ftf[2] = 1`; the mode reads off the largest index with `ftf > 0`.
+
+:::
+
+::: {.callout-important title="What can ride on the window"}
+Anything you can maintain in $O(1)$ per `add`/`remove`: freq-of-freq arrays (mode, exact-$k$, "all counts $\le t$"), a set of "currently-present" values (CF 1000F's single-occurrence witness), or a single "how many values are off-target" counter (the exactly-thrice decision of @sec-mo-p5-threeocc). The Mo skeleton is unchanged — only the payload grows. Beware the look-alikes: CF 1000F genuinely lives in this family (@sec-mo-p4-oneocc), but CF 1418G counts good *subarrays* (a two-pointer / hashing sweep) and CF 985F's isomorphism is a *positional* bijection no frequency table can express — both are cited, never solved as Mo, in @sec-mo-p5.
+:::
+
+## A6. Mo versus the rest: a triage {#sec-mo-a6}
+
+::: {.callout-note title="In plain words"}
+Mo is one of several tools for "many range queries". Pick it by reading the statement, not by habit. **Segment tree / Fenwick** win when queries must be answered *online* (the next query depends on your previous answer) or when updates interleave heavily — Mo cannot reorder them. **Sqrt decomposition** (@sec-sqrt) is the online, easy-to-code middle ground with $O(\sqrt n)$ per op and *no reordering*. **Mo** is the offline specialist: many queries, few/no updates, and a $O(1)$ slide. **Persistent / offline-BIT tricks** fit when the query is really "prefix up to $r$ with a static rule" (k-th number, count $< x$). The single tell for Mo: you may answer the queries in *any* order and get to keep one moving window.
+:::
+
+::: {#fig-mo-triage}
+
+```{python}
+#| echo: false
+#| renderings: [light, dark]
+def draw(ax, p):
+    V.flow(ax, p, {
+        "q": (0.0, 2.6, "many range\nqueries?", "muted"),
+        "online": (-3.6, 0.4, "must answer\nonline / depends\non last answer?", "pink"),
+        "upd": (3.6, 0.4, "few or no\nupdates?", "green"),
+        "slide": (0.0, -1.8, "answer moves in\n$O(1)$ per add/remove?", "indigo"),
+        "mo": (-3.2, -3.6, "Mo's algorithm\n(this chapter)", "green"),
+        "seg": (3.4, -3.6, "segment tree /\nFenwick / sqrt", "muted"),
+    }, [("q", "online", "yes"), ("q", "upd", ""), ("online", "seg", "yes"),
+        ("upd", "slide", ""), ("slide", "mo", "yes"), ("slide", "seg", "no")], w=2.6, h=1.1)
+V.show(draw)
+```
+
+The decision tree. Reordering freedom is the gate: if you can permute the queries (offline, few updates) and the answer slides in $O(1)$, Mo is your tool. If either fails, @sec-sqrt's blocks or @sec-seg's tree is the honest answer — and forcing Mo onto adaptive input is a wrong-algorithm bug, not a slow one.
+
+:::
+
+Cross-reference: @sec-sqrt-a6 drew the *other* side of this boundary — "sqrt versus Mo versus segment tree" from the block-decomposition point of view. The two triages are the same fork seen from opposite doors: sqrt decomposition keeps the queries in input order and pays $O(\sqrt n)$ online; Mo spends the reordering freedom to slide one window and pays $O(n\sqrt q)$ offline.
+
+## Part B — Patterns
+
+Each pattern below is one *way of moving the window* — how the queries are ordered, what the `add`/`remove` maintain, and what extra pointer or table the statement forces on you. The two solved problems per pattern put that shape on a real (or fully-stressed, self-authored) task and check the sliding answer against a brute force.
+
+**Where we are.** The five patterns climb one idea at a time on top of A1's core. Pattern 1 is the bare engine — a $O(1)$ `add`/`remove` and block order (@sec-mo-p1). Pattern 2 removes the `remove`: when only `add` is cheap, rollback keeps the right pointer monotone (@sec-mo-p2). Pattern 3 adds a third, *time* pointer so a few interleaved updates can be applied and reverted (@sec-mo-p3). Pattern 4 keeps two pointers but orders them by a Hilbert curve instead of by blocks, trading a tidy proof for a shorter walk (@sec-mo-p4). Pattern 5 keeps the plain window but hangs a whole *value structure* off it, because the answer is no longer one scalar (@sec-mo-p5). Pattern 1 is the toolkit; 2–5 are what it buys once the statement gets harder.
+
+## P1. Classic Mo: order, slide, restore {#sec-mo-p1}
+
+**The engine in the wild.** @sec-mo-a1's window — sort by block-of-$\ell$ then $r$, keep an $O(1)$ `add`/`remove`, stash answers by original id — is the whole solution the moment a problem's answer moves by a constant amount per cell. The two problems below differ only in *what* the $O(1)$ update maintains: a squared-count scalar (CF 86D) and a pair count over a prefix-xor table (CF 617E).
+
+::: {.callout-important title="Template"}
+- **Sort, then slide one $[\ell, r]$.** Order queries by $\bigl(\lfloor \ell/B \rfloor, r\bigr)$ with $B = n/\sqrt q$; the four widen-then-narrow loops move only to the next query (@sec-mo-a1).
+- **The answer must update in $O(1)$ per add/remove.** CF 86D adds $(2f+1)v$; CF 617E adds `freq[p ^ k]`. Find the *one-line* delta, and Mo applies.
+- **If you cannot write a cheap `remove`, this is the wrong pattern** — jump to @sec-mo-p2 (rollback).
+- **Offline discipline.** Reordering shuffles the queries; write `ans[id]` and print in input order (@sec-mo-pit).
+:::
+
+{{< include ../problems/cf-86d-powerful-array/problem.qmd >}}
+
+[**From a squared-count to a pair count.** The previous problem kept one scalar and updated it by $(2f+1)v$. The next keeps a *frequency-of-prefix-xor* table and counts how many window pairs xor to $k$ — same window, but the answer lives over *pairs*, and the query range shifts by one into prefix-index space.]{.flow-bridge}
+
+{{< include ../problems/cf-617e-xor-and-favorite-number/problem.qmd >}}
+
+
+
+## P2. Rollback Mo: append, snapshot, restore {#sec-mo-p2}
+
+**When `remove` is the enemy.** @sec-mo-a2's rule: if the aggregate can be *extended* in $O(1)$ but a symmetric `remove` is awkward or you simply do not want to write one, do not delete at all. Group the queries by their $\ell$-block, and inside a group sweep the right pointer **only forward**; per query, snapshot, add the small left fringe, read, and roll the fringe back. The two problems below are the same engine wearing two payloads: CF 703D maintains an XOR-over-even-counts toggle, and a self-authored range-distinct task maintains a plain distinct counter. (A note on the roster: CF 703D also admits a trivial classic-Mo `remove`; it is solved in rollback form here to exercise the pattern end-to-end. The judge problem where rollback is genuinely the standard solution is CF 868F, cited below.)
+
+::: {.callout-important title="Template"}
+- **Monotone right pointer per left-block.** Sort queries by $(\lfloor \ell/B \rfloor, r)$; $R$ only advances within a group, so it is never a delete (@sec-mo-a2).
+- **Snapshot = a stack height plus the scalar answer.** `add` pushes the one `freq` cell it dirties; `rollback` pops back to the height and restores the scalar — restoring *only* the scalar and leaving the table dirty is the classic bug (@sec-mo-pit).
+- **The left fringe is $\le B$ cells.** Add it, read the answer, roll it back; the clean tail $[\text{blockEnd}+1, R]$ survives untouched.
+- **Short (same-block) queries are brute-forced.** There is no tail to reuse, so scan the $\le B$ cells directly.
+:::
+
+{{< include ../problems/cf-703d-mishka-and-interesting-sum/problem.qmd >}}
+
+[**From a parity toggle to a plain counter.** The previous problem's `add` flipped membership of a value with an XOR. The next keeps the same monotone-$R$, snapshot-fringe skeleton but maintains the simplest possible payload — "how many distinct values are in the range" — to show rollback is a *window discipline*, not a specific formula.]{.flow-bridge}
+
+### Problem: Distinct values per range, by rollback {#sec-mo-p2-distinct}
+
+::: {.p-statement}
+*Self-authored (no judge link).* An array $a_1, \ldots, a_n$ ($1 \le n \le 2\cdot 10^{5}$, $1 \le a_i \le 10^{9}$) and $m$ queries $[\ell, r]$. For each query output the number of **distinct** values in $a_\ell, \ldots, a_r$.
+
+Example — $a = [1, 2, 1, 3, 3, 2, 3]$: $[1,7]$ has $\{1,2,3\}$, answer `3`; $[1,3] = [1,2,1]$ has $\{1,2\}$, answer `2`; $[4,6] = [3,3,2]$ has $\{3,2\}$, answer `2`. (Checked against a `set` oracle on the example, then stressed.)
+:::
+
+::: {.p-intuition}
+Distinct-count is the canonical $\sqrt n$-friendly window: `add(i)` raises `freq[v]` from $0$ to $1$ and increments a `distinct` counter only on that $0 \to 1$ edge, everything else in $O(1)$. We answer it **in rollback form on purpose** — never calling `remove`, only `add` on a monotone right pointer plus a temporary fringe that is snapshotted and restored. The point is to prove the pattern is payload-agnostic: whatever `add` does, `snapshot` just records the stack height and the running counter, and `rollback` unwinds both.
+:::
+
+::: {.p-approach}
+1. **Set size.** Per query, $\lvert \operatorname{set}(a[\ell..r]) \rvert$ in $O(r - \ell + 1)$ — the oracle.
+2. **Rollback Mo.** Block by $\ell$, monotone $R$ per group, snapshot $(\mathit{hist}, \mathit{distinct})$, add the fringe, read, roll back; same-block queries use the set oracle.
+
+**Invariant.** After advancing $R$ to $r$ the clean tail $[\text{blockEnd}+1, R]$ holds a `freq`/`distinct` consistent with those cells; the fringe adds for $[\ell, \text{blockEnd}]` bump `distinct` on each first appearance; reading after the fringe gives the true count over $[\ell, r]$, and restoring the snapshot returns the tail to its pre-fringe state.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Count a set per query
+
+::: {.form-next}
+For each query return $\lvert \operatorname{set}(a[\ell..r]) \rvert$ in $O(r - \ell + 1)$ — reference only.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def dc_brute(a, l, r):
+    return len(set(a[l:r + 1]))
+
+
+assert [dc_brute([1, 2, 1, 3, 3, 2, 3], l, r) for l, r in [(0, 6), (0, 2), (3, 5)]] == [3, 2, 2]
+```
+
+##### C++
+
+```cpp
+// brute force: number of distinct values in one range via a set
+int dc_brute(const vector<long long>& a, int l, int r) {
+    set<long long> s;
+    for (int i = l; i <= r; ++i) s.insert(a[i]);
+    return (int)s.size();
+}
+```
+:::
+
+**Reading it line by line.** 0-indexed inclusive here, 1-indexed on the (authored) input; the example subtracts one.
+
+#### Rollback Mo (never call `remove`)
+
+::: {.form-next}
+Monotone right pointer per left-block; `add(i)` bumps `distinct` only when `freq[v]` leaves $0$; snapshot the stack height and `distinct`, add the $\le B$ fringe, read, restore. Same-block queries fall back to the set count. $O(n\sqrt n)$, zero deletes.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-mo-p2-distinct-sol
+def distinct_rollback(a, qs, B=None):
+    """qs are (l, r) 0-indexed inclusive; count distinct values, answered by rollback Mo (no deletes)."""
+    n = len(a)
+    if B is None:
+        B = max(1, int(round(n ** 0.5)))
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    freq = [0] * len(comp)
+    distinct = 0
+    hist = []
+
+    def add(i):
+        nonlocal distinct
+        v = b[i]
+        hist.append((v, freq[v]))
+        if freq[v] == 0:                 # first appearance in the window
+            distinct += 1
+        freq[v] += 1
+
+    def snapshot():
+        return len(hist), distinct
+
+    def rollback(snap):
+        nonlocal distinct
+        hh, dd = snap
+        while len(hist) > hh:
+            v, old = hist.pop()
+            freq[v] = old
+        distinct = dd
+
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    ans = [0] * len(qs)
+    last_block, R = -1, -1
+    for i in order:
+        l, r = qs[i]
+        bl = l // B
+        block_end = min(n - 1, (bl + 1) * B - 1)
+        if bl != last_block:
+            rollback((0, 0))
+            R = block_end
+            last_block = bl
+        while R < r:
+            R += 1
+            add(R)
+        if r <= block_end:
+            ans[i] = dc_brute(a, l, r)
+            continue
+        snap = snapshot()
+        for j in range(block_end, l - 1, -1):
+            add(j)
+        ans[i] = distinct
+        rollback(snap)
+    return ans
+
+
+assert distinct_rollback([1, 2, 1, 3, 3, 2, 3], [(0, 6), (0, 2), (3, 5)]) == [3, 2, 2]
+for _ in range(300):
+    n = random.randint(1, 50)
+    a = [random.randint(0, 7) for _ in range(n)]
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(15)]
+    assert distinct_rollback(a, qs, max(1, int(round(n ** 0.5)))) == [dc_brute(a, l, r) for l, r in qs]
+```
+
+##### C++
+
+```cpp
+// rollback Mo for distinct-count (full program); right pointer never retreats, fringe is snapshotted
+int main() {
+    ios::sync_with_stdio(false);
+    int n;
+    if (!(cin >> n)) return 0;
+    vector<long long> raw(n);
+    for (int i = 0; i < n; ++i) cin >> raw[i];
+    map<long long, int> comp;
+    vector<int> b(n);
+    for (int i = 0; i < n; ++i) {
+        if (!comp.count(raw[i])) comp[raw[i]] = (int)comp.size();
+        b[i] = comp[raw[i]];
+    }
+    int m; cin >> m;
+    int B = max(1, (int)sqrt((double)n));
+    vector<array<int, 3> > qs(m);
+    for (int i = 0; i < m; ++i) {
+        int l, r; cin >> l >> r; --l; --r;
+        qs[i] = {l, r, i};
+    }
+    sort(qs.begin(), qs.end(), [B](const array<int,3>& x, const array<int,3>& y) {
+        if (x[0] / B != y[0] / B) return x[0] / B < y[0] / B;
+        return x[1] < y[1];
+    });
+    vector<int> freq(comp.size(), 0);
+    vector<long long> ans(m, 0);
+    vector<pair<int, int> > hist;
+    int distinct = 0;
+    auto add = [&](int i) {
+        int v = b[i];
+        hist.push_back(make_pair(v, freq[v]));
+        if (freq[v] == 0) distinct++;
+        freq[v]++;
+    };
+    auto rollback_to = [&](int hh) {
+        while ((int)hist.size() > hh) {
+            int v = hist.back().first;
+            freq[v] = hist.back().second;
+            hist.pop_back();
+        }
+    };
+    int last = -1, R = -1;
+    for (int qi = 0; qi < m; ++qi) {
+        int l = qs[qi][0], r = qs[qi][1], id = qs[qi][2];
+        int bl = l / B;
+        int be = min(n - 1, (bl + 1) * B - 1);
+        if (bl != last) { rollback_to(0); distinct = 0; R = be; last = bl; }
+        while (R < r) { R++; add(R); }
+        if (r <= be) {
+            set<int> s;
+            for (int i = l; i <= r; ++i) s.insert(b[i]);
+            ans[id] = (int)s.size();
+            continue;
+        }
+        int hh = (int)hist.size(); int d0 = distinct;
+        for (int j = be; j >= l; --j) add(j);
+        ans[id] = distinct;
+        rollback_to(hh); distinct = d0;
+    }
+    for (int i = 0; i < m; ++i) cout << ans[i] << "\n";
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** `add` touches exactly one `freq` cell and possibly `distinct`, and records that cell's previous value in `hist`; `rollback_to(hh)` rewinds `hist` and then resets `distinct` to the snapshot — the same "restore the table *and* the scalar" discipline as CF 703D. The window is over compressed ids, so `freq` is sized to the number of distinct values, not to $10^{9}$.
+
+:::
+
+::: {.p-complexity}
+**Set per query:** $O(n)$, $O(nm)$ reference only. **Rollback Mo:** $O(n\sqrt n)$ $O(1)$ adds with $B = \sqrt n$, space $O(n)$ — the same envelope as @sec-mo-a1 but built without a single `remove`.
+:::
+
+::: {.p-edge}
+- Query inside one block: `distinct` is read from a fresh set scan, never from the (empty) tail.
+- All-equal array: every add after the first leaves `distinct` unchanged; the $0\to1$ guard is the whole correctness.
+- Large values ($10^{9}$): compressed to ids for `freq`, so the frequency table stays $O(n)$.
+:::
+
+::: {.practice}
+- [CF 703D · Mishka and Interesting sum](https://codeforces.com/problemset/problem/703/D){rating="2100"} — the same rollback skeleton with a parity-toggle payload (@sec-mo-p2-interesting)
+- [CF 220B · Little Elephant and Array](https://codeforces.com/problemset/problem/220/B){rating="1800"} — a distinct-flavoured window solved with a value-axis split instead (@sec-sqrt-p4-learray)
+:::
+
+## P3. Mo with updates: a third, time pointer {#sec-mo-p3}
+
+**When updates sneak in.** @sec-mo-a3's extension: the input mixes range *queries* with a handful of point *updates*, but the whole batch is still offline, so you may reorder it. Give the window a third pointer `t` = how many updates have been applied, read each query as a triple $(\ell, r, t)$, and sort by $\bigl(\lfloor \ell/B\rfloor, \lfloor r/B\rfloor, t\bigr)$ with $B = n^{2/3}$. Moving `t` forward or back applies or reverts exactly one update — and for that you must have **saved the cell's old value** the instant before overwriting it. The two problems below share that three-pointer skeleton and differ only in payload: CF 940F maintains a *frequency-of-frequency* table to answer a MEX, and a self-authored range-distinct task (whose second slot has no authentic pure-Mo-with-updates judge problem in our offline cache, so it is authored and stressed rather than linked — never fabricated) maintains a plain distinct counter. (A roster note: CF 940F is the flagship Mo-with-updates problem; tree-path variants such as CF 375D use the same value table on a different shape and are cited, not solved, here.)
+
+::: {.callout-important title="Template"}
+- **A query is a triple $(\ell, r, t)$.** $t$ counts the updates applied *before* it in input order; carry the original id so answers print in order (@sec-mo-a3).
+- **Sort by $\bigl(\lfloor \ell/B\rfloor, \lfloor r/B\rfloor, t\bigr)$ with $B = n^{2/3}$** — not the two-pointer $n/\sqrt q$ — so three pointers balance at $O(n^{5/3})$ (@sec-mo-pit).
+- **`apply_time` stashes the old value before overwriting; `revert_time` uses the stash.** Overwrite-without-stash makes the move irreversible.
+- **Touch the window only if the changed cell lies inside it.** An update outside $[\ell, r]$ changes the stored value but not the aggregate; both cases must keep the array consistent.
+:::
+
+{{< include ../problems/cf-940f-machine-learning/problem.qmd >}}
+
+[**From a MEX-of-frequencies to a plain distinct count.** The previous problem kept a `freq`-plus-`ftf` pair and scanned `ftf` for the smallest missing count. The next reuses @sec-mo-a3's already-built three-pointer engine verbatim, but the payload is the simplest one there is — "how many distinct values in $[\ell, r]$" — to show that Mo-with-updates is a *movement discipline*, and the hard part (the time stash) is identical no matter what the window reports.]{.flow-bridge}
+
+### Problem: Distinct values per range with point updates {#sec-mo-p3-distinct}
+
+::: {.p-statement}
+*Self-authored (no judge link).* An array $a_1, \ldots, a_n$ ($1 \le n \le 10^{5}$, $1 \le a_i \le 10^{9}$) and $q$ operations of two kinds: a **query** $1\ \ell\ r$ asks for the number of **distinct** values in $a_\ell, \ldots, a_r$, and an **update** $2\ p\ x$ sets $a_p \leftarrow x$. Queries reflect the updates that precede them ($1 \le q \le 10^{5}$).
+
+Example — $a = [1, 2, 3, 1, 1, 2, 2, 2]$: query $[1,6] = [1,2,3,1,1,2]$ has $\{1,2,3\}$, answer `3`; after update $2\ 2\ 1$ (a $2 \to 1$ at position $2$) the same range $[1,6] = [1,1,3,1,1,2]$ still has $\{1,3,2\}$, answer `3`; after update $2\ 4\ 4$ (a $1 \to 4$ at position $4$) the full range $[1,8] = [1,1,3,4,1,2,2,2]$ has $\{1,3,4,2\}$, answer `4`. Output `3`, `3`, `4`. (Checked against a replay-and-set oracle — the same one @sec-mo-a3 builds — then stressed.)
+:::
+
+::: {.p-intuition}
+This is @sec-mo-a3's engine with nothing new to prove: the window already maintains `distinct` via the $0 \to 1$ / $1 \to 0$ edges of `add`/`remove`, so the only addition over classic Mo is the *time* pointer. Applying update $(p, x)$ when $p$ is inside $[\ell, r]$ must first let the old value out of the count and then let the new one in; when $p$ is outside, only the stored cell changes. Because the whole engine — compression, the six movement loops, the stash — is already written and stressed in @sec-mo-a3, we reuse that `mo_with_updates` function directly rather than re-derive it: the pedagogical point is that a single three-pointer skeleton answers any $O(1)$-slidable payload.
+:::
+
+::: {.p-approach}
+1. **Replay and set-size.** Per query, copy the array, apply the first $t$ updates, return $\lvert \operatorname{set}(a[\ell..r]) \rvert$. $O(n)$ per query — the oracle `distinct_replay` from @sec-mo-a3.
+2. **Mo with updates.** Call `mo_with_updates(a0, queries, updates)` (defined in @sec-mo-a3): compress values, sort $(\ell, r, t)$ by blocks with $B = n^{2/3}$, keep `freq`/`distinct`, and move $\ell, r, t$ with the stash discipline. $O(n^{5/3})$.
+
+**Invariant.** In `mo_with_updates`, `freq`/`distinct` always describe $[cl, cr]$ after $ct$ updates; each of the six loops moves one pointer by one step and updates the tables in $O(1)$, and `apply_time`/`revert_time` swap a cell's contribution only when that cell is inside the window. When all loops land on $(\ell, r, t)$, `distinct` is the true count over $[\ell, r]$ in that version of the array.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Replay the updates, then take a set size
+
+::: {.form-next}
+Per query, copy the array, apply the first $t$ updates, and return the size of $\operatorname{set}(a[\ell..r])$. $O(n)$ per query — reference only; this is `distinct_replay` from @sec-mo-a3.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+# distinct_replay is defined in @sec-mo-a3; here it is the per-query oracle for this task
+assert distinct_replay([1, 2, 3, 1, 1, 2, 2, 2], [(1, 1), (3, 4)], 0, 5, 0) == 3
+assert distinct_replay([1, 2, 3, 1, 1, 2, 2, 2], [(1, 1), (3, 4)], 0, 5, 1) == 3
+assert distinct_replay([1, 2, 3, 1, 1, 2, 2, 2], [(1, 1), (3, 4)], 0, 7, 2) == 4
+```
+
+##### C++
+
+```cpp
+// brute force: apply the first t updates, then count distinct values in [l, r] with a set
+int distinct_ops_brute(const vector<long long>& a0,
+                       const vector<pair<int, long long> >& updates, int l, int r, int t) {
+    vector<long long> arr = a0;
+    for (int k = 0; k < t; ++k) arr[updates[k].first] = updates[k].second;
+    set<long long> s;
+    for (int i = l; i <= r; ++i) s.insert(arr[i]);
+    return (int)s.size();
+}
+```
+:::
+
+**Reading it line by line.** Operations are 1-indexed on the (authored) input and 0-indexed in the code; a query's $t$ is the count of updates that appear before it. Only updates strictly *before* the query are replayed, so ordering matters in the oracle exactly as it does for the engine.
+
+#### Reuse the three-pointer engine (Mo with updates)
+
+::: {.form-next}
+Feed `mo_with_updates` (from @sec-mo-a3) the triples $(\ell, r, t)$: it compresses values, sorts by $(\lfloor \ell/B\rfloor, \lfloor r/B\rfloor, t)$ with $B = n^{2/3}$, and maintains `freq`/`distinct` with the stash. $O(n^{5/3})$, no new code.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-mo-p3-distinct-sol
+# mo_with_updates (@sec-mo-a3) IS the engine; this task only reads operations into (l, r, t) triples.
+a0 = [1, 2, 3, 1, 1, 2, 2, 2]
+ups = [(1, 1), (3, 4)]                 # 0-indexed positions
+qs = [(0, 5, 0), (0, 5, 1), (0, 7, 2)]  # t = number of the first updates already applied
+assert mo_with_updates(a0, qs, ups) == [3, 3, 4]
+for _ in range(200):
+    n = random.randint(1, 40)
+    a = [random.randint(0, 5) for _ in range(n)]
+    u = random.randint(0, 15)
+    updates = [(random.randrange(n), random.randint(0, 5)) for _ in range(u)]
+    qq = random.randint(1, 15)
+    queries = [(*sorted((random.randrange(n), random.randrange(n))), random.randint(0, u))
+               for _ in range(qq)]
+    assert mo_with_updates(a, queries, updates) == [distinct_replay(a, updates, l, r, t)
+                                                     for l, r, t in queries]
+```
+
+##### C++
+
+```cpp
+// Mo with updates for distinct-count (full program); reuses the same three-pointer skeleton as CF 940F
+int main() {
+    ios::sync_with_stdio(false);
+    int n, q;
+    if (!(cin >> n >> q)) return 0;
+    vector<long long> raw(n);
+    for (int i = 0; i < n; ++i) cin >> raw[i];
+
+    struct Op { int type, l, r; long long x; };
+    vector<Op> ops(q);
+    for (int i = 0; i < q; ++i) {
+        int t; cin >> t;
+        if (t == 1) { int l, r; cin >> l >> r; ops[i] = {1, l - 1, r - 1, 0}; }
+        else { int p; long long x; cin >> p >> x; ops[i] = {2, p - 1, 0, x}; }
+    }
+    vector<long long> vals = raw;
+    for (int i = 0; i < q; ++i) if (ops[i].type == 2) vals.push_back(ops[i].x);
+    sort(vals.begin(), vals.end());
+    vals.erase(unique(vals.begin(), vals.end()), vals.end());
+    vector<int> a(n);
+    for (int i = 0; i < n; ++i)
+        a[i] = (int)(lower_bound(vals.begin(), vals.end(), raw[i]) - vals.begin());
+
+    vector<array<int, 4> > Q;                    // {l, r, t, id}
+    vector<array<long long, 3> > U;              // {pos, newid, old}
+    for (int i = 0; i < q; ++i) {
+        if (ops[i].type == 1) Q.push_back({ops[i].l, ops[i].r, (int)U.size(), (int)Q.size()});
+        else {
+            int nid = (int)(lower_bound(vals.begin(), vals.end(), ops[i].x) - vals.begin());
+            U.push_back({ops[i].l, nid, 0});
+        }
+    }
+    int M = (int)Q.size();
+    if (M == 0) return 0;
+    int B = max(1, (int)pow((double)n, 2.0 / 3.0));
+    sort(Q.begin(), Q.end(), [B](const array<int,4>& x, const array<int,4>& y) {
+        if (x[0] / B != y[0] / B) return x[0] / B < y[0] / B;
+        if (x[1] / B != y[1] / B) return x[1] / B < y[1] / B;
+        return x[2] < y[2];
+    });
+    vector<int> freq(vals.size(), 0);
+    vector<long long> ans(M);
+    int distinct = 0, cl = 0, cr = -1, ct = 0;
+    auto add_val = [&](int v) { if (++freq[v] == 1) distinct++; };
+    auto rem_val = [&](int v) { if (--freq[v] == 0) distinct--; };
+    auto apply_time = [&]() {
+        int pos = (int)U[ct][0]; int nid = (int)U[ct][1];
+        U[ct][2] = a[pos];
+        if (cl <= pos && pos <= cr) { rem_val(a[pos]); add_val(nid); }
+        a[pos] = nid;
+        ct++;
+    };
+    auto revert_time = [&]() {
+        ct--;
+        int pos = (int)U[ct][0]; int oldid = (int)U[ct][2];
+        if (cl <= pos && pos <= cr) { rem_val(a[pos]); add_val(oldid); }
+        a[pos] = oldid;
+    };
+    for (int qi = 0; qi < M; ++qi) {
+        int l = Q[qi][0], r = Q[qi][1], t = Q[qi][2], id = Q[qi][3];
+        while (cr < r) add_val(a[++cr]);
+        while (cl > l) add_val(a[--cl]);
+        while (cl < l) rem_val(a[cl++]);
+        while (cr > r) rem_val(a[cr--]);
+        while (ct < t) apply_time();
+        while (ct > t) revert_time();
+        ans[id] = distinct;
+    }
+    for (int i = 0; i < M; ++i) cout << ans[i] << "\n";
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** `add_val`/`rem_val` now carry the *distinct* payload (`freq` crossing $0$ moves the counter) instead of the `ftf` table, yet every surrounding line — compression, the $(\ell,r,t)$ sort, the guarded `apply_time`/`revert_time`, the stash in `U[ct][2]` — is byte-for-byte the CF 940F skeleton. That identity is the lesson: swapping the two $O(1)$ lambdas is the only change a new answer needs. Printing `ans[id]` in input order is the offline discipline again (@sec-mo-pit).
+:::
+
+::: {.p-complexity}
+**Replay:** $O(n)$ per query, $O(nq)$ reference only. **Mo with updates:** $O(n^{5/3})$ with $B = n^{2/3}$, space $O(n + |\text{distinct values}|)$ — identical envelope to CF 940F; only the per-move payload differs.
+:::
+
+::: {.p-edge}
+- Update with the *same* value ($x = a_p$): applying it is a no-op on the tables but still consumes a stash slot; correctness is unaffected.
+- Position updated outside the window: `freq`/`distinct` untouched; the stored cell must still change so a later slide reads the new value.
+- All-equal range after updates: `distinct` collapses to $1$; the $0\to1$ guard on the counter is the whole payload.
+- Reverting must pop the stash in exact reverse of applying — the shared `ct` pointer guarantees the pairing (@sec-mo-a3).
+:::
+
+::: {.practice}
+- [CF 940F · Machine Learning](https://codeforces.com/problemset/problem/940/F){rating="2600"} — the same three-pointer engine answering a MEX via a frequency-of-frequency table (@sec-mo-p3-ml)
+- [CF 220B · Little Elephant and Array](https://codeforces.com/problemset/problem/220/B){rating="1800"} — a distinct-flavoured query to attack without updates (@sec-sqrt-p4-learray)
+:::
+
+## P4. Hilbert order: fold the plane, shorten the walk {#sec-mo-p4}
+
+**Change the order, keep the engine.** @sec-mo-a4's idea is orthogonal to everything in P1–P3: however you move the window, the *order* you visit the queries in controls how far the two pointers travel. Block-sorting is a decent guess; a **Hilbert curve** is a better one — a single line that folds the $(\ell, r)$ plane so nearby-in-plane queries are also nearby-on-the-curve, giving a measurably shorter walk at the same asymptotics. The swap is literally one line: replace the block sort key with `hilbert_order(l, r)`. Both problems below run on Hilbert order and differ only in payload — CF 1000F reports *any value occurring once* (a witness set) at $n, q \le 5\cdot 10^{5}$ where the constant really bites, and a self-authored range-distinct task (no second authentic Hilbert-specific judge problem is cached, so it is authored and stressed rather than linked — never fabricated) shows the order-vs-answer separation head-on. (Roster note: Hilbert is an *ordering*, so any classic-Mo problem can adopt it; CF 1000F is used here because its large limits make the shorter walk worth the uglier key.)
+
+::: {.callout-important title="Template"}
+- **One-line swap.** Order queries by `hilbert_order(l, r)` (@sec-mo-a4) instead of $(\lfloor \ell/B\rfloor, r)$; the `add`/`remove` window and the offline `ans[id]` bookkeeping are unchanged.
+- **The key is only a permutation.** Hilbert reorders visits; it never changes any answer — assert the result equals the block-order result and the brute (@sec-mo-a4).
+- **`pow` must clear $n$ and the key is 64-bit.** $2^{\text{pow}} > \max n$ (use `pow=21` up to $2\cdot10^{6}$) and store the key in a `long long`; $4^{\text{pow}}$ overflows `int` (@sec-mo-pit).
+- **Reach for it when $n, q$ are large and the walk dominates.** For tidy asymptotic proofs or small inputs, block order is simpler and just as fast.
+:::
+
+{{< include ../problems/cf-1000f-one-occurrence/problem.qmd >}}
+
+[**From a witness set to a counter, order held fixed.** The previous problem leaned on Hilbert to shrink a $5\cdot 10^{5}$ walk while reporting a single-occurrence witness. The next keeps the *same* Hilbert key but the payload is the plain distinct counter from @sec-mo-a4 — the point being that Hilbert is a drop-in *ordering* that pairs with any $O(1)$-slidable answer, and that reordering provably cannot change the result.]{.flow-bridge}
+
+### Problem: Distinct count by Hilbert order {#sec-mo-p4-distinct}
+
+::: {.p-statement}
+*Self-authored (no judge link).* An array $a_1, \ldots, a_n$ ($1 \le n \le 2\cdot 10^{5}$, $1 \le a_i \le 10^{9}$) and $m$ queries $[\ell, r]$. For each query output the number of **distinct** values in $a_\ell, \ldots, a_r$. Answer the queries in Hilbert order.
+
+Example — $a = [1, 2, 1, 3, 3, 2, 3]$: $[1,7]$ has $\{1,2,3\}$, answer `3`; $[1,3] = [1,2,1]$ has $\{1,2\}$, answer `2`; $[4,6] = [3,3,2]$ has $\{3,2\}$, answer `2`. (Checked against the `set` oracle *and* against the same window run in block order — both must agree, since only the visit order differs.)
+:::
+
+::: {.p-intuition}
+This is the @sec-mo-a4 engine `mo_distinct_ordered` verbatim, fed a different sort key. The distinct payload ($0 \to 1$ / $1 \to 0$ edges of `freq`) and the four movement loops are untouched; the *only* change is `keyfn`. The insight to lock in is that a Mo answer is a function of the window, and the window is driven to $[\ell, r]$ regardless of the order it is visited in — so swapping block order for Hilbert changes the *cost*, never the *result*. We therefore assert three ways: against the brute, against block order, and under random stress.
+:::
+
+::: {.p-approach}
+1. **Set size.** Per query, $\lvert \operatorname{set}(a[\ell..r]) \rvert$ in $O(r - \ell + 1)$ — the oracle `distinct_brute` (@sec-mo-a1).
+2. **Hilbert-ordered Mo.** Call `mo_distinct_ordered(a, qs, hilb_key)` (@sec-mo-a4): compress, sort by `hilbert_order(l, r)`, slide the window. $O(n\sqrt q)$ movement with a smaller constant than block order.
+
+**Invariant.** For whatever order `keyfn` induces, after the four loops the window equals $[\ell, r]$ and `distinct` equals the number of values with `freq` $> 0$ there. Because this invariant is stated only in terms of the window's contents, not of the visit sequence, `mo_distinct_ordered` returns identical answers under `hilb_key` and `blk_key`.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Count a set per query
+
+::: {.form-next}
+For each query return $\lvert \operatorname{set}(a[\ell..r]) \rvert$ in $O(r - \ell + 1)$ — reference only; this is `distinct_brute` from @sec-mo-a1.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+# distinct_brute is defined in @sec-mo-a1; here it is the per-query oracle
+assert [distinct_brute([1, 2, 1, 3, 3, 2, 3], l, r) for l, r in [(0, 6), (0, 2), (3, 5)]] == [3, 2, 2]
+```
+
+##### C++
+
+```cpp
+// brute force: number of distinct values in [l, r] via a set
+int hilb_brute(const vector<long long>& a, int l, int r) {
+    set<long long> s;
+    for (int i = l; i <= r; ++i) s.insert(a[i]);
+    return (int)s.size();
+}
+```
+:::
+
+**Reading it line by line.** 0-indexed inclusive in the code, 1-indexed on the (authored) input; the example subtracts one. This is the same oracle the block-order engine was checked against, which is the whole point — the oracle is order-blind.
+
+#### Reuse the engine with a Hilbert sort key
+
+::: {.form-next}
+Feed `mo_distinct_ordered` (from @sec-mo-a4) the key `hilb_key` instead of a block key: it sorts queries by `hilbert_order(l, r)` and slides the identical window. Same answers, shorter walk.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-mo-p4-distinct-sol
+# mo_distinct_ordered + hilbert_order + hilb_key are built in @sec-mo-a4; only the key differs here.
+demo = [1, 2, 1, 3, 3, 2, 3]
+dqs = [(0, 6), (0, 2), (3, 5)]
+assert mo_distinct_ordered(demo, dqs, hilb_key) == [3, 2, 2]
+# reordering changes the walk, never the answer: Hilbert and block agree exactly
+assert mo_distinct_ordered(demo, dqs, hilb_key) == mo_distinct_ordered(demo, dqs, lambda q: blk_key(q, 2))
+for _ in range(200):
+    n = random.randint(1, 60)
+    a = [random.randint(0, 5) for _ in range(n)]
+    q = random.randint(1, 25)
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(q)]
+    exp = [distinct_brute(a, l, r) for l, r in qs]
+    assert mo_distinct_ordered(a, qs, hilb_key) == exp
+    assert mo_distinct_ordered(a, qs, hilb_key) == mo_distinct_ordered(a, qs, lambda x: blk_key(x, max(1, int(n / max(1, q) ** 0.5))))
+```
+
+##### C++
+
+```cpp
+// Hilbert-ordered Mo for distinct-count (full program); identical window to block order, only the key differs
+inline long long hilbertOrder(int x, int y, int pow, int rot) {
+    if (pow == 0) return 0;
+    int hpow = 1 << (pow - 1);
+    int seg = (x < hpow) ? ((y < hpow) ? 0 : 3) : ((y < hpow) ? 1 : 2);
+    seg = (seg + rot) & 3;
+    const int rotateDelta[4] = {3, 0, 0, 1};
+    int nx = x & (x ^ hpow), ny = y & (y ^ hpow);
+    int nrot = (rot + rotateDelta[seg]) & 3;
+    long long subSize = 1LL << (2 * pow - 2);
+    long long ans = seg * subSize;
+    long long add = hilbertOrder(nx, ny, pow - 1, nrot);
+    ans += (seg == 1 || seg == 3) ? add : (subSize - add - 1);
+    return ans;
+}
+
+int main() {
+    ios::sync_with_stdio(false);
+    int n;
+    if (!(cin >> n)) return 0;
+    vector<long long> raw(n);
+    for (int i = 0; i < n; ++i) cin >> raw[i];
+    vector<long long> vals = raw;
+    sort(vals.begin(), vals.end());
+    vals.erase(unique(vals.begin(), vals.end()), vals.end());
+    vector<int> b(n);
+    for (int i = 0; i < n; ++i)
+        b[i] = (int)(lower_bound(vals.begin(), vals.end(), raw[i]) - vals.begin());
+    int q; cin >> q;
+    vector<array<int, 3> > qs(q);                 // {l, r, id}
+    vector<long long> ord(q);
+    for (int i = 0; i < q; ++i) {
+        int l, r; cin >> l >> r; --l; --r;
+        qs[i] = {l, r, i};
+        ord[i] = hilbertOrder(l, r, 21, 0);
+    }
+    vector<int> idx(q);
+    for (int i = 0; i < q; ++i) idx[i] = i;
+    sort(idx.begin(), idx.end(), [&](int x, int y) { return ord[x] < ord[y]; });
+    vector<int> freq(vals.size(), 0), ans(q, 0);
+    int distinct = 0, cl = 0, cr = -1;
+    auto add = [&](int i) { if (++freq[b[i]] == 1) distinct++; };
+    auto remove = [&](int i) { if (--freq[b[i]] == 0) distinct--; };
+    for (int k = 0; k < q; ++k) {
+        int i = idx[k];
+        int l = qs[i][0], r = qs[i][1], id = qs[i][2];
+        while (cr < r) add(++cr);
+        while (cl > l) add(--cl);
+        while (cl < l) remove(cl++);
+        while (cr > r) remove(cr--);
+        ans[id] = distinct;
+    }
+    for (int i = 0; i < q; ++i) cout << ans[i] << "\n";
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** The engine is `mo_distinct_ordered`'s — compress to ids, four widen-then-narrow loops, `freq` crossing $0$ moves `distinct`. The only difference from @sec-mo-a1 is `key=lambda i: hilbert_order(...)` in place of the block key, and that is invisible in the answers: the first assertion pins correctness against the brute, the second pins that Hilbert and block produce the *same* list. In C++ the key is folded once into `ord[i]` (a `long long`) and queries are sorted by it via an index permutation, keeping `qs` in input order so `ans[id]` still restores output order.
+:::
+
+::: {.p-complexity}
+**Set per query:** $O(n)$, $O(nm)$ reference only. **Hilbert Mo:** asymptotically $O(n\sqrt q)$ pointer moves like block order (@sec-mo-a1), but with a smaller constant — @sec-mo-a4 measures the shortfall directly. Space $O(n)$.
+:::
+
+::: {.p-edge}
+- All-equal array: `distinct` is $1$ for every non-empty window; order-independent.
+- Single-cell query: `distinct` $= 1$.
+- Large values ($10^{9}$): compressed to ids, so `freq` stays $O(n)$.
+- `hilbert_order` must be given coordinates within $[0, 2^{\text{pow}})$; `pow=21` covers $n \le 2\cdot10^{6}$ (@sec-mo-pit).
+:::
+
+::: {.practice}
+- [CF 1000F · One Occurrence](https://codeforces.com/problemset/problem/1000/F){rating="2400"} — Hilbert order with a single-occurrence witness payload (@sec-mo-p4-oneocc)
+- [CF 86D · Powerful array](https://codeforces.com/problemset/problem/86/D){rating="2200"} — the same window in block order, to reorder as an exercise (@sec-mo-p1-powerful)
+:::
+
+## P5. Mo plus a value structure: the answer is more than one number {#sec-mo-p5}
+
+**Beyond the scalar.** @sec-mo-a5's family: the window still slides by $O(1)$ per cell, but the reported answer is a property of the *whole frequency table*, so you keep a second structure — `ftf[f]` (how many values sit at frequency $f$), a running `mode`, an `off`-count of "bad" values, a per-value mask — and update it in lockstep with `freq`. This is where a Mo solution stops being one line of `add`. **A roster honesty note:** the two judge problems earmarked for this pattern in the plan, CF 1418G (*Three Occurrences*) and CF 985F (*Isomorphic Strings*), turned out on reading to **not be Mo problems**: 1418G *counts* good subarrays in one pass (a two-pointer / random-hash task, its own CF tags say so), and 985F tests a *positional bijection* between two substrings — a property a frequency table cannot even express ("aba" and "aab" have identical frequency multisets yet are not isomorphic), solved by per-character hashing. Rather than fabricate a Mo solution to a non-Mo problem, both slots are filled with fully-stressed **self-authored range-query** tasks that *are* genuine Mo + value-structure (a range mode, and an "every value occurs exactly thrice" decision), and 1418G / 985F are cited below as the adjacent-but-not-Mo cousins they truly are. The shortfall (5 genuine judge-Mo problems solved here, not 7) is recorded in the chapter provenance.
+
+::: {.callout-important title="Template"}
+- **Keep a second table and update it every `add`/`remove`.** `ftf[f]` = count of values at frequency $f$; any edit to `freq[v]` must move `ftf[old]` and `ftf[new]` together (@sec-mo-a5).
+- **Derive the answer from the table, not a rescan.** Mode = largest $f$ with `ftf[f] > 0` (maintain a running `mode`, dropping it by one only when `ftf[mode]` hits $0$); "all present values occur exactly $3$" = an `off`-count of present-but-$\ne 3$ values sitting at $0$.
+- **Amortisation stays $O(1)$** because each `add`/`remove` moves one value's frequency by one, so `mode`/`off` change by at most one — no per-query scan.
+- **The Mo skeleton is untouched** — only the payload grows. Block order is fine here; Hilbert (@sec-mo-p4) is optional.
+:::
+
+### Problem: Range mode (largest frequency) {#sec-mo-p5-mode}
+
+::: {.p-statement}
+*Self-authored (no judge link).* An array $a_1, \ldots, a_n$ ($1 \le n \le 10^{5}$, $1 \le a_i \le 10^{9}$) and $m$ queries $[\ell, r]$. For each query output the **mode count** of $a_\ell, \ldots, a_r$: the largest number of occurrences of any single value in the range.
+
+Example — $a = [1, 2, 2, 3, 3, 3]$: $[1,6]$ has value $3$ three times, answer `3`; $[1,2] = [1,2]$ has every value once, answer `1`; $[4,6] = [3,3,3]$, answer `3`. (Checked against a `Counter`-max oracle, then stressed.)
+:::
+
+::: {.p-intuition}
+The mode is not a sum, so you cannot read it off a scalar accumulator — but with `ftf[f]` (how many distinct values currently occur exactly $f$ times) the mode is "the largest $f$ with `ftf[f] > 0`." Maintaining it costs $O(1)$ amortised: `add` raises one value's count to `old+1`, so the mode can rise by at most one; `remove` can lower it by at most one, and only when the unique value sitting at `mode` steps down (detected by `ftf[mode] == 0`). That "move by at most one per elementary step" is the whole trick that keeps the two-table window $O(n\sqrt q)$ (@sec-mo-a5).
+:::
+
+::: {.p-approach}
+1. **Counter max.** Per query, `max` of the frequency values in $[\ell, r]$. $O(r - \ell + 1)$ — the oracle.
+2. **Mo with a `ftf` table.** Compress values; sort by blocks; keep `freq`, `ftf`, and a running `mode`; `add`/`remove` edit all three in lockstep. $O(n\sqrt q)$.
+
+**Invariant.** `freq[v]` is the count of $v$ in the window and `ftf[f]` $= |\{v : \text{freq}[v] = f\}|$; `mode` $= \max\{f : \text{ftf}[f] > 0\}$. Each `add`/`remove` moves exactly one value between two adjacent frequency buckets and fixes both `ftf` entries and (if needed) `mode` by one, so `mode` is the true largest frequency whenever the window equals $[\ell, r]$.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Max frequency per query
+
+::: {.form-next}
+For each query, tally frequencies on $[\ell, r]$ and report the largest count. $O(r - \ell + 1)$ per query — reference only.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def mode_brute(a, l, r):
+    c = Counter(a[l:r + 1])
+    return max(c.values()) if c else 0
+
+
+assert [mode_brute([1, 2, 2, 3, 3, 3], l, r) for l, r in [(0, 5), (0, 1), (3, 5)]] == [3, 1, 3]
+```
+
+##### C++
+
+```cpp
+// brute force: largest frequency of any value in [l, r]
+int mode_brute(const vector<long long>& a, int l, int r) {
+    map<long long, int> cnt;
+    for (int i = l; i <= r; ++i) cnt[a[i]]++;
+    int m = 0;
+    for (map<long long, int>::iterator it = cnt.begin(); it != cnt.end(); ++it) m = max(m, it->second);
+    return m;
+}
+```
+:::
+
+**Reading it line by line.** 0-indexed inclusive here, 1-indexed on the (authored) input. The range is non-empty, so `mode_brute` returns at least $1$; the `if c else 0` guard only protects the empty case the statement never issues.
+
+#### Mo with a frequency-of-frequency table
+
+::: {.form-next}
+Block-sort the queries; keep `freq`, `ftf` and a running `mode`. `add`/`remove` move one value between adjacent buckets, fixing `ftf` and adjusting `mode` by at most one. $O(n\sqrt q)$, $O(1)$ amortised per step.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-mo-p5-mode-sol
+def mode_solve(a, qs):
+    """qs are (l, r) 0-indexed inclusive; returns the largest frequency of any value in [l, r]."""
+    n = len(a)
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    freq = [0] * len(comp)
+    ftf = [0] * (n + 5)                 # ftf[f] = number of values whose current frequency is f
+    mode = 0
+    cl, cr = 0, -1
+
+    def add(i):
+        nonlocal mode
+        v = b[i]
+        old = freq[v]
+        if old > 0:
+            ftf[old] -= 1
+        freq[v] = old + 1
+        ftf[old + 1] += 1
+        if old + 1 > mode:
+            mode = old + 1
+
+    def remove(i):
+        nonlocal mode
+        v = b[i]
+        old = freq[v]
+        ftf[old] -= 1
+        freq[v] = old - 1
+        if old - 1 > 0:
+            ftf[old - 1] += 1
+        if old == mode and ftf[mode] == 0:
+            mode -= 1
+
+    B = max(1, int(n / max(1, len(qs)) ** 0.5))
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    ans = [0] * len(qs)
+    for i in order:
+        l, r = qs[i]
+        while cr < r:
+            cr += 1; add(cr)
+        while cl > l:
+            cl -= 1; add(cl)
+        while cl < l:
+            remove(cl); cl += 1
+        while cr > r:
+            remove(cr); cr -= 1
+        ans[i] = mode
+    return ans
+
+
+assert mode_solve([1, 2, 2, 3, 3, 3], [(0, 5), (0, 1), (3, 5)]) == [3, 1, 3]
+for _ in range(250):
+    n = random.randint(1, 45)
+    a = [random.randint(1, 6) for _ in range(n)]
+    q = random.randint(1, 20)
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(q)]
+    assert mode_solve(a, qs) == [mode_brute(a, l, r) for l, r in qs]
+```
+
+##### C++
+
+```cpp
+// Mo + frequency-of-frequency table for the range mode (full program); mode drifts by at most 1 per step
+int main() {
+    ios::sync_with_stdio(false);
+    int n;
+    if (!(cin >> n)) return 0;
+    vector<long long> raw(n);
+    for (int i = 0; i < n; ++i) cin >> raw[i];
+    vector<long long> vals = raw;
+    sort(vals.begin(), vals.end());
+    vals.erase(unique(vals.begin(), vals.end()), vals.end());
+    vector<int> b(n);
+    for (int i = 0; i < n; ++i)
+        b[i] = (int)(lower_bound(vals.begin(), vals.end(), raw[i]) - vals.begin());
+    int q; cin >> q;
+    vector<array<int, 3> > qs(q);
+    for (int i = 0; i < q; ++i) { int l, r; cin >> l >> r; --l; --r; qs[i] = {l, r, i}; }
+    int B = max(1, (int)(n / sqrt((double)max(1, q))));
+    sort(qs.begin(), qs.end(), [B](const array<int,3>& x, const array<int,3>& y) {
+        if (x[0] / B != y[0] / B) return x[0] / B < y[0] / B;
+        return x[1] < y[1];
+    });
+    vector<int> freq(vals.size(), 0), ftf(n + 5, 0), ans(q, 0);
+    int mode = 0, cl = 0, cr = -1;
+    auto add = [&](int i) {
+        int v = b[i], old = freq[v];
+        if (old > 0) ftf[old]--;
+        freq[v] = old + 1; ftf[old + 1]++;
+        if (old + 1 > mode) mode = old + 1;
+    };
+    auto remove = [&](int i) {
+        int v = b[i], old = freq[v];
+        ftf[old]--; freq[v] = old - 1;
+        if (old - 1 > 0) ftf[old - 1]++;
+        if (old == mode && ftf[mode] == 0) mode--;
+    };
+    for (int k = 0; k < q; ++k) {
+        int l = qs[k][0], r = qs[k][1], id = qs[k][2];
+        while (cr < r) add(++cr);
+        while (cl > l) add(--cl);
+        while (cl < l) remove(cl++);
+        while (cr > r) remove(cr--);
+        ans[id] = mode;
+    }
+    for (int i = 0; i < q; ++i) cout << ans[i] << "\n";
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** `add` moves $v$ from bucket `old` to `old+1` (dropping `ftf[old]`, raising `ftf[old+1]`) and lets `mode` climb by one if needed; `remove` is the mirror image and lowers `mode` by one **only** when it was the sole occupant of the top bucket (`ftf[mode] == 0`). Both tables are edited on every step — the bug the pattern warns about (@sec-mo-pit) is editing `freq` and forgetting `ftf`.
+:::
+
+::: {.p-complexity}
+**Counter max:** $O(n)$ per query, $O(nm)$ reference only. **Mo + `ftf`:** $O(n\sqrt q)$ moves, each $O(1)$ amortised (the `mode` drift is charged to the frequency changes that raised it), space $O(n)$.
+:::
+
+::: {.p-edge}
+- All-distinct range: every `freq` is $1$, so `ftf[1]` equals the window size and `mode == 1`.
+- All-equal range: one value at `freq` equal to the length, so `mode` equals the length and `ftf[length] == 1`.
+- Ties for the mode: `ftf` counts *how many* values are at that frequency, so a tie changes nothing about the reported `mode`.
+:::
+
+::: {.practice}
+- [CF 940F · Machine Learning](https://codeforces.com/problemset/problem/940/F){rating="2600"} — the same `ftf` table, answering a MEX instead of a mode (@sec-mo-p3-ml)
+- [CF 86D · Powerful array](https://codeforces.com/problemset/problem/86/D){rating="2200"} — a frequency-weighted *scalar* rather than a table-derived max (@sec-mo-p1-powerful)
+:::
+
+[**From "largest frequency" to "every frequency equal to three."** The mode read off the top of the `ftf` table; the next problem reads off its *shape* — is every present value parked at frequency exactly $3$? — using a single `off`-counter instead of a whole table.]{.flow-bridge}
+
+### Problem: Every value exactly thrice {#sec-mo-p5-threeocc}
+
+::: {.p-statement}
+*Self-authored (no judge link).* An array $a_1, \ldots, a_n$ ($1 \le n \le 10^{5}$, $1 \le a_i \le n$) and $m$ queries $[\ell, r]$. For each query print **YES** if every integer that occurs in $a_\ell, \ldots, a_r$ occurs there **exactly three** times, and **NO** otherwise.
+
+Example — $a = [1, 2, 2, 2, 1, 1, 2, 2, 2]$ (the witness array of CF 1418G): $[1,6] = [1,2,2,2,1,1]$ has $1$ thrice and $2$ thrice, **YES**; $[2,4] = [2,2,2]$ **YES**; $[7,9] = [2,2,2]$ **YES**; $[1,2] = [1,2]$ has counts $1,1$, **NO**. (Checked against an `all(c == 3)` oracle, then stressed.)
+:::
+
+::: {.p-intuition}
+The decision "is every present value at count $3$?" is a global property, but it is $O(1)$-maintainable: track `off` = the number of **distinct present** values whose current count is $\ne 3$. The window is "good" exactly when `off == 0`. Each `add`/`remove` nudges one value's count by one, so only that value's good/bad status can flip; compare its status before and after and adjust `off` by $\pm 1$. No table over all frequencies is needed — one integer suffices, because the predicate per value is the cheap test `freq > 0 and freq != 3` (@sec-mo-a5).
+:::
+
+::: {.p-approach}
+1. **All-equals-3 scan.** Per query, `all(c == 3 for c in Counter(a[\ell..r]).values())`. $O(r - \ell + 1)$ — the oracle.
+2. **Mo with an `off`-counter.** Compress; block-sort; keep `freq` and `off`; `add`/`remove` re-evaluate one value's badness around its $\pm 1$ change. $O(n\sqrt q)$.
+
+**Invariant.** `off` equals the number of values $v$ with `freq[v] > 0` and `freq[v] != 3`. An `add`/`remove` first un-counts the old state (if it was bad) then counts the new (if bad), so `off` is exact after every step, and `off == 0` iff the non-empty window has all counts equal to $3$.
+:::
+
+The buttons are in order. Each one keeps the previous solution and changes only what that form changes.
+
+::: {.panel-tabset .solution-forms}
+
+#### Scan the range per query
+
+::: {.form-next}
+For each query, return whether every value's count in $[\ell, r]$ equals $3$. $O(r - \ell + 1)$ per query — reference only.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+def three_brute(a, l, r):
+    return all(c == 3 for c in Counter(a[l:r + 1]).values())
+
+
+assert [three_brute([1, 2, 2, 2, 1, 1, 2, 2, 2], l, r)
+        for l, r in [(0, 5), (1, 3), (6, 8), (0, 1)]] == [True, True, True, False]
+```
+
+##### C++
+
+```cpp
+// brute force: is every value in [l, r] present exactly three times?
+bool three_brute(const vector<int>& a, int l, int r) {
+    map<int, int> cnt;
+    for (int i = l; i <= r; ++i) cnt[a[i]]++;
+    for (map<int, int>::iterator it = cnt.begin(); it != cnt.end(); ++it)
+        if (it->second != 3) return false;
+    return true;
+}
+```
+:::
+
+**Reading it line by line.** Only values that actually appear are counted, so "every present value occurs $\equiv 3$" is exactly what `all(c == 3)` checks; the empty window never occurs because $\ell \le r$.
+
+#### Mo with a single `off`-counter
+
+::: {.form-next}
+Block-sort the queries; keep `freq` and `off` = count of present values whose `freq != 3`. `add`/`remove` flip at most one value's good/bad status, so the answer is `off == 0`. $O(n\sqrt q)$, $O(1)$ per step.
+:::
+
+::: {.panel-tabset group="lang"}
+##### Python
+
+```{python}
+#| label: sec-mo-p5-threeocc-sol
+def three_solve(a, qs):
+    """qs are (l, r) 0-indexed inclusive; True iff every present value occurs exactly 3 times."""
+    n = len(a)
+    comp = {}
+    b = []
+    for v in a:
+        comp.setdefault(v, len(comp))
+        b.append(comp[v])
+    freq = [0] * len(comp)
+    off = 0                             # number of DISTINCT present values whose freq != 3
+    cl, cr = 0, -1
+
+    def bad(f):
+        return f > 0 and f != 3
+
+    def add(i):
+        nonlocal off
+        v = b[i]
+        if bad(freq[v]):
+            off -= 1                     # leaving a bad state
+        freq[v] += 1
+        if bad(freq[v]):
+            off += 1                     # entering a bad state
+
+    def remove(i):
+        nonlocal off
+        v = b[i]
+        if bad(freq[v]):
+            off -= 1
+        freq[v] -= 1
+        if bad(freq[v]):
+            off += 1
+
+    B = max(1, int(n / max(1, len(qs)) ** 0.5))
+    order = sorted(range(len(qs)), key=lambda i: (qs[i][0] // B, qs[i][1]))
+    ans = [False] * len(qs)
+    for i in order:
+        l, r = qs[i]
+        while cr < r:
+            cr += 1; add(cr)
+        while cl > l:
+            cl -= 1; add(cl)
+        while cl < l:
+            remove(cl); cl += 1
+        while cr > r:
+            remove(cr); cr -= 1
+        ans[i] = (off == 0)
+    return ans
+
+
+assert three_solve([1, 2, 2, 2, 1, 1, 2, 2, 2],
+                   [(0, 5), (1, 3), (6, 8), (0, 1)]) == [True, True, True, False]
+for _ in range(250):
+    n = random.randint(1, 45)
+    a = [random.randint(1, 6) for _ in range(n)]
+    q = random.randint(1, 20)
+    qs = [tuple(sorted((random.randrange(n), random.randrange(n)))) for _ in range(q)]
+    assert three_solve(a, qs) == [three_brute(a, l, r) for l, r in qs]
+```
+
+##### C++
+
+```cpp
+// Mo + 'off' counter for "every value occurs exactly thrice" (full program); YES iff off == 0
+int main() {
+    ios::sync_with_stdio(false);
+    int n;
+    if (!(cin >> n)) return 0;
+    vector<long long> raw(n);
+    for (int i = 0; i < n; ++i) cin >> raw[i];
+    vector<long long> vals = raw;
+    sort(vals.begin(), vals.end());
+    vals.erase(unique(vals.begin(), vals.end()), vals.end());
+    vector<int> b(n);
+    for (int i = 0; i < n; ++i)
+        b[i] = (int)(lower_bound(vals.begin(), vals.end(), raw[i]) - vals.begin());
+    int q; cin >> q;
+    vector<array<int, 3> > qs(q);
+    for (int i = 0; i < q; ++i) { int l, r; cin >> l >> r; --l; --r; qs[i] = {l, r, i}; }
+    int B = max(1, (int)(n / sqrt((double)max(1, q))));
+    sort(qs.begin(), qs.end(), [B](const array<int,3>& x, const array<int,3>& y) {
+        if (x[0] / B != y[0] / B) return x[0] / B < y[0] / B;
+        return x[1] < y[1];
+    });
+    vector<int> freq(vals.size(), 0), ans(q, 0);
+    int off = 0, cl = 0, cr = -1;
+    auto bad = [](int f) { return f > 0 && f != 3; };
+    auto add = [&](int i) {
+        int v = b[i];
+        if (bad(freq[v])) off--;
+        freq[v]++;
+        if (bad(freq[v])) off++;
+    };
+    auto remove = [&](int i) {
+        int v = b[i];
+        if (bad(freq[v])) off--;
+        freq[v]--;
+        if (bad(freq[v])) off++;
+    };
+    for (int k = 0; k < q; ++k) {
+        int l = qs[k][0], r = qs[k][1], id = qs[k][2];
+        while (cr < r) add(++cr);
+        while (cl > l) add(--cl);
+        while (cl < l) remove(cl++);
+        while (cr > r) remove(cr--);
+        ans[id] = (off == 0);
+    }
+    for (int i = 0; i < q; ++i) cout << (ans[i] ? "YES" : "NO") << "\n";
+    return 0;
+}
+```
+:::
+
+**Reading it line by line.** `add` and `remove` are the same three lines: subtract the old state's badness, nudge `freq`, add the new state's badness. Because a single step changes one value's count by one, `off` moves by at most one, and `off == 0` is the exact "all counts are three" predicate. `bad(0)` is false, so a value leaving the window entirely stops counting immediately — no separate presence set needed.
+:::
+
+::: {.p-complexity}
+**Scan:** $O(n)$ per query, $O(nm)$ reference only. **Mo + `off`:** $O(n\sqrt q)$ moves, $O(1)$ per step, space $O(n)$ — a whole-table `ftf` would work too but the single counter is leaner.
+:::
+
+::: {.p-edge}
+- Empty conceptual case: `off` counts only *present* values, so `bad(0) == false` keeps absent values out of the tally.
+- A value crossing $2 \to 3$ was bad, now good (`off -= 1`); crossing $3 \to 4$ was good, now bad (`off += 1`) — the before/after test handles every transition uniformly.
+- This is the *decision* form; CF 1418G's *counting-all-good-subarrays* form is a different (two-pointer) problem and is cited, not solved, below.
+:::
+
+::: {.practice}
+- [CF 1418G · Three Occurrences](https://codeforces.com/problemset/problem/1418/G){rating="2500"} — counts subarrays whose values all occur exactly thrice; the judge task is a two-pointer / random-hash sweep, and this decision-form range query is its Mo cousin
+- [CF 985F · Isomorphic Strings](https://codeforces.com/problemset/problem/985/F){rating="2300"} — a per-character structure problem that is *not* Mo-answerable (isomorphism is a positional bijection a frequency table cannot express); solved by hashing — kept here as the cautionary "looks like value structure, isn't Mo" example
+:::
+
+## Pattern map
+
+| Signal in the statement | Pattern | Section |
+|---|---|---|
+| Many **offline** range queries, no updates, answer slides in $O(1)$ | Classic Mo, block order $B = n/\sqrt q$ | @sec-mo-a1, @sec-mo-p1 |
+| Answer is $\sum f(x)^2\cdot$weight or a pair count over a window | One scalar $O(1)$ add/remove | @sec-mo-p1-powerful |
+| "How many subarrays/pairs in $[\ell,r]$ satisfy a $k$-relation" | Frequency table over a transformed (prefix-xor) index | @sec-mo-p1-xorfav |
+| Only `add` is $O(1)$; a symmetric `remove` is awkward or impossible | Rollback Mo: monotone $r$, snapshot the fringe | @sec-mo-a2, @sec-mo-p2 |
+| Point **updates** interleaved, but few ("$\le m$ of them") | Mo with updates: a third, time pointer, $B = n^{2/3}$ | @sec-mo-a3, @sec-mo-p3 |
+| $n, q$ large and the constant bites; you still cannot answer online fast enough | Hilbert order instead of block order | @sec-mo-a4, @sec-mo-p4 |
+| The answer is a **shape** of the frequencies (mode, exact-$k$, "all $=3$") | Mo + a value structure (`ftf`, an `off` counter) | @sec-mo-a5, @sec-mo-p5 |
+| Query needs a *single* witness value with a property ("a value occurring once") | Window + a maintained witness set | @sec-mo-p4-oneocc |
+| Next query depends on your previous answer (adaptive / `lastans`) | **Not Mo** — segment tree / sqrt blocks | @sec-mo-a6, @sec-sqrt-a6 |
+| Path or subtree queries on a tree | Tree Mo (Euler tour) — deferred to the trees volume | @sec-mo-a6 (cited) |
+
+## Pitfalls {#sec-mo-pit}
+
+::: {.callout-warning title="Common mistakes"}
+- **Setting $B = \sqrt n$ for classic Mo.** The movement cost is $qB + n^2/B$, minimised at $B = n/\sqrt q$, not $\sqrt n$; with $q \ll n$ the two differ a lot and $\sqrt n$ is measurably slower (@sec-mo-a1). For Mo-with-updates the right size is $n^{2/3}$, and for rollback it really is $\sqrt n$ — each variant has its own optimum (@sec-mo-a3, @sec-mo-a2).
+- **Running Mo on adaptive input.** If the statement encodes query $i$ with your answer to query $i-1$ (a `lastans` XOR), the queries are no longer known up front and reordering is illegal — that is a wrong-algorithm bug, not a slow one. Reach for @sec-sqrt or @sec-seg instead (@sec-mo-a6).
+- **Asymmetric `add`/`remove`.** Mo needs *both* endpoints to move in $O(1)$. If only `add` is cheap, you are in rollback territory: keep $r$ monotone and restore via a snapshot — and remember to restore **both** the scalar aggregate and the frequency table, not just one (@sec-mo-a2, @sec-mo-p2-interesting).
+- **Forgetting the stash when moving the time pointer.** `apply_time` must save the cell's old value *before* overwriting it, or `revert_time` cannot undo the update. Skipping the stash silently corrupts every query that later moves $t$ backwards (@sec-mo-a3, @sec-mo-p3-ml).
+- **Disturbing the window on an out-of-range update.** Applying an update whose position is outside $[\ell,r]$ only changes the stored array, not the aggregates; testing `if cl <= pos <= cr` before touching `freq` is what keeps the two consistent (@sec-mo-a3).
+- **32-bit overflow on a weighted frequency sum.** CF 86D's $\sum f(x)^2\cdot x$ reaches $n\cdot n\cdot 10^{6}\approx 10^{18}$ with $f(x)$ up to $n$; the running answer and every intermediate must be 64-bit (@sec-mo-p1-powerful, @sec-arr-size-trap).
+- **0-/1-indexing the frequency arrays.** Values up to $10^{6}$ (or negative) need coordinate compression first; a raw `freq[a[i]]` either overruns the array or ignores negatives. Allocate `freq`/`ftf` one slot wider than the largest possible count (@sec-mo-a5, @sec-mo-p3-ml).
+- **A wrong Hilbert `pow` or rotation.** `pow` must satisfy $2^{\text{pow}} > \max(n)$ and the key must be a 64-bit int ($4^{\text{pow}}$ overflows `int`); a mismatched `rotate_delta` still yields a valid *permutation* — tests pass while the walk quietly lengthens (@sec-mo-a4).
+- **Printing answers in sorted order.** Mo reorders the queries; every solved form writes `ans[id]` and prints in input order. Forgetting the original index produces correct numbers in the wrong rows (@sec-mo-a1, @sec-mo-p1).
+- **Half-updating the value structure.** In the `ftf` family, an `add`/`remove` that edits `freq` but forgets `ftf` (or updates them out of lockstep) makes the mode / exact-$k$ read stale counts. Stress against a `Counter` oracle after *every* random operation to catch the desync (@sec-mo-a5, @sec-mo-p5-mode).
+:::
+
+## Exercises
+
+**1. [E] Mo sorts queries to make a window slide. What two properties of a problem make that legal and worthwhile, stated precisely?**
+
+::: {.callout-note collapse="true" title="Solution"}
+(1) **Offline / reorderable:** all queries are known up front and none depends on a previous answer, so you may permute them freely and just remember each one's original index. (2) **$O(1)$ slide:** the answer for $[\ell,r\pm 1]$ or $[\ell\pm1,r]$ differs from $[\ell,r]$ by a constant-time `add`/`remove`. With both, sorting by blocks costs $O(n\sqrt q)$ pointer moves total and beats answering each query independently (@sec-mo-a1).
+:::
+
+**2. [E] Derive the classic block size. Movement is $qB + n^2/B$; minimise it and give the resulting bound.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Differentiate in $B$: $q - n^2/B^2 = 0$ gives $B = n/\sqrt q$. Substituting, $qB = n\sqrt q$ and $n^2/B = n\sqrt q$, so the total pointer movement is $O(n\sqrt q)$. Note the $\ell$-jitter within a block is $O(B)$ per query ($qB$) while $r$ sweeps at most $O(n)$ per $\ell$-block and there are $n/B$ blocks ($n^2/B$) (@sec-mo-a1).
+:::
+
+**3. [E] Why is the answer for CF 86D $\sum_x f(x)^2\cdot x$ updatable in $O(1)$ when a value $v$ enters the window, and what integer type must you use?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Before the add, $v$ contributes $f^2\cdot v$; after, $(f+1)^2\cdot v$. The delta is $((f+1)^2 - f^2)v = (2f+1)v$ — one multiply and add on the old count $f$. Symmetric on removal. The running sum reaches $\approx 10^{18}$, so it and every intermediate must be a 64-bit integer (@sec-mo-p1-powerful).
+:::
+
+**4. [E] CF 617E counts subarrays of $[\ell,r]$ whose xor is $k$. Rewrite it as a window over which derived array, and give the $O(1)$ add?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Build the prefix-xor $p_0=0, p_i = a_1\oplus\cdots\oplus a_i$. A subarray $[x,y]\subseteq[\ell,r]$ has xor $k$ iff $p_{x-1}\oplus p_y = k$, i.e. $p_y\oplus k = p_{x-1}$. The window is over prefix indices $[\ell-1, r]$; adding index $j$ on either side changes the pair count by exactly `freq[p[j] ^ k]` (then bump `freq[p[j]]`) (@sec-mo-p1-xorfav).
+:::
+
+**5. [M] Rollback Mo drops the `remove`. Walk the snapshot/restore cycle for one left-block and bound the fringe work.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Fix an $\ell$-block. Grow $R$ monotonically to the largest $r$ in the group (this is all `add`, no delete). For each query whose $\ell$ is *inside* the block: snapshot the aggregate + stack height, `add` the at-most-$B$ fringe cells $[\ell, \text{block\_end})$, read the answer, then roll back the fringe to the snapshot. Fringe work is $O(B)$ per query; $R$ sweeps $O(n)$ per block over $n/B$ blocks. With $B=\sqrt n$ the total is $O(n\sqrt n)$ (@sec-mo-a2, @sec-mo-p2-interesting).
+:::
+
+**6. [M] CF 703D is *also* solvable by classic Mo. What does the rollback form buy, and why solve it that way here?**
+
+::: {.callout-note collapse="true" title="Solution"}
+Here `remove` equals `add` (XOR is its own inverse), so classic Mo is trivially correct and even faster to code. Rollback is demonstrated to exercise the append-only discipline end-to-end — the shape you *need* when a true `remove` does not exist (the canonical such problem is CF 868F, cited in the ladder). The pedagogical point is that rollback is a window *discipline*, not a specific formula (@sec-mo-p2-interesting, @sec-mo-a2).
+:::
+
+**7. [M] In Mo-with-updates the sort key is $(\lfloor\ell/B\rfloor, \lfloor r/B\rfloor, t)$ with $B=n^{2/3}$. Sketch why three pointers land the optimum there.**
+
+::: {.callout-note collapse="true" title="Solution"}
+There are $(n/B)^2$ cells of $(\ell,r)$-blocks, and within a cell $t$ advances monotonically $O(m)$ times, so the $t$-movement is $O(m\,n^2/B^2)$. The other two terms are $\ell$-jitter $O(qB)$ and $r$-sweeps $O(n^2/B)$ (one $O(n)$ sweep per $\ell$-block, over $n/B$ blocks). With $q \sim m \sim n$ the $\ell$ and $t$ terms balance at $B = n^{2/3}$, each $O(n^{5/3})$ while the $r$ term $O(n^{4/3})$ is dominated, giving $O(n^{5/3})$. Using $B = \sqrt n$ instead leaves the $t$ term at $O(mn)$ — $O(n^2)$ when $m \sim n$, measurably worse (@sec-mo-a3, @sec-mo-p3-ml).
+:::
+
+**8. [M] CF 940F asks for the MEX of the *frequencies* in $[\ell,r]$. Name the two tables the window keeps and the $O(1)$ maintenance.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`freq[v]` (how many times value $v$ is present) and `ftf[c]` (how many values currently have frequency exactly $c$). On add of $v$: `ftf[freq[v]]--; freq[v]++; ftf[freq[v]]++` (guarded at $0$); symmetric on remove. The MEX is the smallest $c\ge 1$ with `ftf[c]==0`, found by a scan from $1$; the number of distinct frequency values present bounds the scan, and the whole answer rides the same three-pointer $(\ell,r,t)$ engine (@sec-mo-p3-ml, @sec-mo-a5).
+:::
+
+**9. [M] Hilbert order has no clean $O(n\sqrt q)$ proof like block sort. Why still use it, and what did @sec-mo-a4 measure to justify it?**
+
+::: {.callout-note collapse="true" title="Solution"}
+The Hilbert curve folds $(\ell,r)$ space so consecutive queries stay spatially close, which in practice yields a strictly shorter two-pointer walk than block order (same asymptotics, better constant). @sec-mo-a4 counted total pointer steps on the *same* random query sets under both orderings and asserted `tot_h < tot_b` — the payoff is measured, not just claimed (@sec-mo-a4, @sec-mo-p4-oneocc).
+:::
+
+**10. [M] CF 1000F outputs *any* value occurring exactly once in $[\ell,r]$ (or 0). Give the structure the window maintains and the two crossings it must handle.**
+
+::: {.callout-note collapse="true" title="Solution"}
+A `freq[v]` table plus a set `ones` of values currently at frequency exactly 1. Every `add`/`remove` nudges `freq[v]` by $\pm1$; the crossings that matter are $1\to 2$ (value leaves `ones`) and $2\to 1$ (value enters `ones`) — the code tests the count *before* and *after* the nudge. The answer is any element of `ones` (or 0 if empty). Coordinate-compress the values and print `ans[id]` (@sec-mo-p4-oneocc).
+:::
+
+**11. [M] The `ftf` table answers mode and exact-$k$ with the same window. Read off: (a) the largest frequency present, (b) how many values appear exactly twice.**
+
+::: {.callout-note collapse="true" title="Solution"}
+(a) The mode is the largest index $f$ with `ftf[f] > 0`; with a running-mode pointer it drops by at most one when `ftf[mode]` hits $0$, so it stays $O(1)$ amortised. (b) Exactly `ftf[2]` — the count of values whose current frequency is 2. Both read the *same* table, one by scanning its top, the other by direct index (@sec-mo-a5, @sec-mo-p5-mode).
+:::
+
+**12. [M] In the "every value appears exactly thrice" decision, one counter `off` replaces a full table. Define it and the two-transition test.**
+
+::: {.callout-note collapse="true" title="Solution"}
+`off` = number of *present* values whose frequency is not 3. A value is "bad" when $0 < f \ne 3$. Each `add`/`remove` changes one value's count by one: subtract its badness before the nudge, add its badness after. The window is good iff `off == 0`. `bad(0)` is false, so a value leaving the window entirely stops counting immediately (@sec-mo-p5-threeocc).
+:::
+
+**13. [H] Prove the two-pointer total is $O(n\sqrt q)$ for block order, bounding $\ell$-movement and $r$-movement separately.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Order by $(\lfloor\ell/B\rfloor, r)$. **$\ell$:** within a block $\ell$ moves $\le B$ per query, and $\ell$-blocks are traversed in $O(B)$ to jump between, so $O(qB)$. **$r$:** inside one $\ell$-block the queries are sorted by $r$, so $r$ sweeps the array at most once, $O(n)$, and there are $n/B$ blocks: $O(n^2/B)$. Sum $= qB + n^2/B$, minimised at $B = n/\sqrt q$ for $O(n\sqrt q)$ (@sec-mo-a1).
+:::
+
+**14. [H] Three no-update range queries: CF 86D ($\sum f^2\cdot x$), CF 1000F (single-occurrence witness), and "count values with $f\ge 2$". Which collapse to one window payload and which need a value structure?**
+
+::: {.callout-note collapse="true" title="Solution"}
+86D and "count $f\ge 2$" are both scalar-accumulator windows: the first keeps a running sum updated by $(2f+1)x$, the second keeps a counter bumped only on the $1\to2$ crossing. CF 1000F is *not* a single scalar — the answer is a value, so it needs a maintained witness set alongside `freq`. All three share the exact same block order and offline `ans[id]`; only the payload grows (@sec-mo-p1-powerful, @sec-mo-p4-oneocc, @sec-mo-a5).
+:::
+
+**15. [H] You are handed a problem with $2\cdot 10^5$ queries and heavy point updates that *interleave* and are needed online. Explain why Mo (with or without a time pointer) is the wrong tool and name the right one.**
+
+::: {.callout-note collapse="true" title="Solution"}
+Mo-with-updates assumes updates are *few* and known up front (the $t$ pointer sorts them offline); $q$ genuine online updates make $m\sim q$, blowing the $O(n^{5/3})$ balance and, worse, the answers may be needed between updates so reordering is illegal. A segment tree or Fenwick answers each updated range in $O(\log n)$ online — the honest structure (@sec-mo-a6, @sec-seg, @sec-sqrt-a6).
+:::
+
+**16. [H] Rollback restores a snapshot. Show precisely why you must restore *both* the running scalar and the `freq`/`ftf` table, and what a partial restore breaks.**
+
+::: {.callout-note collapse="true" title="Solution"}
+The fringe `add`s mutate the scalar aggregate *and* the tables they read. Rollback pops the dirty `freq` cells and resets the scalar to the snapshot height. Restoring only the scalar leaves `freq` (and any `ftf`) inflated, so the *next* query's `add` starts from a wrong base and its crossings ($0\to1$, $1\to2$) fire incorrectly; restoring only `freq` leaves the scalar over-counted. The two must be rolled back together or every subsequent answer in the block is poisoned (@sec-mo-a2, @sec-mo-p2-interesting).
+:::
+
+## Interview questions
+
+**1. State Mo's algorithm in one sentence and name the single property of the input it exploits.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Mo answers a *batch* of offline range queries by sorting them so consecutive windows overlap heavily, then sliding one $[\ell,r]$ pointer pair with $O(1)$ add/remove. The exploited property is **reorderability**: because no query depends on another's answer, you may permute them and merely remember the original indices (@sec-mo-a1).
+:::
+
+**2. Why $B = n/\sqrt q$ and not $\sqrt n$? Give the movement formula you are minimising.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Total pointer travel is $qB$ ($\ell$-jitter) $+\ n^2/B$ ($r$-sweeps across the $n/B$ blocks). AM–GM / calculus minimises it at $B = n/\sqrt q$, yielding $O(n\sqrt q)$. $\sqrt n$ is only optimal when $q\sim n$; for sparse queries it is off by a real, measurable factor (@sec-mo-a1, @sec-mo-pit).
+:::
+
+**3. What makes a problem Mo-*legal* versus merely Mo-*fast*? Give a counterexample where Mo is illegal.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Legal = offline (queries known up front, no answer-chaining) plus an $O(1)$ slide. Illegal = adaptive queries: e.g. CF 455D-style inputs where $\ell,r$ are XOR-ed with `lastans`, so you cannot know query $i$ until you answered query $i-1$ — reordering is void and you need an online structure (@sec-mo-a6, @sec-sqrt-a6).
+:::
+
+**4. Explain rollback Mo and the situation that forces it.**
+
+::: {.callout-note collapse="true" title="Answer"}
+When you can extend the window in $O(1)$ but cannot cheaply *un*-extend it, sort by $\ell$-block and keep $r$ monotone-forward within the group; per query snapshot the aggregate, `add` the $\le B$ left fringe, read, restore. Amortised $O(n\sqrt n)$ with zero deletes. The canonical forcing problem is CF 868F (cost of a window depends on equal-pairs, no clean remove) (@sec-mo-a2, @sec-mo-p2).
+:::
+
+**5. Mo-with-updates: what is the third pointer, and what discipline does moving it impose?**
+
+::: {.callout-note collapse="true" title="Answer"}
+`t` = how many of the updates have been applied; a query is $(\ell,r,t)$ and you sort by $(\ell/B, r/B, t)$ with $B=n^{2/3}$. Advancing $t$ applies one update and **must stash the cell's old value before overwriting** so retreating $t$ can revert it; if the changed position is inside the window you also remove-old/add-new in the aggregates (@sec-mo-a3, @sec-mo-p3-ml).
+:::
+
+**6. What does the Hilbert curve buy over block order, and what does it cost you?**
+
+::: {.callout-note collapse="true" title="Answer"}
+A shorter practical two-pointer walk: space-filling-curve ordering keeps spatially-near queries near in sort order, so pointers travel fewer steps (better constant, same $O(n\sqrt q)$ family). The cost is losing the clean textbook bound and a uglier key — a recursive `hilbertOrder(x,y,pow,rot)` whose `pow` must cover the grid and whose result must be 64-bit (@sec-mo-a4, @sec-mo-p4).
+:::
+
+**7. A query answer is not one number but a *function of the frequency multiset* (mode, exact-$k$, MEX-of-frequencies). How do you keep it $O(1)$ per slide?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Maintain `freq[v]` *and* `ftf[c]` = how many values currently have count $c$, updated together on every add/remove. exact-$k$ is `ftf[k]`; the mode is the top index with `ftf>0` (a running pointer that only drops when `ftf[mode]==0`); MEX-of-frequencies is the smallest $c\ge1$ with `ftf[c]==0`. One leaner trick handles a yes/no shape: a single `off` counter for "all present values at count 3" (@sec-mo-a5, @sec-mo-p5-mode, @sec-mo-p5-threeocc).
+:::
+
+**8. When you would reach for Mo, when for a segment tree, when for sqrt blocks?**
+
+::: {.callout-note collapse="true" title="Answer"}
+Mo: many offline queries, no/few updates, $O(1)$ slide of a non-associative aggregate. Segment tree / Fenwick: online or heavily-updated ranges with an associative $O(\log n)$ combine. Sqrt blocks: online middle ground, $O(\sqrt n)$ per op, no reordering, arbitrary per-block summaries. The gate is reordering freedom — no it means not-Mo (@sec-mo-a6, @sec-sqrt-a6).
+:::
+
+**9. Why is tree-path Mo out of scope in a flat-array chapter, and how would you adapt the window to a tree?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The core method is identical but the array is a stand-in for an Euler/first-occurrence tour; path queries become range queries over that tour with a *toggle* (an in/out-of-path flag) so a node counts only while on the current path. That extra machinery (Euler tour + Mo on a subtree vs a path) belongs with tree data structures, so this chapter cites CF 375D / 246E / 600E as the deferred variant rather than solving them (@sec-mo-a6, @sec-mo-pit).
+:::
+
+**10. Walk CF 617E: what is the window actually over, and why does the $O(1)$ update count pairs?**
+
+::: {.callout-note collapse="true" title="Answer"}
+The window is over prefix-xor indices $[\ell-1, r]$. A subarray in the original range has xor $k$ iff two prefix values differ by $k$. Adding prefix index $j$ to the window pairs it with every present prefix equal to $p_j\oplus k$, which is `freq[p[j]^k]` — so the pair count rises by that and `freq[p[j]]` is bumped. Removing mirrors it (@sec-mo-p1-xorfav).
+:::
+
+**11. What is the single most common Mo bug and how do you catch it in development?**
+
+::: {.callout-note collapse="true" title="Answer"}
+An `add`/`remove` that is not the exact inverse of the other — usually a value structure (`ftf`, a witness set, `off`) updated on add but not symmetrically on remove. The catch is the same as always in this book: keep a raw brute-force oracle (a `Counter`/slice scan) and, after every random query on random data, assert the window answer equals it (@sec-mo-a5, @sec-mo-pit).
+:::
+
+**12. Design: $n\le 10^5$ static array, $q\le 10^5$ queries, each asks "is there a value appearing exactly once in $[\ell,r]$ and print one". Give complexity and the structures.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Classic Mo with a `freq` table and a `ones` set maintained across the $1\rightleftarrows2$ crossings; answers are offline so print in input order. $O(n\sqrt q)$ (or Hilbert for the same order with a smaller constant), space $O(n)$. This is CF 1000F; its sibling "*how many* appear once" is `ftf[1]` (@sec-mo-p4-oneocc, @sec-mo-a5).
+:::
+
+**13. A colleague set the Mo block size to $\sqrt n$ "because Mo is a sqrt-decomposition algorithm". Correct them precisely.**
+
+::: {.callout-note collapse="true" title="Answer"}
+Classic Mo minimises $qB + n^2/B$, whose optimum is $n/\sqrt q$, not $\sqrt n$; $\sqrt n$ is only right when $q\sim n$. Rollback Mo genuinely uses $\sqrt n$ (its cost is $n^2/B + qB$ with a different balance), and Mo-with-updates uses $n^{2/3}$. Each variant has its own $B$ — copying one across the others is the classic slow-Mo bug (@sec-mo-a1, @sec-mo-a2, @sec-mo-a3, @sec-mo-pit).
+:::
+
+## Summary
+
+::: {.callout-important title="Templates to remember"}
+- **Classic Mo.** Sort by $(\lfloor\ell/B\rfloor, r)$ with $B = n/\sqrt q$; four widen/narrow loops with $O(1)$ `add`/`remove`; write `ans[id]`; total movement $O(n\sqrt q)$ (@sec-mo-a1, @sec-mo-p1).
+- **Rollback Mo.** When only `add` is cheap: monotone $r$ per left-block, snapshot the aggregate + stack height, add the $\le B$ fringe, read, restore *both* scalar and table; $O(n\sqrt n)$, no deletes (@sec-mo-a2, @sec-mo-p2).
+- **Mo with updates.** A third, time pointer; sort by $(\ell/B, r/B, t)$ with $B = n^{2/3}$; `apply_time` stashes the old value before overwriting and guards the window touch on `cl <= pos <= cr`; $O(n^{5/3})$ (@sec-mo-a3, @sec-mo-p3).
+- **Hilbert order.** Same window, a different sort key: `hilbertOrder(\ell, r)` (64-bit, `pow` covering the grid); shorter walk in practice, no tidy proof (@sec-mo-a4, @sec-mo-p4).
+- **Mo + a value structure.** Hang `ftf[f]` (or a witness set, or an `off` counter) off `freq[v]` and update *everything* in lockstep so mode / exact-$k$ / MEX / "all $=3$" read in $O(1)$ (@sec-mo-a5, @sec-mo-p5).
+- **The triage.** Offline + $O(1)$ slide + no associative combine → Mo; online or answer-chained → segtree / sqrt blocks; tree paths → tree Mo (deferred) (@sec-mo-a6).
+:::
+
+- Mo is not a data structure; it is an *ordering* of queries plus one sliding window. Everything else — the block size, the third pointer, the Hilbert key, the value table — is a consequence of what the answer needs when the window nudges by one cell (@sec-mo-a1, @sec-mo-p1..p5).
+- The block size is a calculus exercise, not folklore: read the movement cost off the pointers you actually move. $n/\sqrt q$ for two pointers, $\sqrt n$ for rollback, $n^{2/3}$ for three (@sec-mo-a1, @sec-mo-a2, @sec-mo-a3).
+- The offline reorder is a *permission you can lose*. `lastans`-chained queries or heavy online updates make Mo illegal, and no amount of clever sorting fixes a wrong-algorithm bug (@sec-mo-a6, @sec-mo-pit).
+- The stash is the whole of Mo-with-updates: an update that overwrites without saving is irreversible, so `revert_time` needs the old value you refused to keep (@sec-mo-a3, @sec-mo-p3-ml).
+- A value structure turns "how many" into "what shape": `freq`→`ftf` upgrades the window from a scalar to a histogram of counts, and it is the same skeleton with two tables in lockstep (@sec-mo-a5, @sec-mo-p5-mode).
+- Hilbert buys a constant, not an exponent; reach for it when $n,q$ are large and the block walk is measurably the bottleneck — and verify it with a movement counter, not a vibe (@sec-mo-a4, @sec-mo-p4-oneocc).
+- Every window here is only as trustworthy as its brute-force oracle: stress the exact `add`/`remove` inverses, the restore-everything in rollback, and the stash in the time pointer, after every random operation (@sec-mo-pit).
+
+## Practice ladder
+
+Ordered by pattern. The problems solved in Part B are marked `.solved`; self-authored solved tasks are named with their section anchor and are fully stressed against a brute force in this chapter. Every other entry is "solve it after the lesson named"; ratings/names are verbatim from the judge.
+
+::: {.practice}
+- [CF 86D · Powerful array](https://codeforces.com/problemset/problem/86/D){.solved rating="2200"} — the canonical classic-Mo warm-up: $\sum f(x)^2\cdot x$, $(2f+1)v$ slide (@sec-mo-p1-powerful)
+- [CF 617E · XOR and Favorite Number](https://codeforces.com/problemset/problem/617/E){.solved rating="2200"} — pair count over a prefix-xor window (@sec-mo-p1-xorfav)
+- [CF 703D · Mishka and Interesting sum](https://codeforces.com/problemset/problem/703/D){.solved rating="2100"} — solved in rollback form to exercise append/snapshot/restore (@sec-mo-p2-interesting)
+- Distinct values per range, by rollback (@sec-mo-p2-distinct) — self-authored: the rollback skeleton with the simplest payload, brute + stress
+- [CF 940F · Machine Learning](https://codeforces.com/problemset/problem/940/F){.solved rating="2600"} — Mo-with-updates flagship; MEX of frequencies, the stash discipline (@sec-mo-p3-ml)
+- Distinct values per range with point updates (@sec-mo-p3-distinct) — self-authored: the three-pointer engine verbatim, a plain distinct payload, brute + stress
+- [CF 1000F · One Occurrence](https://codeforces.com/problemset/problem/1000/F){.solved rating="2400"} — single-occurrence witness by Hilbert order (@sec-mo-p4-oneocc)
+- Distinct count by Hilbert order (@sec-mo-p4-distinct) — self-authored: Hilbert as a drop-in key, asserted equal to block order and the brute
+- Range mode (largest frequency) (@sec-mo-p5-mode) — self-authored: `freq`+`ftf` with a running-mode pointer, brute + stress
+- Every value exactly thrice (@sec-mo-p5-threeocc) — self-authored: a single `off` counter decision, brute + stress
+- [CF 868F · Yet Another Minimization Problem](https://codeforces.com/problemset/problem/868/F){rating="2500"} — the judge problem where rollback is the standard solution (equal-pair cost, no clean remove); @sec-mo-a2
+- [SPOJ DQUERY · Distinct Queries](https://www.spoj.com/problems/DQUERY/){difficulty="Medium"} — the classic no-update "count distinct in range" that Mo trivialises; a first solo window (@sec-mo-a1)
+- [CSES 2416 · Distinct Values Queries](https://cses.fi/problemset/task/2416){difficulty="Hard"} — #distinct offline; try Mo, then compare the persistent/Fenwick online answer (@sec-mo-a6)
+- [CF 375D · Tree and Queries](https://codeforces.com/problemset/problem/375/D){rating="2400"} — *tree-path* Mo (Euler tour + toggle); cited as the deferred variant, not solved in a flat-array chapter (@sec-mo-a6)
+- [CF 246E · Blood Cousins Return](https://codeforces.com/problemset/problem/246/E){rating="2400"} — subtree-distinct by the same deferred tree-Mo technique (@sec-mo-a6)
+- [CF 600E · Lomsat gelral](https://codeforces.com/problemset/problem/600/E){rating="2300"} — subtree mode; solvable by DSU-on-tree or tree-Mo, the value-structure idea of @sec-mo-p5 on a tree (@sec-mo-a5)
+:::
+
+## Further reading
+
+- [CP-Algorithms — Mo's algorithm](https://cp-algorithms.com/misc/mo-algorithm.html) — the block reordering, the $O(n\sqrt q)$ bound, and the $B = n/\sqrt q$ sizing of @sec-mo-a1 worked through in C++.
+- [CP-Algorithms — Mo's algorithm with updates](https://cp-algorithms.com/misc/mo-with-updates.html) — the third, time pointer and the $n^{2/3}$ block size behind @sec-mo-a3 and @sec-mo-p3-ml.
+- [CP-Algorithms — Mo's algorithm on trees](https://cp-algorithms.com/misc/mo-on-trees.html) — the deferred tree-path/subtree variant cited at @sec-mo-a6 (CF 375D, 246E, 600E); the home of this method in the trees volume.
+- [E-maxx (ru) — Mo's algorithm and Hilbert-curve ordering](https://cp-algorithms.com/) and the kactl `hilbertOrder` reference — the space-filling-curve key of @sec-mo-a4 and @sec-mo-p4, including the `pow`/`rot` recursion.
+- [SPOJ DQUERY](https://www.spoj.com/problems/DQUERY/) — the canonical #distinct warm-up that every Mo textbook opens with (@sec-mo-a1).
+- [CPH — Chapter 10 (Advanced Data Structures)](https://cses.fi/book/book.pdf) — the offline-range-query family that frames Mo against persistent structures (@sec-mo-a6).
